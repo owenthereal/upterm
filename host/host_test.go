@@ -748,6 +748,16 @@ func awaitJoinTimeoutSignal(t *testing.T, ch <-chan struct{}, what string) {
 	}
 }
 
+// only is the one live join timer, which must have been armed for d. It fails
+// the test, rather than panicking, when there isn't exactly one.
+func (f *fakeJoinClock) only(t *testing.T, d time.Duration) *fakeTimer {
+	t.Helper()
+	live := f.live()
+	require.Len(t, live, 1, "exactly one live join timer")
+	require.Equal(t, d, live[0].duration())
+	return live[0]
+}
+
 func (f *joinTimeoutHost) result(t *testing.T) error {
 	t.Helper()
 	select {
@@ -810,11 +820,28 @@ func (f *joinTimeoutHost) guestClient(t *testing.T) *ssh.Client {
 
 func TestJoinTimeoutAuthOnlyGuestDoesNotJoin(t *testing.T) {
 	f := newJoinTimeoutHost(t)
+	clock := newFakeJoinClock()
+	f.h.joinClock = clock.clock()
 	f.h.JoinTimeout = 300 * time.Millisecond
 	f.start(t)
 	awaitJoinTimeoutSignal(t, f.ready, "readiness")
 	client := f.guestClient(t)
 	defer func() { _ = client.Close() }()
+	// A bare window before the fire, in real time: nothing signals that a
+	// join emitted as the guest authenticated would have reached the
+	// lifecycle actor by now, since the emitter delivers asynchronously and
+	// the fixture hears nothing of a guest that never joins. The window is
+	// the 300 ms the real timer ran for, counted from the connection rather
+	// than from readiness, so it is no shorter than the margin that timer
+	// gave. A join that arrives inside it is reported, and stops the timer;
+	// one that takes longer is caught neither here nor by the real timer
+	// this replaces.
+	select {
+	case <-f.joined:
+		t.Fatal("a guest that only authenticated joined")
+	case <-time.After(300 * time.Millisecond):
+	}
+	clock.only(t, 300*time.Millisecond).fire()
 	require.NoError(t, f.result(t))
 	require.Equal(t, sessiondir.ReasonJoinTimeout, f.record(t).Reason)
 	require.True(t, f.record(t).FirstGuestJoinedAt.IsZero())
@@ -822,6 +849,8 @@ func TestJoinTimeoutAuthOnlyGuestDoesNotJoin(t *testing.T) {
 
 func TestJoinTimeoutRejectedNoPtyGuestDoesNotJoin(t *testing.T) {
 	f := newJoinTimeoutHost(t)
+	clock := newFakeJoinClock()
+	f.h.joinClock = clock.clock()
 	f.h.JoinTimeout = 300 * time.Millisecond
 	f.start(t)
 	awaitJoinTimeoutSignal(t, f.ready, "readiness")
@@ -831,6 +860,15 @@ func TestJoinTimeoutRejectedNoPtyGuestDoesNotJoin(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, sess.Shell())
 	_ = sess.Wait()
+	// The same bare window as TestJoinTimeoutAuthOnlyGuestDoesNotJoin's, for
+	// the same reason: nothing signals that a join emitted for the rejected
+	// session would have been processed by now.
+	select {
+	case <-f.joined:
+		t.Fatal("a guest refused for want of a pty joined")
+	case <-time.After(300 * time.Millisecond):
+	}
+	clock.only(t, 300*time.Millisecond).fire()
 	require.NoError(t, f.result(t))
 	require.Equal(t, sessiondir.ReasonJoinTimeout, f.record(t).Reason)
 	require.True(t, f.record(t).FirstGuestJoinedAt.IsZero())
@@ -838,16 +876,23 @@ func TestJoinTimeoutRejectedNoPtyGuestDoesNotJoin(t *testing.T) {
 
 func TestJoinTimeoutDoesNotEndAJoinedSession(t *testing.T) {
 	f := newJoinTimeoutHost(t)
+	clock := newFakeJoinClock()
+	f.h.joinClock = clock.clock()
 	f.h.JoinTimeout = 200 * time.Millisecond
 	f.start(t)
 	awaitJoinTimeoutSignal(t, f.ready, "readiness")
+	joins := f.h.joins
+	armed := clock.only(t, 200*time.Millisecond)
 	f.join(t)
+	// Checked directly, because expire's own check of the join would keep
+	// even a live timer from ending the session.
+	require.True(t, armed.stopped(), "the join stopped the timer")
+	require.True(t, joins.snapshot().Deadline.IsZero(), "the join cleared the deadline")
 	awaitJoinTimeoutSignal(t, f.left, "guest left")
-	select {
-	case err := <-f.done:
-		t.Fatalf("joined session ended: %v", err)
-	case <-time.After(600 * time.Millisecond):
-	}
+	require.Len(t, clock.timers(), 1, "leaving armed nothing new")
+	// A fire already on its way when the join stopped the timer.
+	armed.fire()
+	require.False(t, hasFired(joins), "a joined session's timeout never commits")
 	f.finish(t, "0")
 	require.NoError(t, f.result(t))
 	require.Equal(t, sessiondir.ReasonExited, f.record(t).Reason)
@@ -856,30 +901,56 @@ func TestJoinTimeoutDoesNotEndAJoinedSession(t *testing.T) {
 
 func TestJoinTimeoutZeroDoesNotEndASession(t *testing.T) {
 	f := newJoinTimeoutHost(t)
+	clock := newFakeJoinClock()
+	f.h.joinClock = clock.clock()
 	f.h.JoinTimeout = 0
 	f.start(t)
 	awaitJoinTimeoutSignal(t, f.ready, "readiness")
+	require.Empty(t, clock.timers(), "no timeout, no timer at readiness")
 	f.join(t)
-	select {
-	case err := <-f.done:
-		t.Fatalf("default session ended: %v", err)
-	case <-time.After(300 * time.Millisecond):
-	}
+	require.Empty(t, clock.timers(), "nor after a join")
 	f.finish(t, "0")
 	require.NoError(t, f.result(t))
 }
 
 func TestJoinTimeoutClockStartsAtReadiness(t *testing.T) {
 	f := newJoinTimeoutHost(t)
+	clock := newFakeJoinClock()
+	f.h.joinClock = clock.clockWithNow()
 	f.h.JoinTimeout = 400 * time.Millisecond
-	// Readiness waits for the initial attach, held back 700ms: a clock that
-	// started any earlier would end the session well inside a second.
+	// Readiness waits for the initial attach, held back here. The checks are
+	// made at readiness itself, in beforeReadyPublish, which the ready actor
+	// runs once readiness is established and before it starts the clock: the
+	// hook counts the timers made so far, then moves the fake now on 700 ms.
+	// A clock that started before readiness would have armed a timer by then,
+	// and since the fake now moves only in the hook, a deadline counted from
+	// any moment before it falls 700 ms short of the one checked below. The
+	// checks need a point the actors reach, not the moment attachAfter
+	// returns: the attach socket is bound before Run starts its actors, so a
+	// count made there can come before an early start has armed anything,
+	// and a move made there can come before that start, which would then
+	// count from the moved now.
+	armedBeforeReady := make(chan int, 1)
+	f.h.beforeReadyPublish = func(*sessionState) {
+		armedBeforeReady <- len(clock.timers())
+		clock.advance(700 * time.Millisecond)
+	}
 	hold := make(chan struct{})
-	start := time.Now()
-	time.AfterFunc(700*time.Millisecond, func() { close(hold) })
 	clientDone, _ := f.attachAfter(t, hold)
+	require.Empty(t, clock.timers(), "nothing counts while the attach is held back")
+	close(hold)
+	awaitJoinTimeoutSignal(t, f.ready, "readiness")
+	select {
+	case n := <-armedBeforeReady:
+		require.Zero(t, n, "nothing counts before readiness")
+	default:
+		t.Fatal("readiness came without the ready write")
+	}
+	joins := f.h.joins
+	timer := clock.only(t, 400*time.Millisecond)
+	require.Equal(t, clock.now().Add(400*time.Millisecond), joins.snapshot().Deadline, "counted from readiness")
+	timer.fire()
 	require.NoError(t, f.result(t))
-	require.Greater(t, time.Since(start), 1000*time.Millisecond)
 	require.Equal(t, sessiondir.ReasonJoinTimeout, f.record(t).Reason)
 	select {
 	case outcome := <-clientDone:
@@ -892,14 +963,20 @@ func TestJoinTimeoutClockStartsAtReadiness(t *testing.T) {
 
 func TestJoinTimeoutEndsAnUnjoinedSessionWithReasonAndZero(t *testing.T) {
 	f := newJoinTimeoutHost(t)
+	clock := newFakeJoinClock()
+	f.h.joinClock = clock.clock()
 	f.h.JoinTimeout = 200 * time.Millisecond
 	f.start(t)
+	awaitJoinTimeoutSignal(t, f.ready, "readiness")
+	clock.only(t, 200*time.Millisecond).fire()
 	require.NoError(t, f.result(t), "a join timeout is not a failure")
 	require.Equal(t, sessiondir.ReasonJoinTimeout, f.record(t).Reason)
 }
 
 func TestJoinTimeoutDoesNotStealACompetingOutcome(t *testing.T) {
 	f := newJoinTimeoutHost(t)
+	clock := newFakeJoinClock()
+	f.h.joinClock = clock.clock()
 	f.h.JoinTimeout = 50 * time.Millisecond
 	reached, released := make(chan struct{}), make(chan struct{})
 	var once sync.Once
@@ -922,6 +999,8 @@ func TestJoinTimeoutDoesNotStealACompetingOutcome(t *testing.T) {
 	}
 	clientDone, cancel := f.attach(t)
 	t.Cleanup(release)
+	awaitJoinTimeoutSignal(t, f.ready, "readiness")
+	clock.only(t, 50*time.Millisecond).fire()
 	awaitJoinTimeoutSignal(t, reached, "deadline barrier")
 	// Only the signal actor observes cancellation while the timer is
 	// parked: the SSH actor is canceled by its group interrupt with the
@@ -940,8 +1019,12 @@ func TestJoinTimeoutDoesNotStealACompetingOutcome(t *testing.T) {
 
 func TestJoinTimeoutAttachedClientExitsZero(t *testing.T) {
 	f := newJoinTimeoutHost(t)
+	clock := newFakeJoinClock()
+	f.h.joinClock = clock.clock()
 	f.h.JoinTimeout = 200 * time.Millisecond
 	clientDone, _ := f.attach(t)
+	awaitJoinTimeoutSignal(t, f.ready, "readiness")
+	clock.only(t, 200*time.Millisecond).fire()
 	select {
 	case outcome := <-clientDone:
 		require.NoError(t, outcome.err)
@@ -1050,7 +1133,9 @@ func TestJoinTimeoutHeldAdminDoesNotDelayCommandCancellation(t *testing.T) {
 			fire, release := make(chan struct{}), make(chan struct{})
 			var once sync.Once
 			unblock := func() { once.Do(func() { close(release) }) }
+			clock := newFakeJoinClock()
 			if timeout {
+				f.h.joinClock = clock.clock()
 				f.h.JoinTimeout = 50 * time.Millisecond
 				f.h.onJoinDeadlineFired = func(<-chan struct{}) { close(fire); <-release }
 			}
@@ -1072,13 +1157,16 @@ func TestJoinTimeoutHeldAdminDoesNotDelayCommandCancellation(t *testing.T) {
 			require.NoError(t, err)
 			shutdownStart := time.Now()
 			if timeout {
+				clock.only(t, 50*time.Millisecond).fire()
 				awaitJoinTimeoutSignal(t, fire, "deadline")
 				unblock()
 			} else {
 				cancel()
 			}
 			// The command's HUP trap must run before the one-second admin drain
-			// expires, without releasing the pending RPC from this client.
+			// expires, without releasing the pending RPC from this client. This
+			// 700 ms, and the 2 s bound below, stay real time: they measure the
+			// HUP and the admin drain, which the join clock doesn't drive.
 			require.Eventually(t, func() bool { _, err := os.Stat(terminated); return err == nil }, 700*time.Millisecond, time.Millisecond)
 			select {
 			case outcome := <-clientDone:
@@ -1291,6 +1379,8 @@ func TestParentCancellationImmediatelyAfterClaim(t *testing.T) {
 
 func TestLateParentCancellationDoesNotReplaceCommandWinner(t *testing.T) {
 	f := newJoinTimeoutHost(t)
+	clock := newFakeJoinClock()
+	f.h.joinClock = clock.clock()
 	f.h.JoinTimeout = 30 * time.Millisecond
 	reached, selected, released := make(chan struct{}), make(chan struct{}), make(chan struct{})
 	var once sync.Once
@@ -1312,6 +1402,8 @@ func TestLateParentCancellationDoesNotReplaceCommandWinner(t *testing.T) {
 		}
 	}
 	cancel := f.start(t)
+	awaitJoinTimeoutSignal(t, f.ready, "readiness")
+	clock.only(t, 30*time.Millisecond).fire()
 	awaitJoinTimeoutSignal(t, reached, "timer barrier")
 	f.finish(t, "0")
 	awaitJoinTimeoutSignal(t, selected, "command winner")
@@ -1337,15 +1429,6 @@ func (f *joinTimeoutHost) set(t *testing.T, d time.Duration) (*api.SetJoinTimeou
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	return f.admin(t).SetJoinTimeout(ctx, &api.SetJoinTimeoutRequest{LaunchId: f.record(t).LaunchID, TimeoutNanos: int64(d)})
-}
-
-func (f *joinTimeoutHost) stillRunning(t *testing.T, d time.Duration, why string) {
-	t.Helper()
-	select {
-	case err := <-f.done:
-		t.Fatalf("%s: session ended: %v", why, err)
-	case <-time.After(d):
-	}
 }
 
 // The daemon sends a local client its status before it exits. A client that
@@ -1478,14 +1561,17 @@ func (f *joinTimeoutHost) stop(t *testing.T) {
 
 func TestSessionSetArmsTheJoinTimeoutAfterReadiness(t *testing.T) {
 	f := newJoinTimeoutHost(t)
+	clock := newFakeJoinClock()
+	f.h.joinClock = clock.clock()
 	f.start(t)
 	awaitJoinTimeoutSignal(t, f.ready, "readiness")
-	f.stillRunning(t, 300*time.Millisecond, "no join timeout was set")
+	require.Empty(t, clock.timers(), "no join timeout was set")
 
 	resp, err := f.set(t, 200*time.Millisecond)
 	require.NoError(t, err)
 	require.Equal(t, api.SetJoinTimeoutResponse_COUNTING, resp.GetOutcome())
 	deadline := time.Unix(0, resp.GetState().GetDeadlineUnixNano()).UTC()
+	clock.only(t, 200*time.Millisecond).fire()
 
 	require.NoError(t, f.result(t), "a join timeout is not a failure")
 	rec := f.record(t)
@@ -1496,18 +1582,31 @@ func TestSessionSetArmsTheJoinTimeoutAfterReadiness(t *testing.T) {
 
 func TestSessionSetReplacesAndDisablesALaunchTimeTimeout(t *testing.T) {
 	f := newJoinTimeoutHost(t)
+	clock := newFakeJoinClock()
+	f.h.joinClock = clock.clock()
 	f.h.JoinTimeout = 300 * time.Millisecond
 	f.start(t)
 	awaitJoinTimeoutSignal(t, f.ready, "readiness")
+	joins := f.h.joins
+	launch := clock.only(t, 300*time.Millisecond)
 
 	resp, err := f.set(t, time.Hour)
 	require.NoError(t, err)
 	require.Equal(t, api.SetJoinTimeoutResponse_COUNTING, resp.GetOutcome())
-	f.stillRunning(t, 700*time.Millisecond, "the launch-time timeout was replaced")
+	replacement := clock.only(t, time.Hour)
+	require.True(t, launch.stopped(), "the replaced timer is stopped")
+	// Each fire below is a callback already on its way when its timer was
+	// stopped: expire must turn it away.
+	launch.fire()
+	require.False(t, hasFired(joins), "the launch-time timeout was replaced")
 
 	resp, err = f.set(t, 0)
 	require.NoError(t, err)
 	require.Equal(t, api.SetJoinTimeoutResponse_DISABLED, resp.GetOutcome())
+	require.Empty(t, clock.live(), "disabling leaves nothing counting")
+	require.True(t, replacement.stopped(), "the disabled timer is stopped")
+	replacement.fire()
+	require.False(t, hasFired(joins), "the timeout was disabled")
 	require.Eventually(t, func() bool {
 		rec := f.record(t)
 		return rec.JoinTimeout == 0 && rec.JoinDeadline.IsZero()
@@ -1520,6 +1619,8 @@ func TestSessionSetReplacesAndDisablesALaunchTimeTimeout(t *testing.T) {
 
 func TestSessionSetAfterAJoinIsClaimed(t *testing.T) {
 	f := newJoinTimeoutHost(t)
+	clock := newFakeJoinClock()
+	f.h.joinClock = clock.clock()
 	f.start(t)
 	awaitJoinTimeoutSignal(t, f.ready, "readiness")
 	f.join(t)
@@ -1528,7 +1629,7 @@ func TestSessionSetAfterAJoinIsClaimed(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, api.SetJoinTimeoutResponse_CLAIMED, resp.GetOutcome())
 	require.True(t, time.Unix(0, resp.GetState().GetFirstGuestJoinedUnixNano()).Equal(f.record(t).FirstGuestJoinedAt))
-	f.stillRunning(t, 300*time.Millisecond, "a claimed session is never armed")
+	require.Empty(t, clock.timers(), "a claimed session is never armed")
 
 	f.finish(t, "0")
 	require.NoError(t, f.result(t))
@@ -1536,13 +1637,15 @@ func TestSessionSetAfterAJoinIsClaimed(t *testing.T) {
 
 func TestSessionSetRefusesAnotherLaunch(t *testing.T) {
 	f := newJoinTimeoutHost(t)
+	clock := newFakeJoinClock()
+	f.h.joinClock = clock.clock()
 	f.start(t)
 	awaitJoinTimeoutSignal(t, f.ready, "readiness")
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	_, err := f.admin(t).SetJoinTimeout(ctx, &api.SetJoinTimeoutRequest{LaunchId: "not-this-one", TimeoutNanos: int64(time.Millisecond)})
 	require.Equal(t, codes.FailedPrecondition, status.Code(err))
-	f.stillRunning(t, 200*time.Millisecond, "nothing was set")
+	require.Empty(t, clock.timers(), "nothing was set")
 	f.finish(t, "0")
 	require.NoError(t, f.result(t))
 }
@@ -1748,6 +1851,8 @@ func TestJoinTimeoutIsCountingWhenReadinessIsReported(t *testing.T) {
 // must never write to a Dir that has been released.
 func TestJoinTimeoutShutsDownWhileARecordWriteIsBlocked(t *testing.T) {
 	f := newJoinTimeoutHost(t)
+	clock := newFakeJoinClock()
+	f.h.joinClock = clock.clock()
 	f.h.JoinTimeout = 100 * time.Millisecond
 	writing, unblocked := make(chan struct{}), make(chan struct{})
 	var writingOnce, unblockOnce sync.Once
@@ -1761,12 +1866,19 @@ func TestJoinTimeoutShutsDownWhileARecordWriteIsBlocked(t *testing.T) {
 	t.Cleanup(unblock)
 
 	awaitJoinTimeoutSignal(t, writing, "a record write held open")
+	// The write held may be the pending one, from before readiness, so the
+	// timeout is fired only once the session is ready too.
+	awaitJoinTimeoutSignal(t, f.ready, "readiness")
+	clock.only(t, 100*time.Millisecond).fire()
 	select {
 	case outcome := <-clientDone:
 		require.NoError(t, outcome.err, "the attached terminal is released while the write is still blocked")
 	case <-time.After(5 * time.Second):
 		t.Fatal("shutting the command down waited on a blocked record write")
 	}
+	// A bare window, in real time: nothing signals that Run would have
+	// finished by now had it not waited for the held write. The window is
+	// that wait's, not the join clock's.
 	select {
 	case err := <-f.done:
 		t.Fatalf("Run finished, releasing the name, with a record write still pending: %v", err)
@@ -1830,10 +1942,14 @@ func parkAfterCommit(t *testing.T, f *joinTimeoutHost) (reached <-chan struct{},
 
 func TestJoinAfterTheJoinTimeoutCommitsIsNotRecorded(t *testing.T) {
 	f := newJoinTimeoutHost(t)
+	clock := newFakeJoinClock()
+	f.h.joinClock = clock.clock()
 	f.h.JoinTimeout = 50 * time.Millisecond
 	reached, release := parkAfterCommit(t, f)
 	f.start(t)
 	t.Cleanup(release)
+	awaitJoinTimeoutSignal(t, f.ready, "readiness")
+	clock.only(t, 50*time.Millisecond).fire()
 	awaitJoinTimeoutSignal(t, reached, "committed expiry")
 
 	f.join(t) // registered after the commit
@@ -1846,10 +1962,14 @@ func TestJoinAfterTheJoinTimeoutCommitsIsNotRecorded(t *testing.T) {
 
 func TestSessionSetAfterTheJoinTimeoutCommitsAnswersEnding(t *testing.T) {
 	f := newJoinTimeoutHost(t)
+	clock := newFakeJoinClock()
+	f.h.joinClock = clock.clock()
 	f.h.JoinTimeout = 50 * time.Millisecond
 	reached, release := parkAfterCommit(t, f)
 	f.start(t)
 	t.Cleanup(release)
+	awaitJoinTimeoutSignal(t, f.ready, "readiness")
+	clock.only(t, 50*time.Millisecond).fire()
 	awaitJoinTimeoutSignal(t, reached, "committed expiry")
 
 	resp, err := f.set(t, time.Hour)
@@ -1858,6 +1978,43 @@ func TestSessionSetAfterTheJoinTimeoutCommitsAnswersEnding(t *testing.T) {
 	release()
 	require.NoError(t, f.result(t))
 	require.Equal(t, sessiondir.ReasonJoinTimeout, f.record(t).Reason)
+}
+
+// A Host can run again, and each run makes a fresh join state on the Host's
+// join clock: each run arms its own timer once it is ready.
+func TestJoinClockAppliesToEachRun(t *testing.T) {
+	f := newJoinTimeoutHost(t)
+	clock := newFakeJoinClock()
+	f.h.joinClock = clock.clock()
+	// An hour, so that a second run that fell back to the real clock could
+	// not end within the test.
+	f.h.JoinTimeout = time.Hour
+
+	// The first run ends by its timeout, not through finishFile, which would
+	// still be there to end the second run's command at once.
+	f.start(t)
+	awaitJoinTimeoutSignal(t, f.ready, "the first run's readiness")
+	first := f.h.joins
+	clock.only(t, time.Hour).fire()
+	require.NoError(t, f.result(t))
+	rec := f.record(t)
+	require.Equal(t, sessiondir.ReasonJoinTimeout, rec.Reason)
+	firstLaunch := rec.LaunchID
+
+	// The ready callback closes f.ready, so the second run gets a new one.
+	f.ready = make(chan struct{})
+	f.start(t)
+	awaitJoinTimeoutSignal(t, f.ready, "the second run's readiness")
+	require.NotSame(t, first, f.h.joins, "each run has its own join state")
+	made := clock.timers()
+	require.Len(t, made, 2, "each run armed its own timer on the Host's clock")
+	second := clock.only(t, time.Hour)
+	require.Same(t, made[1], second, "the live timer is the second run's")
+	second.fire()
+	require.NoError(t, f.result(t), "a join timeout is not a failure")
+	rec = f.record(t)
+	require.NotEqual(t, firstLaunch, rec.LaunchID, "the record is the second run's")
+	require.Equal(t, sessiondir.ReasonJoinTimeout, rec.Reason)
 }
 
 // A Host's ClaimTimeout wins; left zero, the package's applies, read when Run
