@@ -390,7 +390,7 @@ func validateDetachAccept(detach, accept bool) error {
 	return nil
 }
 
-// validateServer checks a server address: ssh, ws or wss, and a port for ssh.
+// validateServer checks a server address: ssh, ws or wss, and a host for ssh.
 func validateServer(raw string) error {
 	if raw == "" {
 		return errors.New("missing flag --server")
@@ -403,8 +403,10 @@ func validateServer(raw string) error {
 
 	switch u.Scheme {
 	case "ssh":
-		if _, _, err := net.SplitHostPort(u.Host); err != nil {
-			return err
+		// A port alone, which withDefaultPort would make of it, dials this
+		// machine.
+		if u.Host == "" {
+			return errors.New("missing host in address")
 		}
 	case "ws", "wss":
 	default:
@@ -413,23 +415,27 @@ func validateServer(raw string) error {
 	return nil
 }
 
-// withDefaultPort is a ws or wss server address with its scheme's port when it
-// has none: known_hosts keys the server as host:port, so the URL must carry
-// one. ws.NewWSConn drops it again from the dial URL so the Host header stays
-// "host", not "host:443".
+// withDefaultPort is a server address with its scheme's port when it has
+// none (ssh 22, ws 80, wss 443): known_hosts keys the server as host:port, so
+// the URL must carry one. ws.NewWSConn drops it again from the dial URL so the
+// Host header stays "host", not "host:443".
 func withDefaultPort(raw string) string {
 	u, err := url.Parse(raw)
 	if err != nil || u.Port() != "" {
 		return raw
 	}
+	var port string
 	switch u.Scheme {
+	case "ssh":
+		port = "22"
 	case "ws":
-		u.Host += ":80"
+		port = "80"
 	case "wss":
-		u.Host += ":443"
+		port = "443"
 	default:
 		return raw
 	}
+	u.Host = net.JoinHostPort(u.Hostname(), port)
 	return u.String()
 }
 

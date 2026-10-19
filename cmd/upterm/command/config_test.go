@@ -204,6 +204,7 @@ func TestAFileCommandsAcceptHasNoProblems(t *testing.T) {
 		"values":   "server: wss://uptermd.example.com\njoin-timeout: 10m\nread-only: true\nprivate-key:\n  - /a\n  - /b\nauthorized-user: github:alice,github:bob\ndebug: true\n",
 		"ssh":      "server: ssh://uptermd.example.com:2222\nallow-local-tcp-forwarding: true\n",
 		"no ports": "server: ws://uptermd.example.com\n",
+		"bare ssh": "server: ssh://uptermd.example.com\n",
 	} {
 		t.Run(name, func(t *testing.T) {
 			require.Empty(t, validateConfigFile(Root(), writeConfig(t, body)))

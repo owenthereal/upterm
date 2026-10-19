@@ -98,14 +98,15 @@ func Test_hostValueChecks(t *testing.T) {
 	_, err = parseForceCommand("'unclosed")
 	require.EqualError(t, err, "error parsing command 'unclosed: EOF found when expecting closing quote")
 
-	for _, ok := range []string{"ssh://uptermd.upterm.dev:22", "ssh://[::1]:2222", "ws://example.com", "wss://example.com:8443"} {
+	for _, ok := range []string{"ssh://uptermd.upterm.dev:22", "ssh://uptermd.upterm.dev", "ssh://[::1]:2222", "ssh://[::1]", "ssh://example.com:", "ws://example.com", "wss://example.com:8443"} {
 		require.NoError(t, validateServer(ok), ok)
 	}
 	for raw, want := range map[string]string{
 		"":                         "missing flag --server",
 		"ftp://example.com:22":     "unsupported server protocol ftp",
 		"example.com:22":           "unsupported server protocol example.com",
-		"ssh://example.com":        "missing port in address",
+		"ssh://":                   "missing host in address",
+		"ssh:///x":                 "missing host in address",
 		"ssh://exa mple.com:22":    "error parsing server URL",
 		"http://example.com:8080/": "unsupported server protocol http",
 	} {
@@ -120,12 +121,54 @@ func Test_withDefaultPort(t *testing.T) {
 		"wss://example.com/path":    "wss://example.com:443/path",
 		"wss://example.com:8443":    "wss://example.com:8443",
 		"ssh://example.com:22":      "ssh://example.com:22",
-		"ssh://example.com":         "ssh://example.com",
+		"ssh://example.com:2222":    "ssh://example.com:2222",
+		"ssh://example.com":         "ssh://example.com:22",
+		"ssh://[::1]":               "ssh://[::1]:22",
+		"ssh://[::1]:2222":          "ssh://[::1]:2222",
+		"ssh://user@example.com":    "ssh://user@example.com:22",
 		"wss://[::1]":               "wss://[::1]:443",
 		"ws://user@example.com/x?y": "ws://user@example.com:80/x?y",
+		// A colon with no port after it is no port: the default replaces it
+		// rather than following it.
+		"ssh://example.com:": "ssh://example.com:22",
+		"ws://example.com:":  "ws://example.com:80",
+		"wss://example.com:": "wss://example.com:443",
+		// Other schemes are left to validateServer.
+		"ftp://example.com": "ftp://example.com",
 	} {
 		require.Equal(t, want, withDefaultPort(raw), raw)
 	}
+}
+
+// --server ssh://HOST is ssh://HOST:22, as ws and wss get 80 and 443: the
+// port is what known_hosts keys the server by, so it is in flagServer by the
+// time anything dials.
+func TestSSHServerWithoutAPortIs22(t *testing.T) {
+	origServer := flagServer
+	t.Cleanup(func() { flagServer = origServer })
+
+	// Built once, before any case sets the server: registering a flag writes
+	// its default into the variable behind it.
+	cmd := hostCmd()
+	for raw, want := range map[string]string{
+		"ssh://uptermd.upterm.dev":      "ssh://uptermd.upterm.dev:22",
+		"ssh://uptermd.upterm.dev:22":   "ssh://uptermd.upterm.dev:22",
+		"ssh://uptermd.upterm.dev:2222": "ssh://uptermd.upterm.dev:2222",
+		"ssh://[::1]":                   "ssh://[::1]:22",
+		"ssh://[::1]:2222":              "ssh://[::1]:2222",
+		"ssh://uptermd.upterm.dev:":     "ssh://uptermd.upterm.dev:22",
+		"ws://uptermd.upterm.dev":       "ws://uptermd.upterm.dev:80",
+		"wss://uptermd.upterm.dev":      "wss://uptermd.upterm.dev:443",
+		"wss://uptermd.upterm.dev:8443": "wss://uptermd.upterm.dev:8443",
+	} {
+		flagServer = raw
+		require.NoError(t, validateShareRequiredFlags(cmd, nil), raw)
+		require.Equal(t, want, flagServer, raw)
+	}
+
+	flagServer = "ssh://"
+	require.ErrorContains(t, validateShareRequiredFlags(cmd, nil), "missing host in address")
+	require.Equal(t, "ssh://", flagServer, "a refused address is left as given")
 }
 
 // Test_validateShareRequiredFlags_detachNeedsAcceptAndOutputNeedsDetach pins

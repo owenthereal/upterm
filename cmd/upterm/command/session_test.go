@@ -444,11 +444,11 @@ func Test_countGuests_CountsJumps(t *testing.T) {
 // by --hide-client-ip, or by CI, which hides them on its own.
 func withClientIPs(t *testing.T, hidden bool) {
 	t.Helper()
-	orig := flagHideClientIP
-	flagHideClientIP = hidden
-	t.Cleanup(func() { flagHideClientIP = orig })
-	for _, v := range []string{"CI", "GITHUB_ACTIONS", "GITLAB_CI", "CIRCLECI", "TRAVIS", "JENKINS_URL", "BUILDKITE", "TF_BUILD", "TEAMCITY_VERSION", "BITBUCKET_BUILD_NUMBER"} {
-		t.Setenv(v, "")
+	withoutCI(t)
+	if hidden {
+		withHideClientIPFlag(t, "true")
+	} else {
+		withHideClientIPFlag(t, "")
 	}
 	require.Equal(t, hidden, shouldHideClientIP())
 }

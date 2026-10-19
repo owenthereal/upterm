@@ -453,20 +453,38 @@ func TestBuildDaemonHostNotifiesByName(t *testing.T) {
 
 // TestBuildDaemonHostHidesClientIPs pins that --hide-client-ip reaches the
 // session, which keeps a guest's address out of its forced command's
-// environment as well as out of what upterm prints.
+// environment as well as out of what upterm prints. The daemon runs the
+// root's pre-run on the argv its parent had, so a run that said
+// --hide-client-ip=false under CI keeps the address there too.
 func TestBuildDaemonHostHidesClientIPs(t *testing.T) {
-	hostCmd()
-	daemonTestRoots(t)
-	orig := flagHideClientIP
-	flagHideClientIP = true
-	t.Cleanup(func() { flagHideClientIP = orig })
-	a, b := net.Pipe()
-	t.Cleanup(func() { _ = a.Close(); _ = b.Close() })
-	child := bootstrap.NewChild(a, nil)
-	t.Cleanup(func() { _ = child.Close() })
-	h, err := buildDaemonHost(context.Background(), "d", testHostOptions(), child, discardLogger())
-	require.NoError(t, err)
-	require.True(t, h.HideClientIP)
+	for _, tc := range []struct {
+		name   string
+		ci     bool
+		flag   string
+		hidden bool
+	}{
+		{name: "by the flag", flag: "true", hidden: true},
+		{name: "by CI", ci: true, hidden: true},
+		{name: "by neither"},
+		{name: "not by CI when the flag is false", ci: true, flag: "false"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			hostCmd()
+			daemonTestRoots(t)
+			withoutCI(t)
+			if tc.ci {
+				t.Setenv("CI", "true")
+			}
+			withHideClientIPFlag(t, tc.flag)
+			a, b := net.Pipe()
+			t.Cleanup(func() { _ = a.Close(); _ = b.Close() })
+			child := bootstrap.NewChild(a, nil)
+			t.Cleanup(func() { _ = child.Close() })
+			h, err := buildDaemonHost(context.Background(), "d", testHostOptions(), child, discardLogger())
+			require.NoError(t, err)
+			require.Equal(t, tc.hidden, h.HideClientIP)
+		})
+	}
 }
 
 // TestBuildDaemonHostPassesOnAccept pins that --accept reaches the session,

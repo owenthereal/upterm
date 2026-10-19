@@ -108,6 +108,7 @@ Environment Variables:
 				return err
 			}
 			suppliedFlags = supplied
+			runningCmd = cmd
 			warnDeprecations(cmd.ErrOrStderr(), deps)
 
 			debug, _ := cmd.Flags().GetBool("debug")
