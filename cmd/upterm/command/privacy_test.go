@@ -2,6 +2,7 @@ package command
 
 import (
 	"io"
+	"os"
 	"testing"
 
 	"github.com/spf13/cobra"
@@ -70,14 +71,19 @@ func hiddenInRun(t *testing.T, path []string, flags ...string) bool {
 // line, UPTERM_HIDE_CLIENT_IP or the config file, decides. Only a flag nobody
 // gave a value falls back to CI, which hides addresses on its own: a run that
 // wants them in a CI log has to be able to say so.
+//
+// UPTERM_HIDE_CLIENT_IP is not set in a row unless env says what to, or
+// emptyEnv sets it to nothing: a variable that is set but empty is not the
+// same input as one that isn't there.
 func TestAnExplicitHideClientIPDecidesAndCIIsTheFallback(t *testing.T) {
 	for _, tc := range []struct {
-		name   string
-		ci     bool
-		flags  []string
-		env    string
-		config string
-		hidden bool
+		name     string
+		ci       bool
+		flags    []string
+		env      string
+		emptyEnv bool
+		config   string
+		hidden   bool
 	}{
 		{name: "no CI and nothing given shows"},
 		{name: "CI and nothing given hides", ci: true, hidden: true},
@@ -89,16 +95,20 @@ func TestAnExplicitHideClientIPDecidesAndCIIsTheFallback(t *testing.T) {
 		{name: "true in the config hides", config: "hide-client-ip: true\n", hidden: true},
 		{name: "true under CI hides", ci: true, flags: []string{"--hide-client-ip=true"}, hidden: true},
 		{name: "the command line beats the environment", ci: true, flags: []string{"--hide-client-ip=false"}, env: "true"},
-		{name: "an empty variable is no value, so CI hides", ci: true, env: "", hidden: true},
+		{name: "an empty variable is no value, so CI hides", ci: true, emptyEnv: true, hidden: true},
 	} {
-		for _, path := range [][]string{{"host"}, {"session", "list"}} {
+		for _, path := range [][]string{{"host"}, {"session", "list"}, {"attach"}} {
 			t.Run(tc.name+"/"+path[0], func(t *testing.T) {
 				withoutCI(t)
 				if tc.ci {
 					t.Setenv("CI", "true")
 				}
 				withConfig(t, tc.config)
+				// t.Setenv first, so its cleanup puts back what was there.
 				t.Setenv("UPTERM_HIDE_CLIENT_IP", tc.env)
+				if tc.env == "" && !tc.emptyEnv {
+					require.NoError(t, os.Unsetenv("UPTERM_HIDE_CLIENT_IP"))
+				}
 				setupSessionRoots(t)
 
 				require.Equal(t, tc.hidden, hiddenInRun(t, path, tc.flags...))

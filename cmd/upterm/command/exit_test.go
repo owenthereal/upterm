@@ -39,6 +39,13 @@ func runCLI(t *testing.T, args ...string) (stdout, stderr string, code int) {
 func runCLICmd(t *testing.T, args ...string) (stdout, stderr string, code int, cmd *cobra.Command) {
 	t.Helper()
 
+	// A run leaves the command it ran and the flags it applied in package
+	// state; the real binary exits with them. Put them back, so that a later
+	// test asking whether CI hides addresses doesn't inherit a flag this
+	// run set.
+	origRunning, origSupplied := runningCmd, suppliedFlags
+	t.Cleanup(func() { runningCmd, suppliedFlags = origRunning, origSupplied })
+
 	stdinR, stdinW, err := os.Pipe()
 	require.NoError(t, err)
 	stdoutR, stdoutW, err := os.Pipe()
