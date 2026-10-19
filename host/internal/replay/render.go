@@ -46,22 +46,16 @@ import (
 //     (?1004, ?2031), no bracketed paste (?2004), and modifyOtherKeys at the
 //     terminal's own value (XTMODKEYS 4 with none), none of which moves the
 //     cursor either;
+//   - the main screen's kitty keyboard stack emptied (see popKeys), after
+//     the screen switch, as a pop reaches only the stack of the screen
+//     showing. The alternate screen's is popped where the render goes to
+//     that screen for the session's (see hiddenAlt and alt): a stack the
+//     joiner's own program left there otherwise stays, for one that enters
+//     it later to find, as after a raw replay;
 //   - ASCII designated into G0 to G3, G0 in GL (SI) and G2 in GR (LS2R),
 //     after the DECRCs, which put back the charsets their DECSCs saved;
 //   - the cursor to the start of its row, the default pen and no link (an
-//     OSC 8 with no URL closes one);
-//   - both screens' kitty keyboard stacks emptied, which resets every flag,
-//     by a pop of more entries than a terminal's stack holds: 65535, the
-//     largest parameter xterm's parser and Ghostty's keep, where kitty's,
-//     Ghostty's and foot's stacks hold 8 entries, WezTerm's 128 and
-//     Alacritty's 4096. A pop reaches only the stack of the screen showing,
-//     so the alternate screen's is popped on a trip there and back by ?1049,
-//     as hiddenAlt goes (see there): its save and restore are the main
-//     screen's slot's, so the cursor comes back where it was, in the state
-//     just set, and its ?1049h clears the alternate screen, which xterm does
-//     in the pen's background, the default one by then. xterm ignores the
-//     pops, a CSI with the < prefix;
-//   - the screen erased from the cursor down.
+//     OSC 8 with no URL closes one), and the screen erased from there down.
 //
 // A program that exits or is killed can leave any of them: on the alternate
 // screen, the render would draw over the program's screen, which the
@@ -95,9 +89,16 @@ import (
 // after the history to scroll into its scrollback.
 const preamble = "\x1b7\x1b[?1047;1049;47l" +
 	"\x1b7\x1b[?69l\x1b[r\x1b8\x1b[4l\x1b[20l\x1b[?5l\x1b[?7;25h\x1b[0 q" +
-	"\x1b[?1;1000;1002;1003;1004;1005;1006;2004;2031l\x1b>\x1b[>4m" +
-	"\x1b(B\x1b)B\x1b*B\x1b+B\x0f\x1b}\r\x1b[m\x1b]8;;\x07" +
-	"\x1b[<65535u\x1b[?1049h\x1b[<65535u\x1b[?1049l\x1b[J"
+	"\x1b[?1;1000;1002;1003;1004;1005;1006;2004;2031l\x1b>\x1b[>4m" + popKeys +
+	"\x1b(B\x1b)B\x1b*B\x1b+B\x0f\x1b}\r\x1b[m\x1b]8;;\x07\x1b[J"
+
+// popKeys empties the kitty keyboard stack of the screen showing, which
+// resets every flag, as the protocol has a pop that empties it do: a pop of
+// 65535 entries, the largest parameter xterm's parser and Ghostty's keep,
+// more than a terminal's stack holds, where kitty's, Ghostty's and foot's
+// hold 8, WezTerm's 128 and Alacritty's 4096. xterm, which has no such
+// stack, ignores it, as a CSI with the < prefix.
+const popKeys = "\x1b[<65535u"
 
 // eraseSavedLines is ED 3, which empties the terminal's scrollback and
 // erases nothing on its screen, nor moves the cursor: xterm's sets its count
@@ -116,8 +117,9 @@ const eraseSavedLines = "\x1b[3J"
 // making it so for the screen showing, the scroll region and margins, the
 // modes that change where a print lands or how the screen shows, the
 // cursor's visibility and style, the modes of the keyboard and the mouse and
-// both kitty keyboard stacks, the pen, the link and the charsets, and draw
-// for origin mode: the history that
+// the main screen's kitty keyboard stack, the pen, the link and the
+// charsets, and draw for origin mode, as hiddenAlt and alt do for the
+// alternate screen's stack where they go there: the history that
 // scrolled off, the joiner's scrollback emptied first where the stream
 // emptied the session's (see eraseSavedLines), then both screens, both saved
 // cursors and every state that decides how the next bytes are read, so that
@@ -369,8 +371,9 @@ func (r *renderer) screen(scr *vt.Screen) {
 
 // hiddenAlt rebuilds the alternate screen while the main screen shows, when
 // there is anything to rebuild: its cells, which a later ?47h shows as they
-// are; its saved slot; and its kitty keyboard stack, which a push changes only
-// while that screen shows. Once there, it sets the slot whatever it holds, as
+// are; its saved slot; and its kitty keyboard stack, which a pop or a push
+// changes only while that screen shows, so the joiner's own is popped there
+// first (see popKeys). Once there, it sets the slot whatever it holds, as
 // alt does. A slot no DECSC filled is no reason to go there: the trip costs
 // two screen switches, and a joiner's own slot there then stays, which only a
 // program that restores on the alternate screen before saving there reads.
@@ -395,6 +398,7 @@ func (r *renderer) hiddenAlt() {
 	_ = enc.saveBy("\x1b[?1049h", mainScreen)
 	r.screen(alt)
 	r.slot(alt, altScreen)
+	_ = enc.put(popKeys)
 	_ = enc.bytes(r.parts.HiddenAltKeys)
 	_ = enc.restoreBy("\x1b[?1049l", mainScreen)
 }
@@ -444,7 +448,7 @@ func (r *renderer) slotDone() {
 
 // alt shows the alternate screen through the mode that entered it, when it
 // shows, and draws it: its rows, its saved slot and its kitty keyboard
-// stack. The slot is set even when no DECSC filled it, as the main screen's
+// stack, once the joiner's own is popped (see popKeys). The slot is set even when no DECSC filled it, as the main screen's
 // always is, so that a live DECRC there restores the defaults it restores on
 // the session's terminal, not what the joiner's own programs saved there.
 //
@@ -470,6 +474,7 @@ func (r *renderer) alt() {
 	alt := t.AltScreen()
 	r.screen(alt)
 	r.slot(alt, altScreen)
+	_ = enc.put(popKeys)
 	_ = enc.bytes(r.parts.AltKeys)
 }
 

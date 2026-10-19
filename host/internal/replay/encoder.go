@@ -24,10 +24,9 @@ import (
 // before any restore of its own reads them, the main screen's always and the
 // alternate screen's whenever it draws on that screen. The preamble's own
 // ESC 7s, which keep the cursor across its screen switch and its DECSTBM,
-// and its trip's ?1049h, leave what the joiner's terminal held in the main
-// screen's slot, and in the alternate screen's for a joiner left showing that
-// one, which the model doesn't follow: nothing reads either before the render
-// sets it.
+// leave what the joiner's terminal held in the main screen's slot, and in
+// the alternate screen's for a joiner left showing that one, which the model
+// doesn't follow: nothing reads either before the render sets it.
 //
 // Each method fails before an append would cross the cap, leaving the buffer
 // and the model as they were, so nothing past the cap is ever allocated;

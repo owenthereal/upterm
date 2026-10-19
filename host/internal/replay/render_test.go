@@ -3101,9 +3101,8 @@ func keyboard(p ...string) string {
 // session's does, the stacks as deep as the session's: a stack's pops reach
 // the joiner's own flags otherwise. The rows above the joiner's cursor still
 // scroll into its scrollback (see joinOwn). A session that set them gets
-// them set after the resets. The trip that reaches the alternate screen's
-// stack clears that screen too, so a joiner's hidden one keeps none of what
-// its own program drew there.
+// them set after the resets. The alternate screen's stack is popped where
+// the render goes to that screen for the session's (see hiddenAlt and alt).
 //
 // A joiner left on its alternate screen leaves its cursor home there, for
 // the slot the preamble's DECSC fills there to restore what an unfilled one
@@ -3114,6 +3113,10 @@ func TestReplayResetsTheJoinersInputModes(t *testing.T) {
 		fmt.Fprintf(&lines, "line %d\r\n", i)
 	}
 	stream := lines.String() + "the end"
+	// The session's alternate screen showing, and hidden with cells on it,
+	// which the render goes to.
+	showing := stream + "\x1b[?1049h\x1b[Hvim"
+	hidden := "\x1b[?1049h\x1b[Hvim\x1b[?1049l" + stream
 	const on = "\x1b[?1h\x1b=\x1b[?1002h\x1b[?1006h\x1b[?1004h\x1b[?2004h\x1b[?2031h\x1b[>4;2m\x1b[>1u\x1b[>3u"
 	const earlier = "own 0\r\nown 1\r\nown 2\r\nprompt$ upterm join"
 	for _, tc := range []struct{ name, own, stream string }{
@@ -3131,10 +3134,12 @@ func TestReplayResetsTheJoinersInputModes(t *testing.T) {
 		{"a kitty keyboard stack", "\x1b[>1u\x1b[>3u", stream},
 		{"kitty keyboard flags set on the empty stack", "\x1b[=5;1u", stream},
 		{"a kitty keyboard stack deeper than kitty's", strings.Repeat("\x1b[>1u", 9), stream},
-		{"a kitty keyboard stack on its alternate screen", "\x1b[?1049h\x1b[>3u\x1b[H", stream},
-		{"a kitty keyboard stack on its hidden alternate screen", "\x1b[?1049h\x1b[>3uvim\x1b[?1049l", stream},
-		{"both kitty keyboard stacks, on its alternate screen", "\x1b[>1u\x1b[?1049h\x1b[>3u\x1b[H", stream},
-		{"all of them", "\x1b[?1h\x1b=\x1b[?1003h\x1b[?1006h\x1b[?1004h\x1b[?2004h\x1b[?2031h\x1b[>4;2m\x1b[>1u\x1b[?1049h\x1b[>3u\x1b[H", stream},
+		{"a kitty keyboard stack on its alternate screen, the session's showing", "\x1b[?1049h\x1b[>3u\x1b[H", showing},
+		{"a kitty keyboard stack on its alternate screen, the session's hidden", "\x1b[?1049h\x1b[>3u\x1b[H", hidden},
+		{"a kitty keyboard stack on its hidden alternate screen, the session's showing", "\x1b[?1049h\x1b[>3uold\x1b[?1049l", showing},
+		{"a kitty keyboard stack on its hidden alternate screen, the session's hidden", "\x1b[?1049h\x1b[>3uold\x1b[?1049l", hidden},
+		{"both kitty keyboard stacks, on its alternate screen", "\x1b[>1u\x1b[?1049h\x1b[>3u\x1b[H", showing},
+		{"all of them", "\x1b[?1h\x1b=\x1b[?1003h\x1b[?1006h\x1b[?1004h\x1b[?2004h\x1b[?2031h\x1b[>4;2m\x1b[>1u\x1b[?1049h\x1b[>3u\x1b[H", showing},
 		{"the session's set, the joiner's not", "", on + stream},
 		{"the session's set, the joiner's otherwise", "\x1b[?1000h\x1b[?1005h\x1b[>4;1m\x1b[>7u\x1b[>7u", on + stream},
 		{"the session's alternate screen's stack, the joiner's own there", "\x1b[?1049h\x1b[>7u", on + stream + "\x1b[?1049h\x1b[>5u\x1b[Hvim"},
@@ -3153,6 +3158,17 @@ func TestReplayResetsTheJoinersInputModes(t *testing.T) {
 			require.Equal(t, keyboard(tc.stream, live), keyboard(earlier+tc.own, string(j.render), live))
 		})
 	}
+
+	// A session whose alternate screen holds nothing the render rebuilds
+	// sends it no trip there, so the stack a joiner's own program left there
+	// stays, for one that enters it later to find, as after a raw replay.
+	t.Run("a kitty keyboard stack on its alternate screen, the session's untouched", func(t *testing.T) {
+		for _, own := range []string{"\x1b[?1049h\x1b[>3u\x1b[H", "\x1b[?1049h\x1b[>3u\x1b[?1049l"} {
+			j := joinOwn(t, 80, 12, earlier+own, stream)
+			require.Contains(t, keyboard(earlier+own, string(j.render)), `main "", alternate "", hidden alternate "\x1b[>3u"`)
+			require.NotContains(t, string(j.render), "\x1b[?1049h", "no trip to the alternate screen")
+		}
+	})
 }
 
 // A slot no DECSC has filled restores the cursor home in the default pen,
