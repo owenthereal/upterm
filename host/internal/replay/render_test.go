@@ -2820,6 +2820,76 @@ func TestReplayErasesTheJoinersAlternateScreen(t *testing.T) {
 	}
 }
 
+// An alternate screen the session showed and left blank, as ?1049h's clear
+// and ?1047l's leave it, or an erase there, is blank on the joiner too, as on
+// the session's terminal: the render goes there and back, as for one that
+// holds cells, so the text a joiner's own program left there, which a live
+// ?47h, switching without a clear, would show, is gone. One ?47h showed holds
+// what the stream drew there, nothing, on the emulator, which started with a
+// blank one. A RIS after it, which leaves a hidden alternate screen as it is,
+// changes none of that. A session that never showed it sends no trip there,
+// as a raw replay of it touches the joiner's alternate screen no more.
+func TestReplayClearsTheAlternateScreenTheSessionLeftBlank(t *testing.T) {
+	join := func(t *testing.T, stream string) []byte {
+		t.Helper()
+		sent, fellBack := fanOut(t, New(), []byte(stream), []uio.SizeEvent{event(1, 0, 80, 24)}, 64<<10)
+		require.NoError(t, fellBack)
+		require.True(t, bytes.HasPrefix(sent, []byte(preamble)), "the render, not the raw ring")
+		return sent
+	}
+	const own = "\x1b[?1049h\x1b[H" + "the joiner's own vim" + "\x1b[?1049l\x1b[H"
+	for _, tc := range []struct{ name, stream string }{
+		{"entered and left by ?1049", "text\r\n\x1b[?1049h\x1b[?1049lmore\r\n"},
+		{"drawn on, erased and left by ?1049", "text\r\n\x1b[?1049h\x1b[Hvim\x1b[2J\x1b[?1049lmore\r\n"},
+		{"drawn on and left by ?1047, which clears it", "text\r\n\x1b[?1047h\x1b[Hvim\x1b[?1047lmore\r\n"},
+		{"drawn on, erased and left by ?47", "text\r\n\x1b[?47h\x1b[Hvim\x1b[2J\x1b[?47lmore\r\n"},
+		{"entered and left by ?47, drawing nothing", "text\r\n\x1b[?47h\x1b[?47lmore\r\n"},
+		{"left blank, then RIS", "text\r\n\x1b[?1049h\x1b[?1049l\x1bcmore\r\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sent := join(t, tc.stream)
+			a, aHist := newReference(80, 24)
+			_, _ = a.WriteString(tc.stream + "\x1b[?47h")
+			b, bHist := newReference(80, 24)
+			_, _ = b.WriteString(own)
+			_, _ = b.Write(sent)
+			_, _ = b.WriteString("\x1b[?47h")
+			require.Empty(t, b.AltScreen().Line(0).String(), "the joiner's own text, shown: %q", sent)
+			require.Empty(t, sameState(a, b, *aHist, *bHist, names{}, names{}), "the render: %q", sent)
+		})
+	}
+
+	t.Run("entered before the ring, erased and left in it", func(t *testing.T) {
+		stream := "\x1b[?1049h" + strings.Repeat("vim\r\n", 2<<10) + "\x1b[2J\x1b[?1049lmore\r\n"
+		sent, fellBack := fanOut(t, New(), []byte(stream), []uio.SizeEvent{event(1, 0, 80, 24)}, 4<<10)
+		require.NoError(t, fellBack)
+		require.True(t, bytes.HasPrefix(sent, []byte(preamble)), "the render, not the raw ring")
+		a, aHist := newReference(80, 24)
+		_, _ = a.WriteString(stream + "\x1b[?47h")
+		b, bHist := newReference(80, 24)
+		_, _ = b.WriteString(own)
+		_, _ = b.Write(sent)
+		_, _ = b.WriteString("\x1b[?47h")
+		require.Empty(t, b.AltScreen().Line(0).String(), "the joiner's own text, shown: %q", sent)
+		require.Empty(t, sameState(a, b, *aHist, *bHist, names{}, names{}), "the render: %q", sent)
+	})
+
+	t.Run("never shown", func(t *testing.T) {
+		sent := join(t, "text\r\nmore\r\n")
+		require.NotContains(t, string(sent), "\x1b[?1049h", "no trip to the alternate screen")
+		sent, fellBack := fanOut(t, New(), []byte("text\r\nmore\r\n"), []uio.SizeEvent{event(1, 0, 10, 3)}, 64<<10)
+		require.NoError(t, fellBack)
+		require.Equal(t, preamble+"\r\n\r\n\x1b[?6l\x1b[1;1Htext\x1b[2;1Hmore\x1b[1;1H\x1b7"+
+			"\x1b[3g\r\x1bH\x1b[8C\x1bH\x1b[2;4He\x1b[3;1H", string(sent))
+	})
+	t.Run("left, never shown", func(t *testing.T) {
+		for _, leave := range []string{"\x1b[?1049l", "\x1b[?1047l", "\x1b[?47l"} {
+			sent := join(t, "text\r\n"+leave+"more\r\n")
+			require.NotContains(t, string(sent), "\x1b[?1049h", "no trip to the alternate screen")
+		}
+	})
+}
+
 // A slot keeps the position it was saved at through a resize that leaves it
 // off the screen, for DECRC to clamp: the render sets that position, which a
 // joiner the render's size clamps as the session's terminal does, and a
@@ -3336,9 +3406,9 @@ func TestReplayResetsTheJoinersInputModes(t *testing.T) {
 		})
 	}
 
-	// A session whose alternate screen holds nothing the render rebuilds
-	// sends it no trip there, so the stack a joiner's own program left there
-	// stays, for one that enters it later to find, as after a raw replay.
+	// A session that never showed its alternate screen sends no trip there,
+	// so the stack a joiner's own program left there stays, for one that
+	// enters it later to find, as after a raw replay.
 	t.Run("a kitty keyboard stack on its alternate screen, the session's untouched", func(t *testing.T) {
 		for _, own := range []string{"\x1b[?1049h\x1b[>3u\x1b[H", "\x1b[?1049h\x1b[>3u\x1b[?1049l"} {
 			j := joinOwn(t, 80, 12, earlier+own, stream)

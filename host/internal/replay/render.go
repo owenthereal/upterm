@@ -169,6 +169,7 @@ func (e *emulation) render() ([]byte, error) {
 		fits:      e.join.Cols == e.term.Width(),
 		stops:     append(e.term.TabStops(), e.pastEdge.between(e.term.Width(), e.join.Cols)...),
 		rep:       rep,
+		altShown:  e.altShown,
 		colours:   &e.colours,
 		cwd:       e.cwd,
 		cwdTold:   e.cwdTold,
@@ -299,6 +300,9 @@ type renderer struct {
 	// emulator's, then past its width those it keeps there (see pastEdge).
 	stops []int
 	rep   rep
+	// altShown is set once the stream has shown the alternate screen (see
+	// hiddenAlt).
+	altShown bool
 	// colours is the last change the stream made to each colour, none of
 	// them a setting once the render is eligible.
 	colours *colours
@@ -383,14 +387,24 @@ func (r *renderer) screen(scr *vt.Screen) {
 	}
 }
 
-// hiddenAlt rebuilds the alternate screen while the main screen shows, when
-// there is anything to rebuild: its cells, which a later ?47h shows as they
-// are; its saved slot; and its kitty keyboard stack, which a pop or a push
-// changes only while that screen shows, so the joiner's own is popped there
-// first (see popKeys). Once there, it sets the slot whatever it holds, as
-// alt does. A slot no DECSC filled is no reason to go there: the trip costs
-// two screen switches, and a joiner's own slot there then stays, which only a
-// program that restores on the alternate screen before saving there reads.
+// hiddenAlt rebuilds the alternate screen while the main screen shows, once
+// the stream has shown it (see emulation.altShown) or the tracker holds a
+// kitty keyboard stack there: its cells, which a later ?47h shows as they
+// are, none at all included; its saved slot; and its kitty keyboard stack,
+// which a pop or a push changes only while that screen shows, so the joiner's
+// own is popped there first (see popKeys). Once there, it sets the slot
+// whatever it holds, as alt does.
+//
+// A stream that showed the alternate screen left the session's as the
+// emulator holds it: blank once ?1049h, ?1047l or an erase cleared it and
+// nothing was drawn after, where the joiner's may still hold what its own
+// program left there, which a live ?47h, switching without a clear, would
+// show. The emulator started with a blank one, so one only ?47h showed holds
+// what the stream drew there, which the render takes for the session's, as
+// it does whatever cells the emulator holds. A stream that never showed it
+// left nothing there, and a raw replay of it doesn't touch the joiner's, so
+// neither does the render: the trip costs two screen switches, and the
+// joiner's own cells, slot and stack there stay, as after a raw replay.
 //
 // It goes there and back by ?1049, not ?47: Alacritty and Windows Terminal
 // have ?1049 but ignore ?47, so on them a trip by ?47 would erase the main
@@ -400,10 +414,10 @@ func (r *renderer) screen(scr *vt.Screen) {
 // slot, as ESC 8 does, so the pen, link and charsets after the trip are those
 // before it.
 func (r *renderer) hiddenAlt() {
-	enc, alt := r.enc, r.term.AltScreen()
-	if !hasCells(alt) && defaultSlot(alt.SavedCursor()) && r.parts.HiddenAltKeys == nil {
+	if !r.altShown && r.parts.HiddenAltKeys == nil {
 		return
 	}
+	enc, alt := r.enc, r.term.AltScreen()
 	// ?1049h clears what the joiner's terminal last left there, which xterm
 	// does in the pen's background, as ED 2 does, so the pen goes to the
 	// default first. The clear then leaves the blank screen the rows are
@@ -1331,29 +1345,6 @@ func blankLine(line uv.Line) bool {
 		}
 	}
 	return true
-}
-
-// hasCells reports a screen holding anything but blank cells.
-func hasCells(scr *vt.Screen) bool {
-	for y := range scr.Height() {
-		if !blankLine(scr.Line(y)) {
-			return true
-		}
-	}
-	return false
-}
-
-// unsaved is what DECRC restores from a slot no DECSC has filled, but for the
-// position, pen and link: ASCII in G0-G3, G0 in GL, G2 in GR, no origin mode
-// and no wrap.
-var unsaved = vt.SavedState{Designations: ascii.g, GR: 2}
-
-// defaultSlot reports a slot that restores what a slot no DECSC has filled
-// restores, which the joiner's own, untouched, does too.
-func defaultSlot(c vt.Cursor) bool {
-	st := c.Saved
-	st.Saved = false
-	return c.Position == (uv.Position{}) && c.Pen == (uv.Style{}) && c.Link == (uv.Link{}) && st == unsaved
 }
 
 func abs(n int) int {

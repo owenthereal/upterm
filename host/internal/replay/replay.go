@@ -200,6 +200,9 @@ type emulation struct {
 	// unscroll is set once the stream has scrolled the screen down filling
 	// it from the scrollback (see watchUnscroll).
 	unscroll bool
+	// altShown is set once the alternate screen has shown, the snapshot's
+	// switch to it included (see renderer.hiddenAlt).
+	altShown bool
 	// pastEdge is what the emulator keeps of the tab stops past the screen's
 	// right edge (see the type).
 	pastEdge pastEdge
@@ -300,9 +303,10 @@ func (replayer) Start(ctx context.Context, deadline time.Time, c *uio.Capture, s
 // 96-character set, a window operation, printer controller mode, a memory
 // lock, a key format, locator reporting, the locator's events, a change to
 // iTerm2's state, the keyboard's LEDs, a log file, a window property, a
-// coding other than UTF-8, sized text, extra cursors and an unscroll noted,
-// auto print, 8-bit controls and the tab stops past the screen's edge kept,
-// and the meter stopped by ctx or the deadline.
+// coding other than UTF-8, sized text, extra cursors, an unscroll and a
+// switch to the alternate screen noted, auto print, 8-bit controls and the
+// tab stops past the screen's edge kept, and the meter stopped by ctx or the
+// deadline.
 // Each callback and handler runs inside the emulator's Write and touches only
 // the emulation.
 func (e *emulation) setUp() {
@@ -321,8 +325,14 @@ func (e *emulation) setUp() {
 		// doesn't copy: it is what follows the OSC's first ';', as the stream
 		// sent it, and an OSC 7 without one reports nothing.
 		WorkingDirectory: func(dir string) { e.cwd, e.cwdTold, e.conEmuCwdLast = dir, true, false },
-		EnableMode:       e.syncByMode,
-		DisableMode:      e.syncByMode,
+		// x/vt calls it as it switches screens, by ?47, ?1047 or ?1049, and
+		// not for a switch to the screen already showing. The note stays,
+		// whatever follows: RIS leaves a hidden alternate screen as it is and
+		// clears one showing, on x/vt as on xterm, so the session's is still
+		// what the stream left there.
+		AltScreen:   func(on bool) { e.altShown = e.altShown || on },
+		EnableMode:  e.syncByMode,
+		DisableMode: e.syncByMode,
 	})
 	t.SetStopFunc(func() bool { return e.stop() })
 	e.watchColours()
