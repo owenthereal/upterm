@@ -174,8 +174,11 @@ type emulation struct {
 	// event it passed, applied or skipped as a no-op.
 	h, lastSeq uint64
 	// tail is what was offered past h: bytes the emulator hasn't consumed,
-	// a copy, since the lookahead needs them in one piece.
-	tail []byte
+	// a copy, since the lookahead needs them in one piece, and the
+	// emulation's own, in which screen title strings are made x/vt's (see
+	// screenTitles), which follows what was offered.
+	tail         []byte
+	screenTitles screenTitles
 	// events are the committed events offered and not yet passed, in Seq
 	// order, each at or after h.
 	events []uio.SizeEvent
@@ -222,8 +225,12 @@ func (replayer) Start(ctx context.Context, deadline time.Time, c *uio.Capture, s
 
 	// Priming: the tracker clone is already in the state it
 	// describes, a sequence the ring starts inside included, so only the
-	// emulator is told.
-	if _, err := e.term.Write(c.Modes.Snapshot()); err != nil {
+	// emulator is told. A snapshot that ends with an ESC, as one the ring
+	// starts just after does, leaves screenTitles to read the ring's first
+	// byte after it.
+	snapshot := c.Modes.Snapshot()
+	e.screenTitles.read(snapshot)
+	if _, err := e.term.Write(snapshot); err != nil {
 		return nil, stopped(err)
 	}
 	// Both are now inside the sequence the ring starts in, if it starts in
@@ -1595,6 +1602,51 @@ func (e *emulation) Feed(chunks [][]byte, sizes []uio.SizeEvent) error {
 	return e.offer(chunks, sizes)
 }
 
+// screenTitles hands x/vt the window title strings of GNU screen and tmux,
+// ESC k title ST, as those terminals read them when one is the session's own
+// terminal, under whose TERM oh-my-zsh sends one at every prompt: a string,
+// ended by an ESC, CAN or SUB, BEL included, none of which is drawn (tmux's
+// rename_string state). x/vt, as xterm, reads ESC k as a sequence done at the
+// k and draws the title as text. So the k of each ESC k is handed to it as
+// ^, which makes the string a PM: x/ansi's parser consumes one as tmux does
+// the title, to an ESC, CAN or SUB, with BEL and well-formed UTF-8 inside it.
+// A PM rather than an APC, which the parser reads alike, as watchGraphics
+// notes an APC whose data starts with G, as a title may, and nothing handles
+// a PM. The tracker clone, fed what x/vt is, reads the PM as a string too,
+// and tracks nothing a title holds either way. The byte is replaced in the
+// emulation's own copy of the stream, never in the ring's chunks, and in
+// place, so every offset, the handoff point's included, stays the stream's.
+//
+// esc is that x/vt's parser is in its escape state with no intermediate,
+// where a k completes an ESC k: after an ESC, which enters that state from
+// every state, ending a string too, and through any C0 control but CAN and
+// SUB, which it executes there, and DEL, which it ignores. It carries from
+// the tracker's snapshot into the ring, and across every piece of the stream
+// offered, so an ESC and its k split between them are read as one.
+//
+// A ring that starts inside a title, after its k, starts it as text, as a
+// raw replay does on a joiner's tmux.
+type screenTitles struct{ esc bool }
+
+// read replaces in p, the next bytes x/vt's parser reads, the k of each
+// ESC k with ^.
+func (s *screenTitles) read(p []byte) {
+	for i, b := range p {
+		switch {
+		case b == 0x1b:
+			s.esc = true
+		case !s.esc:
+		case b == 'k':
+			p[i] = '^'
+			s.esc = false
+		case b < 0x18 || b == 0x19 || b >= 0x1c && b <= 0x1f || b == 0x7f:
+			// Executed or ignored where it stands, in the escape state.
+		default:
+			s.esc = false
+		}
+	}
+}
+
 // validSize fails a size no emulation can be at: one that isn't a size, or
 // is over the cap. The product is taken in 64 bits, where two valid
 // dimensions can't overflow it, as they can a 32-bit int.
@@ -1623,10 +1675,12 @@ func placed(events []uio.SizeEvent, afterSeq, from, end uint64) error {
 }
 
 // offer adds chunks and events, already validated, to what waits in the
-// tail, and runs a batch. A failure spends the emulation.
+// tail, with each screen title string made x/vt's (see screenTitles), and
+// runs a batch. A failure spends the emulation.
 func (e *emulation) offer(chunks [][]byte, sizes []uio.SizeEvent) error {
 	for _, chunk := range chunks {
 		e.tail = append(e.tail, chunk...)
+		e.screenTitles.read(e.tail[len(e.tail)-len(chunk):])
 	}
 	e.events = append(e.events, sizes...)
 	if len(sizes) > 0 {

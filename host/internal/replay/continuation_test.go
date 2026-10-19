@@ -883,7 +883,8 @@ func genCase(rnd *rand.Rand) contCase {
 // fed the prefix with its resizes, then the suffix, and B, a terminal fresh
 // at the joiner's size, fed the render, the deferred tail and the suffix (a
 // joiner larger than the render, only the render, and A only up to the
-// handoff point); and the outcome. A case that rendered and held has none of
+// handoff point); and the outcome. Both read the stream's screen title
+// strings as the emulation does (see screenTitlesRead). A case that rendered and held has none of
 // skip, bug and diff.
 type contRun struct {
 	a, b       *vt.Emulator
@@ -897,6 +898,20 @@ type contRun struct {
 	bug error
 	// diff is the first difference between A and B.
 	diff string
+}
+
+// screenTitleOpener is ESC k as x/vt's parser reads it: after an ESC, and any
+// C0 controls but CAN and SUB, which it executes in its escape state, and
+// DEL, which it ignores there.
+var screenTitleOpener = regexp.MustCompile("\x1b([\x00-\x17\x19\x1c-\x1f\x7f]*)k")
+
+// screenTitlesRead is p as a session's terminal that is GNU screen or tmux
+// reads its window title strings, ESC k title ST, for x/vt to read them so:
+// each k of an ESC k made a ^, which makes the title a PM that x/vt's parser
+// consumes to the ESC, CAN or SUB that ends it, as tmux consumes the title,
+// the length kept. The emulation reads the stream so too.
+func screenTitlesRead(p []byte) []byte {
+	return screenTitleOpener.ReplaceAll(p, []byte("\x1b$1^"))
 }
 
 // eventsUpTo is how many of sizes are at or before offset.
@@ -959,6 +974,10 @@ func (c contCase) run(wait time.Duration) contRun {
 	rendered := historyOf(e)
 
 	stop := func() bool { return !time.Now().Before(deadline) }
+	// The stream as A and B read it, offsets kept, the replay having read
+	// the raw prefix.
+	read := screenTitlesRead(slices.Concat(c.prefix, c.suffix))
+	prefix, suffix := read[:len(c.prefix)], read[len(c.prefix):]
 	first := c.sizes[0].Size
 	r.a = vt.NewEmulator(first.Cols, first.Rows)
 	r.a.SetReplyFunc(func([]byte) {})
@@ -976,14 +995,14 @@ func (c contCase) run(wait time.Duration) contRun {
 	// Every event is at or before h, the replay having passed them all.
 	size, pos := first, 0
 	for _, ev := range c.sizes[1:] {
-		write(r.a, c.prefix[pos:ev.Offset])
+		write(r.a, prefix[pos:ev.Offset])
 		pos = int(ev.Offset)
 		if ev.Size != size {
 			r.a.Resize(ev.Size.Cols, ev.Size.Rows)
 			size = ev.Size
 		}
 	}
-	write(r.a, c.prefix[pos:h])
+	write(r.a, prefix[pos:h])
 	// A render begun inside a synchronized update starts with what begins it
 	// again (see synced), which sameState checks of ?2026, as it compares that
 	// mode; x/vt keeps nothing of the DCS form. Once the stream has cleared
@@ -1012,7 +1031,7 @@ func (c contCase) run(wait time.Duration) contRun {
 		}
 		return r.inside(join, rendered, *aNames, wider, stop)
 	}
-	write(r.a, c.prefix[h:])
+	write(r.a, prefix[h:])
 
 	r.b = vt.NewEmulator(e.term.Width(), e.term.Height())
 	r.b.SetReplyFunc(func([]byte) {})
@@ -1021,7 +1040,7 @@ func (c contCase) run(wait time.Duration) contRun {
 	bNames := watchTitle(r.b)
 	write(r.b, r.render)
 	nb, clears := len(r.bOff.lines), r.bOff.clears
-	write(r.b, c.prefix[h:])
+	write(r.b, prefix[h:])
 
 	// What B holds of history is the lines the render emitted, then what
 	// scrolled off B after them, unless the stream cleared history since,
@@ -1047,8 +1066,8 @@ func (c contCase) run(wait time.Duration) contRun {
 		r.diff = check("before the suffix")
 	}
 	if r.diff == "" && werr == nil {
-		write(r.a, c.suffix)
-		write(r.b, c.suffix)
+		write(r.a, suffix)
+		write(r.b, suffix)
 		if werr == nil {
 			r.diff = check("after the suffix")
 		}
@@ -1890,6 +1909,22 @@ func TestReplayContinuesAcrossASplitCluster(t *testing.T) {
 			require.Equal(t, tc.cluster, cellAt(r.a, 0, 1).Content)
 			require.Equal(t, tc.cluster, cellAt(r.b, 0, 1).Content)
 		})
+	}
+}
+
+// A screen title string the stream sends, which a session's terminal that is
+// GNU screen or tmux consumes, continues alike, wherever io's offers split
+// it, its ESC and its k apart included: the replay reads it as the
+// terminals do (see screenTitlesRead). The first case is one the fuzzer
+// found, a title an ESC 0 ends.
+func TestReplayContinuesAfterAScreenTitleString(t *testing.T) {
+	for _, c := range []contCase{
+		{prefix: []byte("000\x1bk0000000000\x1b0"), suffix: []byte("00000"), offers: []int{5, 17}},
+		{prefix: []byte("text\r\n\x1b"), suffix: []byte("kzsh\x1b\\$ ls\r\n")},
+		{prefix: []byte("text\r\n\x1bkzsh\x1b\\$ ls\r\n"), suffix: []byte("\x1bkls\x1b\\file\r\n"), offers: []int{7, 8, 19}},
+	} {
+		c.sizes = []uio.SizeEvent{event(1, 0, 80, 24)}
+		requireContinues(t, c, c.run(time.Minute))
 	}
 }
 
