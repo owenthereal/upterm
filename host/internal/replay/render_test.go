@@ -1482,6 +1482,136 @@ func TestReplayFailsOnAWorkingDirectoryTooLongToReplay(t *testing.T) {
 	requireIneligible(t, err, "a working directory too long to replay")
 }
 
+// The working directory the session last reported by ConEmu's
+// OSC 9 ; 9 ; path, which Windows Terminal starts a tab or pane duplicated
+// from the session's in, and which the query filter lets into the ring and a
+// raw replay hands the joiner with every earlier one, ends on the joiner as
+// it would: the render sends the last one Windows Terminal acts on, its path
+// and what follows it as the stream sent them, ended by BEL, beside the
+// working directory OSC 7 reported, in the order the stream last sent the
+// two, as Windows Terminal reads both into one directory; then the pointer
+// shape. Windows Terminal acts on one whose number's digits make 9, any other
+// byte there skipped, whose next field is 9, of digits alone, with a ';'
+// after it, and whose path, up to the next ';', holds none of '"', '*', '<',
+// '>', '?' and '|' once the '"' at each end of a path of three bytes or more
+// are dropped: an empty one too, which empties its directory. Its RIS keeps
+// the directory. iTerm2's notifications and the progress indicator, the other
+// OSC 9s, are as they were, and a session that reported none sends none.
+func TestReplayReplaysTheConEmuWorkingDirectory(t *testing.T) {
+	join := func(t *testing.T, stream string) []byte {
+		t.Helper()
+		joined, fellBack := fanOut(t, New(), []byte(stream), []uio.SizeEvent{event(1, 0, 80, 24)}, 64<<10)
+		require.NoError(t, fellBack)
+		require.True(t, bytes.HasPrefix(joined, []byte(preamble)), "the render, not the raw ring")
+		return joined
+	}
+
+	t.Run("the last of two", func(t *testing.T) {
+		joined := join(t, "\x1b]9;9;C:\\x\x1b\\text\r\n\x1b]9;9;C:\\y\x07more\r\n")
+		require.True(t, bytes.HasSuffix(joined, []byte("\x1b]9;9;C:\\y\x07")), "%q", joined)
+		require.Equal(t, 1, bytes.Count(joined, []byte("\x1b]9")), "%q", joined)
+	})
+	for _, tc := range []struct{ name, stream, end string }{
+		{
+			"after OSC 7's, sent first, and before the pointer shape",
+			"\x1b]52;c;QQ==\x07\x1b]9;4;1;80\x07\x1b]22;hand2\x07\x1b]7;file://host/dir\x07\x1b]9;9;C:\\x\x07",
+			"\x1b]7;file://host/dir\x07\x1b]9;9;C:\\x\x07\x1b]22;hand2\x07\x1b]9;4;1;80\x07\x1b]52;c;QQ==\x07",
+		},
+		{"before OSC 7's, sent last", "\x1b]9;9;C:\\x\x07\x1b]7;file://host/dir\x07", "\x1b]9;9;C:\\x\x07\x1b]7;file://host/dir\x07"},
+		{
+			"before OSC 7's, with one Windows Terminal ignores after it",
+			"\x1b]9;9;C:\\x\x07\x1b]7;file://host/dir\x07\x1b]9;9;C:\\a|b\x07",
+			"\x1b]9;9;C:\\x\x07\x1b]7;file://host/dir\x07",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			joined := join(t, tc.stream+"text\r\n")
+			require.True(t, bytes.HasSuffix(joined, []byte(tc.end)), "%q", joined)
+		})
+	}
+
+	const set = "\x1b]9;9;C:\\x\x07"
+	rows := []struct{ name, stream, sent string }{
+		{"none", "", ""},
+		{"a path in quotes", "\x1b]9;9;\"C:\\Program Files\"\x07", "\x1b]9;9;\"C:\\Program Files\"\x07"},
+		{"an empty path", set + "\x1b]9;9;\x07", "\x1b]9;9;\x07"},
+		{"more after the path", "\x1b]9;9;C:\\y;more\x07", "\x1b]9;9;C:\\y;more\x07"},
+		{"bytes a path can't hold after it", set + "\x1b]9;9;C:\\y;a|b\x07", "\x1b]9;9;C:\\y;a|b\x07"},
+		{"leading zeros", "\x1b]09;09;C:\\y\x07", "\x1b]9;9;C:\\y\x07"},
+		{"a byte in its number Windows Terminal skips", set + "\x1b]9x;9;C:\\y\x07", "\x1b]9;9;C:\\y\x07"},
+		{"then RIS", set + "\x1bc", set},
+		{"no path", set + "\x1b]9;9\x07", set},
+		{"a number Windows Terminal reads as 95", set + "\x1b]9x5;9;C:\\y\x07", set},
+		{"another action", set + "\x1b]9;8;C:\\y\x07", set},
+		{"an action past 9", "\x1b]9;11;note\x07", ""},
+		{"an action of two 9s", "\x1b]9;99;x\x07", ""},
+		{"an action not of digits alone", set + "\x1b]9;9x;C:\\y\x07", set},
+		{"a quote left open", set + "\x1b]9;9;\"C:\\y\x07", set},
+		{"a path of two quotes", set + "\x1b]9;9;\"\"\x07", set},
+		{"a path in quotes with a ';' inside", set + "\x1b]9;9;\"C:\\a;b\"\x07", set},
+		{"an iTerm2 notification", "\x1b]9;build done\x07", ""},
+		{"an iTerm2 notification after it", set + "\x1b]9;build done\x07", set},
+	}
+	for _, c := range `"*<>?|` {
+		rows = append(rows, struct{ name, stream, sent string }{
+			fmt.Sprintf("a path with %q in it", c), set + "\x1b]9;9;C:\\a" + string(c) + "b\x07", set,
+		})
+	}
+	for _, tc := range rows {
+		t.Run(tc.name, func(t *testing.T) {
+			joined := join(t, tc.stream+"text\r\n")
+			if tc.sent == "" {
+				require.Zero(t, bytes.Count(joined, []byte("\x1b]9")), "%q", joined)
+				return
+			}
+			require.True(t, bytes.HasSuffix(joined, []byte(tc.sent)), "%q", joined)
+			require.Equal(t, 1, bytes.Count(joined, []byte("\x1b]9")), "%q", joined)
+		})
+	}
+	t.Run("the progress indicator beside it", func(t *testing.T) {
+		joined := join(t, "\x1b]9;4;1;50\x07"+set+"\x1b]9;4;3\x07text\r\n")
+		require.True(t, bytes.HasSuffix(joined, []byte(set+"\x1b]9;4;3\x07")), "%q", joined)
+		require.Equal(t, 2, bytes.Count(joined, []byte("\x1b]9")), "%q", joined)
+		joined = join(t, "\x1b]9;4;1;50\x07text\r\n")
+		require.True(t, bytes.HasSuffix(joined, []byte("\x1b]9;4;1;50\x07")), "%q", joined)
+		require.Equal(t, 1, bytes.Count(joined, []byte("\x1b]9")), "%q", joined)
+	})
+}
+
+// A ConEmu working directory the render can't fit in its budget with
+// everything else fails it, named as OSC 7's does, and one longer than the
+// whole budget too, which keeps none of its bytes; one that fits exactly
+// renders, and so does one too long that a later one replaces.
+func TestReplayFailsOnAConEmuWorkingDirectoryTooLongToReplay(t *testing.T) {
+	setBudget(t, 8<<10)
+	stream := func(n int) string {
+		return "text\r\n\x1b]9;9;" + strings.Repeat("a", n) + "\x07more\r\n"
+	}
+	join := func(t *testing.T, s string) ([]byte, error) {
+		t.Helper()
+		return fanOut(t, New(), []byte(s), []uio.SizeEvent{event(1, 0, 80, 24)}, 64<<10)
+	}
+	empty, err := join(t, stream(0))
+	require.NoError(t, err)
+	fits := budget - len(empty)
+
+	joined, err := join(t, stream(fits))
+	require.NoError(t, err)
+	require.Len(t, joined, budget)
+	_, err = join(t, stream(fits+1))
+	requireIneligible(t, err, "a working directory too long to replay")
+	_, err = join(t, stream(budget))
+	requireIneligible(t, err, "a working directory too long to replay")
+
+	e := startFor(t, captureOf(stream(budget), event(1, 0, 80, 24)), termsize.Size{Cols: 80, Rows: 24})
+	require.True(t, e.conEmuCwdOver)
+	require.Empty(t, e.conEmuCwd)
+
+	joined, err = join(t, "text\r\n\x1b]9;9;"+strings.Repeat("a", budget)+"\x07\x1b]9;9;C:\\y\x07more\r\n")
+	require.NoError(t, err)
+	require.True(t, bytes.HasSuffix(joined, []byte("\x1b]9;9;C:\\y\x07")), "%q", joined)
+}
+
 // The pointer shape the session last set by OSC 22, which the query filter
 // lets into the ring and a raw replay hands the joiner with every earlier
 // one, ends on the joiner as it would: the render sends the last one xterm

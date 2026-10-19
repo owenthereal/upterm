@@ -92,6 +92,13 @@ type emulation struct {
 	// cwdTold whether it reported one at all, as title and titled are.
 	cwd     string
 	cwdTold bool
+	// conEmuCwd is the working directory the stream last reported by ConEmu's
+	// OSC 9 ; 9, and conEmuCwdTold whether it reported one at all, as cwd and
+	// cwdTold are; conEmuCwdOver is one longer than any render may be, whose
+	// bytes aren't kept, and conEmuCwdLast says it came after the last OSC 7
+	// (see watchConEmuCwd).
+	conEmuCwd                                   string
+	conEmuCwdTold, conEmuCwdOver, conEmuCwdLast bool
 	// pointer is the pointer shape the stream last set, by OSC 22, and
 	// pointerSet whether it set one at all, as title and titled are;
 	// pointerOver is one longer than any render may be, whose bytes aren't
@@ -282,19 +289,20 @@ func (replayer) Start(ctx context.Context, deadline time.Time, c *uio.Capture, s
 // setUp makes the emulator a replay's: no scrollback on either screen, the
 // history kept through the scroll-off function instead, and a clear of it
 // noted (see history.erase), replies to queries discarded, the title, the
-// icon name and the title stack, the working directory, the pointer shape,
-// the bell's volumes, the progress indicator, the colours, the clipboard and
-// synchronized output's DCS form kept, images, special colour modes, device
-// control strings that change the terminal's state, title modes, character
-// protection, selective erases, saves, renditions and line sizes the cells
-// can't hold, a status line, a font, a rectangular attribute extent, a
-// conformance level, a reset of a mode a terminal starts with set, a
-// 94-character set x/vt drops, a 96-character set, a window operation,
-// printer controller mode, a memory lock, a key format, locator reporting,
-// the locator's events, a change to iTerm2's state, the keyboard's LEDs, a
-// log file, a window property, a coding other than UTF-8, sized text, extra
-// cursors and an unscroll noted, auto print, 8-bit controls and the tab stops
-// past the screen's edge kept, and the meter stopped by ctx or the deadline.
+// icon name and the title stack, the working directory, by OSC 7 and by
+// ConEmu's OSC 9 ; 9, the pointer shape, the bell's volumes, the progress
+// indicator, the colours, the clipboard and synchronized output's DCS form
+// kept, images, special colour modes, device control strings that change the
+// terminal's state, title modes, character protection, selective erases,
+// saves, renditions and line sizes the cells can't hold, a status line, a
+// font, a rectangular attribute extent, a conformance level, a reset of a
+// mode a terminal starts with set, a 94-character set x/vt drops, a
+// 96-character set, a window operation, printer controller mode, a memory
+// lock, a key format, locator reporting, the locator's events, a change to
+// iTerm2's state, the keyboard's LEDs, a log file, a window property, a
+// coding other than UTF-8, sized text, extra cursors and an unscroll noted,
+// auto print, 8-bit controls and the tab stops past the screen's edge kept,
+// and the meter stopped by ctx or the deadline.
 // Each callback and handler runs inside the emulator's Write and touches only
 // the emulation.
 func (e *emulation) setUp() {
@@ -312,7 +320,7 @@ func (e *emulation) setUp() {
 		// x/vt keeps the directory too, as this string, which keeping it here
 		// doesn't copy: it is what follows the OSC's first ';', as the stream
 		// sent it, and an OSC 7 without one reports nothing.
-		WorkingDirectory: func(dir string) { e.cwd, e.cwdTold = dir, true },
+		WorkingDirectory: func(dir string) { e.cwd, e.cwdTold, e.conEmuCwdLast = dir, true, false },
 		EnableMode:       e.syncByMode,
 		DisableMode:      e.syncByMode,
 	})
@@ -325,6 +333,7 @@ func (e *emulation) setUp() {
 	e.watchPointer()
 	e.watchBellVolumes()
 	e.watchProgress()
+	e.watchConEmuCwd()
 	e.watchProtection()
 	e.watchTitles()
 	e.watchSaves()
@@ -830,11 +839,11 @@ type progress struct {
 // 100. Both ignore a state past 4 and a field that isn't a number; they read
 // apart an empty field, and a second field that is a 4 written otherwise or
 // has no ';' after it, which kitty takes for a notification: none of those is
-// kept. Every other OSC 9 is iTerm2's notification, shown once, which the
-// render doesn't send again. Windows Terminal's RIS leaves the indicator as
-// it is, and it is kept through one. The query filter drops no OSC 9. x/vt
-// has no handler of its own for it; this returns false all the same, as
-// watchColours' do.
+// kept. OSC 9 ; 9 is watchConEmuCwd's, and every other OSC 9 iTerm2's
+// notification, shown once, which the render doesn't send again. Windows
+// Terminal's RIS leaves the indicator as it is, and it is kept through one.
+// The query filter drops no OSC 9. x/vt has no handler of its own for it;
+// this returns false all the same, as watchColours' do.
 func (e *emulation) watchProgress() {
 	e.term.RegisterOscHandler(9, func(data []byte) bool {
 		// data is the whole OSC, its number first.
@@ -874,6 +883,64 @@ func decimal(f []byte) (int, bool) {
 		n = min(n*10+int(b-'0'), 1000)
 	}
 	return n, len(f) > 0
+}
+
+// watchConEmuCwd registers the handler that keeps the working directory the
+// stream last reported by ConEmu's OSC 9 ; 9 ; path, which Windows Terminal
+// starts a tab or pane duplicated from the session's in, and which x/vt drops,
+// where a raw replay hands the joiner every one, which leave it at the last
+// one Windows Terminal acts on. Kept are the ones it acts on, read as it
+// reads them: the OSC's number is 9 by its digits, Windows Terminal skipping
+// any other byte there, where x/vt hands this handler an OSC by the digits it
+// starts with, so 9x is 9 to both and 9x5 is 95 to Windows Terminal; the
+// field after the number is 9, of digits alone, with a ';' after it; and the
+// path, the field after that, up to the next ';', holds none of '"', '*',
+// '<', '>', '?' and '|' once the '"' at each end of a path of three bytes or
+// more are dropped, as ConEmu's documentation wraps one. An empty path is
+// kept too, which empties Windows Terminal's directory. What follows the
+// second ';' is kept as the stream sent it, which the joiner's Windows
+// Terminal then reads as the session's did, but not when it is longer than
+// any render may be (conEmuCwdOver).
+//
+// Windows Terminal reads OSC 7 into the same directory, so the later of the
+// two sets it, and conEmuCwdLast keeps which that was, the WorkingDirectory
+// callback clearing it. Windows Terminal's RIS leaves the directory as it is,
+// and it is kept through one, as OSC 7's is. kitty and iTerm2 read an OSC 9
+// as a notification, so on them the one the render sends shows as one, once
+// a join, where a raw replay shows one for each in the ring. Every other
+// OSC 9 is watchProgress's, or iTerm2's notification, shown once, which the
+// render doesn't send again. The query filter drops no OSC 9. x/vt has no
+// handler of its own for it; this returns false all the same, as
+// watchColours' do.
+func (e *emulation) watchConEmuCwd() {
+	e.term.RegisterOscHandler(9, func(data []byte) bool {
+		// data is the whole OSC, its number first.
+		num, args, _ := bytes.Cut(data, []byte{';'})
+		n := 0
+		for _, b := range num {
+			if b >= '0' && b <= '9' {
+				n = min(n*10+int(b-'0'), 1000)
+			}
+		}
+		action, rest, ok := bytes.Cut(args, []byte{';'})
+		if a, _ := decimal(action); n != 9 || a != 9 || !ok {
+			return false
+		}
+		path, _, _ := bytes.Cut(rest, []byte{';'})
+		if len(path) >= 3 && path[0] == '"' && path[len(path)-1] == '"' {
+			path = path[1 : len(path)-1]
+		}
+		if bytes.ContainsAny(path, `"*<>?|`) {
+			return false
+		}
+		e.conEmuCwdTold, e.conEmuCwdLast = true, true
+		if e.conEmuCwdOver = len("\x1b]9;9;\x07")+len(rest) > budget; e.conEmuCwdOver {
+			e.conEmuCwd = ""
+		} else {
+			e.conEmuCwd = string(rest)
+		}
+		return false
+	})
 }
 
 // watchProtection registers the handlers that note DECSCA (CSI Ps " q)

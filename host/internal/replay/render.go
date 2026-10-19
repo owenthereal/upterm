@@ -172,6 +172,12 @@ func (e *emulation) render() ([]byte, error) {
 		colours:   &e.colours,
 		cwd:       e.cwd,
 		cwdTold:   e.cwdTold,
+		// ConEmu's working directory, if told, whether it was too long to
+		// keep, and whether it came after OSC 7's.
+		conEmuCwd:     e.conEmuCwd,
+		conEmuCwdTold: e.conEmuCwdTold,
+		conEmuCwdOver: e.conEmuCwdOver,
+		conEmuCwdLast: e.conEmuCwdLast,
 		// The pointer shape, if set, and whether it was too long to keep.
 		pointer:     e.pointer,
 		pointerSet:  e.pointerSet,
@@ -296,10 +302,14 @@ type renderer struct {
 	// colours is the last change the stream made to each colour, none of
 	// them a setting once the render is eligible.
 	colours *colours
-	// cwd is the working directory to send, if cwdTold, and cwdOver says it
-	// didn't fit.
-	cwd              string
-	cwdTold, cwdOver bool
+	// cwd is the working directory OSC 7 reported, to send if cwdTold, and
+	// conEmuCwd the one ConEmu's OSC 9 ; 9 reported, to send if conEmuCwdTold,
+	// unless conEmuCwdOver says it was too long to keep, after cwd if
+	// conEmuCwdLast; cwdOver says one of them was too long, or didn't fit.
+	cwd                                         string
+	cwdTold, cwdOver                            bool
+	conEmuCwd                                   string
+	conEmuCwdTold, conEmuCwdOver, conEmuCwdLast bool
 	// pointer is the pointer shape to send, if pointerSet, and pointerOver
 	// says it was too long to keep or didn't fit.
 	pointer                 string
@@ -680,16 +690,33 @@ func allReset(part []colourChange) bool {
 	return !slices.ContainsFunc(part, func(ch colourChange) bool { return ch != colourReset })
 }
 
-// workingDirectory writes the working directory the stream last reported, as
-// the stream sent it, ended by BEL: a raw replay hands the joiner every OSC 7
-// in the ring, which leave it at the last. One that doesn't fit the budget
-// with everything before it sets cwdOver instead, and the render fails on it.
+// workingDirectory writes the working directory the stream last reported by
+// OSC 7, as the stream sent it, and the one it last reported by ConEmu's
+// OSC 9 ; 9, its path and what follows it as the stream sent them, each ended
+// by BEL: a raw replay hands the joiner every one in the ring, which leave
+// each at the last. Windows Terminal reads both into one directory, which the
+// later of the two last ones sets, so they go in the order the stream sent
+// those. One too long to keep, or that doesn't fit the budget with everything
+// before it, sets cwdOver instead, and the render fails on it.
 func (r *renderer) workingDirectory() {
-	if !r.cwdTold || r.enc.err != nil {
+	if r.enc.err != nil {
 		return
 	}
-	if r.enc.put("\x1b]7;", r.cwd, "\x07") != nil {
-		r.cwdOver = true
+	dirs := [2]struct {
+		told, over bool
+		osc, dir   string
+	}{
+		{r.conEmuCwdTold, r.conEmuCwdOver, "\x1b]9;9;", r.conEmuCwd},
+		{r.cwdTold, false, "\x1b]7;", r.cwd},
+	}
+	if r.conEmuCwdLast {
+		dirs[0], dirs[1] = dirs[1], dirs[0]
+	}
+	for _, d := range dirs {
+		if d.told && (d.over || r.enc.put(d.osc, d.dir, "\x07") != nil) {
+			r.cwdOver = true
+			return
+		}
 	}
 }
 
