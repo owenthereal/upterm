@@ -3012,6 +3012,88 @@ func TestReplayResetsTheJoinersOwnModesAndScreen(t *testing.T) {
 	}
 }
 
+// keyboard is what io's tracker, given p, holds of what a terminal sends of
+// the keyboard and the mouse: the DEC modes it tracks, each screen's kitty
+// keyboard stack, as the pushes that rebuild it, and modifyOtherKeys; and the
+// pops that would empty each stack, which say how deep it is past the
+// entries the tracker keeps. x/vt keeps neither the stacks nor
+// modifyOtherKeys, so a joiner's are compared by this.
+func keyboard(p ...string) string {
+	m := uio.NewModeTracker()
+	for _, s := range p {
+		_, _ = m.Write([]byte(s))
+	}
+	r := m.ReplayParts()
+	pops := regexp.MustCompile(`\x1b\[<\d+u`).FindAllString(string(m.Restore()), -1)
+	return fmt.Sprintf("modes %v, main %q, alternate %q, hidden alternate %q, pops %q",
+		r.DECModes, r.MainKeys, r.AltKeys, r.HiddenAltKeys, pops)
+}
+
+// A program can also leave the joiner's terminal sending the keyboard or the
+// mouse otherwise than a terminal starts: the cursor keys or the keypad in
+// application mode, mouse reports in an encoding of their own, focus and
+// colour-scheme reports, bracketed paste, modifyOtherKeys, or flags on either
+// screen's kitty keyboard stack, which a program killed before it put them
+// back leaves. The render sets each only where the session's terminal has it
+// otherwise than a terminal starts, so it resets them all first, on both
+// screens, and the joiner's terminal then sends the program what the
+// session's does, the stacks as deep as the session's: a stack's pops reach
+// the joiner's own flags otherwise. The rows above the joiner's cursor still
+// scroll into its scrollback (see joinOwn). A session that set them gets
+// them set after the resets. The trip that reaches the alternate screen's
+// stack clears that screen too, so a joiner's hidden one keeps none of what
+// its own program drew there.
+//
+// A joiner left on its alternate screen leaves its cursor home there, for
+// the slot the preamble's DECSC fills there to restore what an unfilled one
+// does (see TestReplayResetsTheJoinersOwnModesAndScreen).
+func TestReplayResetsTheJoinersInputModes(t *testing.T) {
+	var lines strings.Builder
+	for i := range 20 {
+		fmt.Fprintf(&lines, "line %d\r\n", i)
+	}
+	stream := lines.String() + "the end"
+	const on = "\x1b[?1h\x1b=\x1b[?1002h\x1b[?1006h\x1b[?1004h\x1b[?2004h\x1b[?2031h\x1b[>4;2m\x1b[>1u\x1b[>3u"
+	const earlier = "own 0\r\nown 1\r\nown 2\r\nprompt$ upterm join"
+	for _, tc := range []struct{ name, own, stream string }{
+		{"the cursor keys", "\x1b[?1h", stream},
+		{"the keypad", "\x1b=", stream},
+		{"the keypad, by DECNKM", "\x1b[?66h", stream},
+		{"mouse reports of presses, in SGR's encoding", "\x1b[?1000h\x1b[?1006h", stream},
+		{"mouse reports of drags, in UTF-8's", "\x1b[?1002h\x1b[?1005h", stream},
+		{"mouse reports of any motion", "\x1b[?1003h", stream},
+		{"focus reports", "\x1b[?1004h", stream},
+		{"bracketed paste", "\x1b[?2004h", stream},
+		{"colour-scheme reports", "\x1b[?2031h", stream},
+		{"modifyOtherKeys", "\x1b[>4;2m", stream},
+		{"modifyOtherKeys disabled", "\x1b[>4n", stream},
+		{"a kitty keyboard stack", "\x1b[>1u\x1b[>3u", stream},
+		{"kitty keyboard flags set on the empty stack", "\x1b[=5;1u", stream},
+		{"a kitty keyboard stack deeper than kitty's", strings.Repeat("\x1b[>1u", 9), stream},
+		{"a kitty keyboard stack on its alternate screen", "\x1b[?1049h\x1b[>3u\x1b[H", stream},
+		{"a kitty keyboard stack on its hidden alternate screen", "\x1b[?1049h\x1b[>3uvim\x1b[?1049l", stream},
+		{"both kitty keyboard stacks, on its alternate screen", "\x1b[>1u\x1b[?1049h\x1b[>3u\x1b[H", stream},
+		{"all of them", "\x1b[?1h\x1b=\x1b[?1003h\x1b[?1006h\x1b[?1004h\x1b[?2004h\x1b[?2031h\x1b[>4;2m\x1b[>1u\x1b[?1049h\x1b[>3u\x1b[H", stream},
+		{"the session's set, the joiner's not", "", on + stream},
+		{"the session's set, the joiner's otherwise", "\x1b[?1000h\x1b[?1005h\x1b[>4;1m\x1b[>7u\x1b[>7u", on + stream},
+		{"the session's alternate screen's stack, the joiner's own there", "\x1b[?1049h\x1b[>7u", on + stream + "\x1b[?1049h\x1b[>5u\x1b[Hvim"},
+		{"the session's hidden alternate screen's stack, the joiner's own there", "\x1b[?1049h\x1b[>7u\x1b[?1049l", on + "\x1b[?1049h\x1b[>5u\x1b[?1049l" + stream},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			j := joinOwn(t, 80, 12, earlier+tc.own, tc.stream)
+			require.Equal(t, keyboard(tc.stream), keyboard(earlier+tc.own, string(j.render)))
+			if strings.HasPrefix(tc.stream, on) {
+				require.True(t, j.b.Mode(ansi.ModeBracketedPaste).IsSet(), "the session's modes, set after the resets")
+			}
+			// A pop of one entry, which reaches whatever the stack holds under
+			// its top.
+			const live = "\x1b[<u\r\nafter"
+			j.then(t, live)
+			require.Equal(t, keyboard(tc.stream, live), keyboard(earlier+tc.own, string(j.render), live))
+		})
+	}
+}
+
 // A slot no DECSC has filled restores the cursor home in the default pen,
 // link and charsets, as xterm's does. The render sets the slot of each screen
 // it draws on, as the session's holds it, filled or not, so a live DECRC

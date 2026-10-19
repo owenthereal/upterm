@@ -39,10 +39,29 @@ import (
 //   - insert mode, LNM and reverse video off, autowrap on, and the cursor
 //     shown, in the terminal's default style (DECSCUSR 0), none of which
 //     moves the cursor or is what a DECRC restores;
+//   - every mode of the keyboard and the mouse the render sets, as the
+//     terminal starts: the cursor keys and the keypad in normal mode (DECCKM
+//     off and DECKPNM), no mouse reports and none of their encodings (?1000,
+//     ?1002, ?1003, ?1005 and ?1006 off), no focus or colour-scheme reports
+//     (?1004, ?2031), no bracketed paste (?2004), and modifyOtherKeys at the
+//     terminal's own value (XTMODKEYS 4 with none), none of which moves the
+//     cursor either;
 //   - ASCII designated into G0 to G3, G0 in GL (SI) and G2 in GR (LS2R),
 //     after the DECRCs, which put back the charsets their DECSCs saved;
 //   - the cursor to the start of its row, the default pen and no link (an
-//     OSC 8 with no URL closes one), and the screen erased from there down.
+//     OSC 8 with no URL closes one);
+//   - both screens' kitty keyboard stacks emptied, which resets every flag,
+//     by a pop of more entries than a terminal's stack holds: 65535, the
+//     largest parameter xterm's parser and Ghostty's keep, where kitty's,
+//     Ghostty's and foot's stacks hold 8 entries, WezTerm's 128 and
+//     Alacritty's 4096. A pop reaches only the stack of the screen showing,
+//     so the alternate screen's is popped on a trip there and back by ?1049,
+//     as hiddenAlt goes (see there): its save and restore are the main
+//     screen's slot's, so the cursor comes back where it was, in the state
+//     just set, and its ?1049h clears the alternate screen, which xterm does
+//     in the pen's background, the default one by then. xterm ignores the
+//     pops, a CSI with the < prefix;
+//   - the screen erased from the cursor down.
 //
 // A program that exits or is killed can leave any of them: on the alternate
 // screen, the render would draw over the program's screen, which the
@@ -53,8 +72,13 @@ import (
 // would make the live line feeds return the carriage, where the session's
 // don't; autowrap off would keep the live text that reaches the last column
 // there; reverse video, a hidden cursor or a style of its own would show the
-// screen otherwise than the session's terminal does; and the render's text
-// would print through a link or a charset left in place, linked or remapped.
+// screen otherwise than the session's terminal does; the render's text would
+// print through a link or a charset left in place, linked or remapped; and
+// the joiner's keys, mouse and pastes would reach the program encoded
+// otherwise than the session's terminal sends them, or as reports it never
+// asked for. The render sets each mode of the keyboard and the mouse, and
+// pushes the stacks, only where the session's terminal has them otherwise
+// than a terminal starts (see draw), so they are reset here, before it does.
 // GR maps no UTF-8 a print sends, but DECSC saves it, and the render takes it
 // to be G2 (see unrestored). Origin mode, which DECRC restores and whose
 // reset homes the cursor, goes off after the history (see draw).
@@ -71,7 +95,9 @@ import (
 // after the history to scroll into its scrollback.
 const preamble = "\x1b7\x1b[?1047;1049;47l" +
 	"\x1b7\x1b[?69l\x1b[r\x1b8\x1b[4l\x1b[20l\x1b[?5l\x1b[?7;25h\x1b[0 q" +
-	"\x1b(B\x1b)B\x1b*B\x1b+B\x0f\x1b}\r\x1b[m\x1b]8;;\x07\x1b[J"
+	"\x1b[?1;1000;1002;1003;1004;1005;1006;2004;2031l\x1b>\x1b[>4m" +
+	"\x1b(B\x1b)B\x1b*B\x1b+B\x0f\x1b}\r\x1b[m\x1b]8;;\x07" +
+	"\x1b[<65535u\x1b[?1049h\x1b[<65535u\x1b[?1049l\x1b[J"
 
 // eraseSavedLines is ED 3, which empties the terminal's scrollback and
 // erases nothing on its screen, nor moves the cursor: xterm's sets its count
@@ -89,8 +115,9 @@ const eraseSavedLines = "\x1b[3J"
 // joiner's terminal, which it takes to be at its defaults, the preamble
 // making it so for the screen showing, the scroll region and margins, the
 // modes that change where a print lands or how the screen shows, the
-// cursor's visibility and style, the pen, the link and the charsets, and
-// draw for origin mode: the history that
+// cursor's visibility and style, the modes of the keyboard and the mouse and
+// both kitty keyboard stacks, the pen, the link and the charsets, and draw
+// for origin mode: the history that
 // scrolled off, the joiner's scrollback emptied first where the stream
 // emptied the session's (see eraseSavedLines), then both screens, both saved
 // cursors and every state that decides how the next bytes are read, so that
