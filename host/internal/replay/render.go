@@ -883,6 +883,9 @@ func (e *emulation) eligible(parts uio.ReplayParts) (rep, error) {
 	if e.charset96 {
 		return rep{}, &IneligibleError{State: "a 96-character set"}
 	}
+	if e.windowOp {
+		return rep{}, &IneligibleError{State: "a window operation"}
+	}
 	if splitWide(e.term.MainScreen()) || splitWide(e.term.AltScreen()) {
 		return rep{}, &IneligibleError{State: splitWideState}
 	}

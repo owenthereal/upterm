@@ -133,6 +133,9 @@ type emulation struct {
 	// charset96 is set once the stream has designated a 96-character set
 	// (see watchCharsets96).
 	charset96 bool
+	// windowOp is set once the stream has changed the terminal's window (see
+	// watchWindowOps).
+	windowOp bool
 	// pastEdge is what the emulator keeps of the tab stops past the screen's
 	// right edge (see the type).
 	pastEdge pastEdge
@@ -220,10 +223,11 @@ func (replayer) Start(ctx context.Context, deadline time.Time, c *uio.Capture, s
 // strings that change the terminal's state, title modes, character
 // protection, selective erases, saves, renditions and line sizes the cells
 // can't hold, a status line, a font, a rectangular attribute extent, a
-// conformance level, a reset of a mode a terminal starts with set and a
-// 96-character set noted, the tab stops past the screen's edge kept, and the
-// meter stopped by ctx or the deadline. Each callback and handler runs inside
-// the emulator's Write and touches only the emulation.
+// conformance level, a reset of a mode a terminal starts with set, a
+// 96-character set and a window operation noted, the tab stops past the
+// screen's edge kept, and the meter stopped by ctx or the deadline. Each
+// callback and handler runs inside the emulator's Write and touches only the
+// emulation.
 func (e *emulation) setUp() {
 	t := e.term
 	t.SetScrollbackSize(0)
@@ -259,6 +263,7 @@ func (e *emulation) setUp() {
 	e.watchTabStops()
 	e.watchDefaultModes()
 	e.watchCharsets96()
+	e.watchWindowOps()
 }
 
 // colours is the last change the stream made, by OSC, to each of the colours
@@ -1084,6 +1089,30 @@ func (e *emulation) watchCharsets96() {
 			e.term.RegisterEscHandler(ansi.Command(0, inter, final), note)
 		}
 	}
+}
+
+// watchWindowOps registers the handler that notes XTWINOPS (CSI Ps ; Ps ;
+// Ps t) changing the terminal's window, by its first parameter as xterm reads
+// it: de-iconifying or iconifying it (1, 2), moving it (3), resizing it in
+// pixels or in characters (4, 8), raising or lowering it (5, 6), maximizing
+// it or making it full screen (9, 10), and DECSLPP (24 and up), which resizes
+// it to that many lines. x/vt keeps no window, where a raw replay does each
+// of them to the joiner's, as xterm allows by default. The note stays,
+// whatever follows: a later operation can't be told to undo one, as what the
+// joiner's window was before isn't known. A refresh (7) only redraws, and
+// xterm does nothing for 0, 12, 17 and the rest below 24 it doesn't list; the
+// reports (11, 13 to 21) the query filter drops, and the render rebuilds the
+// title stack (22, 23, see watchTitles). x/vt keys a CSI handler by its
+// prefix too, so this one sees no XTSMTITLE (CSI > Pm t). x/vt has no handler
+// of its own for it; this returns false all the same, as watchColours' do.
+func (e *emulation) watchWindowOps() {
+	e.term.RegisterCsiHandler('t', func(params ansi.Params) bool {
+		switch op, _, _ := params.Param(0, 0); {
+		case op >= 1 && op <= 6, op >= 8 && op <= 10, op >= 24:
+			e.windowOp = true
+		}
+		return false
+	})
 }
 
 // sgrUndrawable reports whether params, an SGR's, hold a number x/vt's SGR

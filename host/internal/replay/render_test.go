@@ -1721,10 +1721,11 @@ func TestReplayRebuildsTheTitleStack(t *testing.T) {
 		require.Contains(t, string(joined), "\x1b]1;icon 2\x07", "its icon name")
 	})
 
-	// Nearby forms: a window op whose later parameter is 22, and a push whose
-	// third parameter is 0, which is no index.
-	t.Run("a resize with a parameter of 22", func(t *testing.T) {
-		joined, _ := titlesJoin(t, "\x1b[8;22;1ttext\r\n", "")
+	// Nearby forms: a window op whose later parameter is 22, a refresh, as a
+	// window op that changes the window falls back, and a push whose third
+	// parameter is 0, which is no index.
+	t.Run("a refresh with a parameter of 22", func(t *testing.T) {
+		joined, _ := titlesJoin(t, "\x1b[7;22;1ttext\r\n", "")
 		require.NotContains(t, string(joined), "\x1b[22;")
 	})
 	t.Run("a push with no index", func(t *testing.T) {
@@ -3066,6 +3067,60 @@ func TestReplayFailsOnA96CharacterSet(t *testing.T) {
 			require.NoError(t, join(t, tc.stream))
 			j := joinAt(t, 80, 24, "text\r\n"+tc.stream+"more\r\n")
 			j.then(t, "\x0eqx\x1bnqx\x1boqx\x0fqx\r\n")
+		})
+	}
+}
+
+// An XTWINOPS that changes the terminal's window (CSI Ps ; Ps ; Ps t) fails
+// the render, named, whatever follows: a raw replay iconifies, moves,
+// resizes, raises, lowers, maximizes the joiner's window or makes it full
+// screen as the session's was, and DECSLPP (Ps 24 and up) resizes it to Ps
+// lines, which xterm allows by default, where x/vt keeps no window. A later
+// operation can't be told to undo one, as what the joiner's window was before
+// isn't known. A refresh, which only redraws, an operation xterm doesn't
+// have, the title stack, which the render rebuilds, and the reports render:
+// the filter drops the reports, and given to the emulation they don't count
+// either.
+func TestReplayFailsOnAWindowOperation(t *testing.T) {
+	join := func(t *testing.T, stream string) error {
+		t.Helper()
+		_, fellBack := fanOut(t, New(), []byte("text\r\n"+stream+"more\r\n"), []uio.SizeEvent{event(1, 0, 80, 24)}, 4<<10)
+		return fellBack
+	}
+	for _, tc := range []struct{ name, stream string }{
+		{"de-iconify", "\x1b[1t"},
+		{"iconify", "\x1b[2t"},
+		{"a move", "\x1b[3;10;20t"},
+		{"a resize in pixels", "\x1b[4;400;600t"},
+		{"raise", "\x1b[5t"},
+		{"lower", "\x1b[6t"},
+		{"a resize in characters", "\x1b[8;40;100t"},
+		{"maximize", "\x1b[9;1t"},
+		{"full screen", "\x1b[10;1t"},
+		{"DECSLPP", "\x1b[24t"},
+		{"DECSLPP to 72 lines", "\x1b[72t"},
+		{"a resize, then the title pushed", "\x1b[8;40;100t\x1b[22;0t"},
+		{"a resize, then a resize back", "\x1b[8;40;100t\x1b[8;24;80t"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			requireIneligible(t, join(t, tc.stream), "a window operation")
+		})
+	}
+	for _, tc := range []struct{ name, stream string }{
+		{"a refresh", "\x1b[7t"},
+		{"no operation", "\x1b[t"},
+		{"operation 0", "\x1b[0t"},
+		{"an operation xterm doesn't have", "\x1b[12t\x1b[17t"},
+		{"the title pushed and popped", "\x1b[22;0t\x1b[23;0t"},
+		{"the window's state asked for", "\x1b[11t"},
+		{"its size in pixels asked for", "\x1b[14t"},
+		{"its size in characters asked for", "\x1b[18t"},
+		{"its title asked for", "\x1b[21t"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			require.NoError(t, join(t, tc.stream))
+			_, err := renderAt(t, 80, 24, "text\r\n"+tc.stream+"more\r\n")
+			require.NoError(t, err, "given to the emulation")
 		})
 	}
 }
