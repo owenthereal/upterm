@@ -38,7 +38,7 @@ type joined struct {
 	render         []byte
 	a, b           *vt.Emulator
 	aHist, bHist   *[][]byte
-	aTitle, bTitle *string
+	aNames, bNames *names
 }
 
 // joinAt emulates stream on a cols x rows terminal for a joiner of that
@@ -52,10 +52,10 @@ func joinAt(t *testing.T, cols, rows int, stream string) *joined {
 
 	j := &joined{render: render}
 	j.a, j.aHist = newReference(cols, rows)
-	j.aTitle = watchTitle(j.a)
+	j.aNames = watchTitle(j.a)
 	_, _ = j.a.WriteString(stream)
 	j.b, j.bHist = newReference(cols, rows)
-	j.bTitle = watchTitle(j.b)
+	j.bNames = watchTitle(j.b)
 	_, _ = j.b.Write(render)
 	_, _ = j.b.WriteString(stream[h:])
 	j.requireSame(t)
@@ -72,7 +72,7 @@ func (j *joined) then(t *testing.T, s string) {
 
 func (j *joined) requireSame(t *testing.T) {
 	t.Helper()
-	require.Empty(t, sameState(j.a, j.b, *j.aHist, *j.bHist, *j.aTitle, *j.bTitle), "the render: %q", j.render)
+	require.Empty(t, sameState(j.a, j.b, *j.aHist, *j.bHist, *j.aNames, *j.bNames), "the render: %q", j.render)
 }
 
 // renderAt is the render of stream emulated on a cols x rows terminal, for a
@@ -342,12 +342,12 @@ func TestReplayRebuildsTheHiddenAlternateScreenBy1049(t *testing.T) {
 		b, bHist := newReference(80, 24)
 		_, _ = b.Write(without47(render))
 		_, _ = b.WriteString(afterAnEditor[h:])
-		require.Empty(t, sameState(a, b, *aHist, *bHist, "", ""), "the render: %q", render)
+		require.Empty(t, sameState(a, b, *aHist, *bHist, names{}, names{}), "the render: %q", render)
 		require.Equal(t, "$ vim notes", b.MainScreen().Line(2).String())
 		for _, term := range []*vt.Emulator{a, b} {
 			_, _ = term.WriteString("echo hi\r\nhi\r\n$ ")
 		}
-		require.Empty(t, sameState(a, b, *aHist, *bHist, "", ""))
+		require.Empty(t, sameState(a, b, *aHist, *bHist, names{}, names{}))
 	})
 }
 
@@ -370,7 +370,7 @@ func TestReplayMarginsComeFromTheEmulator(t *testing.T) {
 		a.Resize(80, 30)
 		b, bHist := newReference(80, 30)
 		_, _ = b.Write(render)
-		require.Empty(t, sameState(a, b, *aHist, *bHist, "", ""))
+		require.Empty(t, sameState(a, b, *aHist, *bHist, names{}, names{}))
 	})
 
 	t.Run("in the state the ring starts in", func(t *testing.T) {
@@ -485,7 +485,7 @@ func TestReplayBudget(t *testing.T) {
 		_, _ = a.WriteString(stream)
 		b, bHist := newReference(80, 5)
 		_, _ = b.Write(render)
-		require.Empty(t, sameState(a, b, (*aHist)[3:], *bHist, "", ""))
+		require.Empty(t, sameState(a, b, (*aHist)[3:], *bHist, names{}, names{}))
 	})
 
 	t.Run("the rest over it", func(t *testing.T) {
@@ -544,7 +544,7 @@ func TestContinuationStateLeavesThePendingWrap(t *testing.T) {
 	for _, seq := range []string{
 		"\x1b(0", "\x1b)0", "\x1b*0", "\x1b+0", "\x1b(A", "\x1b(B",
 		"\x0f", "\x0e", "\x1bn", "\x1bo",
-		"\x1b[4h", "\x1b=", "\x1b[?5h", "\x1b]2;a title\x07",
+		"\x1b[4h", "\x1b=", "\x1b[?5h", "\x1b]2;a title\x07", "\x1b]1;an icon name\x07",
 		"\x1b[22;0t", "\x1b[22;1t", "\x1b[22;2t", "\x1b[22;3t",
 		"\x1b[1 q", "\x1b[2 q", "\x1b[3 q", "\x1b[4 q", "\x1b[5 q", "\x1b[6 q",
 		"\x1b[?7l", "\x1b[m", "\x1b[1;4:3;38;2;1;2;3m",
@@ -730,7 +730,7 @@ func TestReplayClearsATitleTheSessionCleared(t *testing.T) {
 		got := watchTitle(b)
 		_, _ = b.WriteString("\x1b]2;the joiner's own\x07")
 		_, _ = b.Write(joined)
-		return joined, *got
+		return joined, got.title
 	}
 	for _, clear := range []string{"\x1b]2;\x07", "\x1b]0;\x1b\\"} {
 		_, title := join(t, "\x1b]2;the title\x07text\r\n"+clear+"more\r\n")
@@ -1395,33 +1395,37 @@ func TestReplayFailsOnASelectiveErase(t *testing.T) {
 // titlesJoin joins a terminal to a session whose stream is stream, and
 // requires the render, not the raw ring. It returns what the joiner was sent,
 // and then, which feeds live to the session's terminal and the joiner's and
-// requires the two to show the same title: each has a title of its own, so a
-// pop that puts back the terminal's own leaves each showing its own, and one
-// that puts back a title the stream set leaves both showing it. The title
-// stack is kept as xterm keeps it (see xtermTitles). joinerStack, if given,
-// goes to the joiner's terminal first: its own stack, which the joiner had
-// before it joined.
+// requires the two to show the same window title and the same icon name: each
+// terminal has names of its own, so a pop that puts back the terminal's own
+// leaves each showing its own, and one that puts back a name the stream set
+// leaves both showing it. The title stack is kept as xterm keeps it (see
+// xtermTitles). joinerStack, if given, goes to the joiner's terminal first:
+// its own stack, which the joiner had before it joined.
 func titlesJoin(t *testing.T, stream, joinerStack string) (joined []byte, then func(live string)) {
 	t.Helper()
 	joined, fellBack := fanOut(t, New(), []byte(stream), []uio.SizeEvent{event(1, 0, 80, 24)}, 64<<10)
 	require.NoError(t, fellBack)
 	require.True(t, bytes.HasPrefix(joined, []byte(preamble)), "the render, not the raw ring")
-	const sessionsOwn, joinersOwn = "the session's own", "the joiner's own"
+	sessionsOwn := names{"the session's own", "the session's own icon"}
+	joinersOwn := names{"the joiner's own", "the joiner's own icon"}
 	a, b := vt.NewEmulator(80, 24), vt.NewEmulator(80, 24)
 	a.SetReplyFunc(func([]byte) {})
 	b.SetReplyFunc(func([]byte) {})
-	aTitle, bTitle := watchTitleFrom(a, sessionsOwn), watchTitleFrom(b, joinersOwn)
+	aNames, bNames := watchTitleFrom(a, sessionsOwn), watchTitleFrom(b, joinersOwn)
 	_, _ = b.WriteString(joinerStack)
-	*bTitle = joinersOwn
-	shown := func(title *string, own string) string {
-		if *title == own {
-			return "the terminal's own"
+	*bNames = joinersOwn
+	shown := func(n, own names) names {
+		if n.title == own.title {
+			n.title = "the terminal's own"
 		}
-		return *title
+		if n.icon == own.icon {
+			n.icon = "the terminal's own"
+		}
+		return n
 	}
 	same := func(after string) {
 		t.Helper()
-		require.Equal(t, shown(aTitle, sessionsOwn), shown(bTitle, joinersOwn), "the title after %q; the render: %q", after, joined)
+		require.Equal(t, shown(*aNames, sessionsOwn), shown(*bNames, joinersOwn), "the names after %q; the render: %q", after, joined)
 	}
 	_, _ = a.WriteString(stream)
 	_, _ = b.Write(joined)
@@ -1436,13 +1440,13 @@ func titlesJoin(t *testing.T, stream, joinerStack string) (joined []byte, then f
 
 // The title stack the session pushed onto, by XTWINOPS 22 (CSI 22 ; Ps t),
 // and popped, by XTWINOPS 23, which x/vt keeps none of, is pushed again on
-// the joiner's terminal, oldest first, each entry under the title it saved:
-// one the stream set is set again first; where the stream had set none, the
-// joiner's own still shows, and is what the joiner pushes, as a raw replay
-// would have it push. A pop the joiner's terminal then makes puts back what
-// the session's puts back: the same title the stream set, or each one's own.
-// vim pushes the window title and the icon name apart as it starts, and pops
-// them as it exits.
+// the joiner's terminal, oldest first, each entry under the window title and
+// the icon name it saved: one the stream set is set again first; where the
+// stream had set none, the joiner's own still shows, and is what the joiner
+// pushes, as a raw replay would have it push. A pop the joiner's terminal
+// then makes puts back what the session's puts back: the same name the stream
+// set, or each one's own. vim pushes the window title and the icon name apart
+// as it starts, and pops them as it exits.
 func TestReplayRebuildsTheTitleStack(t *testing.T) {
 	const vimStart, vimScreen = "\x1b[22;2t\x1b[22;1t", "\x1b[?1049h\x1b[H\x1b[2J~\r\n~\x1b[H"
 	for _, tc := range []struct{ name, before, after string }{
@@ -1450,6 +1454,9 @@ func TestReplayRebuildsTheTitleStack(t *testing.T) {
 		{"a title the shell set", "\x1b]2;the shell\x07", ""},
 		{"a title vim set", "", "\x1b]2;vim\x07"},
 		{"both", "\x1b]2;the shell\x07", "\x1b]0;vim\x07"},
+		{"an icon name the shell set", "\x1b]1;the shell\x07", ""},
+		{"both names vim set, apart", "", "\x1b]2;vim title\x07\x1b]1;vim\x07"},
+		{"both names the shell set, and vim", "\x1b]0;the shell\x07", "\x1b]0;vim\x07"},
 	} {
 		for _, start := range []string{vimStart, "\x1b[22;1t\x1b[22;2t"} {
 			for _, exit := range []string{"\x1b[23;2t\x1b[23;1t", "\x1b[23;1t\x1b[23;2t"} {
@@ -1493,6 +1500,11 @@ func TestReplayRebuildsTheTitleStack(t *testing.T) {
 		require.Contains(t, string(joined), "\x1b]2;one\x07\x1b[22;0t\x1b]2;one\x07")
 		then("\x1b[23;0t")
 	})
+	t.Run("a pop in the ring that finds no title below", func(t *testing.T) {
+		joined, then := titlesJoin(t, "\x1b[22;1t\x1b]2;one\x07\x1b[22;1t\x1b[23;2ttext\r\n", "")
+		require.Contains(t, string(joined), "\x1b[22;1t\x1b]2;one\x07")
+		then("\x1b[23;0t")
+	})
 	t.Run("a pop of the icon name", func(t *testing.T) {
 		joined, then := titlesJoin(t, "\x1b]2;one\x07\x1b[22;0t\x1b]2;two\x07\x1b[23;1ttext\r\n", "")
 		require.NotContains(t, string(joined), "\x1b[22;")
@@ -1515,11 +1527,11 @@ func TestReplayRebuildsTheTitleStack(t *testing.T) {
 	pushes := func(n int) string {
 		var s strings.Builder
 		for i := range n {
-			fmt.Fprintf(&s, "\x1b]2;title %d\x07\x1b[22;0t", i)
+			fmt.Fprintf(&s, "\x1b]2;title %d\x07\x1b]1;icon %d\x07\x1b[22;0t", i, i)
 		}
 		return s.String()
 	}
-	const joinerStack = "\x1b]2;the joiner's saved\x07\x1b[22;0t"
+	const joinerStack = "\x1b]2;the joiner's saved\x07\x1b]1;the joiner's saved icon\x07\x1b[22;0t"
 	for _, tc := range []struct {
 		name, stream string
 		pops         int
@@ -1540,6 +1552,7 @@ func TestReplayRebuildsTheTitleStack(t *testing.T) {
 		require.NotContains(t, string(joined), "\x1b[22;", "%q", joined)
 		require.NotContains(t, string(joined), "\x1b[23;", "%q", joined)
 		require.Contains(t, string(joined), "\x1b]2;title 2\x07", "the title the oldest entry put back, which the pops of the lost places left")
+		require.Contains(t, string(joined), "\x1b]1;icon 2\x07", "its icon name")
 	})
 
 	// Nearby forms: a window op whose later parameter is 22, and a push whose
@@ -1552,6 +1565,105 @@ func TestReplayRebuildsTheTitleStack(t *testing.T) {
 		joined, then := titlesJoin(t, "\x1b]2;one\x07\x1b[22;0;0ttext\r\n", "")
 		require.Contains(t, string(joined), "\x1b]2;one\x07\x1b[22;0t")
 		then("\x1b[23;0t")
+	})
+}
+
+// The icon name the session set, by OSC 1, or by OSC 0 with the window
+// title, which x/vt keeps behind no accessor, is set again on the joiner's
+// terminal, by OSC 1, as a raw replay sets it there; an empty one too, which
+// clears the joiner's. One the session never set isn't, and the joiner's own
+// stays. The title stack's entries saved the icon name too, which the render
+// sets again before each push that saves it, as it does the window title. An
+// entry of both names saves the window's: one the stream set, and the
+// terminal's own where it set none, so such an entry is pushed with only the
+// name the stream set sent before it, the joiner saving its own as the other,
+// and a pop of both then puts back each terminal's own. A pop of an entry that
+// saved no icon name takes it from the nearest one below that did, as xterm
+// does, in the ring and live.
+func TestReplayRebuildsTheIconName(t *testing.T) {
+	for _, tc := range []struct{ name, stream, sent string }{
+		{"by OSC 1", "\x1b]1;the icon\x07text\r\n", "\x1b]1;the icon\x07"},
+		{"by OSC 0, ended by ST", "\x1b]0;both\x1b\\text\r\n", "\x1b]1;both\x07\x1b]2;both\x07"},
+		{"by OSC 0, then the title by OSC 2", "\x1b]0;both\x07\x1b]2;the title\x07text\r\n", "\x1b]1;both\x07\x1b]2;the title\x07"},
+		{"by OSC 0, then by OSC 1", "\x1b]0;both\x07\x1b]1;the icon\x07text\r\n", "\x1b]1;the icon\x07\x1b]2;both\x07"},
+		{"cleared", "\x1b]1;the icon\x07text\r\n\x1b]1;\x07", "\x1b]1;\x07"},
+		{"never set", "\x1b]2;the title\x07text\r\n", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			joined, then := titlesJoin(t, tc.stream, "")
+			require.Contains(t, string(joined), tc.sent)
+			require.Equal(t, strings.Count(tc.sent, "\x1b]1;"), bytes.Count(joined, []byte("\x1b]1;")), "%q", joined)
+			then("\x1b]2;later\x07")
+		})
+	}
+
+	for _, tc := range []struct {
+		name, stream, sent string
+		pops               []string
+	}{
+		{
+			"an entry of the icon name", "\x1b]1;one\x07\x1b[22;1t\x1b]1;two\x07text\r\n",
+			"\x1b]1;one\x07\x1b[22;1t\x1b]1;two\x07", []string{"\x1b[23;1t", "\x1b[23;1t"},
+		},
+		{
+			"an entry of both, both set", "\x1b]0;one\x07\x1b[22;0t\x1b]0;two\x07text\r\n",
+			"\x1b]1;one\x07\x1b]2;one\x07\x1b[22;0t\x1b]1;two\x07\x1b]2;two\x07", []string{"\x1b[23;0t"},
+		},
+		{
+			"an entry of both, only the title set", "\x1b]2;one\x07\x1b[22;0t\x1b]1;two\x07text\r\n",
+			"\x1b]2;one\x07\x1b[22;0t\x1b]1;two\x07\x1b]2;one\x07", []string{"\x1b[23;0t"},
+		},
+		{
+			"an entry of both, only the icon name set", "\x1b]1;one\x07\x1b[22;0t\x1b]2;two\x07text\r\n",
+			"\x1b]1;one\x07\x1b[22;0t\x1b]1;one\x07\x1b]2;two\x07", []string{"\x1b[23;0t"},
+		},
+		{
+			"an entry of both, neither set", "\x1b[22;0t\x1b]0;vim\x07text\r\n",
+			"\x1b[22;0t\x1b]1;vim\x07\x1b]2;vim\x07", []string{"\x1b[23;0t"},
+		},
+		{
+			"an entry of the title on one of the icon name", "\x1b]1;one\x07\x1b[22;1t\x1b]1;two\x07\x1b[22;2ttext\r\n",
+			"\x1b]1;one\x07\x1b[22;1t\x1b[22;2t\x1b]1;two\x07", []string{"\x1b[23;1t", "\x1b[23;0t"},
+		},
+		{
+			"a pop in the ring of an entry that saved only the title", "\x1b]1;one\x07\x1b[22;0t\x1b]1;two\x07\x1b[22;2t\x1b[23;1ttext\r\n",
+			"\x1b]1;one\x07\x1b[22;0t\x1b]1;one\x07", []string{"\x1b[23;0t"},
+		},
+		{
+			"a pop in the ring of the title alone", "\x1b]0;one\x07\x1b[22;0t\x1b]0;two\x07\x1b[23;2ttext\r\n",
+			"\x1b]1;two\x07\x1b]2;one\x07", []string{"\x1b[23;0t"},
+		},
+		{
+			"a pop in the ring that finds no icon name below", "\x1b[22;2t\x1b]1;one\x07\x1b[22;2t\x1b[23;1ttext\r\n",
+			"\x1b[22;2t\x1b]1;one\x07", []string{"\x1b[23;0t"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			joined, then := titlesJoin(t, tc.stream, "")
+			require.Contains(t, string(joined), tc.sent)
+			require.Equal(t, strings.Count(tc.sent, "\x1b]1;"), bytes.Count(joined, []byte("\x1b]1;")), "%q", joined)
+			for _, pop := range tc.pops {
+				then(pop)
+			}
+		})
+	}
+	t.Run("a pop in the ring that puts back the terminal's own", func(t *testing.T) {
+		joined, then := titlesJoin(t, "\x1b[22;1t\x1b]1;vim\x07\x1b[23;1ttext\r\n", "")
+		require.NotContains(t, string(joined), "\x1b]1;")
+		then("\x1b]1;later\x07")
+	})
+
+	// Past ten, xterm's oldest entry is overwritten, the joiner's own one
+	// with it, which saved an icon name of its own.
+	t.Run("eleven pushes of the icon name", func(t *testing.T) {
+		var s strings.Builder
+		for i := range 11 {
+			fmt.Fprintf(&s, "\x1b]1;icon %d\x07\x1b[22;1t", i)
+		}
+		_, then := titlesJoin(t, s.String()+"\x1b]1;now\x07text\r\n", "\x1b]0;the joiner's saved\x07\x1b[22;0t")
+		for range 13 {
+			then("\x1b[23;1t")
+		}
 	})
 }
 
@@ -1568,36 +1680,48 @@ func TestReplayFailsOnAnIndexedTitleStackEntry(t *testing.T) {
 }
 
 // The title stack counts against the render's budget: entries that don't fit
-// with everything else fail it, over the budget. A saved title longer than
-// any render may be keeps none of its bytes, and fails the render, named,
-// while it is on the stack or a pop has put it back.
+// with everything else fail it, over the budget. A saved window title or icon
+// name longer than any render may be keeps none of its bytes, and fails the
+// render, named, while it is on the stack or a pop has put it back.
 func TestReplayFailsOnATitleStackTooLargeToReplay(t *testing.T) {
 	setBudget(t, 8<<10)
-	stream := func(n int) string {
-		return "text\r\n\x1b]2;" + strings.Repeat("A", n) + "\x07\x1b[22;2t\x1b]2;now\x07more\r\n"
-	}
-	join := func(t *testing.T, stream string) ([]byte, error) {
-		t.Helper()
-		return fanOut(t, New(), []byte(stream), []uio.SizeEvent{event(1, 0, 80, 24)}, 64<<10)
-	}
-	empty, err := join(t, stream(0))
-	require.NoError(t, err)
-	fits := budget - len(empty)
-	joined, err := join(t, stream(fits))
-	require.NoError(t, err)
-	require.Len(t, joined, budget)
-	_, err = join(t, stream(fits+1))
-	require.ErrorIs(t, err, ErrOverBudget)
+	for _, tc := range []struct{ name, osc, ps, state string }{
+		{"a window title", "\x1b]2;", "2", "a saved title too long to replay"},
+		{"an icon name", "\x1b]1;", "1", "a saved icon name too long to replay"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stream := func(n int) string {
+				return "text\r\n" + tc.osc + strings.Repeat("A", n) + "\x07\x1b[22;" + tc.ps + "t" + tc.osc + "now\x07more\r\n"
+			}
+			join := func(t *testing.T, stream string) ([]byte, error) {
+				t.Helper()
+				return fanOut(t, New(), []byte(stream), []uio.SizeEvent{event(1, 0, 80, 24)}, 64<<10)
+			}
+			empty, err := join(t, stream(0))
+			require.NoError(t, err)
+			fits := budget - len(empty)
+			joined, err := join(t, stream(fits))
+			require.NoError(t, err)
+			require.Len(t, joined, budget)
+			_, err = join(t, stream(fits+1))
+			require.ErrorIs(t, err, ErrOverBudget)
 
-	_, err = join(t, stream(budget+1))
-	requireIneligible(t, err, "a saved title too long to replay")
-	e := startFor(t, captureOf(stream(budget+1), event(1, 0, 80, 24)), termsize.Size{Cols: 80, Rows: 24})
-	require.Len(t, e.titles.entries, 1)
-	require.True(t, e.titles.entries[0].over)
-	require.Empty(t, e.titles.entries[0].title)
+			_, err = join(t, stream(budget+1))
+			requireIneligible(t, err, tc.state)
+			e := startFor(t, captureOf(stream(budget+1), event(1, 0, 80, 24)), termsize.Size{Cols: 80, Rows: 24})
+			require.Len(t, e.titles.entries, 1)
+			en := e.titles.entries[0]
+			over, kept := en.over, en.title
+			if tc.ps == "1" {
+				over, kept = en.iconOver, en.icon
+			}
+			require.True(t, over)
+			require.Empty(t, kept)
 
-	_, err = join(t, stream(budget+1)+"\x1b[23;2t")
-	requireIneligible(t, err, "a saved title too long to replay")
+			_, err = join(t, stream(budget+1)+"\x1b[23;"+tc.ps+"t")
+			requireIneligible(t, err, tc.state)
+		})
+	}
 }
 
 // A title mode the session set by XTSMTITLE (CSI > Pm t), which makes the
@@ -2036,7 +2160,7 @@ func TestReplayErasesTheJoinersAlternateScreen(t *testing.T) {
 			_, _ = b.WriteString("\x1b[?47h\x1b[H" + strings.Repeat("STALE", 16) + "\x1b[?47l\x1b[H")
 			_, _ = b.Write(render)
 			_, _ = b.WriteString(tc.show)
-			require.Empty(t, sameState(a, b, *aHist, *bHist, "", ""))
+			require.Empty(t, sameState(a, b, *aHist, *bHist, names{}, names{}))
 		})
 	}
 }
@@ -2204,7 +2328,7 @@ func TestReplayRestoresTheCursorSCORCReturnsTo(t *testing.T) {
 		_, _ = term.WriteString("X")
 		require.Equal(t, "X", cellAt(term, 9, 4).Content)
 	}
-	require.Empty(t, sameState(a, b, *aHist, *bHist, "", ""))
+	require.Empty(t, sameState(a, b, *aHist, *bHist, names{}, names{}))
 }
 
 // joinOwn joins, through the fan-out, a joiner whose terminal, b, a program
@@ -2225,10 +2349,10 @@ func joinOwn(t *testing.T, cols, rows int, own, stream string) *joined {
 
 	j := &joined{render: sent}
 	j.a, j.aHist = newReference(cols, rows)
-	j.aTitle = watchTitle(j.a)
+	j.aNames = watchTitle(j.a)
 	_, _ = j.a.WriteString(stream)
 	j.b, j.bHist = newReference(cols, rows)
-	j.bTitle = watchTitle(j.b)
+	j.bNames = watchTitle(j.b)
 	_, _ = j.b.WriteString(own)
 	row := j.b.CursorPosition().Y
 	if j.b.IsAltScreen() {
@@ -2351,7 +2475,7 @@ func TestReplayErasesWhatAnUnknownDesignationPrints(t *testing.T) {
 				require.NotContains(t, b.MainScreen().Line(y).String(), "B", "row %d", y)
 			}
 			require.NotContains(t, string(bytes.Join(*bHist, nil)), "B", "the history")
-			require.Empty(t, sameState(a, b, *aHist, *bHist, "", ""), "%q", printed)
+			require.Empty(t, sameState(a, b, *aHist, *bHist, names{}, names{}), "%q", printed)
 		})
 	}
 }

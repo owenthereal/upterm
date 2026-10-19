@@ -77,6 +77,11 @@ type emulation struct {
 	// too long to keep (see titleEntry).
 	title             string
 	titled, titleOver bool
+	// icon is the icon name the stream last set, by OSC 0 or OSC 1, or that a
+	// pop of the title stack put back, kept as the title is: iconed whether it
+	// is one the stream set, and iconOver one a pop put back too long to keep.
+	icon             string
+	iconed, iconOver bool
 	// titles is the title stack (see titleStack), and titleIndexed is set
 	// once the stream has saved or restored a title by its index on it.
 	// titleModes is set once the stream has set a title mode (see
@@ -200,13 +205,14 @@ func (replayer) Start(ctx context.Context, deadline time.Time, c *uio.Capture, s
 
 // setUp makes the emulator a replay's: no scrollback on either
 // screen, the history kept through the scroll-off function instead, replies
-// to queries discarded, the title and the title stack, the working
-// directory, the colours, the clipboard and synchronized output's DCS form
-// kept, images, device control strings, title modes, character protection,
-// selective erases, saves, renditions and line sizes the cells can't hold, a
-// status line, a font, a rectangular attribute extent and a conformance level
-// noted, and the meter stopped by ctx or the deadline. Each callback and
-// handler runs inside the emulator's Write and touches only the emulation.
+// to queries discarded, the title, the icon name and the title stack, the
+// working directory, the colours, the clipboard and synchronized output's
+// DCS form kept, images, device control strings, title modes, character
+// protection, selective erases, saves, renditions and line sizes the cells
+// can't hold, a status line, a font, a rectangular attribute extent and a
+// conformance level noted, and the meter stopped by ctx or the deadline. Each
+// callback and handler runs inside the emulator's Write and touches only the
+// emulation.
 func (e *emulation) setUp() {
 	t := e.term
 	t.SetScrollbackSize(0)
@@ -217,7 +223,8 @@ func (e *emulation) setUp() {
 	t.SetScrollbackClearFunc(e.hist.clear)
 	t.SetReplyFunc(func([]byte) {})
 	t.SetCallbacks(vt.Callbacks{
-		Title: func(title string) { e.title, e.titled, e.titleOver = title, true, false },
+		Title:    func(title string) { e.title, e.titled, e.titleOver = title, true, false },
+		IconName: func(icon string) { e.icon, e.iconed, e.iconOver = icon, true, false },
 		// x/vt keeps the directory too, as this string, which keeping it here
 		// doesn't copy: it is what follows the OSC's first ';', as the stream
 		// sent it, and an OSC 7 without one reports nothing.
@@ -632,20 +639,27 @@ type titleStack struct {
 
 // titleEntry is what a push saved. ps is its second parameter, which says
 // which names: 0, or none given, both; 1 the icon name; 2 the window title;
-// any other neither, which xterm pushes all the same. The window title, if ps
-// saves it, is the emulation's as of the push, the terminal's own where the
-// stream had set none (see emulation.title). One longer than any render may
-// be is over, its bytes not kept. The icon name isn't kept at all, as the
-// render sends none.
+// any other neither, which xterm pushes all the same. Each name ps saves is
+// the emulation's as of the push, the terminal's own where the stream had set
+// none (see emulation.title): xterm saves the names its window has, so an
+// entry of both that the stream had set only one of holds the terminal's own
+// as the other, which a pop of both puts back. A name longer than any render
+// may be is over, its bytes not kept.
 type titleEntry struct {
-	ps           int
-	title        string
-	titled, over bool
+	ps               int
+	title            string
+	titled, over     bool
+	icon             string
+	iconed, iconOver bool
 }
 
 // savesTitle reports whether XTWINOPS 22 or 23 with ps saves or puts back
 // the window title.
 func savesTitle(ps int) bool { return ps == 0 || ps == 2 }
+
+// savesIcon reports whether XTWINOPS 22 or 23 with ps saves or puts back the
+// icon name.
+func savesIcon(ps int) bool { return ps == 0 || ps == 1 }
 
 // watchTitles registers the handlers that keep the title stack and note the
 // title modes. A third parameter from 1 on is an index on xterm's stack,
@@ -703,6 +717,12 @@ func (e *emulation) pushTitle(ps int) {
 			en.title = e.title
 		}
 	}
+	if savesIcon(ps) && e.iconed {
+		en.iconed = true
+		if en.iconOver = e.iconOver || len(e.icon) > budget; !en.iconOver {
+			en.icon = e.icon
+		}
+	}
 	s := &e.titles
 	if len(s.entries) == maxTitles {
 		copy(s.entries, s.entries[1:])
@@ -713,11 +733,8 @@ func (e *emulation) pushTitle(ps int) {
 	s.entries = append(s.entries, en)
 }
 
-// popTitle pops an entry, or a lost place, and puts back the window title
-// when ps restores it: the entry's own, or for an entry that saved none, as
-// xterm takes it, that of the nearest one below it that saved one. Below
-// the entries there is none to take: a lost place holds nothing, and what
-// the session's terminal pushed before the ring isn't known.
+// popTitle pops an entry, or a lost place, and puts back each name ps
+// restores, the window title and the icon name apart (see titleStack.saved).
 func (e *emulation) popTitle(ps int) {
 	s := &e.titles
 	n := len(s.entries)
@@ -725,19 +742,32 @@ func (e *emulation) popTitle(ps int) {
 		s.lost = max(s.lost-1, 0)
 		return
 	}
-	en := s.entries[n-1]
+	top := s.entries[n-1]
 	s.entries[n-1] = titleEntry{}
 	s.entries = s.entries[:n-1]
-	if !savesTitle(ps) {
-		return
+	if en, ok := s.saved(top, savesTitle); ok && savesTitle(ps) {
+		e.title, e.titled, e.titleOver = en.title, en.titled, en.over
 	}
-	for i := len(s.entries) - 1; !savesTitle(en.ps); i-- {
-		if i < 0 {
-			return
+	if en, ok := s.saved(top, savesIcon); ok && savesIcon(ps) {
+		e.icon, e.iconed, e.iconOver = en.icon, en.iconed, en.iconOver
+	}
+}
+
+// saved is the entry a pop of top takes a name from, saves saying which Ps
+// saves that name: top, or for an entry that saved none, as xterm takes it,
+// the nearest one below it, of the entries left, that saved one. Below the
+// entries there is none to take: a lost place holds nothing, and what the
+// session's terminal pushed before the ring isn't known.
+func (s *titleStack) saved(top titleEntry, saves func(int) bool) (titleEntry, bool) {
+	if saves(top.ps) {
+		return top, true
+	}
+	for i := len(s.entries) - 1; i >= 0; i-- {
+		if saves(s.entries[i].ps) {
+			return s.entries[i], true
 		}
-		en = s.entries[i]
 	}
-	e.title, e.titled, e.titleOver = en.title, en.titled, en.over
+	return titleEntry{}, false
 }
 
 // watchSaves registers the handlers that note the stream saving state the

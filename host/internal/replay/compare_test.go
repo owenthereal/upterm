@@ -100,16 +100,18 @@ func collectScrollOff(term *vt.Emulator) *scrollOff {
 // never seen again), both screens' saved slots, compared by what DECRC would
 // restore, the modes but those the render ignores, the charsets and a
 // pending single shift, the one scroll region, the tab stops, REP's last
-// character, a carried cluster, the title, and the history lines each side
-// collected. The title is what each one's Title callback last reported, as
-// the emulator keeps it behind no accessor: "" for one never set.
+// character, a carried cluster, the window title and the icon name, and the
+// history lines each side collected. The names are what each one's Title and
+// IconName callbacks last reported, as the emulator keeps them behind no
+// accessor, with each pop of the title stack (see watchTitleFrom): "" for one
+// never set.
 //
 // A slot keeps the position it was saved at through a resize, even off the
 // screen, and DECRC clamps it as it moves there. A terminal fresh at this
 // size, given the slot's position, clamps it already, and DECRC restores the
 // same cell from both, so a slot's position is compared clamped to the
 // screen.
-func sameState(a, b *vt.Emulator, aHist, bHist [][]byte, aTitle, bTitle string) string {
+func sameState(a, b *vt.Emulator, aHist, bHist [][]byte, aNames, bNames names) string {
 	if a.Width() != b.Width() || a.Height() != b.Height() {
 		return fmt.Sprintf("size: %dx%d vs %dx%d", a.Width(), a.Height(), b.Width(), b.Height())
 	}
@@ -149,7 +151,7 @@ func sameState(a, b *vt.Emulator, aHist, bHist [][]byte, aTitle, bTitle string) 
 	if ta, tb := a.TabStops(), b.TabStops(); !slices.Equal(ta, tb) {
 		return fmt.Sprintf("tab stops: %v vs %v", ta, tb)
 	}
-	return sameRest(a, b, aHist, bHist, aTitle, bTitle)
+	return sameRest(a, b, aHist, bHist, aNames, bNames)
 }
 
 // sameStateInside is sameState for b, the terminal of a joiner larger than
@@ -168,7 +170,7 @@ func sameState(a, b *vt.Emulator, aHist, bHist [][]byte, aTitle, bTitle string) 
 //     a's rows otherwise;
 //   - a stop every 8 columns of b's width where a's are a's default, and a's
 //     stops alone otherwise.
-func sameStateInside(a, b *vt.Emulator, aHist, bHist [][]byte, aTitle, bTitle string) string {
+func sameStateInside(a, b *vt.Emulator, aHist, bHist [][]byte, aNames, bNames names) string {
 	w, h := a.Width(), a.Height()
 	if b.Width() < w || b.Height() < h {
 		return fmt.Sprintf("size: %dx%d isn't inside %dx%d", w, h, b.Width(), b.Height())
@@ -225,14 +227,14 @@ func sameStateInside(a, b *vt.Emulator, aHist, bHist [][]byte, aTitle, bTitle st
 	if tb := b.TabStops(); !slices.Equal(stops, tb) {
 		return fmt.Sprintf("tab stops: %v, where %v is wanted", tb, stops)
 	}
-	return sameRest(a, b, aHist, bHist, aTitle, bTitle)
+	return sameRest(a, b, aHist, bHist, aNames, bNames)
 }
 
 // sameRest is what sameState and sameStateInside compare alike, with no
 // regard to the screen's size: the cursor's style, the modes, the charsets
 // and a pending single shift, REP's last character, a carried cluster, the
-// title and the history.
-func sameRest(a, b *vt.Emulator, aHist, bHist [][]byte, aTitle, bTitle string) string {
+// window title and the icon name, and the history.
+func sameRest(a, b *vt.Emulator, aHist, bHist [][]byte, aNames, bNames names) string {
 	if d := sameCursorStyle(a, b); d != "" {
 		return d
 	}
@@ -253,8 +255,8 @@ func sameRest(a, b *vt.Emulator, aHist, bHist [][]byte, aTitle, bTitle string) s
 	if a.Carrying() != b.Carrying() {
 		return fmt.Sprintf("carrying a cluster: %v vs %v", a.Carrying(), b.Carrying())
 	}
-	if aTitle != bTitle {
-		return fmt.Sprintf("title: %q vs %q", aTitle, bTitle)
+	if aNames != bNames {
+		return fmt.Sprintf("title and icon name: %q vs %q", aNames, bNames)
 	}
 	if !slices.EqualFunc(aHist, bHist, bytes.Equal) {
 		return fmt.Sprintf("history: %q vs %q", aHist, bHist)
@@ -272,19 +274,26 @@ func sameCursorStyle(a, b *vt.Emulator) string {
 	return ""
 }
 
-// watchTitle has term report the window title it shows into title, and
-// returns title: "" until the stream sets one, as for a terminal whose own
-// title is "" (see watchTitleFrom).
-func watchTitle(term *vt.Emulator) *string { return watchTitleFrom(term, "") }
+// names are the window title and the icon name a terminal shows.
+type names struct{ title, icon string }
 
-// watchTitleFrom has term, a terminal whose own window title is own, report
-// the title it shows into title, and returns title: each one it is set to, by
-// OSC 0 or OSC 2, and each one a pop of its title stack puts back, the stack
-// kept as xterm keeps it (see xtermTitles). x/vt keeps no title stack, so
-// without it a pop would leave the title as the last OSC set it.
-func watchTitleFrom(term *vt.Emulator, own string) *string {
-	x := &xtermTitles{title: own}
-	term.SetCallbacks(vt.Callbacks{Title: func(s string) { x.title = s }})
+// watchTitle has term report the window title and the icon name it shows,
+// where it returns them: "" for each until the stream sets it, as for a
+// terminal whose own names are "" (see watchTitleFrom).
+func watchTitle(term *vt.Emulator) *names { return watchTitleFrom(term, names{}) }
+
+// watchTitleFrom has term, a terminal whose own window title and icon name are
+// own, report the names it shows, where it returns them: each one it is set
+// to, the window title by OSC 0 or OSC 2 and the icon name by OSC 0 or OSC 1,
+// and each one a pop of its title stack puts back, the stack kept as xterm
+// keeps it (see xtermTitles). x/vt keeps no title stack, so without it
+// a pop would leave each name as the last OSC set it.
+func watchTitleFrom(term *vt.Emulator, own names) *names {
+	x := &xtermTitles{shown: own}
+	term.SetCallbacks(vt.Callbacks{
+		Title:    func(s string) { x.shown.title = s },
+		IconName: func(s string) { x.shown.icon = s },
+	})
 	term.RegisterCsiHandler('t', func(params ansi.Params) bool {
 		op, _, _ := params.Param(0, 0)
 		ps, _, _ := params.Param(1, 0)
@@ -297,37 +306,38 @@ func watchTitleFrom(term *vt.Emulator, own string) *string {
 		}
 		return false
 	})
-	return &x.title
+	return &x.shown
 }
 
 // xtermTitles is xterm's title stack, as its xtermPushTitle and
-// xtermPopTitle (misc.c) keep it, and the window title it shows: ten slots,
-// a count of pushes that wraps round them, a pop that takes a name its entry
-// lacks from the nearest of the nine slots below that has one, and that
-// empties the slot it pops; a third parameter from 1 stores into, or reads,
-// a slot in place. A name not saved, or a slot emptied, is nil, and putting
-// back nil changes nothing, as xterm's ChangeGroup ignores it. The icon name
-// is only there or not: the render doesn't send it.
+// xtermPopTitle (misc.c) keep it, and the names it shows: ten slots, a count
+// of pushes that wraps round them, a pop that takes each name its entry lacks
+// from the nearest of the nine slots below that has one, and that empties the
+// slot it pops; a third parameter from 1 stores into, or reads, a slot in
+// place. A push saves the names the window has, whether a program set them
+// or they are the terminal's own: Ps 0 both, 1 the icon name, 2 the window
+// title, any other neither. A pop puts back those its Ps names, so a pop of
+// both after a push of both puts back a name the stream never set as the
+// terminal's own. A name not saved, or a slot emptied, is nil, and putting
+// back nil changes nothing, as xterm's ChangeGroup ignores it.
 type xtermTitles struct {
-	title string
+	shown names
 	used  int
-	data  [10]struct {
-		icon   bool
-		window *string
-	}
+	data  [10]savedNames
 }
 
+// savedNames is a slot of xterm's title stack: the names it saved, each nil
+// where it saved none.
+type savedNames struct{ icon, window *string }
+
 func (x *xtermTitles) push(ps, which int) {
-	var item struct {
-		icon   bool
-		window *string
-	}
-	title := x.title
+	var item savedNames
+	icon, title := x.shown.icon, x.shown.title
 	switch ps {
 	case 0:
-		item.icon, item.window = true, &title
+		item = savedNames{icon: &icon, window: &title}
 	case 1:
-		item.icon = true
+		item.icon = &icon
 	case 2:
 		item.window = &title
 	}
@@ -350,46 +360,83 @@ func (x *xtermTitles) pop(ps, which int) {
 	default:
 		return
 	}
-	window := x.data[which].window
-	for n := 1; window == nil && n < 10; n++ {
-		window = x.data[(which-n+10)%10].window
+	item := x.data[which]
+	for n := 1; n < 10; n++ {
+		below := x.data[(which-n+10)%10]
+		if item.icon == nil {
+			item.icon = below.icon
+		}
+		if item.window == nil {
+			item.window = below.window
+		}
 	}
 	if popped {
-		x.data[which].icon, x.data[which].window = false, nil
+		x.data[which] = savedNames{}
 	}
-	if (ps == 0 || ps == 2) && window != nil {
-		x.title = *window
+	if (ps == 0 || ps == 1) && item.icon != nil {
+		x.shown.icon = *item.icon
+	}
+	if (ps == 0 || ps == 2) && item.window != nil {
+		x.shown.title = *item.window
 	}
 }
 
 // The title stack's model follows xterm: a pop of an entry that saved only
-// the icon name puts back the title of the one below it, as vim's exit
-// relies on; past ten pushes the oldest is overwritten, and a pop that comes
-// down to it finds nothing; a pop of an empty stack does nothing.
+// one name puts back the other's from the nearest one below it that saved
+// it, as vim's exit relies on for the title, and the icon name the same way;
+// a pop of both puts back both an entry of both saved, the terminal's own
+// for one the stream never set; past ten pushes the oldest is overwritten,
+// and a pop that comes down to it finds nothing; a pop of an empty stack does
+// nothing. A terminal watched shows the names its OSCs set, and those its
+// pops put back.
 func TestXtermTitlesFollowsXterm(t *testing.T) {
-	x := &xtermTitles{title: "own"}
+	own := names{"own", "own icon"}
+	term := vt.NewEmulator(10, 2)
+	shown := watchTitleFrom(term, own)
+	_, _ = term.WriteString("\x1b]1;icon\x07\x1b[22;1t\x1b]0;both\x07")
+	require.Equal(t, names{"both", "both"}, *shown)
+	_, _ = term.WriteString("\x1b]2;title\x07\x1b[23;1t")
+	require.Equal(t, names{"title", "icon"}, *shown)
+
+	x := &xtermTitles{shown: own}
 	x.push(2, 0)
-	x.title = "vim"
+	x.shown = names{"vim", "vim icon"}
 	x.push(1, 0)
 	x.pop(2, 0)
-	require.Equal(t, "own", x.title)
+	require.Equal(t, names{"own", "vim icon"}, x.shown, "the title from the entry below")
 	x.pop(1, 0)
-	require.Equal(t, "own", x.title)
+	require.Equal(t, names{"own", "vim icon"}, x.shown, "no icon name below")
 
-	x = &xtermTitles{title: "own"}
+	x = &xtermTitles{shown: own}
+	x.shown.icon = "one"
+	x.push(1, 0)
+	x.shown.icon = "two"
+	x.push(2, 0)
+	x.shown = names{"now", "now"}
+	x.pop(1, 0)
+	require.Equal(t, names{"now", "one"}, x.shown, "the icon name from the entry below")
+
+	x = &xtermTitles{shown: own}
+	x.shown.title = "set"
+	x.push(0, 0)
+	x.shown = names{"later", "later"}
+	x.pop(0, 0)
+	require.Equal(t, names{"set", "own icon"}, x.shown, "the terminal's own icon name, which the push saved")
+
+	x = &xtermTitles{shown: own}
 	for i := range 11 {
-		x.title = fmt.Sprint(i)
+		x.shown = names{fmt.Sprint(i), fmt.Sprint("icon ", i)}
 		x.push(0, 0)
 	}
-	x.title = "now"
+	x.shown = names{"now", "now"}
 	for i := 10; i >= 1; i-- {
 		x.pop(0, 0)
-		require.Equal(t, fmt.Sprint(i), x.title)
+		require.Equal(t, names{fmt.Sprint(i), fmt.Sprint("icon ", i)}, x.shown)
 	}
 	x.pop(0, 0)
-	require.Equal(t, "1", x.title, "the overwritten entry")
+	require.Equal(t, names{"1", "icon 1"}, x.shown, "the overwritten entry")
 	x.pop(0, 0)
-	require.Equal(t, "1", x.title, "the empty stack")
+	require.Equal(t, names{"1", "icon 1"}, x.shown, "the empty stack")
 	require.Zero(t, x.used)
 }
 
@@ -513,7 +560,7 @@ func TestSameStateTellsColourTypesApart(t *testing.T) {
 		a, b := vt.NewEmulator(10, 2), vt.NewEmulator(10, 2)
 		_, _ = a.WriteString(sa)
 		_, _ = b.WriteString(sb)
-		return sameState(a, b, nil, nil, "", "")
+		return sameState(a, b, nil, nil, names{}, names{})
 	}
 	require.Contains(t, differ("\x1b[31mx", "\x1b[38;5;1mx"), "cell 0,0")
 	require.Contains(t, differ("\x1b[31m", "\x1b[38;5;1m"), "pen")

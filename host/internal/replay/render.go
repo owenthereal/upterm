@@ -107,9 +107,12 @@ func (e *emulation) render() ([]byte, error) {
 		parts:  parts,
 		title:  e.title,
 		titled: e.titled,
+		icon:   e.icon,
+		iconed: e.iconed,
 		titles: e.titles,
-		// A title a pop put back too long to keep can't be sent.
+		// A name a pop put back too long to keep can't be sent.
 		titleOver: e.titled && e.titleOver,
+		iconOver:  e.iconed && e.iconOver,
 		rows:      e.join.Rows,
 		cols:      e.join.Cols,
 		fits:      e.join.Cols == e.term.Width(),
@@ -122,6 +125,9 @@ func (e *emulation) render() ([]byte, error) {
 	r.draw()
 	if r.titleOver {
 		return nil, &IneligibleError{State: "a saved title too long to replay"}
+	}
+	if r.iconOver {
+		return nil, &IneligibleError{State: "a saved icon name too long to replay"}
 	}
 	if r.cwdOver {
 		return nil, &IneligibleError{State: "a working directory too long to replay"}
@@ -203,14 +209,18 @@ type renderer struct {
 	term  *vt.Emulator
 	parts uio.ReplayParts
 	// title is the one the stream last set or a pop put back, if titled: an
-	// empty one too, which clears the joiner's.
+	// empty one too, which clears the joiner's. icon is the icon name, if
+	// iconed, as title is.
 	title  string
 	titled bool
-	// titles is the title stack to push again, and titleOver says a title
-	// it or the current one holds was too long to keep.
-	titles     titleStack
-	titleOver  bool
-	rows, cols int // the joiner's
+	icon   string
+	iconed bool
+	// titles is the title stack to push again, and titleOver and iconOver say
+	// a title or an icon name it or the current one holds was too long to
+	// keep.
+	titles              titleStack
+	titleOver, iconOver bool
+	rows, cols          int // the joiner's
 	// fits is a joiner as wide as the render, where a character printed in
 	// the render's last column leaves a wrap pending, as it did on the
 	// session's terminal. A wider joiner gets no wrap, as a wider live
@@ -506,10 +516,10 @@ func (r *renderer) reportModes() {
 // that neither moves the cursor nor clears a pending wrap, after the last
 // print, which the charsets would remap and insert mode would shift: the
 // charsets, insert mode, the application keypad, reverse video, the title
-// stack and then the title, the cursor's style, autowrap, and the active pen
-// and link. The colours the stream reset, the working directory and the
-// clipboard writes still in force, which change none of that, come last of
-// all.
+// stack and then the icon name and the title, the cursor's style, autowrap,
+// and the active pen and link. The colours the stream reset, the working
+// directory and the clipboard writes still in force, which change none of
+// that, come last of all.
 //
 // Autowrap goes off here, after every wrap reprint. A character that fills
 // the line leaves a wrap pending with autowrap on or off, so where ?7l goes
@@ -534,6 +544,9 @@ func (r *renderer) continuation(reprinted int) {
 		_ = enc.put("\x1b[?5h")
 	}
 	r.titleStack()
+	if r.iconed && !r.iconOver {
+		_ = enc.put("\x1b]1;", r.icon, "\x07")
+	}
 	if r.titled && !r.titleOver {
 		_ = enc.put("\x1b]2;", r.title, "\x07")
 	}
@@ -603,13 +616,16 @@ func (r *renderer) workingDirectory() {
 	}
 }
 
-// titleStack pushes the title stack's entries again, oldest first, the
-// window title each saved set before it where the stream had set that one.
-// Where it hadn't, the joiner's own title still shows, as the session's own
-// did: such an entry is pushed only while the title is the terminal's own,
-// so every entry under it is one too, and none of their titles is set first.
-// A title too long to keep sets titleOver instead, and the render fails on
-// it.
+// titleStack pushes the title stack's entries again, oldest first, the icon
+// name and the window title each saved set before it where the stream had set
+// that one. Where it hadn't, the joiner's own name still shows, as the
+// session's own did: such an entry is pushed only while the name is the
+// terminal's own, so every entry under it that saved the name saved the
+// terminal's own too, and none of their names is set first. That holds of
+// each name apart, so an entry of both that saved only the title the stream
+// set is pushed under the joiner's own icon name, which the joiner then
+// saves, as the session's saved its own. A name too long to keep sets
+// titleOver or iconOver instead, and the render fails on it.
 //
 // Places lost under the entries (see the type) say the session's terminal
 // pushed past ten: each of the ten places of xterm's stack holds what the
@@ -628,6 +644,13 @@ func (r *renderer) titleStack() {
 		if en.titled && en.over {
 			r.titleOver = true
 			return
+		}
+		if en.iconed && en.iconOver {
+			r.iconOver = true
+			return
+		}
+		if en.iconed {
+			_ = enc.put("\x1b]1;", en.icon, "\x07")
 		}
 		if en.titled {
 			_ = enc.put("\x1b]2;", en.title, "\x07")

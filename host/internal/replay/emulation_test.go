@@ -94,7 +94,7 @@ func TestReplayDefersTheUnfinishedTail(t *testing.T) {
 
 	ref, refHist := newReference(80, 24)
 	_, _ = ref.WriteString(head)
-	require.Empty(t, sameState(ref, e.term, *refHist, historyOf(e), "", e.title))
+	require.Empty(t, sameState(ref, e.term, *refHist, historyOf(e), names{}, names{e.title, e.icon}))
 }
 
 // A cluster that can still be extended waits in the tail, and the handoff
@@ -150,7 +150,7 @@ func TestReplayAppliesNoEventInsideTheTail(t *testing.T) {
 	_, _ = ref.WriteString(stream)
 	ref.Resize(45, 30)
 	_, _ = ref.WriteString(rest)
-	require.Empty(t, sameState(ref, e.term, *refHist, historyOf(e), "", e.title))
+	require.Empty(t, sameState(ref, e.term, *refHist, historyOf(e), names{}, names{e.title, e.icon}))
 }
 
 // Inside a batch, an event can fall inside a sequence, as it did in the
@@ -165,7 +165,7 @@ func TestReplayResizesInsideASequence(t *testing.T) {
 	_, _ = ref.WriteString(before)
 	ref.Resize(45, 30)
 	_, _ = ref.WriteString(after)
-	require.Empty(t, sameState(ref, e.term, *refHist, historyOf(e), "", e.title))
+	require.Empty(t, sameState(ref, e.term, *refHist, historyOf(e), names{}, names{e.title, e.icon}))
 	require.NotNil(t, e.term.CellAt(0, 0).Style.Fg, "the SGR split by the event was lost")
 }
 
@@ -411,7 +411,7 @@ func TestReplayPrimesTheEmulatorWithTheTrackersSnapshot(t *testing.T) {
 	ref, refHist := newReference(80, 24)
 	_, _ = ref.Write(snapshot)
 	_, _ = ref.WriteString(stream)
-	require.Empty(t, sameState(ref, e.term, *refHist, historyOf(e), "", e.title))
+	require.Empty(t, sameState(ref, e.term, *refHist, historyOf(e), names{}, names{e.title, e.icon}))
 	require.NotNil(t, e.term.CellAt(0, 0).Style.Fg, "the SGR the ring starts inside was lost")
 	require.NoError(t, e.consistent())
 }

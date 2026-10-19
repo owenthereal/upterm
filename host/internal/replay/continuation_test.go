@@ -975,7 +975,7 @@ func (c contCase) run(wait time.Duration) contRun {
 	r.a.SetReplyFunc(func([]byte) {})
 	r.a.SetStopFunc(stop)
 	r.aOff = collectScrollOff(r.a)
-	aTitle := watchTitle(r.a)
+	aNames := watchTitle(r.a)
 	var werr error
 	write := func(term *vt.Emulator, p []byte) {
 		if _, err := term.Write(p); err != nil && werr == nil {
@@ -1005,7 +1005,7 @@ func (c contCase) run(wait time.Duration) contRun {
 			r.skip = "the terminals ran out of time"
 			return r
 		}
-		return r.inside(join, rendered, *aTitle, wider, stop)
+		return r.inside(join, rendered, *aNames, wider, stop)
 	}
 	write(r.a, c.prefix[h:])
 
@@ -1013,7 +1013,7 @@ func (c contCase) run(wait time.Duration) contRun {
 	r.b.SetReplyFunc(func([]byte) {})
 	r.b.SetStopFunc(stop)
 	r.bOff = collectScrollOff(r.b)
-	bTitle := watchTitle(r.b)
+	bNames := watchTitle(r.b)
 	write(r.b, r.render)
 	nb, clears := len(r.bOff.lines), r.bOff.clears
 	write(r.b, c.prefix[h:])
@@ -1030,7 +1030,7 @@ func (c contCase) run(wait time.Duration) contRun {
 			aHist = append(slices.Clip(r.aOff.lines[:len(rendered)]), r.aOff.canon[len(rendered):]...)
 			bHist = append(slices.Clip(rendered), r.bOff.canon[nb:]...)
 		}
-		if d := sameState(r.a, r.b, aHist, bHist, *aTitle, *bTitle); d != "" {
+		if d := sameState(r.a, r.b, aHist, bHist, *aNames, *bNames); d != "" {
 			return when + ": " + d
 		}
 		if !wider && !slices.EqualFunc(r.aOff.canon, r.bOff.canon, bytes.Equal) {
@@ -1059,17 +1059,17 @@ func (c contCase) run(wait time.Duration) contRun {
 // a terminal of join's size, larger than the render's, given the render:
 // sameStateInside, and B's own scroll-off, which holds the render's history
 // lines as A's holds them, unless one is wider than the joiner.
-func (r contRun) inside(join termsize.Size, rendered [][]byte, aTitle string, wider bool, stop func() bool) contRun {
+func (r contRun) inside(join termsize.Size, rendered [][]byte, aNames names, wider bool, stop func() bool) contRun {
 	r.b = vt.NewEmulator(join.Cols, join.Rows)
 	r.b.SetReplyFunc(func([]byte) {})
 	r.b.SetStopFunc(stop)
 	r.bOff = collectScrollOff(r.b)
-	bTitle := watchTitle(r.b)
+	bNames := watchTitle(r.b)
 	if _, err := r.b.Write(r.render); err != nil || stop() {
 		r.skip = "the terminals ran out of time"
 		return r
 	}
-	switch d := sameStateInside(r.a, r.b, r.aOff.lines, rendered, aTitle, *bTitle); {
+	switch d := sameStateInside(r.a, r.b, r.aOff.lines, rendered, aNames, *bNames); {
 	case d != "":
 		r.diff = "at the handoff: " + d
 	case !wider && !slices.EqualFunc(r.aOff.canon, r.bOff.canon, bytes.Equal):
@@ -1689,7 +1689,7 @@ func TestEvictedRegionPrimesAFreshEmulator(t *testing.T) {
 
 			b := vt.NewEmulator(80, 8)
 			_, _ = b.Write(joined)
-			require.Empty(t, sameState(ref, b, nil, nil, "", ""))
+			require.Empty(t, sameState(ref, b, nil, nil, names{}, names{}))
 		})
 	}
 }
