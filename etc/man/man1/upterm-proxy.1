@@ -19,8 +19,10 @@ upterm join is the simpler way to join such a session: it takes the
 connect string on the host's Join line, and needs no ssh options.
 
 .PP
-Exit status: 0 when ssh closes the connection; 1 when it can't reach the
-relay, or the relay closes it.
+Exit status: 1 when it can't connect to the relay, including a usage or
+configuration error. Once connected, whichever end comes first decides: 0
+when ssh closes the connection, 1 when the relay closes it or a read or write
+fails.
 
 
 .SH OPTIONS
