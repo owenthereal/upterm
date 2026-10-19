@@ -1,10 +1,10 @@
 app = "upterm"
 kill_signal = "SIGINT"
 # Must exceed uptermd's worst-case shutdown, which is 11s: Server.Shutdown
-# waits up to server.serveStopDeadline (routingShutdownDeadline + 3 *
+# waits up to server.defaultServeStopDeadline (routingShutdownDeadline + 3 *
 # serverShutDownDeadline = 8s) for serving to stop, then spends up to
-# server.sessionCleanupDeadline (3s) deleting this node's sessions from the
-# store. Change either constant and change this.
+# server.defaultSessionCleanupDeadline (3s) deleting this node's sessions from
+# the store. Change either constant and change this.
 #
 # At Fly's 5s default the drain alone could outlast the grace period, so the
 # machine was killed before the deletes were attempted -- leaving entries that

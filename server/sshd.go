@@ -22,7 +22,7 @@ import (
 	"log/slog"
 )
 
-var (
+const (
 	serverShutDownDeadline = 1 * time.Second
 )
 
