@@ -957,17 +957,6 @@ func (c contCase) run(wait time.Duration) contRun {
 	}
 	e := em.(*emulation)
 	rendered := historyOf(e)
-	// A render begun inside a synchronized update starts with what begins it
-	// again (see synced), which sameState checks of ?2026, as it compares that
-	// mode; x/vt keeps nothing of the DCS form.
-	full := []byte(e.synced() + preamble)
-	for _, line := range rendered {
-		full = append(append(full, line...), crlf...)
-	}
-	if !bytes.HasPrefix(r.render, full) {
-		r.diff = "the render carries less history than the replay kept"
-		return r
-	}
 
 	stop := func() bool { return !time.Now().Before(deadline) }
 	first := c.sizes[0].Size
@@ -995,6 +984,22 @@ func (c contCase) run(wait time.Duration) contRun {
 		}
 	}
 	write(r.a, c.prefix[pos:h])
+	// A render begun inside a synchronized update starts with what begins it
+	// again (see synced), which sameState checks of ?2026, as it compares that
+	// mode; x/vt keeps nothing of the DCS form. Once the stream has cleared
+	// history before the handoff point, as A's clears count, the render
+	// clears the joiner's scrollback, by ED 3, before the history it sends.
+	full := []byte(e.synced() + preamble)
+	if r.aOff.clears > 0 {
+		full = append(full, "\x1b[3J"...)
+	}
+	for _, line := range rendered {
+		full = append(append(full, line...), crlf...)
+	}
+	if werr == nil && !bytes.HasPrefix(r.render, full) {
+		r.diff = "the render doesn't start with the history the replay kept, after a clear of the joiner's only where A's was cleared"
+		return r
+	}
 	// A line of history wider than the joiner wraps when the render prints
 	// it on B, as it would on any terminal of that width, so B's own
 	// scroll-off then holds more lines than the render emitted.

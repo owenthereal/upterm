@@ -210,8 +210,8 @@ func (replayer) Start(ctx context.Context, deadline time.Time, c *uio.Capture, s
 }
 
 // setUp makes the emulator a replay's: no scrollback on either
-// screen, the history kept through the scroll-off function instead, replies
-// to queries discarded, the title, the icon name and the title stack, the
+// screen, the history kept through the scroll-off function instead, and a
+// clear of it noted (see history.erase), replies to queries discarded, the title, the icon name and the title stack, the
 // working directory, the colours, the clipboard and synchronized output's
 // DCS form kept, images, device control strings that change the terminal's
 // state, title modes, character protection, selective erases, saves,
@@ -227,7 +227,7 @@ func (e *emulation) setUp() {
 	// screen's size leaves at 10,000 lines: about 600 MiB at 512 columns.
 	t.AltScreen().SetScrollback(nil)
 	t.SetScrollOffFunc(e.hist.push)
-	t.SetScrollbackClearFunc(e.hist.clear)
+	t.SetScrollbackClearFunc(e.hist.erase)
 	t.SetReplyFunc(func([]byte) {})
 	t.SetCallbacks(vt.Callbacks{
 		Title:    func(title string) { e.title, e.titled, e.titleOver = title, true, false },

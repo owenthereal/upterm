@@ -450,8 +450,9 @@ func TestReplaySetsUpTheEmulator(t *testing.T) {
 // The history keeps the newest lines that fit its budget, each
 // costing its bytes and the CRLF the render follows it with; a line over the
 // whole budget is dropped, and every older line with it, as a render that sent
-// them would send them next to the newer ones with that line missing between;
-// and the clear function empties it.
+// them would send them next to the newer ones with that line missing between,
+// which is no clear of the scrollback the session's terminal keeps; and an
+// erase, the stream's ED 3 or RIS, empties it and notes the clear.
 func TestHistoryKeepsTheNewestLinesWithinItsBudget(t *testing.T) {
 	line := func(s string) uv.Line {
 		l := uv.NewLine(20)
@@ -469,15 +470,18 @@ func TestHistoryKeepsTheNewestLinesWithinItsBudget(t *testing.T) {
 
 	h.push(line("ddddddddddddd"))
 	require.Empty(t, collect(&h), "a line over the budget alone, and the older lines with it")
+	require.False(t, h.erased, "a line over the budget, dropped")
 
 	h.push(line(""))
 	h.push(line("eee"))
 	require.Equal(t, [][]byte{{}, []byte("eee")}, collect(&h))
 
-	h.clear()
+	h.erase()
 	require.Empty(t, collect(&h))
+	require.True(t, h.erased, "erased")
 	h.push(line("eee"))
 	require.Equal(t, [][]byte{[]byte("eee")}, collect(&h))
+	require.True(t, h.erased, "erased, then a line kept")
 }
 
 // The history tells whether the lines a render sends, from its cut on, hold

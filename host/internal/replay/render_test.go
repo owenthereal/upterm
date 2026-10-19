@@ -39,6 +39,9 @@ type joined struct {
 	a, b           *vt.Emulator
 	aHist, bHist   *[][]byte
 	aNames, bNames *names
+	// own is, for joinOwn, the joiner's own lines the render left at the
+	// front of b's scrollback, which bHist no longer holds.
+	own [][]byte
 }
 
 // joinAt emulates stream on a cols x rows terminal for a joiner of that
@@ -473,6 +476,12 @@ func TestReplayBudget(t *testing.T) {
 	require.Len(t, hist, 26)
 	perLine := len(hist[0]) + len(crlf)
 	mandatory := len(full.render) - len(hist)*perLine
+	// The ED 3 that clears the joiner's scrollback, once the stream cleared
+	// history, is part of the rest.
+	cleared := "\x1b[3J" + stream
+	fullCleared := joinAt(t, 80, 5, cleared)
+	require.Len(t, *fullCleared.aHist, 26)
+	mandatoryCleared := len(fullCleared.render) - 26*perLine
 
 	t.Run("newest first", func(t *testing.T) {
 		setBudget(mandatory + 23*perLine + perLine - 1)
@@ -483,6 +492,20 @@ func TestReplayBudget(t *testing.T) {
 
 		a, aHist := newReference(80, 5)
 		_, _ = a.WriteString(stream)
+		b, bHist := newReference(80, 5)
+		_, _ = b.Write(render)
+		require.Empty(t, sameState(a, b, (*aHist)[3:], *bHist, names{}, names{}))
+	})
+
+	t.Run("newest first, after a clear", func(t *testing.T) {
+		setBudget(mandatoryCleared + 23*perLine + perLine - 1)
+		e := startFor(t, captureOf(cleared, event(1, 0, 80, 5)), termsize.Size{Cols: 80, Rows: 5})
+		render, err := e.Render()
+		require.NoError(t, err)
+		require.LessOrEqual(t, len(render), budget)
+
+		a, aHist := newReference(80, 5)
+		_, _ = a.WriteString(cleared)
 		b, bHist := newReference(80, 5)
 		_, _ = b.Write(render)
 		require.Empty(t, sameState(a, b, (*aHist)[3:], *bHist, names{}, names{}))
@@ -2566,8 +2589,10 @@ func TestReplayRestoresTheCursorSCORCReturnsTo(t *testing.T) {
 // own left above b's cursor on its main screen are the joiner's earlier
 // screen, which the render scrolls into b's scrollback from the cursor's row
 // on, before the history: b's history must hold what own scrolled off, then
-// those rows, then a's history, and is compared from a's on. For b left on
-// its alternate screen, that row is the one the main screen's slot holds,
+// those rows, then a's history, and is compared from a's on. A stream that
+// clears history, by ED 3 or RIS, clears a's scrollback, and a raw replay's
+// joiner's: then b's must hold those rows and a's history alone. For b left
+// on its alternate screen, that row is the one the main screen's slot holds,
 // which ?1049l, bringing b back, restores: where ?1049h saved the cursor, or
 // home for a slot nothing filled.
 func joinOwn(t *testing.T, cols, rows int, own, stream string) *joined {
@@ -2578,6 +2603,8 @@ func joinOwn(t *testing.T, cols, rows int, own, stream string) *joined {
 
 	j := &joined{render: sent}
 	j.a, j.aHist = newReference(cols, rows)
+	cleared := false
+	j.a.SetScrollbackClearFunc(func() { *j.aHist, cleared = nil, true })
 	j.aNames = watchTitle(j.a)
 	_, _ = j.a.WriteString(stream)
 	j.b, j.bHist = newReference(cols, rows)
@@ -2587,7 +2614,10 @@ func joinOwn(t *testing.T, cols, rows int, own, stream string) *joined {
 	if j.b.IsAltScreen() {
 		row = min(j.b.MainScreen().SavedCursor().Y, rows-1)
 	}
-	earlier := slices.Clone(*j.bHist)
+	var earlier [][]byte
+	if !cleared {
+		earlier = slices.Clone(*j.bHist)
+	}
 	for y := range row {
 		line, err := encodeLine(j.b.MainScreen().Line(y), budget)
 		require.NoError(t, err)
@@ -2597,9 +2627,53 @@ func joinOwn(t *testing.T, cols, rows int, own, stream string) *joined {
 	got := *j.bHist
 	require.True(t, len(got) >= len(earlier) && slices.EqualFunc(earlier, got[:len(earlier)], bytes.Equal),
 		"the joiner's earlier screen, above its cursor, in its scrollback: %q, then %q", earlier, got)
-	*j.bHist = got[len(earlier):]
+	j.own, *j.bHist = got[:len(earlier):len(earlier)], got[len(earlier):]
 	j.requireSame(t)
 	return j
+}
+
+// A clear of history the session sent, ED 3 or RIS, emptied the session's
+// terminal's scrollback, and a raw replay empties the joiner's. So the render
+// empties the joiner's too, once the preamble has left the joiner's earlier
+// screen above the cursor: that screen then scrolls into a scrollback that
+// holds nothing older, and the session's history since the clear follows it.
+// With no clear in the ring, the joiner keeps the scrollback of its own.
+func TestReplayClearsTheJoinersScrollbackTheSessionCleared(t *testing.T) {
+	lines := func(prefix string, from, to int) string {
+		var s strings.Builder
+		for i := from; i < to; i++ {
+			fmt.Fprintf(&s, "%s %d\r\n", prefix, i)
+		}
+		return s.String()
+	}
+	// 30 lines and a prompt on 12 rows: own 0 to own 18 in the joiner's
+	// scrollback, own 19 to own 29 above its cursor.
+	own := lines("own", 0, 30) + "prompt$ upterm join"
+	var all []string
+	for i := range 30 {
+		all = append(all, fmt.Sprintf("own %d", i))
+	}
+	screen := all[19:]
+	for _, tc := range []struct {
+		name, stream string
+		own          []string
+	}{
+		{"no clear", lines("line", 0, 30) + "the end", all},
+		{"ED 3", lines("line", 0, 10) + "\x1b[3J" + lines("line", 10, 30) + "the end", screen},
+		{"ED 3, nothing scrolled off after it", lines("line", 0, 30) + "\x1b[3Jthe end", screen},
+		{"ED 2 then ED 3, as clear(1) sends", lines("line", 0, 30) + "\x1b[H\x1b[2J\x1b[3J" + lines("line", 30, 35) + "the end", screen},
+		{"RIS", lines("line", 0, 10) + "\x1bc" + lines("line", 10, 30) + "the end", screen},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			j := joinOwn(t, 80, 12, own, tc.stream)
+			var got []string
+			for _, line := range j.own {
+				got = append(got, string(line))
+			}
+			require.Equal(t, tc.own, got, "the joiner's own lines in its scrollback")
+			j.then(t, "\r\nafter\r\n"+lines("live", 0, 15))
+		})
+	}
 }
 
 // A program can leave the joiner's terminal with a scroll region, left and

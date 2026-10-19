@@ -73,31 +73,49 @@ const preamble = "\x1b7\x1b[?1047;1049;47l" +
 	"\x1b7\x1b[?69l\x1b[r\x1b8\x1b[4l\x1b[20l\x1b[?5l\x1b[?7;25h\x1b[0 q" +
 	"\x1b(B\x1b)B\x1b*B\x1b+B\x0f\x1b}\r\x1b[m\x1b]8;;\x07\x1b[J"
 
+// eraseSavedLines is ED 3, which empties the terminal's scrollback and
+// erases nothing on its screen, nor moves the cursor: xterm's sets its count
+// of saved lines to zero, and that is all. The render sends it after the
+// preamble once the stream has cleared the history (see history.erase), with
+// the joiner's earlier screen still above the cursor, which the history's
+// line feeds then scroll into a scrollback that holds nothing older, as the
+// session's held nothing from before its clear. A RIS clears the history as
+// ED 3 does, and gets the same ED 3: its other resets reach the joiner as
+// every render's do, and the joiner's earlier screen, which a raw replay's
+// RIS would erase, scrolls into the scrollback as in every render.
+const eraseSavedLines = "\x1b[3J"
+
 // render reconstructs the emulator's state at the handoff point on the
 // joiner's terminal, which it takes to be at its defaults, the preamble
 // making it so for the screen showing, the scroll region and margins, the
 // modes that change where a print lands or how the screen shows, the
 // cursor's visibility and style, the pen, the link and the charsets, and
 // draw for origin mode: the history that
-// scrolled off, then both screens, both saved cursors and every state that
-// decides how the next bytes are read, so that the raw stream from the
-// handoff point on lands on it as it did on the session's own terminal.
+// scrolled off, the joiner's scrollback emptied first where the stream
+// emptied the session's (see eraseSavedLines), then both screens, both saved
+// cursors and every state that decides how the next bytes are read, so that
+// the raw stream from the handoff point on lands on it as it did on the
+// session's own terminal.
 //
 // State it can't restore fails it before anything is written; a history line
 // it can't rebuild fails it once the lines to send are known. Within the
 // budget, everything but the history must fit on its own, or the render
 // fails, named when what doesn't fit is a clipboard write or the working
 // directory; the history then fills what is left, newest lines first, cut at
-// whole lines, between the preamble and the rest. A synchronized update open
-// at the handoff point is begun before all of it (see synced).
+// whole lines, between the preamble, with the ED 3 that follows it, and the
+// rest. A synchronized update open at the handoff point is begun before all
+// of it (see synced).
 func (e *emulation) render() ([]byte, error) {
 	parts := e.modes.ReplayParts()
 	rep, err := e.eligible(parts)
 	if err != nil {
 		return nil, err
 	}
-	lead := e.synced()
-	head := len(lead) + len(preamble)
+	start := e.synced() + preamble
+	if e.hist.erased {
+		start += eraseSavedLines
+	}
+	head := len(start)
 	enc := &e.enc
 	enc.reset(budget - head)
 	enc.stop = e.stop
@@ -147,8 +165,7 @@ func (e *emulation) render() ([]byte, error) {
 		return nil, &IneligibleError{State: splitWideState}
 	}
 	out := make([]byte, 0, head+size+len(enc.buf))
-	out = append(out, lead...)
-	out = append(out, preamble...)
+	out = append(out, start...)
 	out = e.hist.appendFrom(out, from)
 	return append(out, enc.buf...), nil
 }

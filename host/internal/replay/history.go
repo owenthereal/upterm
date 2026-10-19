@@ -30,7 +30,9 @@ type history struct {
 	// a render sends the newest lines, so one that sends any such line sends
 	// that one.
 	split int
-	enc   encoder
+	// erased is set once the stream has cleared the history (see erase).
+	erased bool
+	enc    encoder
 }
 
 // push encodes line and keeps it, dropping the oldest lines past the
@@ -79,9 +81,19 @@ func (h *history) lineAt(off int) int {
 	return from + i + len(crlf)
 }
 
-// clear forgets every line, as ED 3 and RIS clear history.
+// clear forgets every line.
 func (h *history) clear() {
 	h.data, h.split = nil, 0
+}
+
+// erase forgets every line, as ED 3 and RIS clear the history, and notes
+// it: the session's terminal emptied its scrollback there, and a raw replay
+// empties a joiner's, of the joiner's own lines too, so the render empties
+// the joiner's as well (see render). A line push drops is no such clear: the
+// session's terminal keeps it.
+func (h *history) erase() {
+	h.clear()
+	h.erased = true
 }
 
 // all yields the lines kept, oldest first, without their CRLFs. Each is the
