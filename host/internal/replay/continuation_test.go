@@ -957,13 +957,14 @@ func (c contCase) run(wait time.Duration) contRun {
 	}
 	e := em.(*emulation)
 	rendered := historyOf(e)
-	full := []byte(preamble)
+	// A render begun inside a synchronized update starts with what begins it
+	// again (see synced), which sameState checks of ?2026, as it compares that
+	// mode; x/vt keeps nothing of the DCS form.
+	full := []byte(e.synced() + preamble)
 	for _, line := range rendered {
 		full = append(append(full, line...), crlf...)
 	}
-	// A render begun inside a synchronized update begins one first, which
-	// sameState checks, as it compares that mode.
-	if !bytes.HasPrefix(bytes.TrimPrefix(r.render, []byte(ansi.SetModeSynchronizedOutput)), full) {
+	if !bytes.HasPrefix(r.render, full) {
 		r.diff = "the render carries less history than the replay kept"
 		return r
 	}
