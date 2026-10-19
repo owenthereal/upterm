@@ -161,6 +161,14 @@ Environment Variables:
 			reportUnknownCommands(c)
 		}
 	}
+	helpOnlyForKnownCommands(rootCmd)
+
+	// The root and the groups run only to report an unknown command, so
+	// their usage shows the commands they hold and no run of their own:
+	// cobra's template, its runnable line kept for a command without
+	// subcommands.
+	rootCmd.SetUsageTemplate(strings.Replace(rootCmd.UsageTemplate(),
+		"{{if .Runnable}}", "{{if and .Runnable (not .HasSubCommands)}}", 1))
 
 	return rootCmd
 }
@@ -256,6 +264,61 @@ func reportUnknownCommands(c *cobra.Command) {
 		}
 		return unknownCommandError(c, args[0])
 	}
+}
+
+// helpOnlyForKnownCommands makes help for an unknown command the error that
+// running it is, whether --help, -h or upterm help asks for it.
+//
+// cobra looks for --help before a command checks its arguments, and prints
+// the help itself, whatever follows the command; so the help func prints
+// nothing for the root or a group given an unknown command, and execute
+// returns the error. cobra's help command prints the help of the nearest
+// command it finds; here it returns the error instead.
+func helpOnlyForKnownCommands(root *cobra.Command) {
+	help := root.HelpFunc()
+	root.SetHelpFunc(func(c *cobra.Command, args []string) {
+		if _, unknown := unknownCommand(c, c.Flags().Args()); unknown {
+			return
+		}
+		help(c, args)
+	})
+
+	root.InitDefaultHelpCmd()
+	for _, c := range root.Commands() {
+		if c.Name() != "help" {
+			continue
+		}
+		c.Run = nil
+		c.RunE = func(c *cobra.Command, args []string) error {
+			target, rest, err := c.Root().Find(args)
+			if err != nil {
+				return err
+			}
+			if arg, unknown := unknownCommand(target, rest); unknown {
+				return unknownCommandError(target, arg)
+			}
+			if target.Context() == nil {
+				target.SetContext(c.Context())
+			}
+			target.InitDefaultHelpFlag()
+			target.InitDefaultVersionFlag()
+			return target.Help()
+		}
+	}
+}
+
+// unknownCommand is the first of args when c is the root or a group and it
+// names none of c's commands: what reportUnknownCommands reports.
+func unknownCommand(c *cobra.Command, args []string) (string, bool) {
+	if !c.HasSubCommands() || len(args) == 0 {
+		return "", false
+	}
+	// In `upterm --help session` cobra's lookup takes session for --help's
+	// value and stops at the root: it is left over, but it is a command.
+	if sub, _, err := c.Find(args[:1]); err == nil && sub != c {
+		return "", false
+	}
+	return args[0], true
 }
 
 // bindFlagsToEnv binds cmd's flags to the config file and environment

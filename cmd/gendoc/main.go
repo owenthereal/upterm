@@ -6,6 +6,7 @@ import (
 	"github.com/owenthereal/upterm/cmd/upterm/command"
 	"github.com/owenthereal/upterm/internal/logging"
 	"github.com/owenthereal/upterm/internal/version"
+	"github.com/spf13/cobra"
 	"github.com/spf13/cobra/doc"
 )
 
@@ -18,7 +19,7 @@ func main() {
 	// Note: XDG environment variables should be set externally before running this command
 	// to generate docs with generic paths instead of machine-specific paths.
 	// See Makefile 'docs' target for proper environment variable setup.
-	rootCmd := command.Root()
+	rootCmd := docRoot()
 
 	if err := doc.GenMarkdownTree(rootCmd, "./docs"); err != nil {
 		logger.Error("failed generating markdown docs", "error", err)
@@ -44,4 +45,22 @@ func main() {
 		logger.Error("failed generating zsh completion", "error", err)
 		os.Exit(1)
 	}
+}
+
+// docRoot is the command tree the pages describe. The root and the groups
+// run only to report an unknown command, so their pages show no usage line
+// of their own, as for a command that can't run.
+func docRoot() *cobra.Command {
+	root := command.Root()
+	var walk func(c *cobra.Command)
+	walk = func(c *cobra.Command) {
+		if c.HasSubCommands() {
+			c.Run, c.RunE = nil, nil
+		}
+		for _, child := range c.Commands() {
+			walk(child)
+		}
+	}
+	walk(root)
+	return root
 }

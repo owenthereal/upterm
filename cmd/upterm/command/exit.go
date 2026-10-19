@@ -35,8 +35,21 @@ var mainRoot = cliRoot
 // it is touched.
 func Main() int {
 	installSignalPolicy()
-	cmd, err := mainRoot().ExecuteC()
+	cmd, err := execute(mainRoot())
 	return Exit(cmd, err, os.Stderr)
+}
+
+// execute runs root as ExecuteC does, and help asked for an unknown command
+// fails as running it does: cobra prints help instead of returning an error,
+// and the help func prints nothing for it (helpOnlyForKnownCommands).
+func execute(root *cobra.Command) (*cobra.Command, error) {
+	cmd, err := root.ExecuteC()
+	if err == nil && cmd != nil {
+		if arg, unknown := unknownCommand(cmd, cmd.Flags().Args()); unknown {
+			err = unknownCommandError(cmd, arg)
+		}
+	}
+	return cmd, err
 }
 
 // cliRoot is Root as Main runs it. cobra adds its completion command inside
