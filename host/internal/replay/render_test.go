@@ -3525,10 +3525,11 @@ func TestReplayFailsOnAMemoryLock(t *testing.T) {
 // modifyFunctionKeys, but CSI > 4 n. Each changes how the joiner's terminal
 // encodes a key it sends the program, where a raw replay sets it there.
 // modifyOtherKeys, which the tracker restores, renders, and so does a
-// sequence that only puts resources back to the values a terminal starts
-// with, as the tracker reads CSI > 4 ; m: one with no parameters, or a
-// resource with nothing after it. So do XTQMODKEYS (CSI ? Pp m), which the
-// query filter drops, and SGR.
+// sequence that moves no resource off the value a terminal starts with, as
+// the tracker reads CSI > 4 ; m: a resource with nothing after it, which puts
+// it back, or no parameters, which ctlseqs documents as putting every
+// resource back and xterm reads as naming none. So do XTQMODKEYS
+// (CSI ? Pp m), which the query filter drops, and SGR.
 func TestReplayFailsOnAKeyFormat(t *testing.T) {
 	join := func(t *testing.T, stream string) ([]byte, error) {
 		t.Helper()
@@ -3557,7 +3558,7 @@ func TestReplayFailsOnAKeyFormat(t *testing.T) {
 		{"modifyOtherKeys", "\x1b[>4;2m", "\x1b[>4;2m"},
 		{"modifyOtherKeys disabled", "\x1b[>4n", "\x1b[>4n"},
 		{"modifyOtherKeys put back", "\x1b[>4;2m\x1b[>4;m", ""},
-		{"each put back", "\x1b[>m\x1b[>f", ""},
+		{"no parameters", "\x1b[>m\x1b[>f", ""},
 		{"a resource put back", "\x1b[>1m\x1b[>4f", ""},
 		{"a resource asked for", "\x1b[?1m", ""},
 		{"SGR", "\x1b[1;31m", ""},

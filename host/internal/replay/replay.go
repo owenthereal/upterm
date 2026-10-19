@@ -1386,9 +1386,9 @@ func (e *emulation) watchMemoryLock() {
 // one too, which xterm reads as disabling modifyFunctionKeys, but CSI > 4 n,
 // which the tracker keeps. x/vt keeps none of them, where a raw replay sets
 // each on the joiner's terminal, so the joiner's keys would reach the program
-// otherwise encoded. One that only puts resources back to the values a
-// terminal starts with isn't noted (see keyResets), as the tracker reads
-// CSI > 4 ; m. The note stays, whatever follows, though xterm's DECSTR and
+// otherwise encoded. One that moves no resource off the value a terminal
+// starts with isn't noted (see keyResets), as the tracker reads CSI > 4 ; m.
+// The note stays, whatever follows, though xterm's DECSTR and
 // RIS put every resource back. x/vt keys a CSI handler by its prefix too, so
 // these see neither SGR (CSI Pm m) nor DSR (CSI Ps n) nor HVP
 // (CSI Ps ; Ps f), and the query filter drops XTQMODKEYS (CSI ? Pp m). x/vt
@@ -1416,10 +1416,13 @@ func (e *emulation) watchKeyFormats() {
 	})
 }
 
-// keyResets reports whether params, an XTMODKEYS's or an XTFMTKEYS's, only
-// put resources back to the values a terminal starts with: none at all, which
-// xterm reads as resources 1 to 5, or a resource with nothing after it, no
-// value nor a mask, which x/ansi keeps as parameters after it.
+// keyResets reports whether params, an XTMODKEYS's or an XTFMTKEYS's, move no
+// resource off the value a terminal starts with: a resource with nothing
+// after it, no value nor a mask, which x/ansi keeps as parameters after it,
+// puts that one back; and none at all, which ctlseqs documents as putting
+// every resource back, xterm's parser reads as naming no resource, as it gives
+// a CSI one omitted parameter from the start, and so does nothing. Neither is
+// noted, whichever a terminal does.
 func keyResets(params ansi.Params) bool {
 	for i := 1; i < len(params); i++ {
 		if params[i].Param(-1) >= 0 {
