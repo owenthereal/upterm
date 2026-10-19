@@ -2413,6 +2413,46 @@ func TestReplayFailsOnASavedPalette(t *testing.T) {
 	}
 }
 
+// kitty's push of its colours (OSC 30001), its dynamic colours and its
+// colour table, onto the stack its XTPUSHCOLORS pushes onto, fails the render
+// as XTPUSHCOLORS does, named the same: x/vt keeps no stack and ignores
+// kitty's pop (OSC 30101), so the render can't tell what colours a later pop
+// gives the session's terminal, and a joiner's kitty, which the push never
+// reached, would pop its own. Every push counts, whatever follows its number,
+// of which kitty reads nothing, and still does once popped, by either pop, or
+// once RIS has come. kitty's pop alone renders: what it puts back was pushed
+// before the ring, which neither a raw replay nor the render holds.
+func TestReplayFailsOnAPaletteKittyPushed(t *testing.T) {
+	join := func(t *testing.T, stream string) error {
+		t.Helper()
+		_, fellBack := fanOut(t, New(), []byte("text\r\n"+stream+"more\r\n"), []uio.SizeEvent{event(1, 0, 80, 24)}, 4<<10)
+		return fellBack
+	}
+	for _, tc := range []struct{ name, stream string }{
+		{"the colours pushed", "\x1b]30001\x1b\\"},
+		{"the colours pushed, ended by BEL", "\x1b]30001\x07"},
+		{"a push with data kitty doesn't read", "\x1b]30001;fg=red\x07"},
+		{"a push with a byte after its number", "\x1b]30001x\x07"},
+		{"a push popped", "\x1b]30001\x07\x1b]30101\x07"},
+		{"a push popped by XTPOPCOLORS", "\x1b]30001\x07\x1b[#Q"},
+		{"a push, then RIS", "\x1b]30001\x07\x1bc"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			requireIneligible(t, join(t, tc.stream), "a saved palette")
+		})
+	}
+	for _, tc := range []struct{ name, stream string }{
+		{"a pop alone", "\x1b]30101\x1b\\"},
+		{"a pop alone, ended by BEL", "\x1b]30101\x07"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			require.NoError(t, join(t, tc.stream))
+			_, err := renderAt(t, 80, 24, "text\r\n"+tc.stream+"more\r\n")
+			require.NoError(t, err, "given to the emulation")
+		})
+	}
+}
+
 // An SGR the session sent with a number x/vt's SGR skips, which changes how
 // a terminal draws what is printed after it, fails the render, named, as the
 // cells printed under it would be drawn as x/vt keeps them: an alternative

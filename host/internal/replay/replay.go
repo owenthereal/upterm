@@ -1129,10 +1129,13 @@ func (s *titleStack) saved(top titleEntry, saves func(int) bool) (titleEntry, bo
 // by XTPUSHSGR (CSI Pm # {, or its alias CSI Pm # p), the whole pen or the
 // attributes Pm names; and the dynamic and ANSI colours saved by
 // XTPUSHCOLORS (CSI Pm # P), pushed on xterm's stack of palettes or, by a
-// parameter, stored in a place on it. x/vt keeps none of them and ignores
-// what restores each, XTRESTORE (CSI ? Pm r), XTPOPSGR (CSI # }, or CSI # q)
-// and XTPOPCOLORS (CSI Pm # Q), so once one is saved the render can't tell
-// what a restore on the session's terminal puts back, and a joiner's
+// parameter, stored in a place on it, or by kitty's OSC 30001, which pushes
+// them on the stack kitty's own XTPUSHCOLORS pushes on, as one with no
+// parameter does: every one counts, whatever follows its number, of which
+// kitty reads nothing. x/vt keeps none of them and ignores what restores each,
+// XTRESTORE (CSI ? Pm r), XTPOPSGR (CSI # }, or CSI # q), XTPOPCOLORS
+// (CSI Pm # Q) and kitty's OSC 30101, so once one is saved the render can't
+// tell what a restore on the session's terminal puts back, and a joiner's
 // terminal, which the save never reached, would put back its own. x/vt keys a
 // CSI handler by its prefix and intermediate too, so XTSAVE's handler sees
 // neither SCOSC nor DECSLRM, both the bare CSI s, the alias's sees no CSI p
@@ -1152,6 +1155,10 @@ func (e *emulation) watchSaves() {
 		})
 	}
 	t.RegisterCsiHandler(ansi.Command(0, '#', 'P'), func(ansi.Params) bool {
+		e.savedPalette = true
+		return false
+	})
+	t.RegisterOscHandler(30001, func([]byte) bool {
 		e.savedPalette = true
 		return false
 	})
