@@ -46,29 +46,47 @@ func (e ExitCodeError) Error() string {
 
 func (e ExitCodeError) Unwrap() error { return e.Err }
 
+// attachedKeysHelp is the keys of a terminal attached to a session, for
+// upterm host's help and attach's.
+const attachedKeysHelp = `Keys, at the start of a line (--escape-char changes the ~, or turns them off):
+  ~.    detach: the session keeps running; 'upterm attach NAME' reattaches
+        and 'upterm session stop NAME' ends it
+  ~?    show the session's status and keys, in this terminal only; the
+        program may need its own redraw afterwards
+  ~^Z   suspend this terminal (Unix); fg resumes it
+  ~~    send a ~
+Through an outer ssh connection, ssh's own ~ escapes come first: type ~~.,
+~~? and ~~^Z, or connect with 'ssh -e none' and type them plain.
+
+On Unix you can also suspend with ~^Z, run 'upterm session info NAME', and
+return with fg. A session that keeps producing output while this terminal
+is suspended may disconnect it (254 below); 'upterm attach NAME' brings it
+back.`
+
 func attachCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "attach [NAME]",
+		Use:   "attach [NAME|ID]",
 		Short: "Attach this terminal to a running session",
-		Long: `Attach this terminal to a running session, by name.
+		Long: `Attach this terminal to a running session, given its name or session ID.
+
+` + nameOrIDHelp + `
+Without one, the only running session is attached to; with several, name one.
 
 The session keeps running when this terminal detaches, and any number of
-terminals can attach to it over time. With no NAME, the one running session
-is attached to; with several, the name is required.
+terminals can attach to it over time. Everything but the keys below is sent
+to the session as typed, and a SIGTERM or SIGHUP detaches.
 
-To detach, type the escape character at the start of a line followed by a
-period: ~. by default. ~~ sends a literal ~. On Unix, ~^Z suspends this
-terminal instead — fg resumes it. A session that keeps producing output
-while this terminal is suspended may disconnect it before fg runs (the
-same 254 below); 'upterm attach NAME' brings it back. Everything else is
-sent to the session as typed. A SIGTERM or SIGHUP detaches too.
+` + attachedKeysHelp + `
 
-Exit status: 0 after a detach; the session's reported exit status once it
-ends (0 when --join-timeout expires); 254 if the session disconnected this
-terminal (a stalled or overflowed terminal, or a daemon that went away — see
-the log for which); 255 if it could not attach.`,
+Exit status: 0 after a detach; the session's status once it ends (0 when no
+guest joined within its join timeout; 1 when it was stopped or ended by a
+signal); 254 if this terminal was disconnected; 255 if it could not attach,
+including a usage or configuration error.`,
 		Example: `  # Attach to the session named build-shell:
   upterm attach build-shell
+
+  # Attach to a session by its session ID:
+  upterm attach d3k5fia7m4us73ehblug
 
   # Attach with no escape character, so every keystroke reaches the session:
   upterm attach build-shell --escape-char none`,
@@ -79,11 +97,11 @@ the log for which); 255 if it could not attach.`,
 		// RunE returns.
 		Annotations: map[string]string{failureCodeAnnotation: strconv.Itoa(exitAttachFailed)},
 	}
-	cmd.Flags().StringVar(&flagEscapeChar, "escape-char", "~", "Escape character for detaching (ESC-CHAR followed by . at the start of a line) or suspending (ESC-CHAR followed by ^Z, Unix only), or 'none' to disable.")
+	cmd.Flags().StringVar(&flagEscapeChar, "escape-char", "~", escapeCharHelp)
 	// ~? lists the session's guests, so attach hides their addresses on the
 	// same flag, environment variable and config key as every other command
 	// that prints them: each command reads only the flags it registers.
-	cmd.Flags().BoolVar(&flagHideClientIP, "hide-client-ip", false, "Hide client IP addresses from output (auto-enabled in CI environments).")
+	cmd.Flags().BoolVar(&flagHideClientIP, "hide-client-ip", false, hideClientIPHelp)
 	return cmd
 }
 

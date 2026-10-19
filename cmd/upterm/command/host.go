@@ -123,90 +123,107 @@ var (
 
 func hostCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "host",
+		Use:   "host [flags] [-- COMMAND [ARGS...]]",
 		Short: "Host a terminal session",
-		Long: `Host a terminal session via a reverse SSH tunnel to the Upterm server.
+		Long: `Host a terminal session: run COMMAND, or $SHELL without one, and share it
+through a relay, so that guests can join it from their own terminals with
+upterm join or plain ssh.
 
-The session links the host and client IO to a command's IO. Authentication with the
-Upterm server uses, in this order:
+upterm prints the session, with the commands guests join it with, and asks
+before starting it; --accept starts it without asking. The relay is
+--server, and upterm authenticates to it with, in this order:
   1. SSH agent keys, when an agent is running and holds any
   2. Private key files: ~/.ssh/id_{ed25519,ed25519_sk,ecdsa,ecdsa_sk,dsa,rsa}
-  3. Auto-generated ephemeral key, when neither is available
+  3. A generated key, when neither is available
+Supplying --private-key makes the named list the whole set instead; see its
+help.
 
-Supplying --private-key makes the named list the whole set instead; see its help.
+Who can join: anyone with the session's connect string, unless
+--authorized-keys (an authorized_keys file) or --authorized-user names the
+keys a guest must have.
 
-To authorize client connections, use --authorized-keys to specify an authorized_keys file
-containing client public keys.
+What guests may do: type into the session, or only watch it with
+--read-only; transfer files with sftp or scp, with your access (downloads
+only with --read-only, none with --no-sftp); and forward TCP ports (ssh -L)
+to what this machine can reach, only with --allow-local-tcp-forwarding. Each
+file transfer waits for your approval in a desktop dialog on this machine,
+unless --accept; where no dialog can be shown, transfers are denied.
 
-The session runs in a process of its own. This terminal is a client of it:
-type ~. at the start of a line (or --escape-char) to leave the session
-running, reattach with 'upterm attach NAME', and end it with
-'upterm session stop NAME'. On Unix, ~^Z suspends this terminal instead — fg
-resumes it. A session that keeps producing output while this terminal is
-suspended may disconnect it before fg runs; 'upterm attach NAME' brings it
-back. With --detach nothing is attached: the session starts in the
-background and this command prints how to reach it.`,
-		Example: `  # Host a terminal session running $SHELL, attaching client's IO to the host's:
+The session runs in a process of its own, and this terminal is attached to
+it. NAME is the session's name, which upterm prints (--name chooses it).
+
+` + attachedKeysHelp + `
+
+With --detach nothing is attached: the session starts in the background, and
+upterm prints how to reach it.
+
+Exit status: the command's own status when it exits; 1 when upterm fails, or
+the session is stopped or ends by a signal (whatever the command returns
+while it is torn down); 254 when this terminal is disconnected; 130 for
+Ctrl-C at a prompt; 0 after declining at the prompt or detaching (~.). A
+command's own 1 or 254 reads the same.`,
+		Example: `  # Host $SHELL; upterm prints how guests join it:
   upterm host
 
-  # Accept client connections automatically without prompts:
-  upterm host --accept
-
-  # Host a terminal session allowing only specified public key(s) to connect:
-  upterm host --authorized-keys PATH_TO_AUTHORIZED_KEY_FILE
-
-  # Authorize a user by fetching their public keys from a code-hosting service:
-  upterm host --authorized-user github:username
-
-  # Host a session executing a custom command:
+  # Host a command:
   upterm host -- docker run --rm -ti ubuntu bash
 
-  # Host a 'tmux new -t pair-programming' session, forcing clients to join with 'tmux attach -t pair-programming':
+  # Let only the keys alice has on GitHub join:
+  upterm host --authorized-user github:alice
+
+  # Let only the keys in an authorized_keys file join:
+  upterm host --authorized-keys ~/.ssh/guests_authorized_keys
+
+  # Start without asking, and let guests transfer files without approval:
+  upterm host --accept
+
+  # Host 'tmux new -t pair-programming', and give each guest
+  # 'tmux attach -t pair-programming' instead of the session itself:
   upterm host --force-command 'tmux attach -t pair-programming' -- tmux new -t pair-programming
 
-  # Allow clients to use local TCP forwarding (ssh -L) through the hosted session:
+  # Let guests forward TCP ports (ssh -L) to what this machine can reach:
   upterm host --allow-local-tcp-forwarding
 
-  # Use a different Uptermd server, hosting a session via WebSocket:
-  upterm host --server wss://YOUR_UPTERMD_SERVER -- YOUR_COMMAND
+  # Host on another relay, over a WebSocket:
+  upterm host --server wss://relay.example.com
 
   # Start a session in the background and print how to reach it:
-  upterm host --detach --accept --github-user alice
+  upterm host --detach --accept --authorized-user github:alice
 
   # The same, as JSON for a script:
-  upterm host --detach --accept --github-user alice -o json`,
+  upterm host --detach --accept --authorized-user github:alice -o json`,
 		PreRunE: validateShareRequiredFlags,
 		RunE:    shareRunE,
 	}
 
-	cmd.PersistentFlags().StringVarP(&flagServer, "server", "", "ssh://uptermd.upterm.dev:22", "Specify the upterm server address (required). Supported protocols: ssh, ws, wss.")
-	cmd.PersistentFlags().StringVarP(&flagForceCommand, "force-command", "f", "", "Enforce a specified command for clients to join, and link the command's input/output to the client's terminal.")
-	cmd.PersistentFlags().StringSliceVarP(&flagPrivateKeys, "private-key", "i", defaultPrivateKeys(), "Identity files for authenticating with the upterm server. Supplying this makes the list the whole set, like OpenSSH's IdentitiesOnly: each file must load, a .pub selects that key in the SSH agent, and other agent keys are not offered. By default, the agent's keys are used when it has any, then the listed files that exist, then a generated key.")
-	cmd.PersistentFlags().StringVarP(&flagKnownHostsFilename, "known-hosts", "", defaultKnownHost(), "Specify a file containing known keys for remote hosts (required).")
+	cmd.PersistentFlags().StringVarP(&flagServer, "server", "", "ssh://uptermd.upterm.dev:22", "Relay to host the session on: ssh://HOST[:PORT], ws://HOST[:PORT] or wss://HOST[:PORT]. Without a port, ssh uses 22, ws 80 and wss 443.")
+	cmd.PersistentFlags().StringVarP(&flagForceCommand, "force-command", "f", "", "Run this command for each guest who joins, on a terminal of its own, instead of showing them the session's command (e.g. 'tmux attach -t NAME' to share a tmux session).")
+	cmd.PersistentFlags().StringSliceVarP(&flagPrivateKeys, "private-key", "i", defaultPrivateKeys(), "Identity files to authenticate to the relay with. "+identitiesOnlyHelp+" By default it offers the agent's keys alone when the agent holds any, and otherwise the listed files that load, or a generated key when none do.")
+	cmd.PersistentFlags().StringVarP(&flagKnownHostsFilename, "known-hosts", "", defaultKnownHost(), knownHostsHelp)
 	// Keep help and generated docs portable without changing the runtime defaults.
 	cmd.PersistentFlags().Lookup("private-key").DefValue = "[~/.ssh/id_{ed25519,ed25519_sk,ecdsa,ecdsa_sk,dsa,rsa}]"
 	cmd.PersistentFlags().Lookup("known-hosts").DefValue = "~/.ssh/known_hosts"
 
-	cmd.PersistentFlags().StringVar(&flagAuthorizedKeys, "authorized-keys", "", "Specify a authorize_keys file listing authorized public keys for connection.")
+	cmd.PersistentFlags().StringVar(&flagAuthorizedKeys, "authorized-keys", "", "An authorized_keys file: only guests with a key it lists, or that --authorized-user names, can join.")
 	registerAuthUserFlag(cmd.PersistentFlags(), &flagCodebergUsers, "codeberg-user", "Authorize specified Codeberg users by allowing their public keys to connect.")
 	registerAuthUserFlag(cmd.PersistentFlags(), &flagGitHubUsers, "github-user", "Authorize specified GitHub users by allowing their public keys to connect. Configure GitHub CLI environment variables as needed; see https://cli.github.com/manual/gh_help_environment for details.")
 	registerAuthUserFlag(cmd.PersistentFlags(), &flagGitLabUsers, "gitlab-user", "Authorize specified GitLab users by allowing their public keys to connect.")
 	registerAuthUserFlag(cmd.PersistentFlags(), &flagSourceHutUsers, "srht-user", "Authorize specified SourceHut users by allowing their public keys to connect.")
-	cmd.PersistentFlags().BoolVar(&flagAccept, "accept", false, "Automatically accept client connections without prompts.")
-	cmd.PersistentFlags().BoolVarP(&flagReadOnly, "read-only", "r", false, "Host a read-only session, preventing client interaction. Also restricts SFTP to download-only.")
-	cmd.PersistentFlags().BoolVar(&flagHideClientIP, "hide-client-ip", false, "Hide client IP addresses from output, and from forced commands' SSH_CONNECTION and SSH_CLIENT (auto-enabled in CI environments).")
-	cmd.PersistentFlags().BoolVar(&flagSkipHostKeyCheck, "skip-host-key-check", false, "Automatically accept unknown server host keys and add them to known_hosts (similar to SSH's StrictHostKeyChecking=accept-new). This bypasses host key verification for new connections.")
-	cmd.PersistentFlags().StringVar(&flagProxy, "proxy", "", "HTTP proxy to connect to the server through (e.g. http://proxy.example.com:3128). Works with ssh, ws, and wss servers. Without it, ws and wss connections use HTTPS_PROXY/HTTP_PROXY and ssh connections go direct.")
-	cmd.PersistentFlags().BoolVar(&flagNoSFTP, "no-sftp", false, "Disable file transfer via SFTP/SCP. By default, clients can transfer files with the same access as the terminal session.")
-	cmd.PersistentFlags().BoolVar(&flagAllowLocalTCPForwarding, "allow-local-tcp-forwarding", false, "Allow clients to use SSH local TCP forwarding (ssh -L) through the hosted session, reaching TCP destinations visible to the host.")
-	cmd.PersistentFlags().StringVar(&flagPtySize, "pty-size", "", "Pin the session's terminal size as COLSxROWS (e.g. 132x43). Client resize requests are then ignored. Defaults to the attached terminal's size, or 80x24 when there is none.")
+	cmd.PersistentFlags().BoolVar(&flagAccept, "accept", false, "Start the session without asking, and let guests transfer files without your approval. Without it, each file transfer waits for a desktop dialog on this machine, and where none can be shown, transfers are denied.")
+	cmd.PersistentFlags().BoolVarP(&flagReadOnly, "read-only", "r", false, "Let guests only watch: they can't type into the session, and can only download files, each with your approval in a desktop dialog on this machine unless --accept (where no dialog can be shown, transfers are denied). Can't be used with --allow-local-tcp-forwarding.")
+	cmd.PersistentFlags().BoolVar(&flagHideClientIP, "hide-client-ip", false, "Hide guests' IP addresses from upterm's output, and from forced commands' SSH_CONNECTION and SSH_CLIENT. "+hideClientIPDefaultHelp)
+	cmd.PersistentFlags().BoolVar(&flagSkipHostKeyCheck, "skip-host-key-check", false, skipHostKeyCheckHelp)
+	cmd.PersistentFlags().StringVar(&flagProxy, "proxy", "", proxyHelp)
+	cmd.PersistentFlags().BoolVar(&flagNoSFTP, "no-sftp", false, "Turn off file transfer (sftp and scp) for guests. Without it, guests transfer files with your access (downloads only with --read-only), each with your approval in a desktop dialog on this machine unless --accept; where no dialog can be shown, transfers are denied.")
+	cmd.PersistentFlags().BoolVar(&flagAllowLocalTCPForwarding, "allow-local-tcp-forwarding", false, "Let guests forward TCP ports (ssh -L) through the session, to whatever this machine can reach. Can't be used with --read-only.")
+	cmd.PersistentFlags().StringVar(&flagPtySize, "pty-size", "", "Pin the session's terminal size as COLSxROWS (e.g. 132x43); resize requests are then ignored. Defaults to the attached terminal's size, or 80x24 when there is none.")
 	cmd.PersistentFlags().StringVar(&flagTerm, "term", "", "Set TERM for the hosted command. Defaults to the inherited TERM, or "+defaultTerm+" when TERM is unset or "+dumbTerm+".")
-	cmd.PersistentFlags().StringVar(&flagName, "name", "", "Name this session. Determines the socket paths, so it can be looked up with 'upterm session info NAME'. Defaults to COMMAND-XXXX.")
+	cmd.PersistentFlags().StringVar(&flagName, "name", "", "Name the session, for upterm attach and the session commands to find it by. Defaults to the command's name and four hex digits, e.g. bash-1f3a.")
 	cmd.PersistentFlags().DurationVar(&flagJoinTimeout, "join-timeout", 0, "End the session if no guest has joined within this long (e.g. 10m). 0 waits forever. A guest who joins disarms it permanently, so a guest who joins and then leaves does not re-arm it. Change it later with 'upterm session set NAME --join-timeout'.")
 	cmd.PersistentFlags().BoolVar(&flagDetach, "detach", false, "Start the session in the background and exit once it is running. Requires --accept. Attach a terminal later with 'upterm attach NAME'; stop it with 'upterm session stop NAME'.")
-	cmd.PersistentFlags().StringVarP(&flagHostOutput, "output", "o", "", "With --detach, print the started session as JSON (the same shape as 'upterm session info NAME -o json').")
+	cmd.PersistentFlags().StringVarP(&flagHostOutput, "output", "o", "", "With --detach, print the started session as JSON: a superset of the fields 'upterm session info NAME -o json' reports at launch, with sshCommand and joinCommand present even when its status says guests can't join.")
 	_ = cmd.RegisterFlagCompletionFunc("output", completeValues("json"))
-	cmd.PersistentFlags().StringVar(&flagHostEscapeChar, "escape-char", "~", "Escape character for detaching (ESC-CHAR followed by . at the start of a line) or suspending (ESC-CHAR followed by ^Z, Unix only) this terminal from the session, or 'none' to disable.")
+	cmd.PersistentFlags().StringVar(&flagHostEscapeChar, "escape-char", "~", escapeCharHelp)
 
 	// One run's choices, not standing configuration. --join-timeout stays
 	// bound to env and config: CI sets it there.
@@ -216,7 +233,7 @@ background and this command prints how to reach it.`,
 	// docs and the parser's own error messages cannot disagree about which
 	// services are supported.
 	registerAuthUserFlag(cmd.PersistentFlags(), &flagAuthorizedUsers, "authorized-user",
-		"Authorize users by fetching their public keys from a code-hosting service. Repeatable. "+
+		"Let a user join with the public keys a code-hosting service lists for them, fetched through --proxy when it is set. Repeatable. "+
 			"Providers: "+host.ProviderList()+". "+
 			"Examples: github:alice, github:bob@ghe.example.com, gitea:carol@git.example.com, https://git.example.com/dave")
 

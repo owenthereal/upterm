@@ -31,61 +31,19 @@ func Root() *cobra.Command {
 	rootCmd := &cobra.Command{
 		Use:   "upterm",
 		Short: "Instant Terminal Sharing",
-		Long: `Upterm is an open-source solution for sharing terminal sessions instantly over secure SSH tunnels to the public internet.
+		Long: `Upterm shares a terminal session: you host a command, and guests join it
+from their own terminals, through a relay, with upterm join or plain ssh.
 
-Configuration Priority (highest to lowest):
-  1. Command-line flags
-  2. Environment variables (UPTERM_ prefix)
-  3. Config file (see below)
-  4. Default values
+Flags can also be set with UPTERM_ environment variables and the config
+file: see 'upterm config --help'.`,
+		Example: `  # Host $SHELL; upterm prints how guests join it:
+  upterm host
 
-Config File:
-  ~/.config/upterm/config.yaml (Linux)
-  ~/Library/Application Support/upterm/config.yaml (macOS)
-  %LOCALAPPDATA%\upterm\config.yaml (Windows)
+  # A guest joins with the connect string the host shares:
+  upterm join ssh://ID@uptermd.upterm.dev
 
-  Run 'upterm config path' to see your config file location.
-  Run 'upterm config edit' to create and edit the config file.
-
-Environment Variables:
-  All flags can be set via environment variables with the UPTERM_ prefix.
-  Flag names are converted by replacing hyphens (-) with underscores (_).
-
-  Examples:
-    --hide-client-ip  → UPTERM_HIDE_CLIENT_IP=true
-    --read-only       → UPTERM_READ_ONLY=true
-    --accept          → UPTERM_ACCEPT=true`,
-		Example: `  # Host a terminal session running $SHELL, attaching client's IO to the host's:
-  $ upterm host
-
-  # Display the connection string for sharing with client(s):
-  $ upterm session current
-  Session: SESSION_ID
-
-  Command:          /bin/bash
-  Host:             ssh://uptermd.upterm.dev:22
-
-  ➤ Join:
-      upterm join ssh://TOKEN@uptermd.upterm.dev
-  ➤ SSH:
-      ssh TOKEN@uptermd.upterm.dev
-  ➤ SFTP:
-      sftp TOKEN@uptermd.upterm.dev
-  ➤ SCP:
-      scp <local> TOKEN@uptermd.upterm.dev:<remote>
-      scp TOKEN@uptermd.upterm.dev:<remote> <local>
-
-  Connected Clients:
-    host local SSH-2.0-upterm-attach SHA256:FINGERPRINT
-
-  # A client joins the host session, and rejoins on its own if the connection drops:
-  $ upterm join ssh://TOKEN@uptermd.upterm.dev
-
-  # Or with plain ssh (no install needed):
-  $ ssh TOKEN@uptermd.upterm.dev
-
-  # Set flags via environment variables:
-  $ UPTERM_HIDE_CLIENT_IP=true upterm host`,
+  # Or with plain ssh:
+  ssh ID@uptermd.upterm.dev`,
 		// For every command: cobra checks the root's. Exit prints each error
 		// once, as one line, and never the usage; cobra would print
 		// "Error: ...", often the usage block too, and then main its own copy.
@@ -144,7 +102,7 @@ Environment Variables:
 
 	logPath := utils.UptermLogFilePath()
 	rootCmd.PersistentFlags().Bool("debug", os.Getenv("DEBUG") != "",
-		fmt.Sprintf("enable debug level logging (log file: %s).", logPath))
+		fmt.Sprintf("Enable debug logging (log file: %s). A non-empty DEBUG turns it on too.", logPath))
 
 	rootCmd.AddCommand(attachCmd())
 	rootCmd.AddCommand(configCmd())

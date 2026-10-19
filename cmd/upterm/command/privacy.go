@@ -6,6 +6,14 @@ import (
 	"github.com/spf13/cobra"
 )
 
+// --hide-client-ip's help: hideClientIPHelp on the commands that print
+// guests' addresses, and the rest of host's own after what it hides them
+// from.
+const (
+	hideClientIPDefaultHelp = "When it isn't set (by flag, environment or config file), they are hidden in CI only; --hide-client-ip=false shows them there too."
+	hideClientIPHelp        = "Hide guests' IP addresses from upterm's output. " + hideClientIPDefaultHelp
+)
+
 var (
 	flagHideClientIP bool
 

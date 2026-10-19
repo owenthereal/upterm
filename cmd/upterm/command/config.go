@@ -24,17 +24,22 @@ func configCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "config",
 		Short: "Manage upterm configuration",
-		Long: fmt.Sprintf(`Manage upterm configuration file.
+		Long: fmt.Sprintf(`Manage upterm's config file: YAML, with flags' names as its keys, e.g.
+hide-client-ip: true.
 
 Config file: %s
 
-This follows the XDG Base Directory Specification.
+That is usually ~/.config/upterm/config.yaml on Linux,
+~/Library/Application Support/upterm/config.yaml on macOS and
+%%LOCALAPPDATA%%\upterm\config.yaml on Windows, or
+$XDG_CONFIG_HOME/upterm/config.yaml when XDG_CONFIG_HOME is set.
 
-Configuration priority (highest to lowest):
-  1. Command-line flags
-  2. Environment variables (UPTERM_ prefix)
-  3. Config file
-  4. Default values`, configPath),
+A flag's value comes from the first of these that sets it:
+  1. The command line
+  2. An environment variable: UPTERM_ and the flag's name in capitals, with
+     _ for -, e.g. UPTERM_HIDE_CLIENT_IP=true for --hide-client-ip
+  3. The config file
+  4. The flag's default`, configPath),
 	}
 
 	cmd.AddCommand(configPathCmd())
@@ -49,16 +54,15 @@ func configPathCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "path",
 		Short: "Show the path to the config file",
-		Long: fmt.Sprintf(`Show the path to the config file.
+		Long: fmt.Sprintf(`Print the path of the config file, whether or not it exists.
 
 Config file: %s
 
-The config file is optional and created manually by users.`, configPath),
-		Example: `  # Show config file path:
-  upterm config path
+The file is optional; 'upterm config edit' creates it.
 
-  # Create config file directory:
-  mkdir -p "$(dirname "$(upterm config path)")"`,
+Exit status: 0, or 1 on failure.`, configPath),
+		Example: `  # Print the config file's path:
+  upterm config path`,
 		RunE: configPathRunE,
 	}
 
@@ -70,17 +74,18 @@ func configViewCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "view",
 		Short: "View the config file contents",
-		Long: fmt.Sprintf(`View the config file contents.
+		Long: fmt.Sprintf(`Print the config file, or an example config when there is none.
 
 Config file: %s
 
-If the config file exists, this command displays its contents. If it doesn't
-exist, this command shows an example config file that you can use as a template.`, configPath),
-		Example: `  # View current config:
+'upterm config edit' creates the file from the example, and checks it.
+
+Exit status: 0, or 1 on failure.`, configPath),
+		Example: `  # Print the config file, or the example:
   upterm config view
 
-  # View and save as new config:
-  upterm config view > "$(upterm config path)"`,
+  # Keep a copy of it:
+  upterm config view > upterm-config.yaml`,
 		RunE: configViewRunE,
 	}
 
@@ -92,20 +97,27 @@ func configEditCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "edit",
 		Short: "Edit the config file",
-		Long: fmt.Sprintf(`Edit the config file in your default editor.
+		Long: fmt.Sprintf(`Open the config file in your editor, first creating it, and its directory,
+from the example when there is none.
 
 Config file: %s
 
-This command opens the config file in your editor (determined by $VISUAL, $EDITOR,
-or a sensible default). If the config file doesn't exist, it creates a template
-with example settings and comments.
+The editor is $VISUAL, else $EDITOR, else nano (vi without nano; notepad on
+Windows). A value that names an existing file runs as it is; any other is
+split into a program and its arguments (code --wait), as a POSIX shell would
+on Unix and by the Windows command-line rules on Windows.
 
-The config directory is created automatically if it doesn't exist.`, configPath),
-		Example: `  # Edit config file:
+Once the editor exits, the file is checked as commands read it: its YAML,
+its keys, and each value as the command it belongs to would check it. Each
+problem is one upterm: line, and the exit status is 1. When the editor
+itself exits with an error, the file isn't checked.
+
+Exit status: 0, or 1 on failure.`, configPath),
+		Example: `  # Edit the config file:
   upterm config edit
 
-  # Use a specific editor:
-  EDITOR=nano upterm config edit`,
+  # With an editor that needs an argument to wait:
+  VISUAL='code --wait' upterm config edit`,
 		RunE: configEditRunE,
 	}
 

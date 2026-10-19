@@ -14,7 +14,10 @@ func versionCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "version",
 		Short: "Show version",
-		Args:  cobra.ExactArgs(0),
+		Long: `Print upterm's version, with its git commit and build date when known.
+
+Exit status: 0, or 1 on failure.`,
+		Args: cobra.ExactArgs(0),
 		// A broken config file doesn't stop it.
 		Annotations: map[string]string{annotationConfig: "none"},
 		RunE: func(c *cobra.Command, args []string) error {
@@ -35,7 +38,7 @@ func versionCmd() *cobra.Command {
 	// Only the command line sets it: an output key or UPTERM_OUTPUT is meant
 	// for the commands that take one, and must neither turn the version into
 	// JSON nor make it fail.
-	cmd.Flags().StringVarP(&output, "output", "o", "", "Output format: json")
+	cmd.Flags().StringVarP(&output, "output", "o", "", "Output format: json, with version, gitCommit and buildDate (command line only)")
 	_ = cmd.RegisterFlagCompletionFunc("output", completeValues("json"))
 	_ = cmd.Flags().SetAnnotation("output", annotationCLIOnly, []string{"true"})
 
