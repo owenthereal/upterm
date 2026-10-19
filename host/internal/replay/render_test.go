@@ -3574,3 +3574,45 @@ func TestReplayFailsOnAKeyFormat(t *testing.T) {
 		})
 	}
 }
+
+// DEC locator reporting turned on, by DECELR 1 or 2 (CSI Ps ; Pu ' z), fails
+// the render, named, whatever follows: the joiner's terminal would report
+// the mouse to the program on its own, where a raw replay turns it on there.
+// DECELR 0, or any other value, turns it off, and alone renders, as does
+// DECSLE (CSI Pm ' {), which selects the events reported once it is on, and
+// DECEFR (CSI Pt ; Pl ; Pb ; Pr ' w), which xterm ignores while it is off.
+// DECRQLP (CSI Ps ' |), which asks for the locator's position, the query
+// filter drops.
+func TestReplayFailsOnLocatorReporting(t *testing.T) {
+	join := func(t *testing.T, stream string) error {
+		t.Helper()
+		_, fellBack := fanOut(t, New(), []byte("text\r\n"+stream+"more\r\n"), []uio.SizeEvent{event(1, 0, 80, 24)}, 4<<10)
+		return fellBack
+	}
+	for _, tc := range []struct{ name, stream string }{
+		{"on", "\x1b[1'z"},
+		{"on for one report", "\x1b[2'z"},
+		{"on, in pixels", "\x1b[1;1'z"},
+		{"on, with the events selected", "\x1b[1'z\x1b[1;3'{"},
+		{"on, then off", "\x1b[1'z\x1b[0'z"},
+		{"on, then RIS", "\x1b[2'z\x1bc"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			requireIneligible(t, join(t, tc.stream), "locator reporting")
+		})
+	}
+	for _, tc := range []struct{ name, stream string }{
+		{"off", "\x1b[0'z"},
+		{"off, with no parameter", "\x1b['z"},
+		{"a value xterm reads as off", "\x1b[3'z"},
+		{"the events selected", "\x1b[1;3'{"},
+		{"a filter rectangle", "\x1b[1;1;10;10'w"},
+		{"the position asked for", "\x1b[1'|"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			require.NoError(t, join(t, tc.stream))
+			_, err := renderAt(t, 80, 24, "text\r\n"+tc.stream+"more\r\n")
+			require.NoError(t, err, "given to the emulation")
+		})
+	}
+}
