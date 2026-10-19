@@ -274,6 +274,37 @@ func Test_WebSocketProxy_EmbeddedGuestGoesToSSHProxy(t *testing.T) {
 	require.Zero(t, accepted.Load(), "the address the guest's user named was dialed")
 }
 
+// The page's ssh line names the relay's SSH address: the Host header's own
+// port when it has one, and 443 when it doesn't. The wss URLs take the header
+// as it is.
+func Test_GettingStarted_NamesTheSSHAddress(t *testing.T) {
+	for _, tt := range []struct {
+		host string
+		ssh  string
+	}{
+		{"uptermd.upterm.dev", "uptermd.upterm.dev:443"},
+		{"127.0.0.1:28251", "127.0.0.1:28251"},
+		{"[::1]:8080", "[::1]:8080"},
+		{"[::1]", "[::1]:443"},
+	} {
+		t.Run(tt.host, func(t *testing.T) {
+			h := webHandler(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+				t.Error("the page fell through to the WebSocket handler")
+			}))
+			req := httptest.NewRequest(http.MethodGet, "/getting-started", nil)
+			req.Host = tt.host
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+
+			lines := strings.Split(strings.TrimSuffix(rec.Body.String(), "\n"), "\n")
+			require.Len(t, lines, 4)
+			require.Equal(t, `2. On your machine, host a session with "upterm host --server wss://`+tt.host+` -- YOUR_COMMAND". More details in https://github.com/owenthereal/upterm#quick-start.`, lines[1])
+			require.Equal(t, `3. Your pair(s) join the session with "upterm join wss://TOKEN@`+tt.host+`", which rejoins on its own if the connection drops.`, lines[2])
+			require.Equal(t, `4. Or with ssh: "ssh -o ProxyCommand='upterm proxy wss://TOKEN@`+tt.host+`' TOKEN@`+tt.ssh+`".`, lines[3])
+		})
+	}
+}
+
 func scan(s *bufio.Scanner) string {
 	for s.Scan() {
 		return s.Text()
