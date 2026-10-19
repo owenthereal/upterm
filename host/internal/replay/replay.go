@@ -137,9 +137,10 @@ type emulation struct {
 	// windowOp is set once the stream has changed the terminal's window (see
 	// watchWindowOps).
 	windowOp bool
-	// printer is the printer mode the stream left the terminal in (see
+	// printerController is set once the stream has turned printer
+	// controller mode on, and autoPrint is whether it left auto print on (see
 	// watchPrinter).
-	printer printerMode
+	printerController, autoPrint bool
 	// memoryLock is set once the stream has locked or unlocked memory so as
 	// to move the scroll region's top margin (see watchMemoryLock).
 	memoryLock bool
@@ -231,10 +232,11 @@ func (replayer) Start(ctx context.Context, deadline time.Time, c *uio.Capture, s
 // protection, selective erases, saves, renditions and line sizes the cells
 // can't hold, a status line, a font, a rectangular attribute extent, a
 // conformance level, a reset of a mode a terminal starts with set, a
-// 94-character set x/vt drops, a 96-character set, a window operation and a
-// memory lock noted, the printer's mode and the tab stops past the screen's
-// edge kept, and the meter stopped by ctx or the deadline. Each callback and
-// handler runs inside the emulator's Write and touches only the emulation.
+// 94-character set x/vt drops, a 96-character set, a window operation,
+// printer controller mode and a memory lock noted, auto print and the tab
+// stops past the screen's edge kept, and the meter stopped by ctx or the
+// deadline. Each callback and handler runs inside the emulator's Write and
+// touches only the emulation.
 func (e *emulation) setUp() {
 	t := e.term
 	t.SetScrollbackSize(0)
@@ -1195,63 +1197,41 @@ func (e *emulation) watchWindowOps() {
 	})
 }
 
-// printerMode is what a terminal with a printer does with what it is sent,
-// as xterm keeps it.
-type printerMode uint8
-
-const (
-	// printerOff draws it, and prints only what a media copy asks for.
-	printerOff printerMode = iota
-	// autoPrint draws it, and prints each line the cursor leaves by a line
-	// feed, a form feed, a vertical tab or a wrap: auto print, set by
-	// CSI ? 5 i.
-	autoPrint
-	// printerController sends every byte to the printer instead, until the
-	// end: printer controller mode, set by CSI 5 i.
-	printerController
-)
-
-// watchPrinter registers the handlers that keep the printer's mode, as xterm
-// reads the media copies that set it: CSI 5 i turns printer controller mode
-// on and CSI 4 i off; CSI ? 5 i turns auto print on and CSI ? 4 i off, and
-// CSI 4 i turns it off too. Each reads its first parameter, but in printer
-// controller mode the terminal reads no sequence at all: it matches CSI 4 i
-// byte for byte and sends everything else to the printer, so auto print's
-// end, RIS or an end with another parameter doesn't end it. RIS ends neither
-// mode. x/vt has no printer, where a raw replay sets the mode on a joiner's
-// terminal that has one, which then prints the live bytes, or sends them to
-// the printer instead of drawing them: a mode on at the handoff fails the
-// render (see eligible). One ended before it renders: the bytes it covered
-// are drawn, as on a terminal without a printer, which is what x/vt is. The
-// media copies that only print, the screen (CSI i) or the cursor's line
-// (CSI ? 1 i) among them, change no mode. x/vt has no handler of its own for
-// either; these return false all the same, as watchColours' do.
+// watchPrinter registers the handlers that note the printer's modes, as xterm
+// reads the media copies that set them, each by its first parameter: CSI 5 i
+// turns printer controller mode on and CSI 4 i off; CSI ? 5 i turns auto print
+// on and CSI ? 4 i off, and CSI 4 i turns it off too. x/vt has no printer,
+// where a raw replay sets each mode on a joiner's terminal that has one. In
+// printer controller mode such a terminal sends every byte to the printer
+// instead of drawing it, until it matches CSI 4 i byte for byte, so a raw
+// replay leaves off its screen the bytes the mode covered, ended before the
+// handoff or not, where the render draws them, as x/vt drew them: the note
+// stays once the mode is on (see eligible). An xterm with no printer command,
+// as it starts, takes neither mode and draws those bytes as x/vt does, but a
+// joiner's terminal may have a printer. Auto print draws everything all the
+// same, and prints each line the cursor leaves by a line feed, a form feed, a
+// vertical tab or a wrap, so it fails the render only when on at the handoff,
+// as the live lines would print. RIS ends neither mode. The media copies that
+// only print, the screen (CSI i) or the cursor's line (CSI ? 1 i) among them,
+// change no mode. x/vt has no handler of its own for either; these return
+// false all the same, as watchColours' do.
 func (e *emulation) watchPrinter() {
 	t := e.term
 	t.RegisterCsiHandler('i', func(params ansi.Params) bool {
-		if e.printer == printerController {
-			if len(params) == 1 && params[0] == 4 {
-				e.printer = printerOff
-			}
-			return false
-		}
 		switch n, _, _ := params.Param(0, 0); n {
 		case 4:
-			e.printer = printerOff
+			e.autoPrint = false
 		case 5:
-			e.printer = printerController
+			e.printerController = true
 		}
 		return false
 	})
 	t.RegisterCsiHandler(ansi.Command('?', 0, 'i'), func(params ansi.Params) bool {
-		if e.printer == printerController {
-			return false
-		}
 		switch n, _, _ := params.Param(0, 0); n {
 		case 4:
-			e.printer = printerOff
+			e.autoPrint = false
 		case 5:
-			e.printer = autoPrint
+			e.autoPrint = true
 		}
 		return false
 	})

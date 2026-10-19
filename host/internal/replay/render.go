@@ -889,10 +889,10 @@ func (e *emulation) eligible(parts uio.ReplayParts) (rep, error) {
 	if e.windowOp {
 		return rep{}, &IneligibleError{State: "a window operation"}
 	}
-	switch e.printer {
-	case printerController:
+	if e.printerController {
 		return rep{}, &IneligibleError{State: "printer controller mode"}
-	case autoPrint:
+	}
+	if e.autoPrint {
 		return rep{}, &IneligibleError{State: "auto print mode"}
 	}
 	if e.memoryLock {

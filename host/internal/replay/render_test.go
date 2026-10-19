@@ -3222,15 +3222,14 @@ func TestReplayFailsOnAWindowOperation(t *testing.T) {
 	}
 }
 
-// Printer controller mode (CSI 5 i) on at the handoff fails the render,
-// named: a raw replay leaves a joiner's terminal that has a printer sending
-// the live bytes to it instead of drawing them, where the render leaves it
-// drawing them. Such a terminal reads no sequence in that mode but CSI 4 i,
-// matched byte for byte, so neither auto print's end nor RIS nor an end with
-// another parameter ends it. Auto print (CSI ? 5 i), which prints each line
-// the cursor leaves, fails it too, named, until CSI ? 4 i or CSI 4 i, and RIS
-// doesn't end it either. A mode ended before the handoff renders, as do the
-// media copies that only print.
+// Printer controller mode (CSI 5 i) fails the render, named, once the stream
+// has turned it on, ended before the handoff or not: a joiner's terminal that
+// has a printer sends the bytes the mode covers to it instead of drawing them,
+// so a raw replay of a span the mode closed leaves them off its screen, where
+// the render draws them, as x/vt drew them. Auto print (CSI ? 5 i), which
+// prints each line the cursor leaves and draws it all the same, fails it too,
+// named, until CSI ? 4 i or CSI 4 i, and RIS doesn't end it. Auto print ended
+// before the handoff renders, as do the media copies that only print.
 func TestReplayFailsOnAPrinterMode(t *testing.T) {
 	join := func(t *testing.T, stream string) error {
 		t.Helper()
@@ -3245,6 +3244,9 @@ func TestReplayFailsOnAPrinterMode(t *testing.T) {
 		{"the controller, then auto print's end", "\x1b[5i\x1b[?4i", "printer controller mode"},
 		{"the controller, then RIS", "\x1b[5i\x1bc", "printer controller mode"},
 		{"the controller, then an end with another parameter", "\x1b[5i\x1b[4;0i", "printer controller mode"},
+		{"the controller ended", "\x1b[5itext\x1b[4i", "printer controller mode"},
+		{"the controller ended, then auto print", "\x1b[5ix\x1b[4i\x1b[?5i", "printer controller mode"},
+		{"the controller ended, then RIS", "\x1b[5ix\x1b[4i\x1bc", "printer controller mode"},
 		{"auto print", "\x1b[?5i", "auto print mode"},
 		{"auto print, then RIS", "\x1b[?5i\x1bc", "auto print mode"},
 		{"auto print ended, then on again", "\x1b[?5ix\x1b[?4i\x1b[?5i", "auto print mode"},
@@ -3254,7 +3256,6 @@ func TestReplayFailsOnAPrinterMode(t *testing.T) {
 		})
 	}
 	for _, tc := range []struct{ name, stream string }{
-		{"the controller ended", "\x1b[5ix\x1b[4i"},
 		{"auto print ended", "\x1b[?5ix\x1b[?4i"},
 		{"auto print ended by the controller's end", "\x1b[?5i\x1b[4i"},
 		{"auto print ended by an end with another parameter", "\x1b[?5i\x1b[4;0i"},
