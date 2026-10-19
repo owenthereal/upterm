@@ -2049,3 +2049,43 @@ func TestReplaySetsASlotTheSessionNeverSaved(t *testing.T) {
 		})
 	}
 }
+
+// A font the session's terminal was told to use, by OSC 50, fails the render,
+// named: x/vt keeps no font, so a joiner given the render would draw in its
+// own, where one given the raw ring changes font as the session's did. Every
+// OSC 50 that doesn't ask counts, as xterm reads one: a font name, a font by
+// its index (#), an empty one, which xterm answers with the bell, and iTerm2's
+// and Konsole's key=value settings, such as the cursor's shape. A query, whose
+// font starts with ?, the filter drops before the ring, and the emulation,
+// given one directly, doesn't count either.
+func TestReplayFailsOnAFontChange(t *testing.T) {
+	join := func(t *testing.T, stream string) error {
+		t.Helper()
+		_, fellBack := fanOut(t, New(), []byte("text\r\n"+stream+"more\r\n"), []uio.SizeEvent{event(1, 0, 80, 24)}, 4<<10)
+		return fellBack
+	}
+	for _, tc := range []struct{ name, stream string }{
+		{"a font name", "\x1b]50;fixed\x07"},
+		{"a font name ended by ST", "\x1b]50;-misc-fixed-medium-r-normal--20-*\x1b\\"},
+		{"the next font", "\x1b]50;#+1\x07"},
+		{"a font by its index, with a name", "\x1b]50;#3 9x15\x07"},
+		{"a cursor shape", "\x1b]50;CursorShape=1\x07"},
+		{"an empty font", "\x1b]50;\x07"},
+		{"no font at all", "\x1b]50\x07"},
+		{"a font, then text", "\x1b]50;fixed\x07after"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			requireIneligible(t, join(t, tc.stream), "a font change")
+		})
+	}
+	for _, tc := range []struct{ name, stream string }{
+		{"the font asked for", "\x1b]50;?\x07"},
+		{"the next font asked for", "\x1b]50;?+1\x07"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			require.NoError(t, join(t, tc.stream))
+			_, err := renderAt(t, 80, 24, "text\r\n"+tc.stream+"more\r\n")
+			require.NoError(t, err, "the query given to the emulation")
+		})
+	}
+}

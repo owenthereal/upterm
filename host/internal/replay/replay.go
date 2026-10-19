@@ -109,6 +109,9 @@ type emulation struct {
 	// statusLine is set once the stream has made a status line it can write
 	// to, or made it active (see watchStatusLine).
 	statusLine bool
+	// font is set once the stream has set the terminal's font (see
+	// watchFont).
+	font bool
 
 	// The handoff point: the end of what the emulator consumed, and the last
 	// event it passed, applied or skipped as a no-op.
@@ -190,8 +193,8 @@ func (replayer) Start(ctx context.Context, deadline time.Time, c *uio.Capture, s
 // to queries discarded, the title and the title stack, the working
 // directory, the colours and the clipboard kept, images, device control
 // strings, character protection, selective erases, saves, renditions and line
-// sizes the cells can't hold, and a status line noted, and the meter stopped
-// by ctx or the deadline. Each callback and handler runs inside the
+// sizes the cells can't hold, a status line and a font noted, and the meter
+// stopped by ctx or the deadline. Each callback and handler runs inside the
 // emulator's Write and touches only the emulation.
 func (e *emulation) setUp() {
 	t := e.term
@@ -221,6 +224,7 @@ func (e *emulation) setUp() {
 	e.watchSaves()
 	e.watchRendition()
 	e.watchStatusLine()
+	e.watchFont()
 }
 
 // colours is what the stream changed, by OSC, of the colours a terminal keeps
@@ -675,6 +679,25 @@ func (e *emulation) watchStatusLine() {
 			return false
 		})
 	}
+}
+
+// watchFont registers the handler that notes an OSC 50 setting the
+// terminal's font. x/vt keeps none, so the render would leave a joiner's
+// terminal in its own, where a raw replay changes it as the session's
+// changed. Every OSC 50 counts but a query, whose font starts with ?, as
+// xterm reads one: a font name, a font by its index (#), and an empty one,
+// which xterm answers with the bell; iTerm2 and Konsole read key=value
+// settings from it too, such as the cursor's shape. The query filter drops
+// the queries before the ring. x/vt has no handler of its own for it; this
+// returns false all the same, as watchColours' do.
+func (e *emulation) watchFont() {
+	e.term.RegisterOscHandler(50, func(data []byte) bool {
+		// data is the whole OSC, its number first.
+		if _, font, _ := bytes.Cut(data, []byte{';'}); !bytes.HasPrefix(font, []byte("?")) {
+			e.font = true
+		}
+		return false
+	})
 }
 
 // sgrUndrawable reports whether params, an SGR's, hold a number x/vt's SGR
