@@ -130,11 +130,11 @@ func (e *encoder) cup(row, col int) error {
 	return e.bytes(append(s, 'H'))
 }
 
-// cha moves the cursor to a 1-based column of its row.
-func (e *encoder) cha(col int) error {
+// cuf moves the cursor n columns right along its row.
+func (e *encoder) cuf(n int) error {
 	var b [16]byte
-	s := strconv.AppendInt(append(b[:0], "\x1b["...), int64(col), 10)
-	return e.bytes(append(s, 'G'))
+	s := strconv.AppendInt(append(b[:0], "\x1b["...), int64(n), 10)
+	return e.bytes(append(s, 'C'))
 }
 
 // shifts invoke G0-G3 into GL: SI, SO, LS2 and LS3.

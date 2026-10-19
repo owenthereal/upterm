@@ -111,6 +111,7 @@ func (e *emulation) render() ([]byte, error) {
 		// A title a pop put back too long to keep can't be sent.
 		titleOver: e.titled && e.titleOver,
 		rows:      e.join.Rows,
+		cols:      e.join.Cols,
 		fits:      e.join.Cols == e.term.Width(),
 		rep:       rep,
 		colours:   &e.colours,
@@ -207,9 +208,9 @@ type renderer struct {
 	titled bool
 	// titles is the title stack to push again, and titleOver says a title
 	// it or the current one holds was too long to keep.
-	titles    titleStack
-	titleOver bool
-	rows      int // the joiner's
+	titles     titleStack
+	titleOver  bool
+	rows, cols int // the joiner's
 	// fits is a joiner as wide as the render, where a character printed in
 	// the render's last column leaves a wrap pending, as it did on the
 	// session's terminal. A wider joiner gets no wrap, as a wider live
@@ -394,17 +395,26 @@ func (r *renderer) alt() {
 	_ = enc.bytes(r.parts.AltKeys)
 }
 
-// tabStops sets the tab stops when they aren't a stop every 8 columns, as a
-// terminal starts: every stop cleared, then one set at each column. They
-// move the cursor, so they come before it is placed.
+// tabStops sets the tab stops in every render, as the session's terminal
+// holds them, since a program can leave a joiner's with any: every stop
+// cleared, then one set at each column, reached from the row's start (CR) by
+// CUF, the shortest move that lands exactly, as no left margin is set here
+// (see unrestored). Where the session's are a stop every 8 columns, as a
+// terminal starts, a joiner wider than the render gets those across its own
+// width, as a terminal of its width starts. Neither CR nor CUF writes a cell,
+// but both move the cursor, so they come before it is placed.
 func (r *renderer) tabStops() {
 	stops := r.term.TabStops()
 	if slices.Equal(stops, defaultTabStops(r.term.Width())) {
-		return
+		stops = defaultTabStops(r.cols)
 	}
-	_ = r.enc.put("\x1b[3g")
+	_ = r.enc.put("\x1b[3g\r")
+	at := 0
 	for _, x := range stops {
-		_ = r.enc.cha(x + 1)
+		if x > at {
+			_ = r.enc.cuf(x - at)
+			at = x
+		}
 		_ = r.enc.put("\x1bH")
 	}
 }

@@ -2357,9 +2357,10 @@ func TestReplayErasesWhatAnUnknownDesignationPrints(t *testing.T) {
 }
 
 // A program can also leave the joiner's terminal with autowrap off, in
-// reverse video, with the cursor hidden or in a style of its own, or on its
-// alternate screen: one killed mid-draw, or a full-screen program that
-// crashed. The render draws on the main screen at its defaults, so it brings
+// reverse video, with the cursor hidden or in a style of its own, with tab
+// stops of its own, or on its alternate screen: one killed mid-draw, or a
+// full-screen program that crashed. The render draws on the main screen at
+// its defaults, and sets the tab stops in every render, so it brings
 // the joiner back to its main screen first, the cursor where it was there,
 // then sets each to its default, before anything is drawn: the rows above
 // the cursor on the main screen still scroll into the joiner's scrollback,
@@ -2380,17 +2381,22 @@ func TestReplayResetsTheJoinersOwnModesAndScreen(t *testing.T) {
 	stream := lines.String() + "the end"
 	// The session's alternate screen holds cells, hidden: the render goes there.
 	withAlt := lines.String() + "\x1b[?1049h\x1b[3;3Hthe session's\x1b[?1049lthe end"
+	// The session's own tab stops.
+	tabbed := "\x1b[3g\x1b[13G\x1bH\x1b[41G\x1bH\r" + stream
 	const earlier = "own 0\r\nown 1\r\nown 2\r\nprompt$ upterm join"
 	for _, tc := range []struct{ name, own, stream string }{
 		{"autowrap off", "\x1b[?7l", stream},
 		{"reverse video", "\x1b[?5h", stream},
 		{"the cursor hidden, a steady bar", "\x1b[?25l\x1b[6 q", stream},
+		{"tab stops of its own", "\x1b[3g\x1b[5G\x1bH\x1b[30G\x1bH", stream},
+		{"no tab stops", "\x1b[3g", stream},
+		{"tab stops of its own, the session's of its own", "\x1b[3g\x1b[5G\x1bH\x1b[30G\x1bH", tabbed},
 		{"on its alternate screen by ?1049h", "\x1b[?1049h\x1b[2;5Hvim's screen\x1b[H", stream},
 		{"on its alternate screen by ?47h", "\x1b[?47h\x1b[2;5Hold screen\x1b[H", stream},
 		{"on its alternate screen by ?47h, its main slot filled", "\x1b7\x1b[?47h\x1b[2;5Hold screen\x1b[H", stream},
 		{"on its alternate screen by ?1047h", "\x1b[?1047h\x1b[2;5Hless\x1b[H", stream},
 		{"on its alternate screen by ?1049h, the cursor anywhere there", "\x1b[?1049h\x1b[5;10H\x1b[31mvim's screen", withAlt},
-		{"all of them", "\x1b[?7l\x1b[?5h\x1b[?25l\x1b[6 q\x1b[?1049h\x1b[2;5Hvim's screen\x1b[H", stream},
+		{"all of them", "\x1b[?7l\x1b[?5h\x1b[?25l\x1b[6 q\x1b[3g\x1b[5G\x1bH\x1b[?1049h\x1b[2;5Hvim's screen\x1b[H", stream},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			j := joinOwn(t, 80, 12, earlier+tc.own, tc.stream)
