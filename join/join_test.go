@@ -10,6 +10,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/owenthereal/upterm/attach"
@@ -659,12 +660,22 @@ func TestPromptHappensWithNoConnectionOpen(t *testing.T) {
 	require.False(t, open.Load(), "the guest was asked with the connection open")
 }
 
+// The guest takes P = 500 ms over the fingerprint, and the first join has
+// F = 300 ms. P ≥ F: were the prompt's time counted against the first join,
+// its time would be up as the guest answered, and the attempt after the
+// prompt would never start. In the bubble nothing else takes time, so the run
+// ends exactly as the guest answers.
 func TestPromptTimeDoesNotCountAgainstTheFirstJoin(t *testing.T) {
-	relay := newFakeRelay(t, relayKnobs{hostKeyUnknown: true}, relayKnobs{exit: intp(0)})
-	// The guest takes 500 ms over the fingerprint, and the first join has
-	// 300 ms.
-	slow := &countingConfirm{accept: true, during: func() { time.Sleep(500 * time.Millisecond) }}
-	require.Equal(t, Exited, runJoin(t, config(t, relay, withConfirm(slow), withFirstJoin(300*time.Millisecond))).Kind)
+	synctest.Test(t, func(t *testing.T) {
+		const prompt, firstJoin = 500 * time.Millisecond, 300 * time.Millisecond
+		relay := newFakeRelay(t, relayKnobs{hostKeyUnknown: true}, relayKnobs{exit: intp(0)})
+		slow := &countingConfirm{accept: true, during: func() { time.Sleep(prompt) }}
+		cfg := config(t, relay, withConfirm(slow), withFirstJoin(firstJoin))
+		start := time.Now()
+		out := runJoin(t, cfg)
+		require.Equal(t, Exited, out.Kind, "%+v", out)
+		require.Equal(t, prompt, time.Since(start), "the run didn't end as the guest answered")
+	})
 }
 
 func TestAPromptEndsWithTheRun(t *testing.T) {
