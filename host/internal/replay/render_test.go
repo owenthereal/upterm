@@ -967,6 +967,45 @@ func TestReplayResetsTheColoursTheSessionReset(t *testing.T) {
 	}
 }
 
+// An OSC 6, or its alias OSC 106, fails the render, named, whatever follows:
+// xterm turns on or off, for each pair of a special colour and a flag, whether
+// it draws bold, underlined, blinking, reversed or italic text in that colour,
+// which x/vt doesn't keep, where a raw replay sets each on the joiner's
+// terminal, and its RIS leaves them. Every one counts: iTerm2 reads OSC 6 as a
+// tab's colour, which xterm ignores. xterm has no query of them, and the
+// query filter drops none. The special colours' own reset renders, and their
+// query, which the filter drops, does too.
+func TestReplayFailsOnASpecialColourMode(t *testing.T) {
+	join := func(t *testing.T, stream string) error {
+		t.Helper()
+		_, fellBack := fanOut(t, New(), []byte("text\r\n"+stream+"more\r\n"), []uio.SizeEvent{event(1, 0, 80, 24)}, 4<<10)
+		return fellBack
+	}
+	for _, tc := range []struct{ name, stream string }{
+		{"underlined text in its colour", "\x1b]6;1;1\x07"},
+		{"bold text not, by OSC 106", "\x1b]106;0;0\x1b\\"},
+		{"several", "\x1b]6;0;1;3;1;4;0\x07"},
+		{"one turned on, then off", "\x1b]6;1;1\x07\x1b]6;1;0\x07"},
+		{"one, then RIS", "\x1b]106;2;1\x07\x1bc"},
+		{"one, then the special colours reset", "\x1b]6;1;1\x07\x1b]105\x07"},
+		{"iTerm2's tab colour", "\x1b]6;1;bg;red;brightness;255\x07"},
+		{"one with no data, which xterm ignores", "\x1b]6\x07"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			requireIneligible(t, join(t, tc.stream), "a special colour mode")
+		})
+	}
+	for _, tc := range []struct{ name, stream string }{
+		{"the special colours reset", "\x1b]105\x07"},
+		{"one special colour reset", "\x1b]105;1\x07"},
+		{"a special colour asked for", "\x1b]5;1;?\x07"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			require.NoError(t, join(t, tc.stream))
+		})
+	}
+}
+
 // An image the session drew, which the query filter lets into the ring, fails
 // the render, named, as x/vt draws none and the render has none to send: a
 // sixel, a kitty graphics command (an APC whose first byte is G) other than

@@ -102,8 +102,10 @@ type emulation struct {
 	// warning bell and the margin bell to (see watchBellVolumes).
 	warningBell, marginBell bellVolume
 	// colours is the last change the stream made to each of the terminal's
-	// colours.
-	colours colours
+	// colours, and colourModes is set once it has turned the use of a special
+	// colour on or off (see watchColourModes).
+	colours     colours
+	colourModes bool
 	// graphics is set once the stream has drawn an image (see watchGraphics).
 	graphics bool
 	// dcs is set once the stream has sent a device control string that
@@ -234,18 +236,18 @@ func (replayer) Start(ctx context.Context, deadline time.Time, c *uio.Capture, s
 
 // setUp makes the emulator a replay's: no scrollback on either screen, the
 // history kept through the scroll-off function instead, and a clear of it
-// noted (see history.erase), replies to queries discarded, the title, the
-// icon name and the title stack, the working directory, the pointer shape,
-// the bell's volumes, the colours, the clipboard and synchronized output's DCS
-// form kept, images, device control strings that change the terminal's state,
-// title modes, character protection, selective erases, saves, renditions and
-// line sizes the cells can't hold, a status line, a font, a rectangular
-// attribute extent, a conformance level, a reset of a mode a terminal starts
-// with set, a 94-character set x/vt drops, a 96-character set, a window
-// operation, printer controller mode and a memory lock noted, auto print and
-// the tab stops past the screen's edge kept, and the meter stopped by ctx or
-// the deadline. Each callback and handler runs inside the emulator's Write and
-// touches only the emulation.
+// noted (see history.erase), replies to queries discarded, the title, the icon
+// name and the title stack, the working directory, the pointer shape, the
+// bell's volumes, the colours, the clipboard and synchronized output's DCS
+// form kept, images, special colour modes, device control strings that change
+// the terminal's state, title modes, character protection, selective erases,
+// saves, renditions and line sizes the cells can't hold, a status line, a
+// font, a rectangular attribute extent, a conformance level, a reset of a mode
+// a terminal starts with set, a 94-character set x/vt drops, a 96-character
+// set, a window operation, printer controller mode and a memory lock noted,
+// auto print and the tab stops past the screen's edge kept, and the meter
+// stopped by ctx or the deadline. Each callback and handler runs inside the
+// emulator's Write and touches only the emulation.
 func (e *emulation) setUp() {
 	t := e.term
 	t.SetScrollbackSize(0)
@@ -267,6 +269,7 @@ func (e *emulation) setUp() {
 	})
 	t.SetStopFunc(func() bool { return e.stop() })
 	e.watchColours()
+	e.watchColourModes()
 	e.watchGraphics()
 	e.watchDCS()
 	e.watchClipboard()
@@ -440,6 +443,26 @@ func (e *emulation) watchColours() {
 		})
 		t.RegisterOscHandler(osc.reset, func(data []byte) bool {
 			c.resetEntries(data, osc.first)
+			return false
+		})
+	}
+}
+
+// watchColourModes registers the handlers that note an OSC 6, or its alias
+// OSC 106, with which xterm turns on or off, for each pair of a special
+// colour (see tableSize) and a flag, whether it draws bold, underlined,
+// blinking, reversed or italic text in that colour. x/vt keeps none of it,
+// where a raw replay sets each on the joiner's terminal, and xterm's RIS
+// leaves them. The note stays, whatever follows: which way each starts is a
+// terminal's own setting, so turning one off needn't leave it as the joiner's
+// started. Every one counts, one xterm ignores too: iTerm2 reads OSC 6 as a
+// tab's colour. xterm has no query of them, and the query filter drops none.
+// x/vt has no handler of its own for either; these return false all the
+// same, as watchColours' do.
+func (e *emulation) watchColourModes() {
+	for _, osc := range []int{6, 106} {
+		e.term.RegisterOscHandler(osc, func([]byte) bool {
+			e.colourModes = true
 			return false
 		})
 	}

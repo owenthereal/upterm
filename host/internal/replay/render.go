@@ -882,6 +882,9 @@ func (e *emulation) eligible(parts uio.ReplayParts) (rep, error) {
 	if e.colours.changed() {
 		return rep{}, &IneligibleError{State: "a changed palette or dynamic colour"}
 	}
+	if e.colourModes {
+		return rep{}, &IneligibleError{State: "a special colour mode"}
+	}
 	// An image in a tmux passthrough is both, named as what it draws.
 	if e.graphics {
 		return rep{}, &IneligibleError{State: "terminal graphics"}
