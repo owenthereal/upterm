@@ -2149,6 +2149,90 @@ func TestReplayRestoresTabStops(t *testing.T) {
 	require.Equal(t, "Y", cellAt(j.b, 19, 1).Content)
 }
 
+// A terminal keeps its tab stops past the screen's right edge, for a
+// widening to bring back: those of the columns a wider screen had, as they
+// were when a narrowing took them off it, and past every width it has had,
+// one every 8 columns, as it starts, unless the stream cleared every stop
+// (TBC 3 or DECST8C) since it started or since the last RIS. A joiner wider
+// than the pty gets those in the columns past the pty's width, so a live
+// tab there lands where the session's does once the pty is as wide.
+func TestReplaySetsTheTabStopsPastThePtysWidth(t *testing.T) {
+	every8 := func(from, to int) []int {
+		var stops []int
+		for x := from; x < to; x += 8 {
+			stops = append(stops, x)
+		}
+		return stops
+	}
+	plus := func(stops []int, xs ...int) []int {
+		s := append(slices.Clone(stops), xs...)
+		slices.Sort(s)
+		return s
+	}
+	without := func(stops []int, x int) []int {
+		return slices.DeleteFunc(slices.Clone(stops), func(s int) bool { return s == x })
+	}
+	at80 := []uio.SizeEvent{event(1, 0, 80, 24)}
+	// narrowed is the pty at cols, narrowed to 80 after head.
+	narrowed := func(cols int, head string) []uio.SizeEvent {
+		return []uio.SizeEvent{event(1, 0, cols, 24), event(2, len(head), 80, 24)}
+	}
+	const at100, at90 = "\x1b[101G\x1bH\r", "\x1b[91G\x1bH\r"
+	for _, tc := range []struct {
+		name, stream string
+		sizes        []uio.SizeEvent
+		want         []int // the joiner's
+	}{
+		{"the default stops", "", at80, every8(0, 120)},
+		{"an HTS", "\x1b[6G\x1bH\r", at80, plus(every8(0, 120), 5)},
+		{"a TBC", "\x1b[9G\x1b[g\r", at80, without(every8(0, 120), 8)},
+		{"TBC 3, then an HTS", "\x1b[3g\x1b[6G\x1bH\r", at80, []int{5}},
+		{"TBC 3, then RIS", "\x1b[3g\x1bc", at80, every8(0, 120)},
+		{"DECST8C", "\x1b[6G\x1bH\x1b[?5W\r", at80, every8(0, 80)},
+		{"DECST8C, then RIS", "\x1b[?5W\x1bc", at80, every8(0, 120)},
+		{"an HTS a narrowing left past the pty's width", at100, narrowed(120, at100), plus(every8(0, 120), 100)},
+		{"TBC 3 and an HTS a narrowing left past it", "\x1b[3g" + at100, narrowed(120, "\x1b[3g"+at100), []int{100}},
+		{"a TBC a narrowing left past it", "\x1b[113G\x1b[g\r", narrowed(120, "\x1b[113G\x1b[g\r"), without(every8(0, 120), 112)},
+		{"DECST8C at a width a narrowing left", "\x1b[?5W\r", narrowed(100, "\x1b[?5W\r"), every8(0, 100)},
+		{"TBC 3 after a narrowing", at100 + "\x1b[3g", narrowed(120, at100), nil},
+		{"RIS after a narrowing", "\x1b[3g" + at100 + "\x1bc", narrowed(120, "\x1b[3g"+at100), every8(0, 120)},
+		{"two narrowings", at100 + "\r" + at90, []uio.SizeEvent{
+			event(1, 0, 120, 24), event(2, len(at100), 80, 24),
+			event(3, len(at100)+1, 100, 24), event(4, len(at100)+1+len(at90), 80, 24),
+		}, plus(every8(0, 120), 90, 100)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stream := tc.stream + "text\r\n"
+			sent, fellBack := fanOutTo(t, New(), []byte(stream), tc.sizes, 4<<10, termsize.Size{Cols: 120, Rows: 24})
+			require.NoError(t, fellBack)
+			require.True(t, bytes.HasPrefix(sent, []byte(preamble)), "the render, not the raw ring")
+
+			first := tc.sizes[0].Size
+			a, aHist := newReference(first.Cols, first.Rows)
+			feedSized(a, []byte(stream), 0, first, tc.sizes[1:])
+			b, bHist := newReference(120, 24)
+			_, _ = b.Write(sent)
+			require.Equal(t, tc.want, b.TabStops(), "the joiner's")
+
+			// The pty widens to the joiner's width, and the session's
+			// terminal with it, which then holds the same stops.
+			a.Resize(120, 24)
+			require.Equal(t, tc.want, a.TabStops(), "the session's, widened")
+			// A tab from column 85 lands on the first stop past it, or in the
+			// last column, on both.
+			land := 119
+			if i := slices.IndexFunc(tc.want, func(x int) bool { return x > 85 }); i >= 0 {
+				land = tc.want[i]
+			}
+			for _, term := range []*vt.Emulator{a, b} {
+				_, _ = term.WriteString("\x1b[86G\tX\r\n\tY\tZ")
+			}
+			require.Equal(t, "X", cellAt(b, land, 1).Content)
+			require.Empty(t, sameState(a, b, *aHist, *bHist, names{}, names{}))
+		})
+	}
+}
+
 // Each screen's kitty keyboard stack is pushed while that screen shows: the
 // main one's before the alternate screen is entered, the alternate one's
 // after.

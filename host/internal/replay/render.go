@@ -116,6 +116,7 @@ func (e *emulation) render() ([]byte, error) {
 		rows:      e.join.Rows,
 		cols:      e.join.Cols,
 		fits:      e.join.Cols == e.term.Width(),
+		stops:     append(e.term.TabStops(), e.pastEdge.between(e.term.Width(), e.join.Cols)...),
 		rep:       rep,
 		colours:   &e.colours,
 		cwd:       e.cwd,
@@ -226,7 +227,10 @@ type renderer struct {
 	// session's terminal. A wider joiner gets no wrap, as a wider live
 	// client doesn't.
 	fits bool
-	rep  rep
+	// stops are the tab stops to set across the joiner's width: the
+	// emulator's, then past its width those it keeps there (see pastEdge).
+	stops []int
+	rep   rep
 	// colours is the last change the stream made to each colour, none of
 	// them a setting once the render is eligible.
 	colours *colours
@@ -409,37 +413,20 @@ func (r *renderer) alt() {
 // holds them, since a program can leave a joiner's with any: every stop
 // cleared, then one set at each column, reached from the row's start (CR) by
 // CUF, the shortest move that lands exactly, as no left margin is set here
-// (see unrestored). Where the session's are a stop every 8 columns, as a
-// terminal starts, a joiner wider than the render gets those across its own
-// width, as a terminal of its width starts. Neither CR nor CUF writes a cell,
-// but both move the cursor, so they come before it is placed.
+// (see unrestored). A joiner wider than the render gets, past the render's
+// width, the stops the session's terminal keeps there, which a widening of
+// the pty would bring onto its screen. Neither CR nor CUF writes a cell, but
+// both move the cursor, so they come before it is placed.
 func (r *renderer) tabStops() {
-	stops := r.term.TabStops()
-	if slices.Equal(stops, defaultTabStops(r.term.Width())) {
-		stops = defaultTabStops(r.cols)
-	}
 	_ = r.enc.put("\x1b[3g\r")
 	at := 0
-	for _, x := range stops {
+	for _, x := range r.stops {
 		if x > at {
 			_ = r.enc.cuf(x - at)
 			at = x
 		}
 		_ = r.enc.put("\x1bH")
 	}
-}
-
-// defaultTabStops are the columns of a screen width wide that have a tab
-// stop when the terminal starts.
-func defaultTabStops(width int) []int {
-	ts := uv.DefaultTabStops(width)
-	var stops []int
-	for x := range width {
-		if ts.IsStop(x) {
-			stops = append(stops, x)
-		}
-	}
-	return stops
 }
 
 // region sets the scroll region, the terminal's one, which no screen switch

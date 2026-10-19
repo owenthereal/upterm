@@ -127,6 +127,9 @@ type emulation struct {
 	// conformance is set once the stream has set the terminal's conformance
 	// level (see watchConformanceLevel).
 	conformance bool
+	// pastEdge is what the emulator keeps of the tab stops past the screen's
+	// right edge (see the type).
+	pastEdge pastEdge
 
 	// The handoff point: the end of what the emulator consumed, and the last
 	// event it passed, applied or skipped as a no-op.
@@ -210,9 +213,9 @@ func (replayer) Start(ctx context.Context, deadline time.Time, c *uio.Capture, s
 // DCS form kept, images, device control strings, title modes, character
 // protection, selective erases, saves, renditions and line sizes the cells
 // can't hold, a status line, a font, a rectangular attribute extent and a
-// conformance level noted, and the meter stopped by ctx or the deadline. Each
-// callback and handler runs inside the emulator's Write and touches only the
-// emulation.
+// conformance level noted, the tab stops past the screen's edge kept, and the
+// meter stopped by ctx or the deadline. Each callback and handler runs inside
+// the emulator's Write and touches only the emulation.
 func (e *emulation) setUp() {
 	t := e.term
 	t.SetScrollbackSize(0)
@@ -245,6 +248,7 @@ func (e *emulation) setUp() {
 	e.watchFont()
 	e.watchAttributeExtent()
 	e.watchConformanceLevel()
+	e.watchTabStops()
 }
 
 // colours is the last change the stream made, by OSC, to each of the colours
@@ -913,6 +917,90 @@ func (e *emulation) watchConformanceLevel() {
 	})
 }
 
+// pastEdge is what x/vt keeps of the tab stops past the screen's right edge,
+// which TabStops doesn't report. As in xterm, whose 1,024 columns of stops are
+// wider than any screen, a resize changes none of them: a narrowing leaves
+// the stops of the columns it takes off the screen for a widening to bring
+// back, and a widening past every width the screen has had gives each new
+// column a stop every 8 columns, as a terminal starts, or none once the
+// stream has cleared every stop. The render sets those in a joiner wider than
+// the pty, where they are on its screen (see renderer.tabStops), so a live tab
+// there lands as on the session's terminal once the pty is as wide.
+type pastEdge struct {
+	// stops are the stops each narrowing took off the screen, ascending, all
+	// before width, the widest the screen has been since every stop was last
+	// cleared or set afresh (by TBC 3, DECST8C or RIS); past width, there is
+	// a stop every 8 columns, unless cleared. Those in columns a widening has
+	// since brought back onto the screen are the screen's again, and between
+	// leaves them out.
+	stops []int
+	width int
+	// cleared is set once TBC 3 or DECST8C has cleared every stop, until a
+	// RIS sets them every 8 columns again.
+	cleared bool
+}
+
+// narrow keeps the stops a narrowing from from columns to to takes off the
+// screen: those of stops, the screen's before it, from to on, then those kept
+// past from already.
+func (p *pastEdge) narrow(stops []int, from, to int) {
+	i, _ := slices.BinarySearch(stops, to)
+	j, _ := slices.BinarySearch(p.stops, from)
+	p.stops = append(slices.Clone(stops[i:]), p.stops[j:]...)
+	p.width = max(p.width, from)
+}
+
+// reset forgets every stop past the edge, as clearing every stop and setting
+// them afresh do, cleared saying whether every stop was cleared.
+func (p *pastEdge) reset(cleared bool) {
+	p.stops, p.width, p.cleared = nil, 0, cleared
+}
+
+// between returns the stops past the screen's edge from column from, the
+// screen's width, up to column to, ascending.
+func (p *pastEdge) between(from, to int) []int {
+	var stops []int
+	for _, x := range p.stops {
+		if x >= from && x < to {
+			stops = append(stops, x)
+		}
+	}
+	if p.cleared {
+		return stops
+	}
+	for x := (max(from, p.width) + 7) / 8 * 8; x < to; x += 8 {
+		stops = append(stops, x)
+	}
+	return stops
+}
+
+// watchTabStops registers the handlers that keep what x/vt does to the stops
+// past the screen's edge (see pastEdge), each read as x/vt reads it: TBC 3
+// (CSI 3 g) clears every stop; DECST8C (CSI ? 5 W, only so) sets a stop every
+// 8 columns as far as the screen goes and clears the rest, as xterm's does;
+// and RIS (ESC c) sets one every 8 columns everywhere. xterm reads TBC alike,
+// and its RIS, but takes DECST8C only at a VT510's level and up, which isn't
+// its default. Each returns false, so that x/vt's own handler still runs.
+func (e *emulation) watchTabStops() {
+	t := e.term
+	t.RegisterCsiHandler('g', func(params ansi.Params) bool {
+		if n, _, _ := params.Param(0, 0); n == 3 {
+			e.pastEdge.reset(true)
+		}
+		return false
+	})
+	t.RegisterCsiHandler(ansi.Command('?', 0, 'W'), func(params ansi.Params) bool {
+		if len(params) == 1 && params[0] == 5 {
+			e.pastEdge.reset(true)
+		}
+		return false
+	})
+	t.RegisterEscHandler('c', func() bool {
+		e.pastEdge.reset(false)
+		return false
+	})
+}
+
 // sgrUndrawable reports whether params, an SGR's, hold a number x/vt's SGR
 // skips that changes how a terminal draws what is printed after it: an
 // alternative font (11 to 19), Fraktur (20), SGR 21, which x/vt reads neither
@@ -1096,7 +1184,9 @@ func (e *emulation) consume(x uint64, n int) error {
 		// The same size again is a no-op the terminal never saw as a
 		// resize, and applying it would reset the margins and the tab stops.
 		if ev.Size != size {
-			e.resize(ev.Size)
+			if err := e.resize(ev.Size); err != nil {
+				return err
+			}
 			size = ev.Size
 		}
 	}
@@ -1146,13 +1236,25 @@ func (e *emulation) write(p []byte) error {
 }
 
 // resize applies a committed event to the emulator and to the tracker clone,
-// which resets its margins as the terminal does.
-func (e *emulation) resize(size termsize.Size) {
+// which resets its margins as the terminal does. A narrowing first keeps the
+// tab stops it takes off the screen (see pastEdge), which the emulator keeps
+// too but no longer reports. Reading them is a scan as wide as the screen,
+// outside the emulator's meter, which a spent emulator would run for every
+// event left in the batch, so the stop function is asked before it, as
+// batchEnd asks it before each of its scans.
+func (e *emulation) resize(size termsize.Size) error {
 	if testHookResize != nil {
 		testHookResize(size)
 	}
+	if w := e.term.Width(); size.Cols < w {
+		if e.stop() {
+			return uio.ErrReplayDeadline
+		}
+		e.pastEdge.narrow(e.term.TabStops(), w, size.Cols)
+	}
 	e.term.Resize(size.Cols, size.Rows)
 	e.modes.Resized(size)
+	return nil
 }
 
 // stopped says why a Write failed: the meter's stop is the deadline or ctx,

@@ -1058,7 +1058,9 @@ func (c contCase) run(wait time.Duration) contRun {
 // inside compares r.a, the session's terminal at the handoff point, with B,
 // a terminal of join's size, larger than the render's, given the render:
 // sameStateInside, and B's own scroll-off, which holds the render's history
-// lines as A's holds them, unless one is wider than the joiner.
+// lines as A's holds them, unless one is wider than the joiner. Then, for a
+// joiner wider than A, the pty widens to its width, and A with it: A's tab
+// stops are then B's, the ones A kept past its width included.
 func (r contRun) inside(join termsize.Size, rendered [][]byte, aNames names, wider bool, stop func() bool) contRun {
 	r.b = vt.NewEmulator(join.Cols, join.Rows)
 	r.b.SetReplyFunc(func([]byte) {})
@@ -1074,6 +1076,17 @@ func (r contRun) inside(join termsize.Size, rendered [][]byte, aNames names, wid
 		r.diff = "at the handoff: " + d
 	case !wider && !slices.EqualFunc(r.aOff.canon, r.bOff.canon, bytes.Equal):
 		r.diff = fmt.Sprintf("at the handoff: the history B scrolled off: %q vs %q", r.aOff.canon, r.bOff.canon)
+	}
+	if r.diff != "" || join.Cols == r.a.Width() {
+		return r
+	}
+	r.a.Resize(join.Cols, r.a.Height())
+	if _, err := r.a.Write(nil); err != nil || stop() {
+		r.skip = "the terminals ran out of time"
+		return r
+	}
+	if ta, tb := r.a.TabStops(), r.b.TabStops(); !slices.Equal(ta, tb) {
+		r.diff = fmt.Sprintf("once the pty is as wide: tab stops: %v vs %v", ta, tb)
 	}
 	return r
 }
@@ -1334,6 +1347,13 @@ func (c *capturing) Start(ctx context.Context, deadline time.Time, capt *uio.Cap
 // back, if it did.
 func fanOut(t testing.TB, r uio.Replayer, stream []byte, sizes []uio.SizeEvent, ring int) (joined []byte, fellBack error) {
 	t.Helper()
+	return fanOutTo(t, r, stream, sizes, ring, sizes[len(sizes)-1].Size)
+}
+
+// fanOutTo is fanOut for a joiner whose terminal is join, which may be
+// larger than the pty.
+func fanOutTo(t testing.TB, r uio.Replayer, stream []byte, sizes []uio.SizeEvent, ring int, join termsize.Size) (joined []byte, fellBack error) {
+	t.Helper()
 	w := uio.NewMultiWriter(ring)
 	w.SetReplayer(r, func(err error) { fellBack = err })
 	write := func(p []byte) {
@@ -1351,7 +1371,7 @@ func fanOut(t testing.TB, r uio.Replayer, stream []byte, sizes []uio.SizeEvent, 
 	}
 	write(stream[pos:])
 	var out bytes.Buffer
-	require.NoError(t, w.AppendSized(context.Background(), time.Now().Add(time.Minute), sizes[len(sizes)-1].Size, &out))
+	require.NoError(t, w.AppendSized(context.Background(), time.Now().Add(time.Minute), join, &out))
 	return out.Bytes(), fellBack
 }
 

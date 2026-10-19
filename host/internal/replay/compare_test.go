@@ -168,8 +168,9 @@ func sameState(a, b *vt.Emulator, aHist, bHist [][]byte, aNames, bNames names) s
 //     set by a print in the last column of the row a's DECRC would restore;
 //   - b's own whole screen as the region where a's is its whole screen, and
 //     a's rows otherwise;
-//   - a stop every 8 columns of b's width where a's are a's default, and a's
-//     stops alone otherwise.
+//   - a's tab stops within a's width; past it, the ones a keeps there for a
+//     widening to bring back, which only a widening of a shows (see
+//     contRun.inside).
 func sameStateInside(a, b *vt.Emulator, aHist, bHist [][]byte, aNames, bNames names) string {
 	w, h := a.Width(), a.Height()
 	if b.Width() < w || b.Height() < h {
@@ -220,12 +221,9 @@ func sameStateInside(a, b *vt.Emulator, aHist, bHist [][]byte, aNames, bNames na
 	if rb != want {
 		return fmt.Sprintf("scroll region: %v, where %v is wanted for %v", rb, want, ra)
 	}
-	stops := a.TabStops()
-	if slices.Equal(stops, defaultTabStops(w)) {
-		stops = defaultTabStops(b.Width())
-	}
-	if tb := b.TabStops(); !slices.Equal(stops, tb) {
-		return fmt.Sprintf("tab stops: %v, where %v is wanted", tb, stops)
+	within := slices.DeleteFunc(b.TabStops(), func(x int) bool { return x >= w })
+	if ta := a.TabStops(); !slices.Equal(ta, within) {
+		return fmt.Sprintf("tab stops within %d columns: %v vs %v", w, ta, within)
 	}
 	return sameRest(a, b, aHist, bHist, aNames, bNames)
 }

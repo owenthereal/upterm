@@ -682,3 +682,29 @@ func TestReplayChecksItsStopBeforeEachRescan(t *testing.T) {
 	require.Equal(t, 4, calls, "a rescan ran after the stop function said stop, or none asked it")
 	requireHandoff(t, e, 3, 1)
 }
+
+// A narrowing reads the tab stops it takes off the screen, a scan as wide as
+// the screen that the emulator's meter doesn't charge, and that a spent
+// emulator would still run for each event left in the batch. The stop
+// function is asked before each scan, and once it says stop, the batch ends
+// there.
+func TestReplayChecksItsStopBeforeEachNarrowing(t *testing.T) {
+	e := start(t, captureOf("x\r\n", event(1, 0, 80, 24)))
+	resizes := 0
+	testHookResize = func(termsize.Size) { resizes++ }
+	t.Cleanup(func() { testHookResize = nil })
+	e.stop = func() bool { return resizes >= 3 }
+
+	var events []uio.SizeEvent
+	for i := range 100 {
+		cols := 60
+		if i%2 == 1 {
+			cols = 80
+		}
+		events = append(events, event(uint64(2+i), 3, cols, 24))
+	}
+	err := e.Feed([][]byte{[]byte("y\r\n")}, events)
+	require.ErrorIs(t, err, uio.ErrReplayDeadline)
+	require.Equal(t, 3, resizes, "a narrowing scanned after the stop function said stop")
+	requireHandoff(t, e, 3, 1)
+}
