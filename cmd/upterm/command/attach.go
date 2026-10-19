@@ -70,7 +70,7 @@ func attachCmd() *cobra.Command {
 		Long: `Attach this terminal to a running session, given its name or session ID.
 
 ` + nameOrIDHelp + `
-Without one, the only running session is attached to; with several, name one.
+Without one, the only running session is attached to; with several, give one.
 
 The session keeps running when this terminal detaches, and any number of
 terminals can attach to it over time. Everything but the keys below is sent

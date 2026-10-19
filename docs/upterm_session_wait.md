@@ -20,7 +20,7 @@ exited; 0 when it was stopped, or no guest joined within its join timeout;
 128+N when the host or its command was killed by signal N; 125 when the
 outcome can't be known or read, or no session has the name. A command can
 exit 125 too; 'upterm session info NAME -o json' has the reason. Ctrl-C
-stops waiting with 130 and leaves the session running.
+stops waiting, with 130 on Unix, and leaves the session running.
 
 ```
 upterm session wait NAME|ID [flags]

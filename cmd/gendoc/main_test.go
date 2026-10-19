@@ -56,6 +56,19 @@ func TestOnlyPagesOfCommandsThatRunShowAUsageLine(t *testing.T) {
 	text, err := os.ReadFile(filepath.Join("docs", "upterm_version.md"))
 	require.NoError(t, err)
 	require.Contains(t, string(text), "```\nupterm version [flags]\n```")
+
+	// A man page always has a synopsis: the root's and a group's name their
+	// commands, as their --help does.
+	for page, synopsis := range map[string]string{
+		"upterm.1":         "upterm [command]",
+		"upterm-session.1": "upterm session [command]",
+		"upterm-config.1":  "upterm config [command]",
+		"upterm-version.1": "upterm version [flags]",
+	} {
+		text, err := os.ReadFile(filepath.Join("etc", "man", "man1", page))
+		require.NoError(t, err)
+		require.Contains(t, string(text), ".SH SYNOPSIS\n\\fB"+synopsis+"\\fP\n", page)
+	}
 }
 
 // The cask installs the man pages it lists and no others.

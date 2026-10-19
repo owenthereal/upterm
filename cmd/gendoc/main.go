@@ -49,13 +49,17 @@ func main() {
 
 // docRoot is the command tree the pages describe. The root and the groups
 // run only to report an unknown command, so their pages show no usage line
-// of their own, as for a command that can't run.
+// of their own, as for a command that can't run, and a man page's synopsis,
+// which cobra writes for every command, names their commands, as their
+// --help does: upterm session [command].
 func docRoot() *cobra.Command {
 	root := command.Root()
 	var walk func(c *cobra.Command)
 	walk = func(c *cobra.Command) {
 		if c.HasSubCommands() {
 			c.Run, c.RunE = nil, nil
+			c.Use = c.Name() + " [command]"
+			c.DisableFlagsInUseLine = true
 		}
 		for _, child := range c.Commands() {
 			walk(child)

@@ -2,8 +2,10 @@ package command
 
 import (
 	"reflect"
+	"regexp"
 	"strings"
 	"testing"
+	"unicode"
 
 	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/require"
@@ -60,7 +62,7 @@ var exitStatuses = map[string]string{
 	"upterm session list":    "Exit status: 0, or 1 when the session records can't be read.",
 	"upterm session set":     "Exits 0 when the session took the change, was already claimed, is ending, or has already ended, 4 when no session has the name, and 1 for any other failure -- including a change that could not be confirmed, which may still have taken effect: running set again restarts the window, and 'upterm session info NAME' shows what the session holds.",
 	"upterm session stop":    "Exits 4 when no session has the name, and 1 for any other failure.",
-	"upterm session wait":    "Exit status follows the session: its command's status when the command exited; 0 when it was stopped, or no guest joined within its join timeout; 128+N when the host or its command was killed by signal N; 125 when the outcome can't be known or read, or no session has the name. A command can exit 125 too; 'upterm session info NAME -o json' has the reason. Ctrl-C stops waiting with 130 and leaves the session running.",
+	"upterm session wait":    "Exit status follows the session: its command's status when the command exited; 0 when it was stopped, or no guest joined within its join timeout; 128+N when the host or its command was killed by signal N; 125 when the outcome can't be known or read, or no session has the name. A command can exit 125 too; 'upterm session info NAME -o json' has the reason. Ctrl-C stops waiting, with 130 on Unix, and leaves the session running.",
 
 	"upterm upgrade":     "Exit status: 0 when upterm is up to date or was replaced; 1 when it couldn't be, or a package manager owns it.",
 	"upterm version":     "Exit status: 0, or 1 on failure.",
@@ -146,14 +148,43 @@ func TestSharedFlagsShareTheirHelp(t *testing.T) {
 	require.NotEqual(t, join.Flag("private-key").Usage, host.Flag("private-key").Usage)
 }
 
-// session current's help names every variable its template can read.
+// session current's help lists every variable its template can read, and
+// only those: the list's own words, not any mention elsewhere in the help.
 func TestSessionCurrentNamesEveryTemplateVariable(t *testing.T) {
 	long := findCommand(t, "upterm session current").Long
-	fields := reflect.TypeFor[currentInfo]()
-	for i := range fields.NumField() {
-		if f := fields.Field(i); f.IsExported() {
-			require.Contains(t, long, f.Name)
+	_, list, ok := strings.Cut(long, "Template variables:")
+	require.True(t, ok, long)
+	list, _, _ = strings.Cut(list, ".")
+	list = regexp.MustCompile(`\([^)]*\)`).ReplaceAllString(list, "")
+	var listed []string
+	for _, word := range strings.FieldsFunc(list, func(r rune) bool { return r == ',' || unicode.IsSpace(r) }) {
+		if word != "and" {
+			listed = append(listed, word)
 		}
+	}
+
+	var fields []string
+	info := reflect.TypeFor[currentInfo]()
+	for i := range info.NumField() {
+		if f := info.Field(i); f.IsExported() {
+			fields = append(fields, f.Name)
+		}
+	}
+	require.ElementsMatch(t, fields, listed)
+}
+
+// host's help says the same about approving file transfers wherever it
+// says it: in its description and at --accept, --read-only and --no-sftp.
+func TestFileTransferApprovalIsToldTheSameEverywhere(t *testing.T) {
+	host := findCommand(t, "upterm host")
+	for what, text := range map[string]string{
+		"help":        host.Long,
+		"--accept":    host.Flag("accept").Usage,
+		"--read-only": host.Flag("read-only").Usage,
+		"--no-sftp":   host.Flag("no-sftp").Usage,
+	} {
+		require.Contains(t, oneSpaced(text), transferApprovalHelp, what)
+		require.Contains(t, oneSpaced(text), transferDeniedHelp, what)
 	}
 }
 

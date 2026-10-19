@@ -121,6 +121,15 @@ var (
 	flagHostEscapeChar = "~"
 )
 
+// How a guest's file transfers are approved, as host's help says it in its
+// description and at --accept, --read-only and --no-sftp: the dialog's Allow
+// lets that file through for the guest's connection, Allow All every later
+// operation in it.
+const (
+	transferApprovalHelp = "file transfers need your approval in a desktop dialog on this machine, which can allow one or all of that guest's transfers"
+	transferDeniedHelp   = "where no dialog can be shown, transfers are denied"
+)
+
 func hostCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "host [flags] [-- COMMAND [ARGS...]]",
@@ -145,9 +154,10 @@ keys a guest must have.
 What guests may do: type into the session, or only watch it with
 --read-only; transfer files with sftp or scp, with your access (downloads
 only with --read-only, none with --no-sftp); and forward TCP ports (ssh -L)
-to what this machine can reach, only with --allow-local-tcp-forwarding. Each
-file transfer waits for your approval in a desktop dialog on this machine,
-unless --accept; where no dialog can be shown, transfers are denied.
+to what this machine can reach, only with --allow-local-tcp-forwarding.
+Unless --accept, a guest's file transfers need your approval in a desktop
+dialog on this machine, which can allow one or all of that guest's
+transfers; where no dialog can be shown, transfers are denied.
 
 The session runs in a process of its own, and this terminal is attached to
 it. NAME is the session's name, which upterm prints (--name chooses it).
@@ -197,7 +207,7 @@ command's own 1 or 254 reads the same.`,
 	}
 
 	cmd.PersistentFlags().StringVarP(&flagServer, "server", "", "ssh://uptermd.upterm.dev:22", "Relay to host the session on: ssh://HOST[:PORT], ws://HOST[:PORT] or wss://HOST[:PORT]. Without a port, ssh uses 22, ws 80 and wss 443.")
-	cmd.PersistentFlags().StringVarP(&flagForceCommand, "force-command", "f", "", "Run this command for each guest who joins, on a terminal of its own, instead of showing them the session's command (e.g. 'tmux attach -t NAME' to share a tmux session).")
+	cmd.PersistentFlags().StringVarP(&flagForceCommand, "force-command", "f", "", "Run this command for each guest who joins, on a terminal of its own, instead of showing them the session's command (e.g. 'tmux attach -t pair-programming', for a tmux session of that name).")
 	cmd.PersistentFlags().StringSliceVarP(&flagPrivateKeys, "private-key", "i", defaultPrivateKeys(), "Identity files to authenticate to the relay with. "+identitiesOnlyHelp+" By default it offers the agent's keys alone when the agent holds any, and otherwise the listed files that load, or a generated key when none do.")
 	cmd.PersistentFlags().StringVarP(&flagKnownHostsFilename, "known-hosts", "", defaultKnownHost(), knownHostsHelp)
 	// Keep help and generated docs portable without changing the runtime defaults.
@@ -209,12 +219,12 @@ command's own 1 or 254 reads the same.`,
 	registerAuthUserFlag(cmd.PersistentFlags(), &flagGitHubUsers, "github-user", "Authorize specified GitHub users by allowing their public keys to connect. Configure GitHub CLI environment variables as needed; see https://cli.github.com/manual/gh_help_environment for details.")
 	registerAuthUserFlag(cmd.PersistentFlags(), &flagGitLabUsers, "gitlab-user", "Authorize specified GitLab users by allowing their public keys to connect.")
 	registerAuthUserFlag(cmd.PersistentFlags(), &flagSourceHutUsers, "srht-user", "Authorize specified SourceHut users by allowing their public keys to connect.")
-	cmd.PersistentFlags().BoolVar(&flagAccept, "accept", false, "Start the session without asking, and let guests transfer files without your approval. Without it, each file transfer waits for a desktop dialog on this machine, and where none can be shown, transfers are denied.")
-	cmd.PersistentFlags().BoolVarP(&flagReadOnly, "read-only", "r", false, "Let guests only watch: they can't type into the session, and can only download files, each with your approval in a desktop dialog on this machine unless --accept (where no dialog can be shown, transfers are denied). Can't be used with --allow-local-tcp-forwarding.")
+	cmd.PersistentFlags().BoolVar(&flagAccept, "accept", false, "Start the session without asking, and let guests transfer files without your approval. Without it, a guest's "+transferApprovalHelp+"; "+transferDeniedHelp+".")
+	cmd.PersistentFlags().BoolVarP(&flagReadOnly, "read-only", "r", false, "Let guests only watch: they can't type into the session, and can only download files. Unless --accept, a guest's "+transferApprovalHelp+"; "+transferDeniedHelp+". Can't be used with --allow-local-tcp-forwarding.")
 	cmd.PersistentFlags().BoolVar(&flagHideClientIP, "hide-client-ip", false, "Hide guests' IP addresses from upterm's output, and from forced commands' SSH_CONNECTION and SSH_CLIENT. "+hideClientIPDefaultHelp)
 	cmd.PersistentFlags().BoolVar(&flagSkipHostKeyCheck, "skip-host-key-check", false, skipHostKeyCheckHelp)
 	cmd.PersistentFlags().StringVar(&flagProxy, "proxy", "", proxyHelp)
-	cmd.PersistentFlags().BoolVar(&flagNoSFTP, "no-sftp", false, "Turn off file transfer (sftp and scp) for guests. Without it, guests transfer files with your access (downloads only with --read-only), each with your approval in a desktop dialog on this machine unless --accept; where no dialog can be shown, transfers are denied.")
+	cmd.PersistentFlags().BoolVar(&flagNoSFTP, "no-sftp", false, "Turn off file transfer (sftp and scp) for guests. Without it, guests transfer files with your access (downloads only with --read-only), and unless --accept, a guest's "+transferApprovalHelp+"; "+transferDeniedHelp+".")
 	cmd.PersistentFlags().BoolVar(&flagAllowLocalTCPForwarding, "allow-local-tcp-forwarding", false, "Let guests forward TCP ports (ssh -L) through the session, to whatever this machine can reach. Can't be used with --read-only.")
 	cmd.PersistentFlags().StringVar(&flagPtySize, "pty-size", "", "Pin the session's terminal size as COLSxROWS (e.g. 132x43); resize requests are then ignored. Defaults to the attached terminal's size, or 80x24 when there is none.")
 	cmd.PersistentFlags().StringVar(&flagTerm, "term", "", "Set TERM for the hosted command. Defaults to the inherited TERM, or "+defaultTerm+" when TERM is unset or "+dumbTerm+".")
