@@ -1698,6 +1698,51 @@ func TestReplayStartsInsideAnOpenSynchronizedUpdate(t *testing.T) {
 	require.LessOrEqual(t, len(joined), budget)
 }
 
+// Synchronized output's DCS form begins and ends the same update ?2026 does:
+// DCS = 1 s begins one, as ?2026h does, DCS = 2 s ends it, as ?2026l does,
+// either end closes what either beginning opened, a second beginning leaves
+// it open, and an end with none open does nothing. A terminal that takes only
+// one form follows that form's last. So the render starts with the last of
+// each form the stream sent, in the stream's order, but for an end that
+// comes first, which closes nothing: on a terminal that takes either form or
+// both, the joiner's update then ends where the session's does. A full reset
+// ends it, as it resets ?2026.
+func TestReplayStartsInsideAnUpdateTheDCSFormBegan(t *testing.T) {
+	const bsu, esu, bsm, esm = "\x1bP=1s\x1b\\", "\x1bP=2s\x1b\\", "\x1b[?2026h", "\x1b[?2026l"
+	for _, tc := range []struct{ name, stream, lead string }{
+		{"begun", bsu + "\x1b[Hframe", bsu},
+		{"begun and ended", bsu + "\x1b[Hframe" + esu, ""},
+		{"begun twice", bsu + "a" + bsu + "b", bsu},
+		{"begun, then another mode set", bsu + "\x1b[?2004h", bsu},
+		{"ended with none begun", esu, ""},
+		{"begun, then a full reset", bsu + "a\x1bcb\r", ""},
+		{"begun by both, the DCS form first", bsu + bsm + "a", bsu + bsm},
+		{"begun by both, ?2026 first", bsm + bsu + "a", bsm + bsu},
+		{"begun by the DCS form, ended by ?2026", bsu + "a" + esm, bsu + esm},
+		{"begun by ?2026, ended by the DCS form", bsm + "a" + esu, bsm + esu},
+		{"begun by the DCS form after a ?2026 end", esm + bsu + "a", bsu},
+		{"begun by ?2026 after a DCS end", esu + bsm + "a", bsm},
+		{"begun by both, ended by both", bsu + bsm + "a" + esu + esm, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stream := "text\r\n" + tc.stream
+			joined, fellBack := fanOut(t, New(), []byte(stream), []uio.SizeEvent{event(1, 0, 80, 24)}, 64<<10)
+			require.NoError(t, fellBack)
+			require.True(t, bytes.HasPrefix(joined, []byte(tc.lead+preamble)), "%q", joined)
+			for _, seq := range []string{"\x1bP=", "\x1b[?2026"} {
+				require.Equal(t, strings.Count(tc.lead, seq), bytes.Count(joined, []byte(seq)), "%q in %q", seq, joined)
+			}
+			// x/vt keeps ?2026 alone, which the joiner's then holds as the
+			// session's does.
+			a, _ := newReference(80, 24)
+			_, _ = a.WriteString(stream)
+			b, _ := newReference(80, 24)
+			_, _ = b.Write(joined)
+			require.Equal(t, a.Mode(ansi.ModeSynchronizedOutput).IsSet(), b.Mode(ansi.ModeSynchronizedOutput).IsSet())
+		})
+	}
+}
+
 // Insert mode, the application keypad and reverse video are set for the
 // live bytes, which they change.
 func TestReplayRestoresInsertKeypadAndReverseVideo(t *testing.T) {

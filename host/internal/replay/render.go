@@ -15,11 +15,11 @@ import (
 	uio "github.com/owenthereal/upterm/io"
 )
 
-// preamble starts every render, after the ?2026h that begins again a
-// synchronized update open at the handoff point (see synced): the cursor to
-// the start of its row, the default pen, and the screen erased from there
-// down. The joiner's own output above the cursor stays, for the blank screen
-// drawn after the history to scroll into its scrollback.
+// preamble starts every render, after what begins again a synchronized
+// update open at the handoff point (see synced): the cursor to the start of
+// its row, the default pen, and the screen erased from there down. The
+// joiner's own output above the cursor stays, for the blank screen drawn
+// after the history to scroll into its scrollback.
 const preamble = "\r\x1b[m\x1b[J"
 
 // render reconstructs the emulator's state at the handoff point on the
@@ -89,18 +89,52 @@ func (e *emulation) render() ([]byte, error) {
 	return append(out, enc.buf...), nil
 }
 
-// synced is what the render starts with: ?2026h when the stream is inside a
-// synchronized update at the handoff point, a frame the program began and
-// has yet to end, and nothing otherwise. The session's terminal holds its
-// display until the program's own ?2026l, which the live bytes carry, and a
-// joiner's terminal given ?2026h first holds the render and what follows it
-// until then too. An update ended leaves nothing to restore, which is why
-// the mode is otherwise among those the render ignores.
+// The DCS form of synchronized output's beginning and end.
+const (
+	beginSyncDCS = "\x1bP=1s\x1b\\"
+	endSyncDCS   = "\x1bP=2s\x1b\\"
+)
+
+// synced is what the render starts with: the beginning of a synchronized
+// update when the stream is inside one at the handoff point, a frame the
+// program began and has yet to end, and nothing otherwise. The session's
+// terminal holds its display until the program's own end, which the live
+// bytes carry, and a joiner's terminal begun the same way holds the render
+// and what follows it until then too.
+//
+// That is the last the stream sent of each form, ?2026 and the DCS form (see
+// syncForms), in the stream's order, but for an end that comes first, which
+// closes nothing: a terminal that takes one form then follows that form's
+// last, and one that takes both the later of the two, as the session's does.
+// So an update both forms began begins by both again, of which a terminal
+// that takes both reads the second as inside the first, and either end then
+// closes it; and an update one form began and the other ended is begun and
+// ended again. An update ended leaves nothing to restore, which is why ?2026
+// is otherwise among the modes the render ignores.
 func (e *emulation) synced() string {
-	if e.term.Mode(ansi.ModeSynchronizedOutput).IsSet() {
-		return ansi.SetModeSynchronizedOutput
+	type form struct {
+		seq    string
+		begins bool
 	}
-	return ""
+	mode := form{ansi.ResetModeSynchronizedOutput, false}
+	if e.term.Mode(ansi.ModeSynchronizedOutput).IsSet() {
+		mode = form{ansi.SetModeSynchronizedOutput, true}
+	}
+	dcs := form{endSyncDCS, false}
+	if e.sync.dcs {
+		dcs = form{beginSyncDCS, true}
+	}
+	order := [2]form{dcs, mode}
+	if e.sync.dcsLast {
+		order = [2]form{mode, dcs}
+	}
+	lead := ""
+	for _, f := range order {
+		if f.begins || lead != "" {
+			lead += f.seq
+		}
+	}
+	return lead
 }
 
 // renderer draws what follows the history. Each step writes through the

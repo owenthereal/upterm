@@ -92,6 +92,8 @@ type emulation struct {
 	// dcs is set once the stream has sent a device control string (see
 	// watchDCS).
 	dcs bool
+	// sync is what the stream last did with synchronized output's DCS form.
+	sync syncForms
 	// clips are the stream's clipboard writes still in force.
 	clips clipboard
 	// protected is set once the stream has turned character protection on,
@@ -206,6 +208,8 @@ func (e *emulation) setUp() {
 		// doesn't copy: it is what follows the OSC's first ';', as the stream
 		// sent it, and an OSC 7 without one reports nothing.
 		WorkingDirectory: func(dir string) { e.cwd, e.cwdTold = dir, true },
+		EnableMode:       e.syncByMode,
+		DisableMode:      e.syncByMode,
 	})
 	t.SetStopFunc(func() bool { return e.stop() })
 	e.watchColours()
@@ -313,9 +317,10 @@ func (e *emulation) watchGraphics() {
 // too, which watchGraphics also notes.
 //
 // Synchronized output's DCS form, DCS = 1 s and DCS = 2 s, which begins and
-// ends an update, isn't noted: like ?2026, which the render ignores (see
-// ignoredModes), it only holds back the drawing. Its key gets a handler of its
-// own, which notes anything else sent under it.
+// ends an update, isn't noted: like ?2026, it only holds back the drawing, and
+// the render begins an update open at the handoff point again (see
+// syncForms). Its key gets a handler of its own, which keeps that, and notes
+// anything else sent under it, data after the s included.
 //
 // The key is the DCS's prefix, its last intermediate and its final byte. The
 // parser takes a prefix only as the first byte, one of < = > ?, and after an
@@ -335,7 +340,14 @@ func (e *emulation) watchDCS() {
 	t.RegisterDcsHandler(sync, func(params ansi.Params, data []byte) bool {
 		if n, _, _ := params.Param(0, 0); len(params) != 1 || n != 1 && n != 2 || len(data) != 0 {
 			e.dcs = true
+		} else {
+			e.sync = syncForms{dcs: n == 1, dcsLast: true}
 		}
+		return false
+	})
+	// RIS ends an update the DCS form began, as x/vt's resets ?2026.
+	t.RegisterEscHandler('c', func() bool {
+		e.sync.dcs = false
 		return false
 	})
 	t.RegisterDcsHandler(0, note)
@@ -350,6 +362,26 @@ func (e *emulation) watchDCS() {
 				t.RegisterDcsHandler(ansi.Command(prefix, inter, final), note)
 			}
 		}
+	}
+}
+
+// syncForms is what the stream last did with synchronized output's DCS form,
+// of which x/vt keeps nothing, and whether that came after the last ?2026h
+// or ?2026l, which x/vt keeps as a mode. The two forms begin and end one
+// update, as iTerm2's description of both has it: either end closes what
+// either beginning opened, a beginning inside an update leaves it open, and
+// an end outside one does nothing. But a terminal that takes only one form
+// follows that form's last, so the render begins each again (see synced).
+type syncForms struct {
+	// dcs is set when the DCS form's last was DCS = 1 s, a beginning, and
+	// dcsLast when the DCS form was the last of the two.
+	dcs, dcsLast bool
+}
+
+// syncByMode notes ?2026 set or reset, as the last of the two forms.
+func (e *emulation) syncByMode(m ansi.Mode) {
+	if m == ansi.ModeSynchronizedOutput {
+		e.sync.dcsLast = false
 	}
 }
 
