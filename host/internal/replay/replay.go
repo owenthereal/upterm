@@ -1010,11 +1010,11 @@ func (e *emulation) watchTabStops() {
 // resetting a mode a terminal starts with set and the render doesn't restore
 // (see defaultModes), by any of its parameters, each read as x/vt reads them.
 // x/vt keeps every mode a DECSET or DECRST names, but of these only the
-// setting, and its RIS forgets it, where xterm's puts back only DECBKM and
-// the colour registers of these and leaves the rest as they are; nor does a
-// set after it undo DECANM's reset, after which xterm reads the set as a
-// VT52 does, or what xterm ignored while ?1046 was reset. So the note stays,
-// whatever follows. It returns false, so that x/vt's own handler still runs.
+// setting, and its RIS forgets it, where xterm's keeps ?1046 as it is and,
+// in VT52 mode, isn't read as RIS at all; nor does a set after it undo
+// DECANM's reset, after which xterm reads the set as a VT52 does, or what
+// xterm ignored while ?1046 was reset. So the note stays, whatever follows,
+// for the colour registers too, which xterm's RIS puts back. It returns false, so that x/vt's own handler still runs.
 func (e *emulation) watchDefaultModes() {
 	e.term.RegisterCsiHandler(ansi.Command('?', 0, 'l'), func(params ansi.Params) bool {
 		for _, p := range params {
@@ -1207,7 +1207,8 @@ func (e *emulation) consume(x uint64, n int) error {
 		}
 		pos = k
 		// The same size again is a no-op the terminal never saw as a
-		// resize, and applying it would reset the margins and the tab stops.
+		// resize, and applying it would reset the margins and origin mode,
+		// as x/vt's Resize does at any size.
 		if ev.Size != size {
 			if err := e.resize(ev.Size); err != nil {
 				return err

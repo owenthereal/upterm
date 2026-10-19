@@ -708,12 +708,22 @@ var (
 	// (in-band resize, below). The mode snapshot a raw replay starts with
 	// holds none of them either; only the ring's own bytes can carry one.
 	// Most change only how the terminal encodes the keyboard or the mouse,
-	// which the joiner's own terminal does for the joiner, and a program
-	// that relies on one sends it again (readline sends ?1034h at every
-	// prompt where the terminfo entry has it, as xterm-256color's does).
+	// or what a key does, which the joiner's own terminal does for the
+	// joiner, and a program that relies on one sends it again (readline
+	// sends ?1034h at every prompt where the terminfo entry has it, as
+	// xterm-256color's does); a few change only how the terminal shows its
+	// own view of the output, which is the joiner's own too. That holds
+	// whichever way the stream left one, so neither a set nor a reset counts,
+	// though a terminal starts with some of them set.
 	ignoredModes = map[ansi.DECMode]bool{
 		// The cursor's blink: appearance only.
 		ansi.DECMode(12): true,
+		// The keypad's shifted plus and minus change the font's size (rxvt's
+		// mode, which xterm starts with set).
+		ansi.DECMode(35): true,
+		// DECBKM: the backarrow key sends BS, or DEL once reset (xterm starts
+		// with it set).
+		ansi.DECMode(67): true,
 		// A synchronized update, which only holds back the drawing. One open
 		// at the handoff point is begun again, before the rest (see synced).
 		ansi.ModeSynchronizedOutput: true,
@@ -729,6 +739,12 @@ var (
 		// On the alternate screen, the mouse wheel sends cursor up and down
 		// keys instead of scrolling the terminal's own view.
 		ansi.DECMode(1007): true,
+		// Output scrolls the terminal's own view back to the bottom (rxvt's
+		// mode, which xterm starts with set).
+		ansi.DECMode(1010): true,
+		// xterm skips repainting while output scrolls fast: appearance only
+		// (it starts with it set).
+		ansi.DECMode(1014): true,
 		// Mouse reports in urxvt's decimal encoding.
 		ansi.DECMode(1015): true,
 		// The Meta key sets the eighth bit of keyboard input.
@@ -741,6 +757,9 @@ var (
 		ansi.DECMode(1037): true,
 		// Alt sends ESC before the key it modifies.
 		ansi.DECMode(1039): true,
+		// The selection is kept once it is no longer highlighted (xterm
+		// starts with it set).
+		ansi.DECMode(1040): true,
 		// The function keys as terminfo or termcap, Sun, HP and SCO keyboards
 		// send them.
 		ansi.DECMode(1050): true,
@@ -761,30 +780,16 @@ var (
 	// fails the render once the stream has sent it (see watchDefaultModes),
 	// as the joiner's terminal would keep the mode set. Of the others xterm
 	// starts with set, the render restores autowrap and the cursor's
-	// visibility, ignores ?1034, ?1035 and ?1037, which only change what keys
-	// send, and xterm itself ignores a set or reset of autorepeat (?8), of
-	// the cursor's XOR blink (?14) and of ?1020 to ?1023, which it only
-	// reports.
+	// visibility; it ignores ?35, ?67, ?1034, ?1035 and ?1037, which only
+	// change what keys do or send, and ?1010, ?1014 and ?1040, which only
+	// change how the terminal shows its own view of the output; and xterm
+	// itself ignores a set or reset of autorepeat (?8), of the cursor's XOR
+	// blink (?14) and of ?1020 to ?1023, which it only reports.
 	defaultModes = map[ansi.DECMode]bool{
 		// DECANM: reset, xterm reads what follows as a VT52 does, until
 		// ESC <, where a DECSET, a CSI of any kind and RIS are no sequences.
 		// x/vt has no VT52 mode, so it reads those bytes otherwise.
 		ansi.DECMode(2): true,
-		// The keypad's shifted plus and minus change the font's size (rxvt's
-		// mode; xterm's shiftFonts).
-		ansi.DECMode(35): true,
-		// DECBKM: the backarrow key sends BS, and DEL once reset (xterm's
-		// backarrowKey).
-		ansi.DECMode(67): true,
-		// Output scrolls the window back to the bottom (rxvt's mode; xterm's
-		// scrollTtyOutput).
-		ansi.DECMode(1010): true,
-		// xterm skips repainting the screen while output scrolls it fast
-		// (fastScroll).
-		ansi.DECMode(1014): true,
-		// The selection is kept once it is no longer highlighted
-		// (keepSelection).
-		ansi.DECMode(1040): true,
 		// The alternate screen may be shown: reset, xterm leaves it at once
 		// and ignores ?47, ?1047, ?1048 and ?1049 until it is set again
 		// (titeInhibit), none of which x/vt does.

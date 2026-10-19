@@ -2302,18 +2302,22 @@ func requireAfterTheReprints(t *testing.T, render []byte, seq string) {
 	require.Greater(t, bytes.Index(render, []byte(seq)), reprints[len(reprints)-1][0], "%q", render)
 }
 
-// A mode that only changes how the terminal encodes the keyboard or the
-// mouse is neither restored nor a reason to fall back: the join renders
-// without it, as the raw replay's mode snapshot leaves it out. readline
-// sends ?1034h, the meta key's, at every prompt where the terminfo entry has
-// it, as xterm-256color's does.
+// A mode that only changes what the keyboard or the mouse sends, or how the
+// terminal shows its own view of the output (where it scrolls, its
+// selection, how it repaints), is neither restored nor a reason to fall back,
+// whichever way the stream left it, as a terminal starts with it set or not:
+// the join renders without it, as the raw replay's mode snapshot leaves it
+// out. readline sends ?1034h, the meta key's, at every prompt where the
+// terminfo entry has it, as xterm-256color's does.
 func TestReplayIgnoresInputOnlyModes(t *testing.T) {
-	for _, n := range []int{1007, 1015, 1034, 1035, 1036, 1037, 1039, 1050, 1051, 1052, 1053, 1060, 1061, 9001} {
-		t.Run(fmt.Sprintf("?%d", n), func(t *testing.T) {
-			set := fmt.Sprintf("\x1b[?%dh", n)
-			j := joinAt(t, 80, 24, set+"$ ls\r\n")
-			require.NotContains(t, string(j.render), set)
-		})
+	for _, n := range []int{35, 67, 1007, 1010, 1014, 1015, 1034, 1035, 1036, 1037, 1039, 1040, 1050, 1051, 1052, 1053, 1060, 1061, 9001} {
+		for _, hl := range []string{"h", "l"} {
+			t.Run(fmt.Sprintf("?%d%s", n, hl), func(t *testing.T) {
+				seq := fmt.Sprintf("\x1b[?%d%s", n, hl)
+				j := joinAt(t, 80, 24, seq+"$ ls\r\n")
+				require.NotContains(t, string(j.render), seq)
+			})
+		}
 	}
 
 	t.Run("a join at a bash prompt", func(t *testing.T) {
@@ -2788,11 +2792,12 @@ func TestReplayFallsBackOnADefaultModeReset(t *testing.T) {
 		_, fellBack := fanOut(t, New(), []byte("text\r\n"+stream+"more\r\n"), []uio.SizeEvent{event(1, 0, 80, 24)}, 4<<10)
 		return fellBack
 	}
-	for _, n := range []int{2, 35, 67, 1010, 1014, 1040, 1046, 1070} {
+	for _, n := range []int{2, 1046, 1070} {
 		set, reset := fmt.Sprintf("\x1b[?%dh", n), fmt.Sprintf("\x1b[?%dl", n)
-		// x/vt's RIS forgets a mode it doesn't know, where xterm's keeps most
-		// of these as they are, and a set after DECANM's reset is read as a
-		// VT52 reads it: the reset stands.
+		// x/vt's RIS forgets a mode it doesn't know, where xterm's keeps
+		// ?1046 as it is and a VT52 reads no RIS, and a set undoes neither
+		// VT52 mode nor what xterm ignored while ?1046 was reset: the reset
+		// stands.
 		for _, tc := range []struct {
 			name, stream string
 			fails        bool
