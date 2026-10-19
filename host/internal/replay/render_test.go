@@ -3799,6 +3799,92 @@ func TestReplayFailsOnLocatorReporting(t *testing.T) {
 	}
 }
 
+// An iTerm2 command (OSC 1337 ; key = value) that changes what iTerm2 shows,
+// or how, for as long as it lasts fails the render, named by the first such
+// key: x/vt drops every one, where a raw replay hands each to a joiner's
+// iTerm2. Among them the profile and its properties, the colours, the
+// background image, the badge, the cursor's shape and guide, the Unicode
+// version its widths follow, the Touch Bar's key labels, copying the output
+// to the pasteboard, an annotation, a block or a fold of one, a button, which
+// iTerm2 draws in cells of its own, and a clear of its scrollback, which
+// clears the screen but for the prompt too. Every one counts, whatever its
+// value, as do two after the first, and RIS ends none. A window frame set is
+// a window operation. iTerm2 reads the key as what comes before the first =,
+// or the whole command with none, exactly.
+//
+// What iTerm2's shell integration sends at every prompt renders: the remote
+// host, the current directory, its version, the user's variables and a mark.
+// So do the commands that leave nothing on its display: asking for attention
+// or the focus, a copy to the pasteboard, the reports it answers, and a key it
+// doesn't have.
+func TestReplayFailsOnITerm2State(t *testing.T) {
+	join := func(t *testing.T, stream string) error {
+		t.Helper()
+		_, fellBack := fanOut(t, New(), []byte("text\r\n"+stream+"more\r\n"), []uio.SizeEvent{event(1, 0, 80, 24)}, 4<<10)
+		return fellBack
+	}
+	for _, tc := range []struct{ name, stream, state string }{
+		{"a profile", "\x1b]1337;SetProfile=Light\x07", "iTerm2 state (SetProfile)"},
+		{"a profile property", "\x1b]1337;SetProfileProperty=Cursor Type=Mg==\x07", "iTerm2 state (SetProfileProperty)"},
+		{"a colour", "\x1b]1337;SetColors=fg=f0f0f0\x07", "iTerm2 state (SetColors)"},
+		{"a colour preset", "\x1b]1337;SetColors=preset=Solarized Dark\x1b\\", "iTerm2 state (SetColors)"},
+		{"a background image", "\x1b]1337;SetBackgroundImageFile=L3RtcC9iZy5wbmc=\x07", "iTerm2 state (SetBackgroundImageFile)"},
+		{"a background image removed", "\x1b]1337;SetBackgroundImageFile=\x07", "iTerm2 state (SetBackgroundImageFile)"},
+		{"a badge", "\x1b]1337;SetBadgeFormat=XCh1c2VyLmdpdEJyYW5jaCk=\x07", "iTerm2 state (SetBadgeFormat)"},
+		{"a cursor shape", "\x1b]1337;CursorShape=1\x07", "iTerm2 state (CursorShape)"},
+		{"a cursor shape iTerm2 has none for", "\x1b]1337;CursorShape=7\x07", "iTerm2 state (CursorShape)"},
+		{"the cursor guide", "\x1b]1337;HighlightCursorLine=yes\x07", "iTerm2 state (HighlightCursorLine)"},
+		{"a Unicode version", "\x1b]1337;UnicodeVersion=8\x07", "iTerm2 state (UnicodeVersion)"},
+		{"a Unicode version pushed", "\x1b]1337;UnicodeVersion=push vim\x07", "iTerm2 state (UnicodeVersion)"},
+		{"a key label", "\x1b]1337;SetKeyLabel=F1=Help\x07", "iTerm2 state (SetKeyLabel)"},
+		{"the key labels pushed", "\x1b]1337;PushKeyLabels\x07", "iTerm2 state (PushKeyLabels)"},
+		{"the key labels popped", "\x1b]1337;PopKeyLabels=vim\x07", "iTerm2 state (PopKeyLabels)"},
+		{"the output copied", "\x1b]1337;CopyToClipboard=\x07copied\x1b]1337;EndCopy\x07", "iTerm2 state (CopyToClipboard)"},
+		{"an annotation", "\x1b]1337;AddAnnotation=a note\x07", "iTerm2 state (AddAnnotation)"},
+		{"a hidden annotation", "\x1b]1337;AddHiddenAnnotation=4|a note\x07", "iTerm2 state (AddHiddenAnnotation)"},
+		{"a note", "\x1b]1337;AddNote=a note\x07", "iTerm2 state (AddNote)"},
+		{"a hidden note", "\x1b]1337;AddHiddenNote=a note\x07", "iTerm2 state (AddHiddenNote)"},
+		{"a block", "\x1b]1337;Block=id=b1;attr=start\x07code\x1b]1337;Block=id=b1;attr=end\x07", "iTerm2 state (Block)"},
+		{"a block folded", "\x1b]1337;UpdateBlock=id=b1;action=fold\x07", "iTerm2 state (UpdateBlock)"},
+		{"a button", "\x1b]1337;Button=type=custom;code=42;icon=star.fill\x07", "iTerm2 state (Button)"},
+		{"the scrollback cleared", "\x1b]1337;ClearScrollback\x07", "iTerm2 state (ClearScrollback)"},
+		{"its number with a leading 0", "\x1b]01337;CursorShape=2\x07", "iTerm2 state (CursorShape)"},
+		{"two, the first named", "\x1b]1337;SetColors=bg=000\x07\x1b]1337;CursorShape=1\x07", "iTerm2 state (SetColors)"},
+		{"one, then the shell integration's", "\x1b]1337;CursorShape=1\x07\x1b]1337;CurrentDir=/tmp\x07", "iTerm2 state (CursorShape)"},
+		{"one, then RIS", "\x1b]1337;SetBadgeFormat=aG9zdA==\x07\x1bc", "iTerm2 state (SetBadgeFormat)"},
+		{"a window frame", "\x1b]1337;SetWindowFrame=0;0;800;600\x07", "a window operation"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			requireIneligible(t, join(t, tc.stream), tc.state)
+		})
+	}
+	for _, tc := range []struct{ name, stream string }{
+		{"a prompt", "\x1b]133;D;0\x07\x1b]1337;RemoteHost=owen@example.com\x07\x1b]1337;CurrentDir=/home/owen\x07" +
+			"\x1b]1337;ShellIntegrationVersion=14;shell=zsh\x07\x1b]1337;SetUserVar=gitBranch=bWFpbg==\x07" +
+			"\x1b]133;A\x07$ \x1b]133;B\x07"},
+		{"a mark", "\x1b]1337;SetMark\x07"},
+		{"attention", "\x1b]1337;RequestAttention=yes\x07"},
+		{"fireworks", "\x1b]1337;RequestAttention=fireworks\x07"},
+		{"the focus", "\x1b]1337;StealFocus\x07"},
+		{"a copy to the pasteboard", "\x1b]1337;Copy=:aGVsbG8=\x07"},
+		{"the cell size asked for", "\x1b]1337;ReportCellSize\x07"},
+		{"a variable asked for", "\x1b]1337;ReportVariable=c2Vzc2lvbi5uYW1l\x07"},
+		{"a notification", "\x1b]1337;Notification=done\x07"},
+		{"a key iTerm2 doesn't have", "\x1b]1337;NoSuchKey=1\x07"},
+		{"a key that only starts with one", "\x1b]1337;CursorShapes=1\x07"},
+		{"a key in another case", "\x1b]1337;cursorshape=1\x07"},
+		{"one's key after a ;", "\x1b]1337;ClearScrollback;now\x07"},
+		{"one's key in a value", "\x1b]1337;SetUserVar=SetColors=Zm9v\x07"},
+		{"no command", "\x1b]1337\x07"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			require.NoError(t, join(t, tc.stream))
+			_, err := renderAt(t, 80, 24, "text\r\n"+tc.stream+"more\r\n")
+			require.NoError(t, err, "given to the emulation")
+		})
+	}
+}
+
 // screenTitleString is a window title string of GNU screen's and tmux's, as
 // tmux reads one: ESC k after an ESC and any C0 controls tmux executes where
 // they stand but CAN and SUB, then the title, up to the ESC, CAN or SUB that

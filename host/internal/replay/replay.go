@@ -166,6 +166,9 @@ type emulation struct {
 	// locatorEvents once it has selected a button event for a report (see
 	// watchLocator).
 	locator, locatorEvents bool
+	// iTerm2 is the key of the first command the stream has sent that changes
+	// iTerm2's state for as long as it lasts (see watchITerm2), or "".
+	iTerm2 string
 	// pastEdge is what the emulator keeps of the tab stops past the screen's
 	// right edge (see the type).
 	pastEdge pastEdge
@@ -263,10 +266,11 @@ func (replayer) Start(ctx context.Context, deadline time.Time, c *uio.Capture, s
 // can't hold, a status line, a font, a rectangular attribute extent, a
 // conformance level, a reset of a mode a terminal starts with set, a
 // 94-character set x/vt drops, a 96-character set, a window operation,
-// printer controller mode, a memory lock, a key format, locator reporting and
-// the locator's events noted, auto print and the tab stops past the screen's
-// edge kept, and the meter stopped by ctx or the deadline. Each callback and
-// handler runs inside the emulator's Write and touches only the emulation.
+// printer controller mode, a memory lock, a key format, locator reporting,
+// the locator's events and a change to iTerm2's state noted, auto print and
+// the tab stops past the screen's edge kept, and the meter stopped by ctx or
+// the deadline. Each callback and handler runs inside the emulator's Write
+// and touches only the emulation.
 func (e *emulation) setUp() {
 	t := e.term
 	t.SetScrollbackSize(0)
@@ -312,6 +316,7 @@ func (e *emulation) setUp() {
 	e.watchMemoryLock()
 	e.watchKeyFormats()
 	e.watchLocator()
+	e.watchITerm2()
 }
 
 // colours is the last change the stream made, by OSC, to each of the colours
@@ -1356,8 +1361,9 @@ func (e *emulation) watchCharsets96() {
 // DECSNLS to another size; the reports (11, 13 to 21) the query filter drops,
 // and the render rebuilds the title stack (22, 23, see watchTitles). x/vt
 // keys a CSI handler by its prefix and intermediate too, so these see no
-// XTSMTITLE (CSI > Pm t). x/vt has no handler of its own for any of them;
-// these return false all the same, as watchColours' do.
+// XTSMTITLE (CSI > Pm t). iTerm2's SetWindowFrame is noted as one too (see
+// watchITerm2). x/vt has no handler of its own for any of them; these return
+// false all the same, as watchColours' do.
 func (e *emulation) watchWindowOps() {
 	t := e.term
 	t.RegisterCsiHandler('t', func(params ansi.Params) bool {
@@ -1541,6 +1547,77 @@ func (e *emulation) watchLocator() {
 			if n := p.Param(0); n == 1 || n == 3 {
 				e.locatorEvents = true
 			}
+		}
+		return false
+	})
+}
+
+// iTerm2State are the keys of iTerm2's commands, OSC 1337 ; key = value,
+// that change what it shows, or how, until another changes it again: its
+// profile and the profile's properties, its colours, its background image,
+// its badge, the cursor's shape and its guide line, the Unicode version its
+// character widths follow, the Touch Bar's key labels and their stack, and
+// CopyToClipboard, after which it copies what is printed to the pasteboard
+// until EndCopy. So do those that leave on the output something a cell
+// doesn't hold, which stays as long as the output does: an annotation
+// (AddNote and AddHiddenNote are its old names), a block, a block folded or
+// unfolded, and a button, which iTerm2 draws in four cells of its own, moving
+// the cursor; and ClearScrollback, which clears the scrollback, and the screen
+// but for the prompt.
+var iTerm2State = map[string]bool{
+	"SetProfile":             true,
+	"SetProfileProperty":     true,
+	"SetColors":              true,
+	"SetBackgroundImageFile": true,
+	"SetBadgeFormat":         true,
+	"CursorShape":            true,
+	"HighlightCursorLine":    true,
+	"UnicodeVersion":         true,
+	"SetKeyLabel":            true,
+	"PushKeyLabels":          true,
+	"PopKeyLabels":           true,
+	"CopyToClipboard":        true,
+	"AddAnnotation":          true,
+	"AddHiddenAnnotation":    true,
+	"AddNote":                true,
+	"AddHiddenNote":          true,
+	"Block":                  true,
+	"UpdateBlock":            true,
+	"Button":                 true,
+	"ClearScrollback":        true,
+}
+
+// watchITerm2 registers the handler that notes the first of the commands in
+// iTerm2State the stream sent, by its key. x/vt has no OSC 1337 handler of
+// its own, so it drops every one, where a raw replay hands each to a joiner's
+// iTerm2, which acts on it. iTerm2 reads the key as what follows the OSC's
+// number and its ';' up to the first '=', or all of it with none, and takes
+// it exactly, so a key in another case, or with more after it, is none of
+// these. Every one counts, whatever its value, one iTerm2 ignores too, and
+// the note stays, whatever follows, RIS included: the raw ring is exact
+// whatever came after. SetWindowFrame, which moves and resizes iTerm2's
+// window, is noted as a window operation (see watchWindowOps).
+//
+// The other commands render: what iTerm2's shell integration sends at every
+// prompt (RemoteHost, CurrentDir, ShellIntegrationVersion, SetUserVar and
+// SetMark), which the next prompt sends again, and which noted would fail
+// every join to a shell that has it; and those that leave nothing on iTerm2's
+// display: a request for attention or for the focus, a notification, a Copy
+// to the pasteboard, the reports iTerm2 answers, which the query filter lets
+// into the ring, and a key it doesn't have. watchGraphics notes an image, and
+// watchFont every OSC 50, which iTerm2 reads as OSC 1337 too. x/vt has no
+// handler of its own for it; this returns false all the same, as
+// watchColours' do.
+func (e *emulation) watchITerm2() {
+	e.term.RegisterOscHandler(1337, func(data []byte) bool {
+		// data is the whole OSC, its number first.
+		_, cmd, _ := bytes.Cut(data, []byte{';'})
+		key, _, _ := bytes.Cut(cmd, []byte{'='})
+		switch {
+		case string(key) == "SetWindowFrame":
+			e.windowOp = true
+		case e.iTerm2 == "" && iTerm2State[string(key)]:
+			e.iTerm2 = string(key)
 		}
 		return false
 	})
