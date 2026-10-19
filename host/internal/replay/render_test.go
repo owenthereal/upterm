@@ -4131,6 +4131,73 @@ func TestReplayFailsOnSizedText(t *testing.T) {
 	}
 }
 
+// kitty's multiple cursors (CSI > Ps ; … SP q), which show extra cursors at
+// the cells each group after the shape names, or colour them, fail the
+// render, named: x/vt drops them, where a raw replay hands them to the
+// joiner's kitty, which shows them as the session's did. Every one with a
+// shape and a place counts, one kitty ignores too, and the note stays once a
+// clear, an erase of the screen or RIS takes the cursors away. A clear alone,
+// shape 0, renders, as a joiner's kitty, taken to be at its defaults, shows
+// none, and so does a colour reset to the main cursor's; so do the queries,
+// which the query filter lets through and x/vt drops, and a shape with no
+// place, which kitty ignores.
+//
+// The sequences that share the final byte render: DECSCUSR (CSI Ps SP q),
+// which the render restores, DECSCA (CSI Ps " q) leaving characters
+// unprotected, and XTVERSION (CSI > Ps q), with the cursors' parameters too.
+// DECLL (CSI Ps q) is noted as the keyboard's LEDs.
+func TestReplayFailsOnExtraCursors(t *testing.T) {
+	join := func(t *testing.T, stream string) error {
+		t.Helper()
+		_, fellBack := fanOut(t, New(), []byte("text\r\n"+stream+"more\r\n"), []uio.SizeEvent{event(1, 0, 80, 24)}, 4<<10)
+		return fellBack
+	}
+	for _, tc := range []struct{ name, stream string }{
+		{"the main cursor's shape at a cell", "\x1b[>29;2:4:5 q"},
+		{"shapes along a row", "\x1b[>1;2:7:1 q\x1b[>2;2:7:3 q\x1b[>3;2:7:5;2:7:7 q"},
+		{"a beam where the main cursor is", "\x1b[>2;0 q"},
+		{"a block on every cell", "\x1b[>1;4 q"},
+		{"underlines over a rectangle", "\x1b[>3;4:2:3:4:10 q"},
+		{"a cell off the screen, which kitty ignores", "\x1b[>29;2:30:5 q"},
+		{"a shape kitty doesn't have", "\x1b[>7;2:4:5 q"},
+		{"the cursors' colour", "\x1b[>40;2:255:0:0 q"},
+		{"the colour of the text under them", "\x1b[>30;1 q"},
+		{"an indexed colour", "\x1b[>40;5:196 q"},
+		{"a colour set after one reset", "\x1b[>30;0;5:1 q"},
+		{"shown, then cleared", "\x1b[>29;2:4:5 q\x1b[>0;4 q"},
+		{"shown, then the screen erased", "\x1b[>29;2:4:5 q\x1b[2J"},
+		{"shown, then RIS", "\x1b[>29;2:4:5 q\x1bc"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			requireIneligible(t, join(t, tc.stream), "extra cursors")
+		})
+	}
+	t.Run("DECLL", func(t *testing.T) {
+		requireIneligible(t, join(t, "\x1b[1q"), "keyboard LEDs")
+	})
+	for _, tc := range []struct{ name, stream string }{
+		{"every extra cursor cleared", "\x1b[>0;4 q"},
+		{"one cleared", "\x1b[>0;2:4:5 q"},
+		{"the one where the main cursor is cleared", "\x1b[>0;0 q"},
+		{"the cursors' colour reset", "\x1b[>40;0 q"},
+		{"the text's colour reset", "\x1b[>30;0 q"},
+		{"a shape with no place", "\x1b[>29 q"},
+		{"the protocol queried", "\x1b[> q"},
+		{"the cursors queried", "\x1b[>100 q"},
+		{"their colours queried", "\x1b[>101 q"},
+		{"a cursor style", "\x1b[2 q"},
+		{"characters left unprotected", "\x1b[0\"q"},
+		{"the terminal's version asked for", "\x1b[>q"},
+		{"XTVERSION with the cursors' parameters", "\x1b[>29;2:4:5q"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			require.NoError(t, join(t, tc.stream))
+			_, err := renderAt(t, 80, 24, "text\r\n"+tc.stream+"more\r\n")
+			require.NoError(t, err, "given to the emulation")
+		})
+	}
+}
+
 // screenTitleString is a window title string of GNU screen's and tmux's, as
 // tmux reads one: ESC k after an ESC and any C0 controls tmux executes where
 // they stand but CAN and SUB, then the title, up to the ESC, CAN or SUB that

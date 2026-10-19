@@ -187,6 +187,9 @@ type emulation struct {
 	// sizedText is set once the stream has drawn text in kitty's sizes (see
 	// watchSizedText).
 	sizedText bool
+	// extraCursors is set once the stream has shown an extra cursor of
+	// kitty's, or coloured them (see watchExtraCursors).
+	extraCursors bool
 	// pastEdge is what the emulator keeps of the tab stops past the screen's
 	// right edge (see the type).
 	pastEdge pastEdge
@@ -286,10 +289,11 @@ func (replayer) Start(ctx context.Context, deadline time.Time, c *uio.Capture, s
 // 94-character set x/vt drops, a 96-character set, a window operation,
 // printer controller mode, a memory lock, a key format, locator reporting,
 // the locator's events, a change to iTerm2's state, the keyboard's LEDs, a
-// log file, a window property, a coding other than UTF-8 and sized text
-// noted, auto print, 8-bit controls and the tab stops past the screen's edge
-// kept, and the meter stopped by ctx or the deadline. Each callback and
-// handler runs inside the emulator's Write and touches only the emulation.
+// log file, a window property, a coding other than UTF-8, sized text and
+// extra cursors noted, auto print, 8-bit controls and the tab stops past the
+// screen's edge kept, and the meter stopped by ctx or the deadline. Each
+// callback and handler runs inside the emulator's Write and touches only the
+// emulation.
 func (e *emulation) setUp() {
 	t := e.term
 	t.SetScrollbackSize(0)
@@ -342,6 +346,7 @@ func (e *emulation) setUp() {
 	e.watchCoding()
 	e.watchControls()
 	e.watchSizedText()
+	e.watchExtraCursors()
 }
 
 // colours is the last change the stream made, by OSC, to each of the colours
@@ -1777,6 +1782,55 @@ func (e *emulation) watchSizedText() {
 		e.sizedText = true
 		return false
 	})
+}
+
+// watchExtraCursors registers the handler that notes kitty's multiple
+// cursors, CSI > Ps ; … SP q, which show extra cursors, or colour them, as
+// extraCursorsSet reads them. x/vt has no handler for them, so it drops them,
+// where a raw replay hands them to the joiner's kitty, which shows them as the
+// session's did. The note stays, whatever follows: the raw ring is exact
+// whatever came after, though kitty takes the cursors away at a clear, at an
+// ED 2, 3 or 22 and at a switch of screens, and both them and their colours
+// at RIS and DECSTR. x/vt keys a CSI handler by its prefix and intermediate
+// too, so this one sees neither DECSCUSR (CSI Ps SP q), XTVERSION (CSI > Ps
+// q), DECSCA (CSI Ps " q) nor DECLL (CSI Ps q). x/vt has no handler of its
+// own for them; this returns false all the same, as watchColours' do.
+func (e *emulation) watchExtraCursors() {
+	e.term.RegisterCsiHandler(ansi.Command('>', ' ', 'q'), func(params ansi.Params) bool {
+		if extraCursorsSet(params) {
+			e.extraCursors = true
+		}
+		return false
+	})
+}
+
+// extraCursorsSet reports whether params, those of kitty's CSI > Ps ; … SP q,
+// show an extra cursor or colour them, as kitty reads them: the first is a
+// shape, or 30 or 40 for the colour of the text under the extra cursors or of
+// the cursors themselves, and each group of parameters after it a place for
+// the shape, or a colour. Three forms show nothing: shape 0 only takes
+// cursors away, which a joiner's kitty, taken to be at its defaults, doesn't
+// show; a colour of 0 in every parameter puts back the main cursor's, which a
+// terminal starts with; and with no group, kitty only answers a query, which
+// the query filter lets into the ring and x/vt drops, or does nothing. Every
+// other shape counts, one kitty doesn't have too, whatever its place, a cell
+// off the screen included, and so does every other colour.
+func extraCursorsSet(params ansi.Params) bool {
+	if len(params) < 2 {
+		return false
+	}
+	switch params[0].Param(0) {
+	case 0:
+		return false
+	case 30, 40:
+		for _, p := range params[1:] {
+			if p.Param(0) != 0 {
+				return true
+			}
+		}
+		return false
+	}
+	return true
 }
 
 // sgrUndrawable reports whether params, an SGR's, hold a number x/vt's SGR
