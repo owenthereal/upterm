@@ -55,6 +55,7 @@ const attachedKeysHelp = `Keys, at the start of a line (--escape-char changes th
         program may need its own redraw afterwards
   ~^Z   suspend this terminal (Unix); fg resumes it
   ~~    send a ~
+
 Through an outer ssh connection, ssh's own ~ escapes come first: type ~~.,
 ~~? and ~~^Z, or connect with 'ssh -e none' and type them plain.
 

@@ -389,3 +389,11 @@ func TestConfigViewKeepsWhatHomebrewChecks(t *testing.T) {
 	require.Contains(t, stdout, "# Upterm Configuration File")
 	require.Contains(t, stdout, "server: ssh://uptermd.upterm.dev:22")
 }
+
+// The example config's hide-client-ip entry says what the setting does: an
+// uncommented false shows guests' addresses in CI too, so the example must not
+// offer false as the default.
+func TestTheExampleConfigSaysWhatHideClientIPDoes(t *testing.T) {
+	require.Contains(t, exampleConfig(), "# Hide guests' IP addresses from upterm's output (default: hidden in CI only; false shows them there too)\n# hide-client-ip: true\n")
+	require.NotContains(t, exampleConfig(), "# hide-client-ip: false")
+}

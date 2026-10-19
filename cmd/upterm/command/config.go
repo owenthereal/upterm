@@ -485,7 +485,7 @@ func exampleConfig() string {
 # WARNING: Only use this in trusted environments.
 # accept: false
 
-# Hide client IP addresses from logs and display (default: false)
-# hide-client-ip: false
+# Hide guests' IP addresses from upterm's output (default: hidden in CI only; false shows them there too)
+# hide-client-ip: true
 `
 }

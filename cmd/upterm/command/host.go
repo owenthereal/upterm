@@ -140,10 +140,11 @@ upterm join or plain ssh.
 
 upterm prints the session, with the commands guests join it with, and asks
 before starting it; --accept starts it without asking. The relay is
---server, and upterm authenticates to it with, in this order:
-  1. SSH agent keys, when an agent is running and holds any
-  2. Private key files: ~/.ssh/id_{ed25519,ed25519_sk,ecdsa,ecdsa_sk,dsa,rsa}
-  3. A generated key, when neither is available
+--server, and upterm authenticates to it with the first of these it has:
+  1. The SSH agent's keys, when an agent is running and holds any
+  2. Otherwise, the private key files that load: ~/.ssh/id_{ed25519,ed25519_sk,ecdsa,ecdsa_sk,dsa,rsa}
+  3. Otherwise, a generated key
+
 Supplying --private-key makes the named list the whole set instead; see its
 help.
 

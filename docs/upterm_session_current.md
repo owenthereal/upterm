@@ -21,7 +21,7 @@ FirstGuestJoinedAt, Name, Status, Reconnect, TunnelReason, TunnelLostAt,
 NextAttemptAt, StartConfirmed, ReadOnly, FileTransfer,
 FileTransferApprovalRequired, LocalForwarding, SSHCommand and JoinCommand.
 From LaunchID on, a variable the session's upterm doesn't report is empty,
-false, <nil> or a zero time (0001-01-01 ...), so test it first:
+false, nil or a zero time (0001-01-01 ...), so test it first:
 {{with .Name}}{{.}}{{end}}, or {{if not .TunnelLostAt.IsZero}}...{{end}}.
 
 Exits 4 when not in a session ($UPTERM_ADMIN_SOCKET is unset, or no session

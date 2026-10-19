@@ -495,7 +495,7 @@ outcome.
 Given a name, it waits for the session that holds the name when it starts,
 so let 'upterm host --detach' return before you wait, as in the example. A
 session that has already ended is reported from its record, which
-'upterm session list' deletes %s after it ended.
+'upterm session list' deletes once it is %s old.
 
 Exit status follows the session: its command's status when the command
 exited; 0 when it was stopped, or no guest joined within its join timeout;
@@ -1056,7 +1056,7 @@ FirstGuestJoinedAt, Name, Status, Reconnect, TunnelReason, TunnelLostAt,
 NextAttemptAt, StartConfirmed, ReadOnly, FileTransfer,
 FileTransferApprovalRequired, LocalForwarding, SSHCommand and JoinCommand.
 From LaunchID on, a variable the session's upterm doesn't report is empty,
-false, <nil> or a zero time (0001-01-01 ...), so test it first:
+false, nil or a zero time (0001-01-01 ...), so test it first:
 {{with .Name}}{{.}}{{end}}, or {{if not .TunnelLostAt.IsZero}}...{{end}}.
 
 Exits 4 when not in a session ($UPTERM_ADMIN_SOCKET is unset, or no session
