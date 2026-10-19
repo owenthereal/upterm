@@ -532,7 +532,8 @@ func sameSlot(a, b vt.Cursor) string {
 // render ignores are left out, as it leaves them as the joiner's terminal
 // has them, but for synchronized output, which a render begins again when
 // the stream is inside an update at the handoff point. The modes a terminal
-// starts with set (see defaultModes) are compared by whether each is reset.
+// starts with set (see defaultModes), and ANSI's SRM, are compared by whether
+// each is reset.
 func sameModes(a, b ansi.Modes) string {
 	modes := slices.Collect(maps.Keys(a))
 	for m := range b {
@@ -545,7 +546,7 @@ func sameModes(a, b ansi.Modes) string {
 			continue
 		}
 		differ := a[m].IsSet() != b[m].IsSet()
-		if dec, ok := m.(ansi.DECMode); ok && defaultModes[dec] {
+		if dec, ok := m.(ansi.DECMode); ok && defaultModes[dec] || m == ansi.ModeSendReceive {
 			// A terminal starts with these set, but x/vt starts them unset
 			// and the render sends nothing for a set, so a joiner's x/vt
 			// reads one unset that the session's, given the set, reads set:
@@ -560,8 +561,8 @@ func sameModes(a, b ansi.Modes) string {
 }
 
 // The comparison of modes tells a reset of a mode a terminal starts with set
-// (see defaultModes) from a set of it, or none, which x/vt reads as unset;
-// every other mode it compares by whether it is set.
+// (see defaultModes), or of ANSI's SRM, from a set of it, or none, which x/vt
+// reads as unset; every other mode it compares by whether it is set.
 func TestSameModesReadsADefaultModeAsSet(t *testing.T) {
 	never := ansi.Modes{}
 	set := ansi.Modes{ansi.DECMode(2): ansi.ModeSet}
@@ -572,6 +573,15 @@ func TestSameModesReadsADefaultModeAsSet(t *testing.T) {
 	require.Contains(t, sameModes(reset, never), "mode 2")
 	require.Contains(t, sameModes(never, reset), "mode 2")
 	require.Contains(t, sameModes(set, reset), "mode 2")
+
+	// ANSI's SRM is one a terminal starts with set too; DEC's mode 12 isn't.
+	srmSet := ansi.Modes{ansi.ModeSendReceive: ansi.ModeSet}
+	srmReset := ansi.Modes{ansi.ModeSendReceive: ansi.ModeReset}
+	require.Empty(t, sameModes(srmSet, never))
+	require.Empty(t, sameModes(never, srmSet))
+	require.Contains(t, sameModes(srmReset, never), "mode 12")
+	require.Contains(t, sameModes(srmSet, srmReset), "mode 12")
+	require.Contains(t, sameModes(ansi.Modes{ansi.DECMode(1): ansi.ModeSet}, never), "mode 1")
 
 	other := ansi.Modes{ansi.ModeBracketedPaste: ansi.ModeSet}
 	require.Contains(t, sameModes(other, never), "mode 2004")

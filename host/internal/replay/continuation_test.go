@@ -1893,14 +1893,15 @@ func TestReplayContinuesAcrossASplitCluster(t *testing.T) {
 	}
 }
 
-// A set of a mode a terminal starts with set (see defaultModes) leaves the
-// render with nothing to send, so the joiner's terminal keeps the mode as it
-// starts and continues as the session's does. A reset of one fails the render,
-// which the comparison can't see for itself, as it never gets one to compare.
+// A set of a mode a terminal starts with set (see defaultModes), or of ANSI's
+// SRM, leaves the render with nothing to send, so the joiner's terminal keeps
+// the mode as it starts and continues as the session's does. A reset of one
+// fails the render, which the comparison can't see for itself, as it never
+// gets one to compare.
 func TestReplayContinuesAfterADefaultModeSet(t *testing.T) {
-	run := func(mode, final string) (contCase, contRun) {
+	run := func(seq string) (contCase, contRun) {
 		c := contCase{
-			prefix: []byte("text\r\n\x1b[?" + mode + final),
+			prefix: []byte("text\r\n" + seq),
 			sizes:  []uio.SizeEvent{event(1, 0, 20, 4)},
 			suffix: []byte("more"),
 		}
@@ -1908,13 +1909,26 @@ func TestReplayContinuesAfterADefaultModeSet(t *testing.T) {
 	}
 	for _, mode := range []string{"2", "1046", "1070"} {
 		t.Run("?"+mode+" set", func(t *testing.T) {
-			c, r := run(mode, "h")
+			c, r := run("\x1b[?" + mode + "h")
 			requireContinues(t, c, r)
 		})
 	}
 	t.Run("?2 reset", func(t *testing.T) {
-		_, r := run("2", "l")
+		_, r := run("\x1b[?2l")
 		require.Equal(t, "ineligible: a default mode reset (?2)", r.skip)
+	})
+	for _, tc := range []struct{ name, seq string }{
+		{"SRM set", "\x1b[12h"},
+		{"SRM reset, then set", "\x1b[12l\x1b[12h"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c, r := run(tc.seq)
+			requireContinues(t, c, r)
+		})
+	}
+	t.Run("SRM reset", func(t *testing.T) {
+		_, r := run("\x1b[12l")
+		require.Equal(t, "ineligible: a default mode reset (12)", r.skip)
 	})
 }
 
