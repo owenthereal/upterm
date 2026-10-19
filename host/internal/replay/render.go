@@ -880,6 +880,9 @@ func (e *emulation) eligible(parts uio.ReplayParts) (rep, error) {
 	if e.conformance {
 		return rep{}, &IneligibleError{State: "a conformance level"}
 	}
+	if e.charset94 {
+		return rep{}, &IneligibleError{State: "a 94-character set other than ASCII, British or line drawing"}
+	}
 	if e.charset96 {
 		return rep{}, &IneligibleError{State: "a 96-character set"}
 	}

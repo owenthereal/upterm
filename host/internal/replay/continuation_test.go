@@ -1494,12 +1494,12 @@ func primingDiff(t testing.TB, stream []byte, sizes []uio.SizeEvent, ring int) s
 //
 // The stream is read as x/vt reads it, since both terminals are x/vt. That
 // is the tracker's reading but for two sequences: x/vt designates G0 only by
-// an SCS whose final is 0, A or B, and ignores any other, where the tracker
-// keeps whatever final it is given; and x/vt saves on a CSI s with
-// parameters too, where the tracker, as xterm, saves on a bare one alone. A
-// stream that tells the readings apart before the ring is primed with the
-// tracker's, which the terminal fed the whole stream doesn't hold, and
-// primingDiff reports it.
+// an SCS whose final is 0, A or B (vtCharsets94), and ignores any other,
+// where the tracker keeps whatever final it is given; and x/vt saves on a
+// CSI s with parameters too, where the tracker, as xterm, saves on a bare one
+// alone. A stream that tells the readings apart before the ring is primed
+// with the tracker's, which the terminal fed the whole stream doesn't hold,
+// and primingDiff reports it.
 func lostG0(p []byte, start int) bool {
 	// charsets is one terminal's G0, and the G0 each screen's saved slot
 	// holds, by mainScreen and altScreen, as the final byte of the SCS that
@@ -1533,7 +1533,7 @@ func lostG0(p []byte, start int) bool {
 	parser.SetHandler(ansi.Handler{
 		HandleEsc: func(cmd ansi.Cmd) {
 			switch {
-			case cmd.Intermediate() == '(' && strings.IndexByte("0AB", cmd.Final()) >= 0:
+			case cmd.Intermediate() == '(' && strings.IndexByte(vtCharsets94, cmd.Final()) >= 0:
 				each(func(c *charsets) { c.g0 = cmd.Final() })
 			case cmd == '7':
 				save()

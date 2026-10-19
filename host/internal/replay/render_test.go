@@ -3071,6 +3071,89 @@ func TestReplayFailsOnA96CharacterSet(t *testing.T) {
 	}
 }
 
+// A 94-character set designated by a final other than B, A or 0 that xterm
+// acts on fails the render, named, whatever follows: x/vt drops the
+// designation and keeps the set designated before, where xterm, at its
+// default VT420 level, takes ESC ( < as DEC's user-preferred supplemental
+// set, ESC ( > as DEC Technical and ESC ( % 5 as DEC's supplemental graphic
+// set, and resets the G-set to ASCII for the rest, national sets among them,
+// which a terminal in NRCS mode takes. One with " or & ahead of its final is
+// a VT510's. Neither ASCII designated after it nor RIS clears the note, and
+// one the ring has evicted, which the snapshot primes the emulator with, is
+// noted too. ASCII, the UK set and line drawing render, as does a final
+// xterm ignores, which leaves the set before on both, and the live text
+// printed under each lands as on the session's terminal.
+func TestReplayFailsOnAnother94CharacterSet(t *testing.T) {
+	join := func(t *testing.T, stream string) error {
+		t.Helper()
+		_, fellBack := fanOut(t, New(), []byte("text\r\n"+stream+"more\r\n"), []uio.SizeEvent{event(1, 0, 80, 24)}, 4<<10)
+		return fellBack
+	}
+	const state = "a 94-character set other than ASCII, British or line drawing"
+	for _, final := range "124567<=CEHIJKQRYZf9>`" {
+		t.Run(fmt.Sprintf("ESC ( %c", final), func(t *testing.T) {
+			requireIneligible(t, join(t, "\x1b("+string(final)), state)
+		})
+	}
+	for _, tc := range []struct{ name, stream string }{
+		{"DEC Technical into G1", "\x1b)>"},
+		{"DEC's user-preferred supplemental set into G2", "\x1b*<"},
+		{"German into G3", "\x1b+K"},
+		{"DEC's supplemental graphic set", "\x1b(%5"},
+		{"Portuguese", "\x1b)%6"},
+		{"DEC Turkish", "\x1b*%0"},
+		{"Turkish", "\x1b+%2"},
+		{"the SCS NRCS", "\x1b(%3"},
+		{"Hebrew", "\x1b(%="},
+		{"DEC Hebrew", "\x1b(\"4"},
+		{"Greek", "\x1b)\">"},
+		{"DEC Greek", "\x1b*\"?"},
+		{"DEC Cyrillic", "\x1b+&4"},
+		{"Russian", "\x1b(&5"},
+		{"shifted in and printed", "\x1b)>\x0eab\x0f"},
+		{"then ASCII into the same G-set", "\x1b(<\x1b(B"},
+		{"then RIS", "\x1b(<\x1bc"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			requireIneligible(t, join(t, tc.stream), state)
+		})
+	}
+	// A designation the ring has evicted is the session's G0 still, which
+	// the snapshot primes the emulator with.
+	for _, tc := range []struct{ head, state string }{{"\x1b(<", state}, {"\x1b(0", ""}} {
+		t.Run(fmt.Sprintf("%q evicted", tc.head), func(t *testing.T) {
+			stream := []byte(tc.head + strings.Repeat("line of text\r\n", 1000))
+			sizes := []uio.SizeEvent{event(1, 0, 80, 24)}
+			capt := &capturing{}
+			_, _ = fanOut(t, capt, stream, sizes, 4<<10)
+			require.Greater(t, capt.c.Start, uint64(len(tc.head)), "the designation is evicted")
+			_, fellBack := fanOut(t, New(), stream, sizes, 4<<10)
+			if tc.state == "" {
+				require.NoError(t, fellBack)
+			} else {
+				requireIneligible(t, fellBack, tc.state)
+			}
+		})
+	}
+	for _, tc := range []struct{ name, stream string }{
+		{"ASCII into G0", "\x1b(B"},
+		{"line drawing into G0", "\x1b(0"},
+		{"the UK set into G0", "\x1b(A"},
+		{"line drawing into G1", "\x1b)0"},
+		{"the UK set into G2", "\x1b*A"},
+		{"ASCII into G3", "\x1b+B"},
+		{"a final xterm ignores", "\x1b(3\x1b)U"},
+		{"a final xterm ignores after %", "\x1b(%G"},
+		{"UTF-8 selected", "\x1b%G"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			require.NoError(t, join(t, tc.stream))
+			j := joinAt(t, 80, 24, "text\r\n"+tc.stream+"more\r\n")
+			j.then(t, "\x0eqx\x1bnqx\x1boqx\x0fqx\r\n")
+		})
+	}
+}
+
 // An XTWINOPS that changes the terminal's window (CSI Ps ; Ps ; Ps t) fails
 // the render, named, whatever follows: a raw replay iconifies, moves,
 // resizes, raises, lowers, maximizes the joiner's window or makes it full

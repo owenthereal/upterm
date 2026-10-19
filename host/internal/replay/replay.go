@@ -130,9 +130,10 @@ type emulation struct {
 	// conformance is set once the stream has set the terminal's conformance
 	// level (see watchConformanceLevel).
 	conformance bool
-	// charset96 is set once the stream has designated a 96-character set
-	// (see watchCharsets96).
-	charset96 bool
+	// charset94 is set once the stream has designated a 94-character set
+	// that x/vt drops and xterm acts on (see watchCharsets94), and charset96
+	// once it has designated a 96-character set (see watchCharsets96).
+	charset94, charset96 bool
 	// windowOp is set once the stream has changed the terminal's window (see
 	// watchWindowOps).
 	windowOp bool
@@ -230,10 +231,10 @@ func (replayer) Start(ctx context.Context, deadline time.Time, c *uio.Capture, s
 // protection, selective erases, saves, renditions and line sizes the cells
 // can't hold, a status line, a font, a rectangular attribute extent, a
 // conformance level, a reset of a mode a terminal starts with set, a
-// 96-character set, a window operation and a memory lock noted, the printer's
-// mode and the tab stops past the screen's edge kept, and the meter stopped
-// by ctx or the deadline. Each callback and handler runs inside the
-// emulator's Write and touches only the emulation.
+// 94-character set x/vt drops, a 96-character set, a window operation and a
+// memory lock noted, the printer's mode and the tab stops past the screen's
+// edge kept, and the meter stopped by ctx or the deadline. Each callback and
+// handler runs inside the emulator's Write and touches only the emulation.
 func (e *emulation) setUp() {
 	t := e.term
 	t.SetScrollbackSize(0)
@@ -268,6 +269,7 @@ func (e *emulation) setUp() {
 	e.watchConformanceLevel()
 	e.watchTabStops()
 	e.watchDefaultModes()
+	e.watchCharsets94()
 	e.watchCharsets96()
 	e.watchWindowOps()
 	e.watchPrinter()
@@ -1070,6 +1072,57 @@ func (e *emulation) watchDefaultModes() {
 		}
 		return false
 	})
+}
+
+// vtCharsets94 are the finals x/vt designates a 94-character set by, with
+// ESC ( to ESC +: 0 (DEC's line drawing), A (the UK set) and B (ASCII).
+const vtCharsets94 = "0AB"
+
+// xtermCharsets94 are the finals xterm acts on in a 94-character set
+// designation, ESC ( to ESC + and the final: those its scstable passes on to
+// be decoded. xtermCharsets94After are those it acts on with %, " or & between
+// the two, by that intermediate, which it decodes at a VT320's level and up
+// for %, its default VT420 among them, and at a VT510's for " and &.
+const xtermCharsets94 = "0124567<=ABCEHIJKQRYZf9>`"
+
+var xtermCharsets94After = map[byte]string{'%': "02356=", '"': "4>?", '&': "45"}
+
+// watchCharsets94 registers the handlers that note a 94-character set
+// designated into G0 to G3 that x/vt drops and xterm acts on (see
+// xtermCharsets94). x/vt takes only the finals in vtCharsets94 and keeps the
+// set designated before for the rest, where xterm takes ESC ( < as DEC's
+// user-preferred supplemental set, ESC ( > as DEC Technical and ESC ( % 5 as
+// DEC's supplemental graphic set, and sets the G-set to ASCII for each final
+// it knows of no set for at its level: the national sets, which it takes only
+// in NRCS mode, among them. So the cells printed under one may be other than
+// the emulator's, and a live print shifted there lands otherwise on a joiner
+// given the render than on the session's terminal. The note stays, whatever
+// follows, as watchCharsets96's does. The snapshot designates G0 by the SCS
+// the tracker keeps for it, through these handlers too, so one the ring has
+// evicted is noted. A final xterm ignores leaves the set before on both, and
+// isn't noted. x/vt keys a handler by the last intermediate alone, so
+// ESC % 5 and ESC $ ( C, which xterm ignores, are noted too, as ESC ( % 5 and
+// ESC ( C are. x/vt has no handler of its own for any of these; these return
+// false all the same, as watchColours' do.
+func (e *emulation) watchCharsets94() {
+	note := func() bool {
+		e.charset94 = true
+		return false
+	}
+	for _, final := range []byte(xtermCharsets94) {
+		if strings.IndexByte(vtCharsets94, final) >= 0 {
+			continue
+		}
+		for _, inter := range []byte("()*+") {
+			e.term.RegisterEscHandler(ansi.Command(0, inter, final), note)
+		}
+	}
+	// x/vt keys a handler by the last intermediate alone, the %, " or &.
+	for inter, finals := range xtermCharsets94After {
+		for _, final := range []byte(finals) {
+			e.term.RegisterEscHandler(ansi.Command(0, inter, final), note)
+		}
+	}
 }
 
 // watchCharsets96 registers the handlers that note a 96-character set
