@@ -43,14 +43,30 @@ func webHandler(h http.Handler) http.Handler {
 			// TODO: better getting-started guide
 			data := `1. Install the upterm CLI by following https://github.com/owenthereal/upterm#installation.
 2. On your machine, host a session with "upterm host --server wss://%s -- YOUR_COMMAND". More details in https://github.com/owenthereal/upterm#quick-start.
-3. Your pair(s) join the session with "ssh -o ProxyCommand='upterm proxy wss://TOKEN@%s' TOKEN@%s:443".
+3. Your pair(s) join the session with "upterm join wss://TOKEN@%s", which rejoins on its own if the connection drops.
+4. Or with ssh: "ssh -o ProxyCommand='upterm proxy wss://TOKEN@%s' TOKEN@%s".
 `
-			_, _ = fmt.Fprintf(w, data, r.Host, r.Host, r.Host)
+			_, _ = fmt.Fprintf(w, data, r.Host, r.Host, r.Host, sshAddress(r.Host))
 			return
 		default:
 			h.ServeHTTP(w, r)
 		}
 	})
+}
+
+// sshAddress is the host:port the page tells ssh to dial. A Host header already
+// carries the port when the relay isn't on the default one, so appending 443 to
+// it would name a port twice; only a header without one gets 443.
+func sshAddress(hostHeader string) string {
+	host, port, err := net.SplitHostPort(hostHeader)
+	if err != nil {
+		// No port, so the header is a bare name or a bracketed IPv6 literal.
+		host, port = strings.Trim(hostHeader, "[]"), ""
+	}
+	if port == "" {
+		port = "443"
+	}
+	return net.JoinHostPort(host, port)
 }
 
 func (s *webSocketProxy) Serve(ln net.Listener) error {

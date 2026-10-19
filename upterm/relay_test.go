@@ -14,8 +14,8 @@ func TestRelayTextsAreTheWireContract(t *testing.T) {
 		name, got, want string
 	}{
 		{"BannerNoHostFormat", BannerNoHostFormat, "upterm: no host is connected for session %s right now. " +
-			"If it is reconnecting, this same ssh command will work again once it's back. " +
-			"Try again in a few seconds.\n"},
+			"If it's reconnecting, try again once it's back; on some relays the host then has a new command to share. " +
+			"Otherwise it may have ended, or the ID may be wrong.\n"},
 		{"BannerNoHostPrefix", BannerNoHostPrefix, "upterm: no host is connected for session "},
 		{"BannerLookupFailed", BannerLookupFailed, "upterm: the relay can't look up sessions right now. Try again shortly.\n"},
 		{"UpstreamUnavailable", UpstreamUnavailable, "upstream unavailable"},

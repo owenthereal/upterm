@@ -343,7 +343,7 @@ func (s *Server) ServeWithContext(ctx context.Context, guest, host net.Listener)
 			},
 			ChannelHandlers: map[string]gssh.ChannelHandler{
 				"session":      rawSessionHandler,
-				"direct-tcpip": forwardingHandler(s.EventEmitter, s.Forwards),
+				"direct-tcpip": forwardingHandler(s.EventEmitter, s.Forwards, s.ReadOnly),
 			},
 			SubsystemHandlers: subsystemHandlers,
 			// Admits a guest's shell with the session's end, or refuses it
@@ -1016,7 +1016,9 @@ func (h *sessionHandler) HandleSession(sess gssh.Session) {
 	// which the loop below is content with. A guest still needs a pty, because
 	// a guest with no terminal has nothing to show the session on.
 	if !isPty && h.kind == kindGuest {
-		_, _ = io.WriteString(sess, "PTY is required.\n")
+		// With no pty, the guest's ssh client leaves its terminal cooked, so
+		// a bare newline ends the line.
+		_, _ = io.WriteString(sess, "upterm: this session needs a terminal; run ssh without a command, or with -t.\n")
 		_ = sess.Exit(1)
 		// Exit closes the channel. Without returning, the rest of the handler
 		// ran against a dead session: it attached it to the shared output
@@ -1106,6 +1108,9 @@ func (h *sessionHandler) HandleSession(sess gssh.Session) {
 		ptmx, err = h.startForceCommand(ptyReq.Term, ptyReq.Window.Width, ptyReq.Window.Height, auth)
 		if err != nil {
 			h.logger.Error("error starting force command", "error", err)
+			// The guest asked for a pty, so its ssh client has its terminal in
+			// raw mode, and the line ends with a carriage return too.
+			_, _ = io.WriteString(sess.Stderr(), "upterm: this session's command couldn't start; the host's log has why.\r\n")
 			_ = sess.Exit(1)
 			return
 		}
@@ -1603,7 +1608,7 @@ func (h *sessionHandler) HandleSession(sess gssh.Session) {
 	// is about what guests may do; the host is not a guest of its own session.
 	if h.kind == kindGuest && h.readonly {
 		// write to client to notify them that they have connected to a read-only session
-		_, _ = io.WriteString(guestOutput, "\r\n=== Attached to read-only session ===\r\n\r\n")
+		_, _ = io.WriteString(guestOutput, "\r\nupterm: this session is read-only; what you type isn't sent.\r\n\r\n")
 
 		// Still read the client's input, discarding it. Reading is what
 		// tells us the client has gone (EOF), and it keeps the channel

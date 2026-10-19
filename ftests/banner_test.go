@@ -2,11 +2,13 @@ package ftests
 
 import (
 	"encoding/base64"
+	"fmt"
 	"testing"
 
 	"github.com/owenthereal/upterm/host/api"
 	"github.com/owenthereal/upterm/upterm"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/crypto/ssh"
 )
 
 // missingSession is a session on the node at hostNodeAddr that isn't there.
@@ -20,14 +22,21 @@ func testClientBannerForMissingSession(t *testing.T, hostNodeAddr, clientJoinURL
 	var banners []string
 	c := &Client{PrivateKeys: []string{ClientPrivateKey}, BannerCallback: func(m string) error { banners = append(banners, m); return nil }}
 	require.Error(t, c.Join(missingSession(hostNodeAddr), clientJoinURL))
-	require.Len(t, banners, 1)
-	require.Contains(t, banners[0], "no host is connected for session nosuchsession")
+	require.Equal(t, []string{fmt.Sprintf(upterm.BannerNoHostFormat, "nosuchsession")}, banners)
 }
 
 // A guest whose handshake another node completes hears that the session isn't
 // there when it opens its session: in that node's rejection of the channel,
-// not in a banner.
+// not in a banner. A person using ssh reads it in a sentence; upterm join reads
+// the wire text it matches.
 func testClientToldOfMissingSessionThroughAnotherNode(t *testing.T, hostNodeAddr, clientJoinURL string) {
-	c := &Client{PrivateKeys: []string{ClientPrivateKey}}
-	require.ErrorContains(t, c.Join(missingSession(hostNodeAddr), clientJoinURL), upterm.UpstreamNoHost)
+	for clientVersion, want := range map[string]string{
+		"":                          "upterm: no host is connected for session nosuchsession right now; it may have ended, or the ID may be wrong.",
+		upterm.JoinSSHClientVersion: upterm.UpstreamNoHost,
+	} {
+		c := &Client{PrivateKeys: []string{ClientPrivateKey}, ClientVersion: clientVersion}
+		var rejection *ssh.OpenChannelError
+		require.ErrorAs(t, c.Join(missingSession(hostNodeAddr), clientJoinURL), &rejection, "%q", clientVersion)
+		require.Equal(t, want, rejection.Message, "%q", clientVersion)
+	}
 }

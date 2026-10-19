@@ -121,7 +121,7 @@ func forwardDestination(ch ssh.NewChannel) string {
 // Observe acceptance rather than permission: the library checks permission
 // before dialing the target, and either the dial or channel acceptance can fail.
 // Keep its protocol handling and proxy implementation intact.
-func forwardingHandler(events *emitter.Emitter, forwards *Forwards) gssh.ChannelHandler {
+func forwardingHandler(events *emitter.Emitter, forwards *Forwards, readOnly bool) gssh.ChannelHandler {
 	return func(srv *gssh.Server, conn *ssh.ServerConn, channel ssh.NewChannel, ctx gssh.Context) {
 		presence, ok := ctx.Value(forwardingPresenceKey{}).(*forwardingPresence)
 		if !ok || presence == nil {
@@ -135,7 +135,7 @@ func forwardingHandler(events *emitter.Emitter, forwards *Forwards) gssh.Channel
 		}
 		dest := forwardDestination(channel)
 
-		gssh.DirectTCPIPHandler(srv, conn, &forwardingChannel{NewChannel: channel, accepted: func() {
+		gssh.DirectTCPIPHandler(srv, conn, &forwardingChannel{NewChannel: channel, readOnly: readOnly, accepted: func() {
 			if dest != "" {
 				presence.opened(dest)
 			}
@@ -176,6 +176,24 @@ func forwardingHandler(events *emitter.Emitter, forwards *Forwards) gssh.Channel
 type forwardingChannel struct {
 	ssh.NewChannel
 	accepted func()
+	readOnly bool
+}
+
+// Reject words the library's refusal of a forward the session doesn't allow,
+// "port forwarding is disabled", for the guest. It names the flag the host
+// would pass to allow it, except in a read-only session: the host can't pass
+// that flag there without dropping --read-only, so the refusal says why the
+// session doesn't allow it instead. The library refuses that way only when the
+// session's forwarding callback does. Every other refusal keeps its message.
+func (c *forwardingChannel) Reject(reason ssh.RejectionReason, message string) error {
+	if reason == ssh.Prohibited {
+		if c.readOnly {
+			message = "upterm: this session is read-only, so it doesn't allow port forwarding."
+		} else {
+			message = "upterm: this session doesn't allow port forwarding; the host can allow it with --allow-local-tcp-forwarding."
+		}
+	}
+	return c.NewChannel.Reject(reason, message)
 }
 
 func (c *forwardingChannel) Accept() (ssh.Channel, <-chan *ssh.Request, error) {

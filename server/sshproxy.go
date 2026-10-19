@@ -105,10 +105,26 @@ type hopRefusal struct{ err error }
 func (e *hopRefusal) Error() string { return e.err.Error() }
 func (e *hopRefusal) Unwrap() error { return e.err }
 
+// undecodableUser marks a guest's user that an embedded-mode relay can't
+// decode. Such a user carries the session's node as well as its ID, so one that
+// doesn't decode names no session at all: most likely the ID alone, or part of
+// the user the host shared, which the guest can be told how to put right.
+type undecodableUser struct{ err error }
+
+func (e *undecodableUser) Error() string { return e.err.Error() }
+func (e *undecodableUser) Unwrap() error { return e.err }
+
+// permHop is the permissions extension that marks a connection from another
+// relay node, presenting a guest's key. A hop announces x/crypto's default
+// version, as any Go client does, so the certificate it authenticated with is
+// what tells it apart from a plain ssh guest.
+const permHop = "upterm-hop"
+
 // bannerFor is the banner to send with err, the refusal of meta's connection,
-// or "" for none. A guest earns one only by a failed lookup of its session: the
+// or "" for none. A guest earns one by a failed lookup of its session: the
 // session isn't stored (its host may be reconnecting, and about to store it
-// again) or the store couldn't say. Refusing the guest itself, a key the
+// again) or the store couldn't say. On an embedded-mode relay it earns one too
+// by a user that names no session at all. Refusing the guest itself, a key the
 // session doesn't admit, say, sends none, and neither does a host's connection.
 // A key refused to another relay node earns the hop banner, for that node to
 // read. sessionID is the one meta's user names.
@@ -117,8 +133,18 @@ func bannerFor(meta ssh.ConnMetadata, sessionID string, err error) string {
 	if errors.As(err, &hop) {
 		return upterm.HopBannerKeyRefused
 	}
+	if string(meta.ClientVersion()) == upterm.HostSSHClientVersion {
+		return ""
+	}
+	var undecodable *undecodableUser
+	if errors.As(err, &undecodable) {
+		// The user prints on the guest's own terminal, so anything unprintable
+		// in it is escaped, as bannerSessionID escapes an odd ID. It is quoted
+		// whatever its shape, being no session ID.
+		return fmt.Sprintf("upterm: %q isn't a session on this relay; use the whole ssh command the host shared.\n", meta.User())
+	}
 	var lookup *lookupError
-	if string(meta.ClientVersion()) == upterm.HostSSHClientVersion || !errors.As(err, &lookup) {
+	if !errors.As(err, &lookup) {
 		return ""
 	}
 	var missing *ErrSessionNotFound
@@ -273,7 +299,14 @@ func (a proxyAuth) authenticate(conn ssh.ConnMetadata, pk ssh.PublicKey) (*AuthR
 			return nil, nil, false, fmt.Errorf("empty session ID for host connection")
 		}
 	} else if _, _, err := a.SessionManager.GetEncodeDecoder().Decode(conn.User()); err != nil {
-		return nil, nil, false, fmt.Errorf("invalid SSH user format: %w", err)
+		err = fmt.Errorf("invalid SSH user format: %w", err)
+		// Only an embedded-mode user carries more than the session ID, and so
+		// can be cut short to the ID alone. A Consul-mode user is the ID
+		// itself, and any but an empty one decodes.
+		if a.SessionManager.GetRoutingMode() == routing.ModeEmbedded {
+			err = &undecodableUser{err}
+		}
+		return nil, nil, false, err
 	}
 	checker := UserCertChecker{
 		IsUserAuthority: a.isOwnAuthority,
@@ -327,16 +360,17 @@ func (a proxyAuth) authenticate(conn ssh.ConnMetadata, pk ssh.PublicKey) (*AuthR
 // upstream goes. Stock SSH calls this for unsigned public-key queries as well,
 // and a successful query does not count against MaxAuthTries, so it must stay
 // cheap: no certificate minting, no upstream connection, and at most one read
-// of the session.
-func (a proxyAuth) authorize(conn ssh.ConnMetadata, pk ssh.PublicKey) (*AuthRequest, *upstreamTarget, error) {
+// of the session. The flag reports, as authenticate's does, that the key is
+// another relay node's.
+func (a proxyAuth) authorize(conn ssh.ConnMetadata, pk ssh.PublicKey) (*AuthRequest, *upstreamTarget, bool, error) {
 	auth, key, hop, err := a.authenticate(conn, pk)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, false, err
 	}
 
 	target, err := a.resolve(conn)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, false, err
 	}
 	// TODO: simplify auth key validation by moving it to host validation only
 	if !target.admits(key) {
@@ -344,10 +378,10 @@ func (a proxyAuth) authorize(conn ssh.ConnMetadata, pk ssh.PublicKey) (*AuthRequ
 		if hop {
 			err = &hopRefusal{err}
 		}
-		return nil, nil, err
+		return nil, nil, false, err
 	}
 
-	return auth, target, nil
+	return auth, target, hop, nil
 }
 
 // resolve finds where conn's upstream goes, reading the session at most once.
@@ -430,19 +464,24 @@ func (a proxyAuth) plan(conn ssh.ConnMetadata, target *upstreamTarget, creds []s
 // authorization so the decision and the attempt cannot disagree, and takes the
 // attempt's dial target, host-key policy and route from the one session read
 // that authorization made; that costs one extra session lookup, on success
-// only. It does not open a connection.
-func (a proxyAuth) prepare(conn ssh.ConnMetadata, pk ssh.PublicKey) (*preparedRoute, error) {
-	auth, target, err := a.authorize(conn, pk)
+// only. It does not open a connection. The permissions it returns are the
+// client connection's, carrying permHop when the key is another relay node's.
+func (a proxyAuth) prepare(conn ssh.ConnMetadata, pk ssh.PublicKey) (*preparedRoute, *ssh.Permissions, error) {
+	auth, target, hop, err := a.authorize(conn, pk)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	signers, err := a.newUserCertSigners(conn, auth)
 	if err != nil {
-		return nil, fmt.Errorf("error creating cert signers: %w", err)
+		return nil, nil, fmt.Errorf("error creating cert signers: %w", err)
 	}
 
-	return a.plan(conn, target, []ssh.AuthMethod{ssh.PublicKeys(signers...)}), nil
+	perms := &ssh.Permissions{}
+	if hop {
+		perms.Extensions = map[string]string{permHop: ""}
+	}
+	return a.plan(conn, target, []ssh.AuthMethod{ssh.PublicKeys(signers...)}), perms, nil
 }
 
 // prepareFrom plans an attempt from sess, a snapshot of pk's session, with

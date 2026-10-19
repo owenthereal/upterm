@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/go-kit/kit/metrics"
+	"github.com/owenthereal/upterm/upterm"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/crypto/ssh"
 )
@@ -119,7 +120,7 @@ func forwardTestProxy(t *testing.T) (sshPeer, sshPeer, context.CancelFunc, <-cha
 	stopped := make(chan struct{})
 	go func() {
 		defer close(stopped)
-		done <- forwardSSH(ctx, downstream, upstream, abortConnection, discardCounter)
+		done <- forwardSSH(ctx, downstream, upstream, abortConnection, discardCounter, nil)
 	}()
 	t.Cleanup(func() {
 		cancel()
@@ -599,7 +600,7 @@ func TestSSHRejectChannelsAfterHostRejectsKey(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	done := make(chan error, 1)
-	go func() { done <- rejectSSHChannels(ctx, downstream, upstreamErr) }()
+	go func() { done <- rejectSSHChannels(ctx, downstream, upstreamErr, nil) }()
 	for range 40 {
 		ok, _, err := client.conn.SendRequest("keepalive@openssh.com", true, nil)
 		if err != nil || ok {
@@ -614,12 +615,48 @@ func TestSSHRejectChannelsAfterHostRejectsKey(t *testing.T) {
 	_ = forwardTestReceive(t, done)
 }
 
+// The rewrite words every rejection rejectSSHChannels sends: the open it
+// waits for, and the ones the mux had already buffered behind it.
+func TestSSHRejectChannelsRewritesEveryRejection(t *testing.T) {
+	peer := newForwardTestPeer()
+	first, buffered := make(chan *ssh.OpenChannelError, 1), make(chan *ssh.OpenChannelError, 1)
+	opens := make(chan ssh.NewChannel, 2)
+	opens <- forwardTestOpen{from: peer, rejected: first}
+	opens <- forwardTestOpen{from: peer, rejected: buffered}
+	close(opens)
+	require.NoError(t, rejectSSHChannels(t.Context(), sshPeer{peer, opens, peer.requests}, errUpstreamNoHost,
+		func(msg string) string { return "worded: " + msg }))
+	require.Equal(t, "worded: upstream has no session", (<-first).Message)
+	require.Equal(t, "worded: upstream has no session", (<-buffered).Message)
+}
+
+// The rewrite is for the guest's channel opens only: the body of a global
+// request's reply is still the wire text. A host reads it, and OpenSSH
+// ignores it.
+func TestSSHRejectChannelsKeepsTheWireTextInAGlobalRequestsReply(t *testing.T) {
+	client, downstream := forwardTestPair(t, nil, nil)
+	done := make(chan error, 1)
+	go func() {
+		done <- rejectSSHChannels(t.Context(), downstream, errUpstreamNoHost, rejectionRewriteFor("SSH-2.0-OpenSSH_9.6", false, "s"))
+	}()
+	ok, body, err := client.conn.SendRequest("keepalive@openssh.com", true, nil)
+	require.NoError(t, err)
+	require.False(t, ok)
+	require.Equal(t, upterm.UpstreamNoHost, string(body))
+	// The same rewrite words the open, which shows it was set.
+	_, _, err = client.conn.OpenChannel("session", nil)
+	var rejection *ssh.OpenChannelError
+	require.ErrorAs(t, err, &rejection)
+	require.Equal(t, "upterm: no host is connected for session s right now; it may have ended, or the ID may be wrong.", rejection.Message)
+	require.NoError(t, forwardTestReceive(t, done))
+}
+
 func TestSSHRejectChannelsBoundedWait(t *testing.T) {
 	client, downstream := forwardTestPair(t, nil, nil)
 	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Millisecond)
 	defer cancel()
 	done := make(chan error, 1)
-	go func() { done <- rejectSSHChannels(ctx, downstream, errors.New("upstream unavailable")) }()
+	go func() { done <- rejectSSHChannels(ctx, downstream, errors.New("upstream unavailable"), nil) }()
 	if err := forwardTestReceive(t, done); !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("timeout error: %v", err)
 	}
@@ -781,7 +818,7 @@ func TestSSHRejectChannelsBoundedThroughBufferedWrites(t *testing.T) {
 	defer cancel()
 	done := make(chan error, 1)
 	go func() {
-		done <- rejectSSHChannels(ctx, sshPeer{conn, conn.channels, requests}, errors.New("upstream unavailable"))
+		done <- rejectSSHChannels(ctx, sshPeer{conn, conn.channels, requests}, errors.New("upstream unavailable"), nil)
 	}()
 	select {
 	case err := <-done:
@@ -882,7 +919,7 @@ func TestSSHForwardPassesOnARejectionFromAPeerThatThenLeft(t *testing.T) {
 		node.rejection = &ssh.OpenChannelError{Reason: ssh.ConnectionFailed, Message: "upstream has no session"}
 		done := make(chan error, 1)
 		go func() {
-			done <- forwardSSH(t.Context(), guest.sshPeer(), node.sshPeer(), abortConnection, discardCounter)
+			done <- forwardSSH(t.Context(), guest.sshPeer(), node.sshPeer(), abortConnection, discardCounter, nil)
 		}()
 		rejected := guest.open(false)
 		synctest.Wait() // the open is in flight toward the node
@@ -899,6 +936,27 @@ func TestSSHForwardPassesOnARejectionFromAPeerThatThenLeft(t *testing.T) {
 	})
 }
 
+// A rewrite words the rejections the downstream, the guest, is sent. The
+// upstream is sent the downstream's own rejections as they are.
+func TestSSHForwardRewritesOnlyTheDownstreamsRejections(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		guest, node := newForwardTestPeer(), newForwardTestPeer()
+		guest.rejection = &ssh.OpenChannelError{Reason: ssh.ConnectionFailed, Message: "upstream has no session"}
+		node.rejection = guest.rejection
+		close(guest.answered)
+		close(node.answered)
+		done := make(chan error, 1)
+		go func() {
+			done <- forwardSSH(t.Context(), guest.sshPeer(), node.sshPeer(), abortConnection, discardCounter,
+				func(msg string) string { return "worded: " + msg })
+		}()
+		require.Equal(t, "worded: upstream has no session", (<-guest.open(false)).Message)
+		require.Equal(t, "upstream has no session", (<-node.open(false)).Message)
+		node.end()
+		require.ErrorIs(t, <-done, io.EOF)
+	})
+}
+
 // Waiting for that rejection is bounded like the drain: a guest that has
 // stopped reading cannot hold its connection open by not taking it.
 func TestSSHForwardWaitsForThatRejectionOnlyAsLongAsTheDrain(t *testing.T) {
@@ -908,7 +966,7 @@ func TestSSHForwardWaitsForThatRejectionOnlyAsLongAsTheDrain(t *testing.T) {
 		close(node.answered)
 		done := make(chan error, 1)
 		go func() {
-			done <- forwardSSH(t.Context(), guest.sshPeer(), node.sshPeer(), abortConnection, discardCounter)
+			done <- forwardSSH(t.Context(), guest.sshPeer(), node.sshPeer(), abortConnection, discardCounter, nil)
 		}()
 		guest.open(true)
 		synctest.Wait() // the rejection is stuck in a write the guest is not reading
@@ -1307,7 +1365,7 @@ func TestSSHForwardSuccessReplyBeforePeerClose(t *testing.T) {
 			}
 			ctx, cancel := context.WithCancel(context.Background())
 			done := make(chan error, 1)
-			go func() { done <- forwardSSH(ctx, downstream, upstream, abortConnection, discardCounter) }()
+			go func() { done <- forwardSSH(ctx, downstream, upstream, abortConnection, discardCounter, nil) }()
 			t.Cleanup(func() { cancel(); _ = forwardTestReceive(t, done) })
 			a, ar, b, br := forwardTestChannel(t, origin, destination)
 			type response struct {
@@ -2045,7 +2103,7 @@ func TestHostScopedAbortLeavesTheTunnelWorking(t *testing.T) {
 	upstream.conn = &gateFirstChannelConn{Conn: upstream.conn, gate: gate}
 
 	forwarded := make(chan error, 1)
-	go func() { forwarded <- forwardSSH(t.Context(), downstream, upstream, abortChannel, discardCounter) }()
+	go func() { forwarded <- forwardSSH(t.Context(), downstream, upstream, abortChannel, discardCounter, nil) }()
 
 	// The stalled channel: opened first, so it gets the gate.
 	stalled := openTestChannel(t, client)

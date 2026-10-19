@@ -1466,7 +1466,7 @@ func Test_sshd_ProxyTrafficDoesNotKeepASilentHostAlive(t *testing.T) {
 	finished := make(chan struct{})
 	go func() {
 		defer close(finished)
-		_ = forwardSSH(ctx, downstream, sshPeer{conn: c, channels: chans, requests: reqs}, abortChannel, discardCounter)
+		_ = forwardSSH(ctx, downstream, sshPeer{conn: c, channels: chans, requests: reqs}, abortChannel, discardCounter, nil)
 	}()
 	t.Cleanup(func() { cancel(); <-finished })
 

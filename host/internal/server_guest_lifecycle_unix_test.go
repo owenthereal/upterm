@@ -3,6 +3,7 @@
 package internal
 
 import (
+	"bytes"
 	"net"
 	"testing"
 	"time"
@@ -184,6 +185,63 @@ func TestDisabledSFTPSessionDoesNotJoin(t *testing.T) {
 		t.Fatalf("disabled SFTP session left without joining: %v", e.Args)
 	case <-time.After(100 * time.Millisecond):
 	}
+}
+
+// A refused forward names the flag that would allow it, for the guest to pass
+// on to the host.
+func TestARefusedForwardNamesTheFlag(t *testing.T) {
+	h := startHost(t, &Server{Command: readsALine("READY", 0)})
+	_, err := h.guestClient(t).Dial("tcp", "127.0.0.1:1")
+	var open *ssh.OpenChannelError
+	require.ErrorAs(t, err, &open)
+	require.Equal(t, ssh.Prohibited, open.Reason)
+	require.Equal(t, "upterm: this session doesn't allow port forwarding; the host can allow it with --allow-local-tcp-forwarding.", open.Message)
+}
+
+// A read-only session can't allow forwarding: the host would have to drop
+// --read-only to pass the flag, so the refusal says what the session is
+// instead of naming it.
+func TestAReadOnlySessionsRefusedForwardSaysSo(t *testing.T) {
+	h := startHost(t, &Server{Command: readsALine("READY", 0), ReadOnly: true})
+	_, err := h.guestClient(t).Dial("tcp", "127.0.0.1:1")
+	var open *ssh.OpenChannelError
+	require.ErrorAs(t, err, &open)
+	require.Equal(t, ssh.Prohibited, open.Reason)
+	require.Equal(t, "upterm: this session is read-only, so it doesn't allow port forwarding.", open.Message)
+}
+
+// A forward the session allows but the dial fails keeps the library's own
+// connect-failure text: only the refusal for a session that doesn't allow
+// forwarding is reworded.
+func TestAForwardThatCantConnectKeepsTheLibrarysText(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	closed := ln.Addr().String()
+	require.NoError(t, ln.Close())
+
+	h := startHost(t, &Server{Command: readsALine("READY", 0), AllowLocalTCPForwarding: true})
+	_, err = h.guestClient(t).Dial("tcp", closed)
+	var open *ssh.OpenChannelError
+	require.ErrorAs(t, err, &open)
+	require.Equal(t, ssh.ConnectionFailed, open.Reason)
+	require.Contains(t, open.Message, "connection refused")
+	require.NotContains(t, open.Message, "port forwarding")
+}
+
+// A guest whose forced command can't start is told so on its stderr, and where
+// to find why: the host's log. The guest has a pty, and its terminal is raw,
+// so the line ends with a carriage return as well.
+func TestAGuestWhoseForcedCommandCantStartIsTold(t *testing.T) {
+	h := startHost(t, &Server{Command: readsALine("READY", 0), ForceCommand: []string{"/nonexistent-upterm-force-command"}})
+	sess, err := h.guestClient(t).NewSession()
+	require.NoError(t, err)
+	require.NoError(t, sess.RequestPty("xterm", 24, 80, ssh.TerminalModes{}))
+	var stdout, stderr bytes.Buffer
+	sess.Stdout, sess.Stderr = &stdout, &stderr
+	require.NoError(t, sess.Shell())
+	requireExitStatus(t, sess.Wait(), 1)
+	require.Equal(t, "upterm: this session's command couldn't start; the host's log has why.\r\n", stderr.String())
+	require.Empty(t, stdout.String())
 }
 
 func TestFailedForceCommandDoesNotJoin(t *testing.T) {

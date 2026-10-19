@@ -249,7 +249,7 @@ func (p *SSHRouting) stockConnection(ctx context.Context, accepted net.Conn, ins
 		// without incrementing authFailures, so MaxAuthTries does not bound it.
 		// Anything expensive here is reachable before any signature is verified.
 		PublicKeyCallback: func(meta ssh.ConnMetadata, key ssh.PublicKey) (*ssh.Permissions, error) {
-			if _, _, err := p.Auth.authorize(meta, key); err != nil {
+			if _, _, _, err := p.Auth.authorize(meta, key); err != nil {
 				return nil, refuse(meta, err)
 			}
 			return &ssh.Permissions{}, nil
@@ -257,9 +257,10 @@ func (p *SSHRouting) stockConnection(ctx context.Context, accepted net.Conn, ins
 		// Minting upstream credentials costs a certificate signature per
 		// configured signer, so it waits until the client has proven it holds
 		// the key. Running once, after verification, also removes any need to
-		// match credentials back to an offered key after the handshake.
-		VerifiedPublicKeyCallback: func(meta ssh.ConnMetadata, key ssh.PublicKey, permissions *ssh.Permissions, _ string) (*ssh.Permissions, error) {
-			planned, err := p.Auth.prepare(meta, key)
+		// match credentials back to an offered key after the handshake. The
+		// permissions returned here are the ones the connection keeps.
+		VerifiedPublicKeyCallback: func(meta ssh.ConnMetadata, key ssh.PublicKey, _ *ssh.Permissions, _ string) (*ssh.Permissions, error) {
+			planned, permissions, err := p.Auth.prepare(meta, key)
 			if err != nil {
 				return nil, refuse(meta, err)
 			}
@@ -292,6 +293,12 @@ func (p *SSHRouting) stockConnection(ctx context.Context, accepted net.Conn, ins
 	if clientVersion == upterm.HostSSHClientVersion {
 		defer p.hostActivity.track(downstream.SessionID(), raw)()
 	}
+	// How this node words the rejections it sends the client, its own or the
+	// next node's: a sentence for plain ssh, the wire text for join, a host and
+	// relay hops.
+	_, hop := downstream.Permissions.Extensions[permHop]
+	sessionID, _, _ := p.Auth.SessionManager.GetEncodeDecoder().Decode(downstream.User())
+	rewrite := rejectionRewriteFor(clientVersion, hop, sessionID)
 	peer := sshPeer{downstream, channels, requests}
 	upstreamCtx, cancel := context.WithTimeout(ctx, stage)
 	defer cancel()
@@ -332,7 +339,7 @@ func (p *SSHRouting) stockConnection(ctx context.Context, accepted net.Conn, ins
 		} else {
 			inst.authenticatedClient.Add(1)
 		}
-		return forwardSSH(ctx, peer, upstream.sshPeer, abortScopeFor(clientVersion), inst.stalledChannelAborts)
+		return forwardSSH(ctx, peer, upstream.sshPeer, abortScopeFor(clientVersion), inst.stalledChannelAborts, rewrite)
 	}
 	// Report the failure on a fresh budget rather than upstreamCtx's: on a dial
 	// or handshake timeout — the most common way to get here — that budget is
@@ -344,7 +351,7 @@ func (p *SSHRouting) stockConnection(ctx context.Context, accepted net.Conn, ins
 	// whatever its text.
 	rejectCtx, rejectCancel := context.WithTimeout(ctx, min(stage, maxSSHRejectTimeout))
 	defer rejectCancel()
-	_ = rejectSSHChannels(rejectCtx, peer, upstreamFailureReason(err))
+	_ = rejectSSHChannels(rejectCtx, peer, upstreamFailureReason(err), rewrite)
 	return err
 }
 

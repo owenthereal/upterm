@@ -86,7 +86,7 @@ func TestForwardingRejectsMissingConnectionMetadata(t *testing.T) {
 				return false // A mistaken delegation still cannot dial a target.
 			}}
 
-			forwardingHandler(events, &Forwards{})(srv, nil, channel, ctx)
+			forwardingHandler(events, &Forwards{}, false)(srv, nil, channel, ctx)
 
 			require.Equal(t, ssh.ConnectionFailed, channel.rejectReason)
 			require.Contains(t, channel.rejectMessage, "metadata")

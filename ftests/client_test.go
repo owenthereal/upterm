@@ -76,7 +76,7 @@ func testClientAuthorizedKeyNotMatching(t *testing.T, hostShareURL, hostNodeAddr
 	// words: the upstream's error text names internal node addresses and is
 	// never relayed to the joiner.
 	require.Error(err, "connection should be rejected with wrong key")
-	assert.ErrorContains(err, keyRefusal(hostShareURL, clientJoinURL), "should fail with the session's refusal of the key")
+	assert.ErrorContains(err, keyRefusal(session, hostShareURL, clientJoinURL), "should fail with the session's refusal of the key")
 }
 
 func testClientNonExistingSession(t *testing.T, hostShareURL, hostNodeAddr, clientJoinURL string) {
@@ -256,12 +256,8 @@ func testClientAttachReadOnly(t *testing.T, hostShareURL, hostNodeAddr, clientJo
 	remoteInputCh, remoteOutputCh := c.InputOutput()
 	remoteScanner := scanner(remoteOutputCh)
 
-	// client output
-	// client should get "welcome message"
-	// \n
-	// === Attached to read-only session ===
-	// \n
-	expectLine(t, remoteScanner, "=== Attached to read-only session ===", "client should see read-only welcome message")
+	// The guest is told the session is read-only.
+	expectLine(t, remoteScanner, "upterm: this session is read-only; what you type isn't sent.", "client should see the read-only notice")
 
 	// host input should still work
 	hostInputCh <- `echo "hello"`
@@ -453,7 +449,7 @@ func testClientLocalPortForwardDisabled(t *testing.T, hostShareURL, hostNodeAddr
 	}
 
 	require.Error(err)
-	assert.ErrorContains(err, "port forwarding is disabled")
+	assert.ErrorContains(err, "upterm: this session doesn't allow port forwarding; the host can allow it with --allow-local-tcp-forwarding.")
 }
 
 // testGuestKeepaliveIsAnswered pins what a guest's liveness check relies on: a
@@ -603,15 +599,15 @@ func setupAdminSocket(t *testing.T) string {
 	return filepath.Join(adminSockDir, "u.sock")
 }
 
-// keyRefusal is what a guest joining at clientJoinURL is told when the session
-// shared at hostShareURL refuses its key. Where the entry node completes the
-// handshake and carries the connection on, the session's node refuses the key
-// and says so, and the guest hears that verdict when it opens its session.
-// Otherwise the guest's handshake is with the node that holds the authorized
-// keys, and it fails to authenticate.
-func keyRefusal(hostShareURL, clientJoinURL string) string {
+// keyRefusal is what a plain ssh guest joining at clientJoinURL is told when
+// session, shared at hostShareURL, refuses its key. Where the entry node
+// completes the handshake and carries the connection on, the session's node
+// refuses the key and says so, and the guest reads that verdict, in a
+// sentence, when it opens its session. Otherwise the guest's handshake is with
+// the node that holds the authorized keys, and it fails to authenticate.
+func keyRefusal(session *api.GetSessionResponse, hostShareURL, clientJoinURL string) string {
 	if entryNodeCompletesHandshake(hostShareURL, clientJoinURL) {
-		return upterm.UpstreamKeyRefused
+		return "upterm: session " + session.SessionId + " refused your key; if another key is authorized, pass it with ssh -i, or ask the host to add yours."
 	}
 	return "unable to authenticate"
 }
