@@ -449,26 +449,29 @@ func (e *emulation) watchGraphics() {
 // which acts on it: a tmux passthrough, which a joiner running in tmux hands
 // on to the terminal tmux runs in, DECUDK's keys, DECDLD's soft font, ReGIS,
 // DECRSTS's and DECRSPS's restores, XTSETTCAP's key names, DECAUPSS's
-// character set and DECDMAC's macros, which DECINVM (CSI Pn * z) later
-// invokes. Of these xterm ignores DECRSTS and DECDMAC, which Windows Terminal
-// and DEC's terminals act on. xterm ignores the rest, so for them the raw
-// replay hands an xterm joiner nothing the render leaves out: vim's probe of
-// whether it does, DCS z z ST, a final xterm has no use for, or one of these
-// under a private prefix, which xterm reads as the final. A terminal may act
-// on one of its own all the same, as kitty does on its remote control, DCS
-// @kitty-cmd, which isn't noted. Of the DCS a program sends, the query
-// filter drops only the requests, DECRQSS, XTGETTCAP and XTGETXRES, before
-// the ring, and watchGraphics notes a sixel, as an image.
+// character set, DECDMAC's macros, which DECINVM (CSI Pn * z) later invokes,
+// and kitty's own strings, DCS @kitty-, among them its remote control, DCS
+// @kitty-cmd, which runs a command in kitty where the user allows it. Of
+// these xterm ignores DECRSTS and DECDMAC, which Windows Terminal and DEC's
+// terminals act on, and kitty's, which only kitty acts on. xterm ignores the
+// rest, so for them the raw replay hands an xterm joiner nothing the render
+// leaves out: vim's probe of whether it does, DCS z z ST, a final xterm has
+// no use for, or one of these under a private prefix, which xterm reads as
+// the final. Another terminal may act on one of its own all the same, which
+// isn't noted. Of the DCS a program sends, the query filter drops only the
+// requests, DECRQSS, XTGETTCAP and XTGETXRES, before the ring, and
+// watchGraphics notes a sixel, as an image.
 //
 // x/vt keys a handler by the DCS's prefix, its last intermediate and its
 // final byte, not its parameters, so these are noted whatever their
 // parameters: xterm takes DECAUPSS and DECRSPS only with a one-digit one and
-// XTSETTCAP only with none, where a DEC terminal reads a number. tmux's
-// passthrough is DCS tmux;, its final the t and its data what follows, which
-// tmux takes under any prefix, parameters and intermediate, so every key
-// whose final is t gets a handler that notes data that starts mux;. A C0
-// control or an ESC as the first byte makes the key 0: x/vt keeps it and
-// what follows as the string's data, up to the next ESC, where a DEC
+// XTSETTCAP only with none, where a DEC terminal reads a number, and kitty
+// takes its own only with none; kitty's are noted whatever their data too.
+// tmux's passthrough is DCS tmux;, its final the t and its data what
+// follows, which tmux takes under any prefix, parameters and intermediate,
+// so every key whose final is t gets a handler that notes data that starts
+// mux;. A C0 control or an ESC as the first byte makes the key 0: x/vt keeps
+// it and what follows as the string's data, up to the next ESC, where a DEC
 // terminal ignores the control and reads the string after it, which may be
 // any of these, or ends the string at that first ESC and reads what follows
 // as it comes; so key 0 is noted whatever its data.
@@ -497,6 +500,7 @@ func (e *emulation) watchDCS() {
 		ansi.Command(0, '+', 'p'), // XTSETTCAP
 		ansi.Command(0, '!', 'u'), // DECAUPSS
 		ansi.Command(0, '!', 'z'), // DECDMAC
+		ansi.Command(0, 0, '@'),   // kitty's own, its remote control among them
 	} {
 		t.RegisterDcsHandler(cmd, note)
 	}

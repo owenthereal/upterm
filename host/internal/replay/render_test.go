@@ -1002,16 +1002,17 @@ func TestReplayFailsOnTerminalGraphics(t *testing.T) {
 // A DCS the session sent that changes the terminal's state, which x/vt has no
 // handler for and drops, fails the render, named, as a raw replay carries it
 // to the joiner's terminal, which acts on it: a tmux passthrough, which a
-// joiner running in tmux hands on to the terminal tmux runs in; DECUDK's
-// keys, DECDLD's soft font, ReGIS, under whose final iTerm2's tmux
-// integration begins too, DECRSTS's and DECRSPS's restores, XTSETTCAP,
-// DECAUPSS and DECDMAC's macros. So does one whose first byte is an ESC or a
-// C0 control, which x/vt reads as the string's data, where a DEC terminal
-// ends the string at the ESC, or ignores the control and reads the string
-// after it, here DECUDK: the filter drops either after an ESC P, so each
-// comes by the 8-bit introducer, which the filter passes. An image in a tmux
-// passthrough is read as a DEC terminal reads it, the DCS ended by its first
-// ESC and the image a sequence of its own, so it is named as the image.
+// joiner running in tmux hands on to the terminal tmux runs in; DECUDK's keys,
+// DECDLD's soft font, ReGIS, under whose final iTerm2's tmux integration
+// begins too, DECRSTS's and DECRSPS's restores, XTSETTCAP, DECAUPSS, DECDMAC's
+// macros and kitty's remote control, which runs a command in a kitty joiner
+// that allows it. So does one whose first byte is an ESC or a C0 control,
+// which x/vt reads as the string's data, where a DEC terminal ends the string
+// at the ESC, or ignores the control and reads the string after it, here
+// DECUDK: the filter drops either after an ESC P, so each comes by the 8-bit
+// introducer, which the filter passes. An image in a tmux passthrough is read
+// as a DEC terminal reads it, the DCS ended by its first ESC and the image a
+// sequence of its own, so it is named as the image.
 //
 // Any other DCS renders, as xterm ignores it, and so a raw replay hands the
 // joiner something it drops too: vim's probe of whether the terminal
@@ -1040,6 +1041,7 @@ func TestReplayFailsOnADeviceControlString(t *testing.T) {
 		{"XTSETTCAP", "\x1bP+p544e=787465726d\x1b\\"},
 		{"DECAUPSS", "\x1bP1!uA\x1b\\"},
 		{"DECDMAC", "\x1bP1;0;0!zA\x1b\\"},
+		{"kitty's remote control", "\x1bP@kitty-cmd{\"cmd\":\"ls\"}\x1b\\"},
 		{"an ESC first", "\x90\x1b[31mX\x1b\\"},
 		{"a C0 control first", "\x90\r1;1|17/736F6D65\x1b\\"},
 		{"the synchronized output key with another value", "\x1bP=3s\x1b\\"},
@@ -1152,8 +1154,8 @@ func (l *dcsLog) Printf(format string, v ...any) {
 // an ESC, which a DEC terminal reads otherwise. The ones that change it are
 // tmux's passthrough, by its data under any prefix, parameters and
 // intermediate, as tmux reads it; DECUDK, DECDLD, ReGIS, DECRSTS, DECRSPS,
-// XTSETTCAP, DECAUPSS and DECDMAC, under no prefix; and synchronized
-// output's key with anything but DCS = 1 s or DCS = 2 s.
+// XTSETTCAP, DECAUPSS, DECDMAC and kitty's own, under @, under no prefix;
+// and synchronized output's key with anything but DCS = 1 s or DCS = 2 s.
 func dcsEffect(head string, data []byte) (changes, draws bool) {
 	if head == "" {
 		return true, false
@@ -1177,7 +1179,7 @@ func dcsEffect(head string, data []byte) (changes, draws bool) {
 	switch [2]byte{inter, final} {
 	case [2]byte{0, 'q'}:
 		return false, true
-	case [2]byte{0, '|'}, [2]byte{0, '{'}, [2]byte{0, 'p'}, [2]byte{'$', 'p'}, [2]byte{'$', 't'}, [2]byte{'+', 'p'}, [2]byte{'!', 'u'}, [2]byte{'!', 'z'}:
+	case [2]byte{0, '|'}, [2]byte{0, '{'}, [2]byte{0, 'p'}, [2]byte{'$', 'p'}, [2]byte{'$', 't'}, [2]byte{'+', 'p'}, [2]byte{'!', 'u'}, [2]byte{'!', 'z'}, [2]byte{0, '@'}:
 		return true, false
 	}
 	return false, false
