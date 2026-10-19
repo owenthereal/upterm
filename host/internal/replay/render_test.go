@@ -7,6 +7,7 @@ import (
 	"image/color"
 	"maps"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -351,7 +352,8 @@ func TestReplayRebuildsTheHiddenAlternateScreenBy1049(t *testing.T) {
 }
 
 // The region comes from the emulator, which a resize resets, wherever the
-// DECSTBM was: in the ring, or in the state the ring starts in.
+// DECSTBM was: in the ring, or in the state the ring starts in. The render
+// sets none after its preamble, whose own resets the joiner's.
 func TestReplayMarginsComeFromTheEmulator(t *testing.T) {
 	decstbm := regexp.MustCompile(`\x1b\[[0-9;]*r`)
 	tall := termsize.Size{Cols: 80, Rows: 30}
@@ -361,7 +363,7 @@ func TestReplayMarginsComeFromTheEmulator(t *testing.T) {
 		e := startFor(t, captureOf(stream, event(1, 0, 80, 24), event(2, len(stream), 80, 30)), tall)
 		render, err := e.Render()
 		require.NoError(t, err)
-		require.NotRegexp(t, decstbm, string(render))
+		require.NotRegexp(t, decstbm, string(bytes.TrimPrefix(render, []byte(preamble))))
 
 		a, aHist := newReference(80, 24)
 		_, _ = a.WriteString(stream)
@@ -385,7 +387,7 @@ func TestReplayMarginsComeFromTheEmulator(t *testing.T) {
 		e := startFor(t, c, tall)
 		render, err := e.Render()
 		require.NoError(t, err)
-		require.NotRegexp(t, decstbm, string(render))
+		require.NotRegexp(t, decstbm, string(bytes.TrimPrefix(render, []byte(preamble))))
 		require.Equal(t, uv.Rect(0, 0, 80, 30), e.term.ActiveScreen().ScrollRegion())
 	})
 }
@@ -621,7 +623,8 @@ func TestReplayInstallsTheOneRegionAfterBothBuffers(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			j := joinAt(t, 80, 24, tc.stream)
-			require.Len(t, regexp.MustCompile(`\x1b\[[0-9;]*r`).FindAll(j.render, -1), 1)
+			// The preamble's own resets the joiner's.
+			require.Len(t, regexp.MustCompile(`\x1b\[[0-9;]*r`).FindAll(bytes.TrimPrefix(j.render, []byte(preamble)), -1), 1)
 			require.Contains(t, string(j.render), tc.lastSwitch)
 			require.Greater(t, bytes.Index(j.render, []byte("\x1b[2;10r")), bytes.LastIndex(j.render, []byte(tc.lastSwitch)))
 			require.Equal(t, uv.Rect(0, 1, 80, 9), j.b.ActiveScreen().ScrollRegion())
@@ -2117,7 +2120,11 @@ func TestReplayRestoresTheCursorSCORCReturnsTo(t *testing.T) {
 
 // joinOwn joins, through the fan-out, a joiner whose terminal, b, a program
 // left in the state own sets, as joinAt does one at its defaults: b is given
-// own, then what the joiner was sent, and must then be in a's state.
+// own, then what the joiner was sent, and must then be in a's state. The rows
+// own left above b's cursor are the joiner's earlier screen, which the render
+// scrolls into b's scrollback from the cursor's row on, before the history:
+// b's history must hold what own scrolled off, then those rows, then a's
+// history, and is compared from a's on.
 func joinOwn(t *testing.T, cols, rows int, own, stream string) *joined {
 	t.Helper()
 	sent, fellBack := fanOut(t, New(), []byte(stream), []uio.SizeEvent{event(1, 0, cols, rows)}, 64<<10)
@@ -2131,9 +2138,59 @@ func joinOwn(t *testing.T, cols, rows int, own, stream string) *joined {
 	j.b, j.bHist = newReference(cols, rows)
 	j.bTitle = watchTitle(j.b)
 	_, _ = j.b.WriteString(own)
+	require.False(t, j.b.IsAltScreen(), "own leaves the main screen showing")
+	earlier := slices.Clone(*j.bHist)
+	for y := range j.b.CursorPosition().Y {
+		line, err := encodeLine(j.b.MainScreen().Line(y), budget)
+		require.NoError(t, err)
+		earlier = append(earlier, line)
+	}
 	_, _ = j.b.Write(sent)
+	got := *j.bHist
+	require.True(t, len(got) >= len(earlier) && slices.EqualFunc(earlier, got[:len(earlier)], bytes.Equal),
+		"the joiner's earlier screen, above its cursor, in its scrollback: %q, then %q", earlier, got)
+	*j.bHist = got[len(earlier):]
 	j.requireSame(t)
 	return j
+}
+
+// A program can leave the joiner's terminal with a scroll region, left and
+// right margins, insert mode, LNM or origin mode set: one killed mid-draw, or
+// a pager left in a region. The render draws from none of them, so it resets
+// each first, where the cursor stays, on whatever row the joiner's own output
+// left it: the rows above it still scroll into the joiner's scrollback, as
+// they do from a terminal at its defaults, before the history, and the live
+// bytes after the render land as on the session's terminal. Origin mode goes
+// off too, but only after the history (see draw).
+func TestReplayResetsTheJoinersRegionAndEditingModes(t *testing.T) {
+	var stream strings.Builder
+	for i := range 20 {
+		fmt.Fprintf(&stream, "line %d\r\n", i)
+	}
+	stream.WriteString("the end")
+	const earlier, prompt = "own 0\r\nown 1\r\nown 2\r\n", "prompt$ upterm join"
+	for _, tc := range []struct{ name, own string }{
+		{"none of them", ""},
+		{"a scroll region, the cursor in it", "\x1b[5;10r\x1b[6;1H"},
+		{"a scroll region, the cursor below it", "\x1b[3;6r\x1b[9;1H"},
+		{"insert mode", "\x1b[4h"},
+		{"LNM", "\x1b[20h"},
+		{"left and right margins, the cursor inside them", "\x1b[?69h\x1b[10;40s\x1b[5;12H"},
+		{"origin mode in a scroll region", "\x1b[5;10r\x1b[?6h\x1b[2;3H"},
+		{"all of them", "\x1b[5;10r\x1b[?69h\x1b[10;40s\x1b[?6h\x1b[4h\x1b[20h\x1b[2;3H"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			j := joinOwn(t, 80, 12, earlier+tc.own+prompt, stream.String())
+			require.False(t, j.b.Mode(ansi.ModeOrigin).IsSet(), "origin mode")
+			// A line feed at the bottom, a print, and a bare line feed, which
+			// returns the carriage under LNM only.
+			j.then(t, "\r\nafter\nmore")
+			// A print over a drawn cell, which insert mode would shift.
+			j.then(t, "\x1b[1;1Hover")
+			// A region and a CUP, which origin mode would place inside it.
+			j.then(t, "\x1b[3;8r\x1b[2;1Hin the region\r\n\x1b[8;1H\nscrolled")
+		})
+	}
 }
 
 // The render draws from no link and the ASCII charsets, G0 in GL and G2 in
