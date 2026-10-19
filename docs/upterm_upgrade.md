@@ -15,7 +15,7 @@ can't check whether a package owns it. Without VERSION, a build newer than
 the latest release is left as it is.
 
 Exit status: 0 when upterm is up to date or was replaced; 1 when it couldn't
-be, or a package manager owns it.
+be, a package manager owns it, or its arguments are wrong.
 
 ```
 upterm upgrade [VERSION] [flags]

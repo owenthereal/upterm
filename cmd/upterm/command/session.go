@@ -397,7 +397,8 @@ deletes the records of sessions that ended more than %s ago, after which
 -o json prints a JSON array of what 'upterm session info NAME -o json'
 prints, one per running session, and [] when none is running.
 
-Exit status: 0, or 1 when the session records can't be read.`, sessiondir.ResultsRoot(stateDir), retentionText(sessiondir.RecordRetention)),
+Exit status: 0, or 1 on failure, such as session records that can't be read
+or a usage or configuration error.`, sessiondir.ResultsRoot(stateDir), retentionText(sessiondir.RecordRetention)),
 		Example: `  # List the running sessions:
   upterm session list
 
@@ -500,9 +501,10 @@ session that has already ended is reported from its record, which
 Exit status follows the session: its command's status when the command
 exited; 0 when it was stopped, or no guest joined within its join timeout;
 128+N when the host or its command was killed by signal N; 125 when the
-outcome can't be known or read, or no session has the name. A command can
-exit 125 too; 'upterm session info NAME -o json' has the reason. Ctrl-C
-stops waiting, with 130 on Unix, and leaves the session running.`, retentionText(sessiondir.RecordRetention)),
+outcome can't be known or read, when no session has the name, or for a usage
+or configuration error. A command can exit 125 too; 'upterm session info
+NAME -o json' has the reason. Ctrl-C stops waiting, with 130 on Unix, and
+leaves the session running.`, retentionText(sessiondir.RecordRetention)),
 		Example: `  # Wait for a detached session and take its exit status:
   upterm host --detach --accept --name build -- make
   upterm session wait build

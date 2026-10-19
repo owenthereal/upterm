@@ -52,19 +52,19 @@ const exampleSessionID = "d3k5fia7m4us73ehblug"
 // exitStatuses is what each command's help ends with: when it exits with
 // what.
 var exitStatuses = map[string]string{
-	"upterm host":   "Exit status: the command's own status when it exits; 1 when upterm fails, or the session is stopped or ends by a signal (whatever the command returns while it is torn down); 254 when this terminal is disconnected; 130 for Ctrl-C at a prompt; 0 after declining at the prompt or detaching (~.). A command's own 1 or 254 reads the same. With --detach: 0 once the session has started, 1 when it can't start; upterm session wait NAME reports the command's status.",
+	"upterm host":   "Exit status: the command's own status when it exits; 1 when upterm fails, or the session is stopped or ends by a signal (whatever the command returns while it is torn down); 254 when this terminal is disconnected; 130 for Ctrl-C at a prompt, 143 for a SIGTERM there; 0 after declining at the prompt or detaching (~.). A command's own 1 or 254 reads the same. With --detach: 0 once the session has started, 1 when it can't start; upterm session wait NAME reports the command's status.",
 	"upterm attach": "Exit status: 0 after a detach; the session's status once it ends (0 when no guest joined within its join timeout; 1 when it was stopped or ended by a signal); 254 if this terminal was disconnected; 255 if it could not attach, including a usage or configuration error.",
 	"upterm join":   "Exits with the session's status when one arrives, 0 when you leave (~.), 130 when stopped, and 255 when it can't join, including a usage or configuration error.",
 	"upterm proxy":  "Exit status: 1 when it can't connect to the relay, including a usage or configuration error. Once connected, the first result reported decides: 0 for end-of-input from ssh, 1 when the relay closes the connection or a read or write fails.",
 
 	"upterm session current": "Exits 4 when not in a session ($UPTERM_ADMIN_SOCKET is unset, or no session answers at it), and 1 for any other failure. With -o, not being in a session prints nothing.",
 	"upterm session info":    "Exits 4 when no session has the name, and 1 for any other failure.",
-	"upterm session list":    "Exit status: 0, or 1 when the session records can't be read.",
+	"upterm session list":    "Exit status: 0, or 1 on failure, such as session records that can't be read or a usage or configuration error.",
 	"upterm session set":     "Exits 0 when the session took the change, was already claimed, is ending, or has already ended, 4 when no session has the name, and 1 for any other failure -- including a change that could not be confirmed, which may still have taken effect: running set again restarts the window, and 'upterm session info NAME' shows what the session holds.",
 	"upterm session stop":    "Exits 4 when no session has the name, and 1 for any other failure.",
-	"upterm session wait":    "Exit status follows the session: its command's status when the command exited; 0 when it was stopped, or no guest joined within its join timeout; 128+N when the host or its command was killed by signal N; 125 when the outcome can't be known or read, or no session has the name. A command can exit 125 too; 'upterm session info NAME -o json' has the reason. Ctrl-C stops waiting, with 130 on Unix, and leaves the session running.",
+	"upterm session wait":    "Exit status follows the session: its command's status when the command exited; 0 when it was stopped, or no guest joined within its join timeout; 128+N when the host or its command was killed by signal N; 125 when the outcome can't be known or read, when no session has the name, or for a usage or configuration error. A command can exit 125 too; 'upterm session info NAME -o json' has the reason. Ctrl-C stops waiting, with 130 on Unix, and leaves the session running.",
 
-	"upterm upgrade":     "Exit status: 0 when upterm is up to date or was replaced; 1 when it couldn't be, or a package manager owns it.",
+	"upterm upgrade":     "Exit status: 0 when upterm is up to date or was replaced; 1 when it couldn't be, a package manager owns it, or its arguments are wrong.",
 	"upterm version":     "Exit status: 0, or 1 on failure.",
 	"upterm config path": "Exit status: 0, or 1 on failure.",
 	"upterm config view": "Exit status: 0, or 1 on failure.",

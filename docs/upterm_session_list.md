@@ -15,7 +15,8 @@ deletes the records of sessions that ended more than 7 days ago, after which
 -o json prints a JSON array of what 'upterm session info NAME -o json'
 prints, one per running session, and [] when none is running.
 
-Exit status: 0, or 1 when the session records can't be read.
+Exit status: 0, or 1 on failure, such as session records that can't be read
+or a usage or configuration error.
 
 ```
 upterm session list [flags]
