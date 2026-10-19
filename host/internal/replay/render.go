@@ -143,6 +143,8 @@ func (e *emulation) render() ([]byte, error) {
 		pointer:     e.pointer,
 		pointerSet:  e.pointerSet,
 		pointerOver: e.pointerOver,
+		warningBell: e.warningBell,
+		marginBell:  e.marginBell,
 		clips:       e.clips,
 	}
 	r.draw()
@@ -266,6 +268,8 @@ type renderer struct {
 	// says it was too long to keep or didn't fit.
 	pointer                 string
 	pointerSet, pointerOver bool
+	// warningBell and marginBell are the bell's volumes to set.
+	warningBell, marginBell bellVolume
 	// clips are the clipboard writes to send, and clipOver says one didn't
 	// fit.
 	clips    clipboard
@@ -533,8 +537,8 @@ func (r *renderer) reportModes() {
 // charsets, insert mode, the application keypad, reverse video, the title
 // stack and then the icon name and the title, the cursor's style, autowrap,
 // and the active pen and link. The colours the stream reset, the working
-// directory, the pointer shape and the clipboard writes still in force, which
-// change none of that, come last of all.
+// directory, the pointer shape, the bell's volumes and the clipboard writes
+// still in force, which change none of that, come last of all.
 //
 // Autowrap goes off here, after every wrap reprint. A character that fills
 // the line leaves a wrap pending with autowrap on or off, so where ?7l goes
@@ -577,6 +581,7 @@ func (r *renderer) continuation(reprinted int) {
 	r.colourResets()
 	r.workingDirectory()
 	r.pointerShape()
+	r.bellVolumes()
 	r.clipboard()
 	if len(enc.buf) == reprinted {
 		_ = enc.put("\x00")
@@ -656,6 +661,25 @@ func (r *renderer) pointerShape() {
 	}
 	if r.enc.put("\x1b]22;", r.pointer, "\x07") != nil {
 		r.pointerOver = true
+	}
+}
+
+// bellVolumes sets the warning bell's volume, by DECSWBV, then the margin
+// bell's, by DECSMBV, each the stream set, by the first parameter it sent, or
+// none where it sent none: a raw replay hands the joiner every one in the
+// ring, which leave each at the last.
+func (r *renderer) bellVolumes() {
+	for _, bell := range []struct {
+		vol   bellVolume
+		final string
+	}{{r.warningBell, " t"}, {r.marginBell, " u"}} {
+		switch {
+		case !bell.vol.set:
+		case bell.vol.ps < 0:
+			_ = r.enc.put("\x1b[", bell.final)
+		default:
+			_ = r.enc.put("\x1b[", strconv.Itoa(bell.vol.ps), bell.final)
+		}
 	}
 }
 

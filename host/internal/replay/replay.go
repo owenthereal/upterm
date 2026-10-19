@@ -98,6 +98,9 @@ type emulation struct {
 	// kept (see watchPointer).
 	pointer                 string
 	pointerSet, pointerOver bool
+	// warningBell and marginBell are the volumes the stream last set the
+	// warning bell and the margin bell to (see watchBellVolumes).
+	warningBell, marginBell bellVolume
 	// colours is the last change the stream made to each of the terminal's
 	// colours.
 	colours colours
@@ -233,16 +236,16 @@ func (replayer) Start(ctx context.Context, deadline time.Time, c *uio.Capture, s
 // history kept through the scroll-off function instead, and a clear of it
 // noted (see history.erase), replies to queries discarded, the title, the
 // icon name and the title stack, the working directory, the pointer shape,
-// the colours, the clipboard and synchronized output's DCS form kept, images,
-// device control strings that change the terminal's state, title modes,
-// character protection, selective erases, saves, renditions and line sizes the
-// cells can't hold, a status line, a font, a rectangular attribute extent, a
-// conformance level, a reset of a mode a terminal starts with set, a
-// 94-character set x/vt drops, a 96-character set, a window operation, printer
-// controller mode and a memory lock noted, auto print and the tab stops past
-// the screen's edge kept, and the meter stopped by ctx or the deadline. Each
-// callback and handler runs inside the emulator's Write and touches only the
-// emulation.
+// the bell's volumes, the colours, the clipboard and synchronized output's DCS
+// form kept, images, device control strings that change the terminal's state,
+// title modes, character protection, selective erases, saves, renditions and
+// line sizes the cells can't hold, a status line, a font, a rectangular
+// attribute extent, a conformance level, a reset of a mode a terminal starts
+// with set, a 94-character set x/vt drops, a 96-character set, a window
+// operation, printer controller mode and a memory lock noted, auto print and
+// the tab stops past the screen's edge kept, and the meter stopped by ctx or
+// the deadline. Each callback and handler runs inside the emulator's Write and
+// touches only the emulation.
 func (e *emulation) setUp() {
 	t := e.term
 	t.SetScrollbackSize(0)
@@ -268,6 +271,7 @@ func (e *emulation) setUp() {
 	e.watchDCS()
 	e.watchClipboard()
 	e.watchPointer()
+	e.watchBellVolumes()
 	e.watchProtection()
 	e.watchTitles()
 	e.watchSaves()
@@ -684,6 +688,42 @@ func (e *emulation) watchPointer() {
 		}
 		return false
 	})
+}
+
+// bellVolume is the last setting the stream made of one of the bell's
+// volumes, if set: the first parameter it sent, or -1 for none.
+type bellVolume struct {
+	set bool
+	ps  int
+}
+
+// watchBellVolumes registers the handlers that keep the volumes the stream
+// last set the warning bell to, by DECSWBV (CSI Ps SP t), and the margin bell
+// to, by DECSMBV (CSI Ps SP u), which x/vt drops, where a raw replay sets each
+// on the joiner's terminal. Each is kept by its first parameter as the stream
+// sent it, an omitted one too: xterm reads that parameter alone, an omitted
+// one as 0, and every value sets a volume: 1, and 9 and up, off, 2 to 4 low, 5
+// to 8 high, and 0 off for the warning bell and high for the margin bell. It
+// ignores one with a sub-parameter, which isn't kept, and its RIS leaves both
+// volumes as they are. x/vt keys a CSI handler by its prefix and intermediate
+// too, so these see neither DECSCUSR (CSI Ps SP q), XTWINOPS (CSI Ps t), SCORC
+// (CSI u) nor kitty's keyboard forms of CSI u, which carry a prefix; and the
+// query filter drops neither, as it drops a window report only with no
+// intermediate. x/vt has no handler of its own for either; these return false
+// all the same, as watchColours' do.
+func (e *emulation) watchBellVolumes() {
+	for _, bell := range []struct {
+		final byte
+		vol   *bellVolume
+	}{{'t', &e.warningBell}, {'u', &e.marginBell}} {
+		e.term.RegisterCsiHandler(ansi.Command(0, ' ', bell.final), func(params ansi.Params) bool {
+			if !slices.ContainsFunc(params, ansi.Param.HasMore) {
+				ps, _, _ := params.Param(0, -1)
+				*bell.vol = bellVolume{set: true, ps: ps}
+			}
+			return false
+		})
+	}
 }
 
 // watchProtection registers the handlers that note DECSCA (CSI Ps " q)

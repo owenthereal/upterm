@@ -1520,6 +1520,58 @@ func TestReplayFailsOnAPointerShapeTooLongToReplay(t *testing.T) {
 	require.True(t, bytes.HasSuffix(joined, []byte("\x1b]22;hand2\x07")), "%q", joined)
 }
 
+// bellVolumes matches DECSWBV (CSI Ps SP t) and DECSMBV (CSI Ps SP u) with a
+// parameter or none.
+var bellVolumes = regexp.MustCompile(`\x1b\[[0-9;:]* [tu]`)
+
+// The warning and margin bells' volumes the session last set by DECSWBV
+// (CSI Ps SP t) and DECSMBV (CSI Ps SP u), which the query filter lets into
+// the ring and a raw replay hands the joiner with every earlier one, end on
+// the joiner as they would: the render sends the last of each, by the first
+// parameter the stream sent, or none where it sent none, after the pointer
+// shape and before the clipboard writes. xterm reads the first parameter
+// alone, an omitted one as 0, and every value sets a volume, those it doesn't
+// list off; it ignores one with a sub-parameter, and its RIS keeps both. A
+// session that set neither sends neither, and neither kitty's keyboard forms
+// of CSI u, which carry a prefix, nor DECSCUSR (CSI Ps SP q) is one.
+func TestReplayReplaysTheBellVolumes(t *testing.T) {
+	join := func(t *testing.T, stream string) []byte {
+		t.Helper()
+		joined, fellBack := fanOut(t, New(), []byte(stream), []uio.SizeEvent{event(1, 0, 80, 24)}, 64<<10)
+		require.NoError(t, fellBack)
+		require.True(t, bytes.HasPrefix(joined, []byte(preamble)), "the render, not the raw ring")
+		return joined
+	}
+
+	joined := join(t, "\x1b[2 t\x1b[0 utext\r\n\x1b[8 t\x1b[3 umore\r\n")
+	require.True(t, bytes.HasSuffix(joined, []byte("\x1b[8 t\x1b[3 u")), "%q", joined)
+	require.Len(t, bellVolumes.FindAll(joined, -1), 2, "%q", joined)
+
+	joined = join(t, "\x1b]52;c;QQ==\x07\x1b[3 u\x1b[5 t\x1b]22;hand2\x07text\r\n")
+	require.True(t, bytes.HasSuffix(joined, []byte("\x1b]22;hand2\x07\x1b[5 t\x1b[3 u\x1b]52;c;QQ==\x07")), "%q", joined)
+
+	for _, tc := range []struct{ name, stream, sent string }{
+		{"none", "", ""},
+		{"an omitted parameter", "\x1b[5 t\x1b[ t\x1b[5 u\x1b[ u", "\x1b[ t\x1b[ u"},
+		{"an omitted first parameter", "\x1b[;5 t", "\x1b[ t"},
+		{"more than one parameter", "\x1b[5;1 t\x1b[2;8 u", "\x1b[5 t\x1b[2 u"},
+		{"a value xterm doesn't list", "\x1b[9 t\x1b[100 u", "\x1b[9 t\x1b[100 u"},
+		{"a value a window report has", "\x1b[14 t", "\x1b[14 t"},
+		{"one with a sub-parameter", "\x1b[5 t\x1b[2:1 t\x1b[5 u\x1b[2:1 u", "\x1b[5 t\x1b[5 u"},
+		{"the warning bell alone", "\x1b[4 t", "\x1b[4 t"},
+		{"the margin bell alone", "\x1b[4 u", "\x1b[4 u"},
+		{"then RIS", "\x1b[6 t\x1b[7 u\x1bc", "\x1b[6 t\x1b[7 u"},
+		{"a private prefix", "\x1b[?5 t\x1b[>5 u", ""},
+		{"kitty's keyboard forms and DECSCUSR", "\x1b[>1u\x1b[<u\x1b[=1;1u\x1b[?u\x1b[4 q", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			joined := join(t, tc.stream+"text\r\n")
+			require.Equal(t, tc.sent, string(bytes.Join(bellVolumes.FindAll(joined, -1), nil)), "%q", joined)
+			require.True(t, bytes.HasSuffix(joined, []byte(tc.sent)), "%q", joined)
+		})
+	}
+}
+
 // A write that supersedes every earlier one leaves none of them past the
 // clipboard's length, where its array would still hold their bytes.
 func TestReplayClipboardLetsGoOfSupersededWrites(t *testing.T) {
