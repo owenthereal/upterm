@@ -3158,12 +3158,14 @@ func TestReplayFailsOnAnother94CharacterSet(t *testing.T) {
 // the render, named, whatever follows: a raw replay iconifies, moves,
 // resizes, raises, lowers, maximizes the joiner's window or makes it full
 // screen as the session's was, and DECSLPP (Ps 24 and up) resizes it to Ps
-// lines, which xterm allows by default, where x/vt keeps no window. A later
-// operation can't be told to undo one, as what the joiner's window was before
-// isn't known. A refresh, which only redraws, an operation xterm doesn't
-// have, the title stack, which the render rebuilds, and the reports render:
-// the filter drops the reports, and given to the emulation they don't count
-// either.
+// lines, which xterm allows by default, where x/vt keeps no window. So do
+// DECSCPP (CSI Ps $ |), which resizes it to 80 or 132 columns, and DECSNLS
+// (CSI Ps * |), to Ps lines. A later operation can't be told to undo one, as
+// what the joiner's window was before isn't known. A refresh, which only
+// redraws, an operation xterm doesn't have, the title stack, which the
+// render rebuilds, and the reports render: the filter drops the reports, and
+// given to the emulation they don't count either. So do a DECSCPP to another
+// width and a DECSNLS to no lines or past 255, which xterm ignores.
 func TestReplayFailsOnAWindowOperation(t *testing.T) {
 	join := func(t *testing.T, stream string) error {
 		t.Helper()
@@ -3184,6 +3186,14 @@ func TestReplayFailsOnAWindowOperation(t *testing.T) {
 		{"DECSLPP to 72 lines", "\x1b[72t"},
 		{"a resize, then the title pushed", "\x1b[8;40;100t\x1b[22;0t"},
 		{"a resize, then a resize back", "\x1b[8;40;100t\x1b[8;24;80t"},
+		{"DECSCPP", "\x1b[$|"},
+		{"DECSCPP to 0 columns, which is 80", "\x1b[0$|"},
+		{"DECSCPP to 80 columns", "\x1b[80$|"},
+		{"DECSCPP to 132 columns", "\x1b[132$|"},
+		{"DECSNLS to 1 line", "\x1b[1*|"},
+		{"DECSNLS to 36 lines", "\x1b[36*|"},
+		{"DECSNLS to 255 lines", "\x1b[255*|"},
+		{"DECSNLS, then a resize back", "\x1b[36*|\x1b[24*|"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			requireIneligible(t, join(t, tc.stream), "a window operation")
@@ -3199,6 +3209,10 @@ func TestReplayFailsOnAWindowOperation(t *testing.T) {
 		{"its size in pixels asked for", "\x1b[14t"},
 		{"its size in characters asked for", "\x1b[18t"},
 		{"its title asked for", "\x1b[21t"},
+		{"DECSCPP to another width", "\x1b[100$|"},
+		{"DECSNLS", "\x1b[*|"},
+		{"DECSNLS to 0 lines", "\x1b[0*|"},
+		{"DECSNLS to 256 lines", "\x1b[256*|"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			require.NoError(t, join(t, tc.stream))

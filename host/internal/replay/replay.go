@@ -1152,24 +1152,43 @@ func (e *emulation) watchCharsets96() {
 	}
 }
 
-// watchWindowOps registers the handler that notes XTWINOPS (CSI Ps ; Ps ;
+// watchWindowOps registers the handlers that note XTWINOPS (CSI Ps ; Ps ;
 // Ps t) changing the terminal's window, by its first parameter as xterm reads
 // it: de-iconifying or iconifying it (1, 2), moving it (3), resizing it in
 // pixels or in characters (4, 8), raising or lowering it (5, 6), maximizing
 // it or making it full screen (9, 10), and DECSLPP (24 and up), which resizes
-// it to that many lines. x/vt keeps no window, where a raw replay does each
-// of them to the joiner's, as xterm allows by default. The note stays,
-// whatever follows: a later operation can't be told to undo one, as what the
-// joiner's window was before isn't known. A refresh (7) only redraws, and
-// xterm does nothing for 0, 12, 17 and the rest below 24 it doesn't list; the
-// reports (11, 13 to 21) the query filter drops, and the render rebuilds the
-// title stack (22, 23, see watchTitles). x/vt keys a CSI handler by its
-// prefix too, so this one sees no XTSMTITLE (CSI > Pm t). x/vt has no handler
-// of its own for it; this returns false all the same, as watchColours' do.
+// it to that many lines; and the other two that resize it, by their first
+// parameters too: DECSCPP (CSI Ps $ |), to 132 columns for 132 and to 80 for
+// 80, 0 or none, and DECSNLS (CSI Ps * |), to Ps lines for 1 to 255. x/vt
+// keeps no window, where a raw replay does each of them to the joiner's, as
+// xterm allows by default, DECSCPP at a VT320's level and up and DECSNLS at a
+// VT420's, which is its default. The note stays, whatever follows: a later
+// operation can't be told to undo one, as what the joiner's window was
+// before isn't known. A refresh (7) only redraws, and xterm does nothing for
+// 0, 12, 17 and the rest below 24 it doesn't list, nor for a DECSCPP or a
+// DECSNLS to another size; the reports (11, 13 to 21) the query filter drops,
+// and the render rebuilds the title stack (22, 23, see watchTitles). x/vt
+// keys a CSI handler by its prefix and intermediate too, so these see no
+// XTSMTITLE (CSI > Pm t). x/vt has no handler of its own for any of them;
+// these return false all the same, as watchColours' do.
 func (e *emulation) watchWindowOps() {
-	e.term.RegisterCsiHandler('t', func(params ansi.Params) bool {
+	t := e.term
+	t.RegisterCsiHandler('t', func(params ansi.Params) bool {
 		switch op, _, _ := params.Param(0, 0); {
 		case op >= 1 && op <= 6, op >= 8 && op <= 10, op >= 24:
+			e.windowOp = true
+		}
+		return false
+	})
+	t.RegisterCsiHandler(ansi.Command(0, '$', '|'), func(params ansi.Params) bool {
+		switch cols, _, _ := params.Param(0, 0); cols {
+		case 0, 80, 132:
+			e.windowOp = true
+		}
+		return false
+	})
+	t.RegisterCsiHandler(ansi.Command(0, '*', '|'), func(params ansi.Params) bool {
+		if lines, _, _ := params.Param(0, 0); lines >= 1 && lines <= 255 {
 			e.windowOp = true
 		}
 		return false
