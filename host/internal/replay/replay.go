@@ -155,6 +155,10 @@ type emulation struct {
 	// memoryLock is set once the stream has locked or unlocked memory so as
 	// to move the scroll region's top margin (see watchMemoryLock).
 	memoryLock bool
+	// keyFormat is set once the stream has set how the terminal encodes a
+	// key's modifiers otherwise than the tracker restores (see
+	// watchKeyFormats).
+	keyFormat bool
 	// pastEdge is what the emulator keeps of the tab stops past the screen's
 	// right edge (see the type).
 	pastEdge pastEdge
@@ -244,10 +248,10 @@ func (replayer) Start(ctx context.Context, deadline time.Time, c *uio.Capture, s
 // saves, renditions and line sizes the cells can't hold, a status line, a
 // font, a rectangular attribute extent, a conformance level, a reset of a mode
 // a terminal starts with set, a 94-character set x/vt drops, a 96-character
-// set, a window operation, printer controller mode and a memory lock noted,
-// auto print and the tab stops past the screen's edge kept, and the meter
-// stopped by ctx or the deadline. Each callback and handler runs inside the
-// emulator's Write and touches only the emulation.
+// set, a window operation, printer controller mode, a memory lock and a key
+// format noted, auto print and the tab stops past the screen's edge kept, and
+// the meter stopped by ctx or the deadline. Each callback and handler runs
+// inside the emulator's Write and touches only the emulation.
 func (e *emulation) setUp() {
 	t := e.term
 	t.SetScrollbackSize(0)
@@ -290,6 +294,7 @@ func (e *emulation) setUp() {
 	e.watchWindowOps()
 	e.watchPrinter()
 	e.watchMemoryLock()
+	e.watchKeyFormats()
 }
 
 // colours is the last change the stream made, by OSC, to each of the colours
@@ -1365,6 +1370,57 @@ func (e *emulation) watchMemoryLock() {
 		}
 		return false
 	})
+}
+
+// watchKeyFormats registers the handlers that note the stream setting how the
+// terminal encodes the modifiers of a key it sends the program, where the
+// tracker doesn't restore it: XTMODKEYS (CSI > Pp ; Pv m) for any resource
+// but modifyOtherKeys (4), which the tracker keeps; XTFMTKEYS
+// (CSI > Pp ; Pv f) for any; and XTMODKEYS's disable (CSI > Pp n), the bare
+// one too, which xterm reads as disabling modifyFunctionKeys, but CSI > 4 n,
+// which the tracker keeps. x/vt keeps none of them, where a raw replay sets
+// each on the joiner's terminal, so the joiner's keys would reach the program
+// otherwise encoded. One that only puts resources back to the values a
+// terminal starts with isn't noted (see keyResets), as the tracker reads
+// CSI > 4 ; m. The note stays, whatever follows, though xterm's DECSTR and
+// RIS put every resource back. x/vt keys a CSI handler by its prefix too, so
+// these see neither SGR (CSI Pm m) nor DSR (CSI Ps n) nor HVP
+// (CSI Ps ; Ps f), and the query filter drops XTQMODKEYS (CSI ? Pp m). x/vt
+// has no handler of its own for any of them; these return false all the
+// same, as watchColours' do.
+func (e *emulation) watchKeyFormats() {
+	t := e.term
+	t.RegisterCsiHandler(ansi.Command('>', 0, 'm'), func(params ansi.Params) bool {
+		if n, _, _ := params.Param(0, -1); n != 4 && !keyResets(params) {
+			e.keyFormat = true
+		}
+		return false
+	})
+	t.RegisterCsiHandler(ansi.Command('>', 0, 'f'), func(params ansi.Params) bool {
+		if !keyResets(params) {
+			e.keyFormat = true
+		}
+		return false
+	})
+	t.RegisterCsiHandler(ansi.Command('>', 0, 'n'), func(params ansi.Params) bool {
+		if len(params) != 1 || params[0] != 4 {
+			e.keyFormat = true
+		}
+		return false
+	})
+}
+
+// keyResets reports whether params, an XTMODKEYS's or an XTFMTKEYS's, only
+// put resources back to the values a terminal starts with: none at all, which
+// xterm reads as resources 1 to 5, or a resource with nothing after it, no
+// value nor a mask, which x/ansi keeps as parameters after it.
+func keyResets(params ansi.Params) bool {
+	for i := 1; i < len(params); i++ {
+		if params[i].Param(-1) >= 0 {
+			return false
+		}
+	}
+	return true
 }
 
 // sgrUndrawable reports whether params, an SGR's, hold a number x/vt's SGR

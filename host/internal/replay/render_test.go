@@ -3517,3 +3517,60 @@ func TestReplayFailsOnAMemoryLock(t *testing.T) {
 		})
 	}
 }
+
+// A key format the tracker doesn't restore fails the render, named, whatever
+// follows: XTMODKEYS (CSI > Pp ; Pv m) for any resource but modifyOtherKeys
+// (4), XTFMTKEYS (CSI > Pp ; Pv f) for any, and XTMODKEYS's disable
+// (CSI > Pp n), the bare one too, which xterm reads as disabling
+// modifyFunctionKeys, but CSI > 4 n. Each changes how the joiner's terminal
+// encodes a key it sends the program, where a raw replay sets it there.
+// modifyOtherKeys, which the tracker restores, renders, and so does a
+// sequence that only puts resources back to the values a terminal starts
+// with, as the tracker reads CSI > 4 ; m: one with no parameters, or a
+// resource with nothing after it. So do XTQMODKEYS (CSI ? Pp m), which the
+// query filter drops, and SGR.
+func TestReplayFailsOnAKeyFormat(t *testing.T) {
+	join := func(t *testing.T, stream string) ([]byte, error) {
+		t.Helper()
+		return fanOut(t, New(), []byte("text\r\n"+stream+"more\r\n"), []uio.SizeEvent{event(1, 0, 80, 24)}, 4<<10)
+	}
+	for _, tc := range []struct{ name, stream string }{
+		{"modifyCursorKeys", "\x1b[>1;2m"},
+		{"modifyFunctionKeys", "\x1b[>2;1m"},
+		{"modifyKeyboard", "\x1b[>0;1m"},
+		{"with a mask of the modifiers to ignore", "\x1b[>1;2:4m"},
+		{"with a mask on the resource", "\x1b[>1:4m"},
+		{"formatOtherKeys", "\x1b[>4;1f"},
+		{"formatCursorKeys", "\x1b[>1;1f"},
+		{"modifyCursorKeys disabled", "\x1b[>1n"},
+		{"modifyFunctionKeys disabled, with no parameter", "\x1b[>n"},
+		{"modifyOtherKeys disabled in a form the tracker doesn't read", "\x1b[>4;1n"},
+		{"one, then put back", "\x1b[>1;2m\x1b[>1m"},
+		{"one, then RIS", "\x1b[>1;2m\x1bc"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := join(t, tc.stream)
+			requireIneligible(t, err, "a key format")
+		})
+	}
+	for _, tc := range []struct{ name, stream, carries string }{
+		{"modifyOtherKeys", "\x1b[>4;2m", "\x1b[>4;2m"},
+		{"modifyOtherKeys disabled", "\x1b[>4n", "\x1b[>4n"},
+		{"modifyOtherKeys put back", "\x1b[>4;2m\x1b[>4;m", ""},
+		{"each put back", "\x1b[>m\x1b[>f", ""},
+		{"a resource put back", "\x1b[>1m\x1b[>4f", ""},
+		{"a resource asked for", "\x1b[?1m", ""},
+		{"SGR", "\x1b[1;31m", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			joined, err := join(t, tc.stream)
+			require.NoError(t, err)
+			if tc.carries != "" {
+				require.True(t, bytes.HasPrefix(joined, []byte(preamble)), "the render: %q", joined)
+				require.Contains(t, string(joined), tc.carries)
+			}
+			_, err = renderAt(t, 80, 24, "text\r\n"+tc.stream+"more\r\n")
+			require.NoError(t, err, "given to the emulation")
+		})
+	}
+}

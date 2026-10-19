@@ -952,6 +952,9 @@ func (e *emulation) eligible(parts uio.ReplayParts) (rep, error) {
 	if e.memoryLock {
 		return rep{}, &IneligibleError{State: "a memory lock"}
 	}
+	if e.keyFormat {
+		return rep{}, &IneligibleError{State: "a key format"}
+	}
 	if splitWide(e.term.MainScreen()) || splitWide(e.term.AltScreen()) {
 		return rep{}, &IneligibleError{State: splitWideState}
 	}
