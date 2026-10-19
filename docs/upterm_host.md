@@ -57,7 +57,9 @@ Exit status: the command's own status when it exits; 1 when upterm fails, or
 the session is stopped or ends by a signal (whatever the command returns
 while it is torn down); 254 when this terminal is disconnected; 130 for
 Ctrl-C at a prompt; 0 after declining at the prompt or detaching (~.). A
-command's own 1 or 254 reads the same.
+command's own 1 or 254 reads the same. With --detach: 0 once the session has
+started, 1 when it can't start; upterm session wait NAME reports the command's
+status.
 
 ```
 upterm host [flags] [-- COMMAND [ARGS...]]

@@ -52,7 +52,7 @@ const exampleSessionID = "d3k5fia7m4us73ehblug"
 // exitStatuses is what each command's help ends with: when it exits with
 // what.
 var exitStatuses = map[string]string{
-	"upterm host":   "Exit status: the command's own status when it exits; 1 when upterm fails, or the session is stopped or ends by a signal (whatever the command returns while it is torn down); 254 when this terminal is disconnected; 130 for Ctrl-C at a prompt; 0 after declining at the prompt or detaching (~.). A command's own 1 or 254 reads the same.",
+	"upterm host":   "Exit status: the command's own status when it exits; 1 when upterm fails, or the session is stopped or ends by a signal (whatever the command returns while it is torn down); 254 when this terminal is disconnected; 130 for Ctrl-C at a prompt; 0 after declining at the prompt or detaching (~.). A command's own 1 or 254 reads the same. With --detach: 0 once the session has started, 1 when it can't start; upterm session wait NAME reports the command's status.",
 	"upterm attach": "Exit status: 0 after a detach; the session's status once it ends (0 when no guest joined within its join timeout; 1 when it was stopped or ended by a signal); 254 if this terminal was disconnected; 255 if it could not attach, including a usage or configuration error.",
 	"upterm join":   "Exits with the session's status when one arrives, 0 when you leave (~.), 130 when stopped, and 255 when it can't join, including a usage or configuration error.",
 	"upterm proxy":  "Exit status: 1 when it can't connect to the relay, including a usage or configuration error. Once connected, the first result reported decides: 0 for end-of-input from ssh, 1 when the relay closes the connection or a read or write fails.",
