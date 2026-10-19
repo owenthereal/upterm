@@ -2089,3 +2089,39 @@ func TestReplayFailsOnAFontChange(t *testing.T) {
 		})
 	}
 }
+
+// DECSACE 2 (CSI 2 * x), which makes DECCARA and DECRARA change the exact
+// rectangle they name instead of the stream of cells from its first corner to
+// its last, fails the render, named: x/vt keeps no extent, so a joiner given
+// the render would apply a live DECCARA to the stream, where the session's
+// terminal applies it to the rectangle. It still does once the stream is
+// selected again. DECSACE reads only its first parameter, as xterm's does,
+// and the stream, 0, 1 or none, is the default; DECREQTPARM, the same final
+// with no intermediate, isn't DECSACE.
+func TestReplayFailsOnARectangularAttributeExtent(t *testing.T) {
+	join := func(t *testing.T, stream string) error {
+		t.Helper()
+		_, fellBack := fanOut(t, New(), []byte("text\r\n"+stream+"more\r\n"), []uio.SizeEvent{event(1, 0, 80, 24)}, 4<<10)
+		return fellBack
+	}
+	for _, tc := range []struct{ name, stream string }{
+		{"the rectangle", "\x1b[2*x"},
+		{"the rectangle by the first parameter", "\x1b[2;1*x"},
+		{"the rectangle, then the stream again", "\x1b[2*x\x1b[0*x"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			requireIneligible(t, join(t, tc.stream), "a rectangular attribute extent")
+		})
+	}
+	for _, tc := range []struct{ name, stream string }{
+		{"the stream", "\x1b[1*x"},
+		{"the stream by 0", "\x1b[0*x"},
+		{"the default", "\x1b[*x"},
+		{"the rectangle by a later parameter", "\x1b[1;2*x"},
+		{"no intermediate", "\x1b[2x"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			require.NoError(t, join(t, tc.stream))
+		})
+	}
+}

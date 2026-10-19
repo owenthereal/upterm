@@ -673,6 +673,9 @@ func (e *emulation) eligible(parts uio.ReplayParts) (rep, error) {
 	if e.font {
 		return rep{}, &IneligibleError{State: "a font change"}
 	}
+	if e.rectExtent {
+		return rep{}, &IneligibleError{State: "a rectangular attribute extent"}
+	}
 	if splitWide(e.term.MainScreen()) || splitWide(e.term.AltScreen()) {
 		return rep{}, &IneligibleError{State: splitWideState}
 	}

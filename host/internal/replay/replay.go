@@ -112,6 +112,9 @@ type emulation struct {
 	// font is set once the stream has set the terminal's font (see
 	// watchFont).
 	font bool
+	// rectExtent is set once the stream has made DECCARA and DECRARA change
+	// a rectangle (see watchAttributeExtent).
+	rectExtent bool
 
 	// The handoff point: the end of what the emulator consumed, and the last
 	// event it passed, applied or skipped as a no-op.
@@ -191,9 +194,10 @@ func (replayer) Start(ctx context.Context, deadline time.Time, c *uio.Capture, s
 // setUp makes the emulator a replay's: no scrollback on either
 // screen, the history kept through the scroll-off function instead, replies
 // to queries discarded, the title and the title stack, the working
-// directory, the colours and the clipboard kept, images, device control
-// strings, character protection, selective erases, saves, renditions and line
-// sizes the cells can't hold, a status line and a font noted, and the meter
+// directory, the colours, the clipboard and synchronized output's DCS form
+// kept, images, device control strings, character protection, selective
+// erases, saves, renditions and line sizes the cells can't hold, a status
+// line, a font and a rectangular attribute extent noted, and the meter
 // stopped by ctx or the deadline. Each callback and handler runs inside the
 // emulator's Write and touches only the emulation.
 func (e *emulation) setUp() {
@@ -225,6 +229,7 @@ func (e *emulation) setUp() {
 	e.watchRendition()
 	e.watchStatusLine()
 	e.watchFont()
+	e.watchAttributeExtent()
 }
 
 // colours is what the stream changed, by OSC, of the colours a terminal keeps
@@ -695,6 +700,24 @@ func (e *emulation) watchFont() {
 		// data is the whole OSC, its number first.
 		if _, font, _ := bytes.Cut(data, []byte{';'}); !bytes.HasPrefix(font, []byte("?")) {
 			e.font = true
+		}
+		return false
+	})
+}
+
+// watchAttributeExtent registers the handler that notes DECSACE 2
+// (CSI 2 * x), which makes DECCARA and DECRARA change the exact rectangle
+// they name instead of the stream of cells from its first corner to its
+// last, which is how a terminal starts. x/vt keeps no extent, where a raw
+// replay sets the joiner's terminal's, so a DECCARA the program sends after
+// the handoff point would change other cells on a joiner given the render
+// than on the session's terminal. DECSACE reads only its first parameter, as
+// xterm's does, and 0, 1 or none select the stream. x/vt has no handler of
+// its own for it; this returns false all the same, as watchColours' do.
+func (e *emulation) watchAttributeExtent() {
+	e.term.RegisterCsiHandler(ansi.Command(0, '*', 'x'), func(params ansi.Params) bool {
+		if n, _, _ := params.Param(0, 0); n == 2 {
+			e.rectExtent = true
 		}
 		return false
 	})
