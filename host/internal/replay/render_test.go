@@ -696,7 +696,7 @@ func TestReplayAltScreenOverMainHistory(t *testing.T) {
 }
 
 // The title and a cursor style other than the default are set, and the
-// default style isn't.
+// default style isn't, but by the preamble's reset of the joiner's.
 func TestReplayTitleAndCursorStyle(t *testing.T) {
 	render, err := renderAt(t, 80, 24, "\x1b]2;the title\x07\x1b[4 qtext\r\n")
 	require.NoError(t, err)
@@ -711,7 +711,8 @@ func TestReplayTitleAndCursorStyle(t *testing.T) {
 
 	render, err = renderAt(t, 80, 24, "\x1b[4 q\x1b[1 qtext\r\n")
 	require.NoError(t, err)
-	require.NotContains(t, string(render), " q")
+	// The preamble's own DECSCUSR resets the joiner's.
+	require.NotContains(t, string(bytes.TrimPrefix(render, []byte(preamble))), " q")
 	require.NotContains(t, string(render), "\x1b]2;")
 }
 
@@ -2209,10 +2210,13 @@ func TestReplayRestoresTheCursorSCORCReturnsTo(t *testing.T) {
 // joinOwn joins, through the fan-out, a joiner whose terminal, b, a program
 // left in the state own sets, as joinAt does one at its defaults: b is given
 // own, then what the joiner was sent, and must then be in a's state. The rows
-// own left above b's cursor are the joiner's earlier screen, which the render
-// scrolls into b's scrollback from the cursor's row on, before the history:
-// b's history must hold what own scrolled off, then those rows, then a's
-// history, and is compared from a's on.
+// own left above b's cursor on its main screen are the joiner's earlier
+// screen, which the render scrolls into b's scrollback from the cursor's row
+// on, before the history: b's history must hold what own scrolled off, then
+// those rows, then a's history, and is compared from a's on. For b left on
+// its alternate screen, that row is the one the main screen's slot holds,
+// which ?1049l, bringing b back, restores: where ?1049h saved the cursor, or
+// home for a slot nothing filled.
 func joinOwn(t *testing.T, cols, rows int, own, stream string) *joined {
 	t.Helper()
 	sent, fellBack := fanOut(t, New(), []byte(stream), []uio.SizeEvent{event(1, 0, cols, rows)}, 64<<10)
@@ -2226,9 +2230,12 @@ func joinOwn(t *testing.T, cols, rows int, own, stream string) *joined {
 	j.b, j.bHist = newReference(cols, rows)
 	j.bTitle = watchTitle(j.b)
 	_, _ = j.b.WriteString(own)
-	require.False(t, j.b.IsAltScreen(), "own leaves the main screen showing")
+	row := j.b.CursorPosition().Y
+	if j.b.IsAltScreen() {
+		row = min(j.b.MainScreen().SavedCursor().Y, rows-1)
+	}
 	earlier := slices.Clone(*j.bHist)
-	for y := range j.b.CursorPosition().Y {
+	for y := range row {
 		line, err := encodeLine(j.b.MainScreen().Line(y), budget)
 		require.NoError(t, err)
 		earlier = append(earlier, line)
@@ -2345,6 +2352,53 @@ func TestReplayErasesWhatAnUnknownDesignationPrints(t *testing.T) {
 			}
 			require.NotContains(t, string(bytes.Join(*bHist, nil)), "B", "the history")
 			require.Empty(t, sameState(a, b, *aHist, *bHist, "", ""), "%q", printed)
+		})
+	}
+}
+
+// A program can also leave the joiner's terminal with autowrap off, in
+// reverse video, with the cursor hidden or in a style of its own, or on its
+// alternate screen: one killed mid-draw, or a full-screen program that
+// crashed. The render draws on the main screen at its defaults, so it brings
+// the joiner back to its main screen first, the cursor where it was there,
+// then sets each to its default, before anything is drawn: the rows above
+// the cursor on the main screen still scroll into the joiner's scrollback,
+// and the live bytes after the render, a print that reaches the last column
+// among them, land as on the session's terminal.
+//
+// A joiner left on its alternate screen also has that screen cleared, and
+// its slot there filled by the preamble's DECSC, which the render sets again
+// only when it draws on that screen. So each joiner here leaves the cursor on
+// its alternate screen home in the default pen, where the slot so filled
+// restores what an unfilled one does, but where the session's alternate
+// screen holds cells, and the render sets that slot.
+func TestReplayResetsTheJoinersOwnModesAndScreen(t *testing.T) {
+	var lines strings.Builder
+	for i := range 20 {
+		fmt.Fprintf(&lines, "line %d\r\n", i)
+	}
+	stream := lines.String() + "the end"
+	// The session's alternate screen holds cells, hidden: the render goes there.
+	withAlt := lines.String() + "\x1b[?1049h\x1b[3;3Hthe session's\x1b[?1049lthe end"
+	const earlier = "own 0\r\nown 1\r\nown 2\r\nprompt$ upterm join"
+	for _, tc := range []struct{ name, own, stream string }{
+		{"autowrap off", "\x1b[?7l", stream},
+		{"reverse video", "\x1b[?5h", stream},
+		{"the cursor hidden, a steady bar", "\x1b[?25l\x1b[6 q", stream},
+		{"on its alternate screen by ?1049h", "\x1b[?1049h\x1b[2;5Hvim's screen\x1b[H", stream},
+		{"on its alternate screen by ?47h", "\x1b[?47h\x1b[2;5Hold screen\x1b[H", stream},
+		{"on its alternate screen by ?47h, its main slot filled", "\x1b7\x1b[?47h\x1b[2;5Hold screen\x1b[H", stream},
+		{"on its alternate screen by ?1047h", "\x1b[?1047h\x1b[2;5Hless\x1b[H", stream},
+		{"on its alternate screen by ?1049h, the cursor anywhere there", "\x1b[?1049h\x1b[5;10H\x1b[31mvim's screen", withAlt},
+		{"all of them", "\x1b[?7l\x1b[?5h\x1b[?25l\x1b[6 q\x1b[?1049h\x1b[2;5Hvim's screen\x1b[H", stream},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			j := joinOwn(t, 80, 12, earlier+tc.own, tc.stream)
+			// A print that reaches the last column and wraps, scrolling at the
+			// bottom, which autowrap off would keep in the last column.
+			j.then(t, "\x1b[12;75Hwrapping at the end")
+			// A tab, and a line feed at the bottom.
+			j.then(t, "\r\n\tafter a tab\t|\r\nlast")
 		})
 	}
 }

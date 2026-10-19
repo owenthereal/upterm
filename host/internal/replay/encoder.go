@@ -18,14 +18,15 @@ import (
 // right whatever the render wrote before it; and an ESC 8 takes the model
 // back to what the matching ESC 7 recorded. The model starts from a terminal
 // at its defaults (see reset): the render's preamble makes the pen, link and
-// charsets so, and the scroll region, the margins, insert mode and LNM, which
-// the render's moves and prints rely on, with origin mode off once the
-// history is drawn; and the render sets the saved slots itself before any
-// restore of its own reads them, the main screen's always and the alternate
-// screen's whenever it draws on that screen. The preamble's own ESC 7 and
-// ESC 8, which keep the cursor across its DECSTBM, leave what the joiner's
-// terminal held in the main screen's slot, which the model doesn't follow:
-// nothing reads it before the render sets it.
+// charsets so, and the main screen showing, the scroll region, the margins
+// and the modes the render's moves and prints rely on, with origin mode off
+// once the history is drawn; and the render sets the saved slots itself
+// before any restore of its own reads them, the main screen's always and the
+// alternate screen's whenever it draws on that screen. The preamble's own
+// ESC 7s, which keep the cursor across its screen switch and its DECSTBM,
+// leave what the joiner's terminal held in the main screen's slot, and in
+// the alternate screen's for a joiner left showing that one, which the model
+// doesn't follow: nothing reads either before the render sets it.
 //
 // Each method fails before an append would cross the cap, leaving the buffer
 // and the model as they were, so nothing past the cap is ever allocated;

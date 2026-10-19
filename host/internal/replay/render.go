@@ -18,42 +18,67 @@ import (
 // preamble starts every render, after what begins again a synchronized
 // update open at the handoff point (see synced). It makes the terminal what
 // the encoder takes it to be, whatever a program left it holding, with the
-// cursor kept on its row, where the history starts:
+// cursor kept on its row of the main screen, where the history starts:
+//   - the main screen showing, after a DECSC: ?1047l clears the alternate
+//     screen and leaves it, if it shows; ?1049l leaves it if it still shows,
+//     on a terminal that has ?1049 only, and either way restores the cursor
+//     from the main screen's slot, where ?1049h saved it on the way there,
+//     and where the DECSC just saved it on a joiner already on its main
+//     screen; ?47l leaves it on a terminal that has ?47 only. On the main
+//     screen, that restore of what the DECSC just saved is all any of them
+//     does, and resetting all three leaves none set on a terminal that keeps
+//     each apart, as x/vt does;
 //   - the whole screen as the scroll region (DECSTBM) and no left and right
 //     margins (DECLRMM off, which resets them, as xterm's does), between a
 //     DECSC and a DECRC, since DECSTBM homes the cursor. The DECRC puts it
-//     back where it was, under origin mode or not, which address the same
-//     cells with the whole screen as the region. The two use the main
-//     screen's slot, which the render sets again before anything reads it
+//     back where it was, under origin mode or not, since both address the
+//     same cells once the whole screen is the region. The two use the main
+//     screen's slot, as the first DECSC does on a joiner already on its main
+//     screen, and the render sets that slot again before anything reads it
 //     (see draw);
-//   - insert mode and LNM off, neither of which moves the cursor;
-//   - ASCII designated into G0 to G3, G0 in GL (SI) and G2 in GR (LS2R), after
-//     the DECRC, which puts back the charsets the DECSC saved;
+//   - insert mode, LNM and reverse video off, autowrap on, and the cursor
+//     shown, in the terminal's default style (DECSCUSR 0), none of which
+//     moves the cursor or is what a DECRC restores;
+//   - ASCII designated into G0 to G3, G0 in GL (SI) and G2 in GR (LS2R),
+//     after the DECRCs, which put back the charsets their DECSCs saved;
 //   - the cursor to the start of its row, the default pen and no link (an
 //     OSC 8 with no URL closes one), and the screen erased from there down.
 //
-// A program that exits or is killed can leave any of them: a region would
-// scroll only its own rows as the history's line feeds come, none of them
-// into the scrollback, and margins only theirs; insert mode would shift the
-// cells a reprint lands on; LNM would make the live line feeds return the
-// carriage, where the session's don't; and the render's text would print
-// through a link or a charset left in place, linked or remapped. GR maps no
-// UTF-8 a print sends, but DECSC saves it, and the render takes it to be G2
-// (see unrestored). Origin mode, which DECRC restores and whose reset homes
-// the cursor, goes off after the history (see draw).
+// A program that exits or is killed can leave any of them: on the alternate
+// screen, the render would draw over the program's screen, which the
+// joiner's next ?1049l would put away, its own shell's screen coming back
+// over the session's; a region would scroll only its own rows as the
+// history's line feeds come, none of them into the scrollback, and margins
+// only theirs; insert mode would shift the cells a reprint lands on; LNM
+// would make the live line feeds return the carriage, where the session's
+// don't; autowrap off would keep the live text that reaches the last column
+// there; reverse video, a hidden cursor or a style of its own would show the
+// screen otherwise than the session's terminal does; and the render's text
+// would print through a link or a charset left in place, linked or remapped.
+// GR maps no UTF-8 a print sends, but DECSC saves it, and the render takes it
+// to be G2 (see unrestored). Origin mode, which DECRC restores and whose
+// reset homes the cursor, goes off after the history (see draw).
+//
+// A joiner left on its alternate screen holds in that screen's slot what the
+// first DECSC saved there, which the render sets again only when it draws on
+// that screen (see hiddenAlt), as it leaves a joiner's own slot there
+// otherwise.
 //
 // The charsets come before the CR because a terminal with no SCS for G2 or
 // G3, as the Linux console's, takes the ESC alone and prints the final byte
 // after it, at the cursor; the erase from the row's start then clears it. The
 // joiner's own output above the cursor stays, for the blank screen drawn
 // after the history to scroll into its scrollback.
-const preamble = "\x1b7\x1b[?69l\x1b[r\x1b8\x1b[4l\x1b[20l" +
+const preamble = "\x1b7\x1b[?1047;1049;47l" +
+	"\x1b7\x1b[?69l\x1b[r\x1b8\x1b[4l\x1b[20l\x1b[?5l\x1b[?7;25h\x1b[0 q" +
 	"\x1b(B\x1b)B\x1b*B\x1b+B\x0f\x1b}\r\x1b[m\x1b]8;;\x07\x1b[J"
 
 // render reconstructs the emulator's state at the handoff point on the
 // joiner's terminal, which it takes to be at its defaults, the preamble
-// making it so for the scroll region and margins, insert mode, LNM, the pen,
-// the link and the charsets, and draw for origin mode: the history that
+// making it so for the screen showing, the scroll region and margins, the
+// modes that change where a print lands or how the screen shows, the
+// cursor's visibility and style, the pen, the link and the charsets, and
+// draw for origin mode: the history that
 // scrolled off, then both screens, both saved cursors and every state that
 // decides how the next bytes are read, so that the raw stream from the
 // handoff point on lands on it as it did on the session's own terminal.
