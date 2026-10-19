@@ -754,6 +754,45 @@ var (
 		// it starts, and takes keyboard input either way.
 		ansi.DECMode(9001): true,
 	}
+
+	// defaultModes are the DEC private modes a terminal starts with set, as
+	// xterm does with its default resources, that the render neither
+	// restores nor ignores. A set of one leaves it as it starts; a reset
+	// fails the render once the stream has sent it (see watchDefaultModes),
+	// as the joiner's terminal would keep the mode set. Of the others xterm
+	// starts with set, the render restores autowrap and the cursor's
+	// visibility, ignores ?1034, ?1035 and ?1037, which only change what keys
+	// send, and xterm itself ignores a set or reset of autorepeat (?8), of
+	// the cursor's XOR blink (?14) and of ?1020 to ?1023, which it only
+	// reports.
+	defaultModes = map[ansi.DECMode]bool{
+		// DECANM: reset, xterm reads what follows as a VT52 does, until
+		// ESC <, where a DECSET, a CSI of any kind and RIS are no sequences.
+		// x/vt has no VT52 mode, so it reads those bytes otherwise.
+		ansi.DECMode(2): true,
+		// The keypad's shifted plus and minus change the font's size (rxvt's
+		// mode; xterm's shiftFonts).
+		ansi.DECMode(35): true,
+		// DECBKM: the backarrow key sends BS, and DEL once reset (xterm's
+		// backarrowKey).
+		ansi.DECMode(67): true,
+		// Output scrolls the window back to the bottom (rxvt's mode; xterm's
+		// scrollTtyOutput).
+		ansi.DECMode(1010): true,
+		// xterm skips repainting the screen while output scrolls it fast
+		// (fastScroll).
+		ansi.DECMode(1014): true,
+		// The selection is kept once it is no longer highlighted
+		// (keepSelection).
+		ansi.DECMode(1040): true,
+		// The alternate screen may be shown: reset, xterm leaves it at once
+		// and ignores ?47, ?1047, ?1048 and ?1049 until it is set again
+		// (titeInhibit), none of which x/vt does.
+		ansi.DECMode(1046): true,
+		// Each sixel image gets colour registers of its own
+		// (privateColorRegisters).
+		ansi.DECMode(1070): true,
+	}
 )
 
 // eligible fails the render, before anything is written, for a joiner that
@@ -791,6 +830,9 @@ func (e *emulation) eligible(parts uio.ReplayParts) (rep, error) {
 	}
 	if e.savedModes {
 		return rep{}, &IneligibleError{State: "saved DEC modes"}
+	}
+	if e.defaultReset != 0 {
+		return rep{}, &IneligibleError{State: fmt.Sprintf("a default mode reset (?%d)", e.defaultReset)}
 	}
 	if e.savedRendition {
 		return rep{}, &IneligibleError{State: "a saved rendition"}
@@ -918,7 +960,8 @@ func (e *emulation) unrestored(parts uio.ReplayParts) string {
 // screen, insert mode, the keypad, reverse video and the report modes. So a
 // switch mode set otherwise than as that one entry leaves it is one; so are
 // DECLRMM, which changes what CSI s means, and any other mode the tracker
-// doesn't know.
+// doesn't know, but those a terminal starts with set, whose set leaves them
+// as they start and whose reset eligible fails on (see defaultModes).
 func (e *emulation) unrestoredMode(p uio.ReplayParts) string {
 	modes := e.term.Modes()
 	for _, m := range slices.SortedFunc(maps.Keys(modes), compareModes) {
@@ -931,7 +974,7 @@ func (e *emulation) unrestoredMode(p uio.ReplayParts) string {
 			continue
 		}
 		n := int(dec)
-		if _, tracked := p.DECModes[n]; tracked || restoredModes[dec] || ignoredModes[dec] {
+		if _, tracked := p.DECModes[n]; tracked || restoredModes[dec] || ignoredModes[dec] || defaultModes[dec] {
 			continue
 		}
 		switch dec {

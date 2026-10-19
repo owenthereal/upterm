@@ -111,6 +111,9 @@ type emulation struct {
 	// once it has pushed a rendition, and savedPalette once it has pushed
 	// its colours (see watchSaves).
 	savedModes, savedRendition, savedPalette bool
+	// defaultReset is the first mode of those a terminal starts with set
+	// that the stream has reset (see watchDefaultModes), or 0.
+	defaultReset int
 	// undrawable is set once the stream has set an attribute a cell doesn't
 	// keep, and doubleSize once it has made a line double-width or
 	// double-height (see watchRendition).
@@ -212,10 +215,11 @@ func (replayer) Start(ctx context.Context, deadline time.Time, c *uio.Capture, s
 // working directory, the colours, the clipboard and synchronized output's
 // DCS form kept, images, device control strings, title modes, character
 // protection, selective erases, saves, renditions and line sizes the cells
-// can't hold, a status line, a font, a rectangular attribute extent and a
-// conformance level noted, the tab stops past the screen's edge kept, and the
-// meter stopped by ctx or the deadline. Each callback and handler runs inside
-// the emulator's Write and touches only the emulation.
+// can't hold, a status line, a font, a rectangular attribute extent, a
+// conformance level and a reset of a mode a terminal starts with set noted,
+// the tab stops past the screen's edge kept, and the meter stopped by ctx or
+// the deadline. Each callback and handler runs inside the emulator's Write
+// and touches only the emulation.
 func (e *emulation) setUp() {
 	t := e.term
 	t.SetScrollbackSize(0)
@@ -249,6 +253,7 @@ func (e *emulation) setUp() {
 	e.watchAttributeExtent()
 	e.watchConformanceLevel()
 	e.watchTabStops()
+	e.watchDefaultModes()
 }
 
 // colours is the last change the stream made, by OSC, to each of the colours
@@ -997,6 +1002,26 @@ func (e *emulation) watchTabStops() {
 	})
 	t.RegisterEscHandler('c', func() bool {
 		e.pastEdge.reset(false)
+		return false
+	})
+}
+
+// watchDefaultModes registers the handler that notes DECRST (CSI ? Pm l)
+// resetting a mode a terminal starts with set and the render doesn't restore
+// (see defaultModes), by any of its parameters, each read as x/vt reads them.
+// x/vt keeps every mode a DECSET or DECRST names, but of these only the
+// setting, and its RIS forgets it, where xterm's puts back only DECBKM and
+// the colour registers of these and leaves the rest as they are; nor does a
+// set after it undo DECANM's reset, after which xterm reads the set as a
+// VT52 does, or what xterm ignored while ?1046 was reset. So the note stays,
+// whatever follows. It returns false, so that x/vt's own handler still runs.
+func (e *emulation) watchDefaultModes() {
+	e.term.RegisterCsiHandler(ansi.Command('?', 0, 'l'), func(params ansi.Params) bool {
+		for _, p := range params {
+			if n := p.Param(-1); e.defaultReset == 0 && defaultModes[ansi.DECMode(n)] {
+				e.defaultReset = n
+			}
+		}
 		return false
 	})
 }

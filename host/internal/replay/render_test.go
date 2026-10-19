@@ -2775,3 +2775,49 @@ func TestReplayFailsOnAConformanceLevel(t *testing.T) {
 		})
 	}
 }
+
+// A terminal starts with some DEC private modes set. A reset of one that the
+// render neither restores nor ignores fails it, sticky, named, while a set of
+// one leaves it as it starts: DECANM's reset puts xterm in VT52 mode, which
+// reads the bytes after it by other rules, x/vt following none of them, and a
+// joiner given the render would read the live VT52 sequences as ANSI ones.
+// The reset of a mode a terminal starts with reset changes nothing.
+func TestReplayFallsBackOnADefaultModeReset(t *testing.T) {
+	join := func(t *testing.T, stream string) error {
+		t.Helper()
+		_, fellBack := fanOut(t, New(), []byte("text\r\n"+stream+"more\r\n"), []uio.SizeEvent{event(1, 0, 80, 24)}, 4<<10)
+		return fellBack
+	}
+	for _, n := range []int{2, 35, 67, 1010, 1014, 1040, 1046, 1070} {
+		set, reset := fmt.Sprintf("\x1b[?%dh", n), fmt.Sprintf("\x1b[?%dl", n)
+		// x/vt's RIS forgets a mode it doesn't know, where xterm's keeps most
+		// of these as they are, and a set after DECANM's reset is read as a
+		// VT52 reads it: the reset stands.
+		for _, tc := range []struct {
+			name, stream string
+			fails        bool
+		}{
+			{"reset", reset, true},
+			{"set, as it starts", set, false},
+			{"reset, then set", reset + set, true},
+			{"reset, then RIS", reset + "\x1bc", true},
+		} {
+			t.Run(fmt.Sprintf("?%d %s", n, tc.name), func(t *testing.T) {
+				err := join(t, tc.stream)
+				if !tc.fails {
+					require.NoError(t, err)
+					return
+				}
+				requireIneligible(t, err, fmt.Sprintf("a default mode reset (?%d)", n))
+			})
+		}
+	}
+	t.Run("among others", func(t *testing.T) {
+		requireIneligible(t, join(t, "\x1b[?1;2;1046l"), "a default mode reset (?2)")
+	})
+	t.Run("a mode that starts reset", func(t *testing.T) {
+		for _, stream := range []string{"\x1b[?1l", "\x1b[?45l", "\x1b[?9999l"} {
+			require.NoError(t, join(t, stream), "%q", stream)
+		}
+	})
+}
