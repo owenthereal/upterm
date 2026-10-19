@@ -4050,6 +4050,43 @@ func TestReplayFailsOnANonUTF8Coding(t *testing.T) {
 	}
 }
 
+// S8C1T (ESC SP G), which makes the terminal send the program its keys and
+// reports with 8-bit controls, fails the render when the session left it
+// selected at the handoff, named: x/vt keeps no such setting, where a raw
+// replay selects it on the joiner's terminal, whose keys would then reach the
+// program as the session's terminal's do. DECSTR keeps it. S7C1T (ESC SP F)
+// puts back the 7-bit controls a terminal starts with, and so does RIS, after
+// which the join renders, as it does for ESC G, which has no intermediate.
+func TestReplayFailsOn8BitControls(t *testing.T) {
+	join := func(t *testing.T, stream string) error {
+		t.Helper()
+		_, fellBack := fanOut(t, New(), []byte("text\r\n"+stream+"more\r\n"), []uio.SizeEvent{event(1, 0, 80, 24)}, 4<<10)
+		return fellBack
+	}
+	for _, tc := range []struct{ name, stream string }{
+		{"8-bit controls selected", "\x1b G"},
+		{"7-bit, then 8-bit", "\x1b F\x1b G"},
+		{"8-bit, 7-bit, then 8-bit again", "\x1b G\x1b F\x1b G"},
+		{"8-bit, then DECSTR", "\x1b G\x1b[!p"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			requireIneligible(t, join(t, tc.stream), "8-bit controls")
+		})
+	}
+	for _, tc := range []struct{ name, stream string }{
+		{"7-bit controls selected", "\x1b F"},
+		{"8-bit, then 7-bit", "\x1b G\x1b F"},
+		{"8-bit, then RIS", "\x1b G\x1bc"},
+		{"ESC G", "\x1bG"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			require.NoError(t, join(t, tc.stream))
+			_, err := renderAt(t, 80, 24, "text\r\n"+tc.stream+"more\r\n")
+			require.NoError(t, err, "given to the emulation")
+		})
+	}
+}
+
 // screenTitleString is a window title string of GNU screen's and tmux's, as
 // tmux reads one: ESC k after an ESC and any C0 controls tmux executes where
 // they stand but CAN and SUB, then the title, up to the ESC, CAN or SUB that

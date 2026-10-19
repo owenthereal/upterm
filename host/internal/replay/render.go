@@ -1035,6 +1035,9 @@ func (e *emulation) eligible(parts uio.ReplayParts) (rep, error) {
 	if e.nonUTF8 {
 		return rep{}, &IneligibleError{State: "a non-UTF-8 coding"}
 	}
+	if e.eightBit {
+		return rep{}, &IneligibleError{State: "8-bit controls"}
+	}
 	if splitWide(e.term.MainScreen()) || splitWide(e.term.AltScreen()) {
 		return rep{}, &IneligibleError{State: splitWideState}
 	}

@@ -181,6 +181,9 @@ type emulation struct {
 	// nonUTF8 is set once the stream has left UTF-8 for another coding (see
 	// watchCoding).
 	nonUTF8 bool
+	// eightBit is whether the stream left the terminal sending the program
+	// 8-bit controls (see watchControls).
+	eightBit bool
 	// pastEdge is what the emulator keeps of the tab stops past the screen's
 	// right edge (see the type).
 	pastEdge pastEdge
@@ -281,9 +284,9 @@ func (replayer) Start(ctx context.Context, deadline time.Time, c *uio.Capture, s
 // printer controller mode, a memory lock, a key format, locator reporting,
 // the locator's events, a change to iTerm2's state, the keyboard's LEDs, a
 // log file, a window property and a coding other than UTF-8 noted, auto
-// print and the tab stops past the screen's edge kept, and the meter stopped
-// by ctx or the deadline. Each callback and handler runs inside the
-// emulator's Write and touches only the emulation.
+// print, 8-bit controls and the tab stops past the screen's edge kept, and
+// the meter stopped by ctx or the deadline. Each callback and handler runs
+// inside the emulator's Write and touches only the emulation.
 func (e *emulation) setUp() {
 	t := e.term
 	t.SetScrollbackSize(0)
@@ -334,6 +337,7 @@ func (e *emulation) setUp() {
 	e.watchLogFile()
 	e.watchWindowProperty()
 	e.watchCoding()
+	e.watchControls()
 }
 
 // colours is the last change the stream made, by OSC, to each of the colours
@@ -1718,6 +1722,36 @@ func (e *emulation) watchWindowProperty() {
 func (e *emulation) watchCoding() {
 	e.term.RegisterEscHandler(ansi.Command(0, '%', '@'), func() bool {
 		e.nonUTF8 = true
+		return false
+	})
+}
+
+// watchControls registers the handlers that keep whether the stream left the
+// terminal sending the program 8-bit controls: S8C1T (ESC SP G) selects them,
+// and S7C1T (ESC SP F) puts back the 7-bit controls a terminal starts with, as
+// xterm's RIS does too, though not its DECSTR. xterm takes either at a VT220's
+// level and up, its default VT420 among them, and then sends the program the C1
+// control in place of ESC and its 7-bit character, CSI for ESC [ and SS3 for
+// ESC O, in each key, mouse report and reply that starts with one. x/vt keeps
+// no such setting, where a raw replay selects it on the joiner's terminal,
+// whose keys would then reach the program as the session's terminal's do. It
+// changes nothing the terminal draws, so it fails the render only when selected
+// at the handoff. A DECSCL, which selects either form too, is noted as a
+// conformance level (see watchConformanceLevel). x/vt has no handler of its own
+// for either, nor for any other ESC with SP before its final; these return
+// false all the same, as watchColours' do.
+func (e *emulation) watchControls() {
+	t := e.term
+	t.RegisterEscHandler(ansi.Command(0, ' ', 'G'), func() bool {
+		e.eightBit = true
+		return false
+	})
+	t.RegisterEscHandler(ansi.Command(0, ' ', 'F'), func() bool {
+		e.eightBit = false
+		return false
+	})
+	t.RegisterEscHandler('c', func() bool {
+		e.eightBit = false
 		return false
 	})
 }
