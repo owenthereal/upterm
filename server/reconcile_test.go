@@ -237,9 +237,12 @@ func TestAdoptionRefusesARegistrationAlreadySuperseded(t *testing.T) {
 	reg, _, err := a.sm.Register(ctx, &Session{ID: id, NodeAddr: a.addr, Generation: 1})
 	require.NoError(t, err)
 	t.Cleanup(func() { a.sessions.end(reg) })
+	// Node A's watch delivers generation 2. The cache takes each delivery
+	// before the observers see it, so confirm below reads it there.
+	delivered := observe(t, a.store)
 	_, _ = b.register(t, id, 2)
-	require.Eventually(t, func() bool { return cachedGeneration(a.store, id) == 2 },
-		5*time.Second, 10*time.Millisecond, "node A's watch never delivered generation 2")
+	delivered.await(t, 5*time.Second, present(id, 2))
+	require.Equal(t, uint64(2), cachedGeneration(a.store, id), "node A's cache never took generation 2")
 
 	conn := newCloser()
 	_, err = a.sessions.add(reg, conn)

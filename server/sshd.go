@@ -71,6 +71,13 @@ type sshd struct {
 	// meant for one registration picks it out by generation.
 	beforeConfirm func(reg *Registration)
 
+	// onEnded is a test hook, run on the goroutine adopt starts for each
+	// registration that passes confirm, once the owning connection has gone
+	// and that goroutine's end(reg) has returned. That includes a
+	// registration adopt then refuses because the connection had already
+	// gone. The other calls to end don't run it.
+	onEnded func(reg *Registration)
+
 	server         *ssh.Server
 	sessions       *localSessions
 	forwardHandler *streamlocalForwardHandler
@@ -685,6 +692,9 @@ func (s *sshd) adopt(ctx ssh.Context, reg *Registration, conn *gossh.ServerConn)
 	go func() {
 		<-ctx.Done()
 		s.sessions.end(reg)
+		if s.onEnded != nil {
+			s.onEnded(reg)
+		}
 	}()
 
 	// The host may have gone while the store call ran. Its registration would
