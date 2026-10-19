@@ -737,6 +737,9 @@ func (e *emulation) eligible(parts uio.ReplayParts) (rep, error) {
 	if e.savedRendition {
 		return rep{}, &IneligibleError{State: "a saved rendition"}
 	}
+	if e.savedPalette {
+		return rep{}, &IneligibleError{State: "a saved palette"}
+	}
 	if e.undrawable {
 		return rep{}, &IneligibleError{State: "a rendition the render can't draw"}
 	}

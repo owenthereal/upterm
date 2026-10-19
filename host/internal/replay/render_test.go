@@ -1714,6 +1714,49 @@ func TestReplayFailsOnASavedRendition(t *testing.T) {
 	}
 }
 
+// A palette the session saved by XTPUSHCOLORS (CSI Pm # P), its dynamic and
+// ANSI colours, pushed on xterm's stack or stored in a place on it, fails the
+// render, named: x/vt keeps no stack and ignores the XTPOPCOLORS
+// (CSI Pm # Q) that puts one back, so the render can't tell what colours a
+// later pop gives the session's terminal, and a joiner's terminal, which the
+// push never reached, would pop its own. Every push counts, and still does
+// once popped. A pop alone renders: what it puts back was pushed before the
+// ring, which neither a raw replay nor the render holds. So do XTREPORTCOLORS
+// (CSI # R), a report, which the filter drops when it has no parameters and
+// which, given to the emulation directly, doesn't count either, and DCH
+// (CSI Ps P), the same final without the #.
+func TestReplayFailsOnASavedPalette(t *testing.T) {
+	join := func(t *testing.T, stream string) error {
+		t.Helper()
+		_, fellBack := fanOut(t, New(), []byte("text\r\n"+stream+"more\r\n"), []uio.SizeEvent{event(1, 0, 80, 24)}, 4<<10)
+		return fellBack
+	}
+	for _, tc := range []struct{ name, stream string }{
+		{"the palette pushed", "\x1b[#P"},
+		{"the palette stored in a place", "\x1b[3#P"},
+		{"the palette stored in two places", "\x1b[1;2#P"},
+		{"a push popped", "\x1b[#P\x1b[#Q"},
+		{"a push, then text", "\x1b[#Pafter"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			requireIneligible(t, join(t, tc.stream), "a saved palette")
+		})
+	}
+	for _, tc := range []struct{ name, stream string }{
+		{"a pop alone", "\x1b[#Q"},
+		{"a pop from a place", "\x1b[2#Q"},
+		{"the stack reported", "\x1b[#R"},
+		{"the stack reported, with a parameter", "\x1b[1#R"},
+		{"no intermediate", "\x1b[2P"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			require.NoError(t, join(t, tc.stream))
+			_, err := renderAt(t, 80, 24, "text\r\n"+tc.stream+"more\r\n")
+			require.NoError(t, err, "given to the emulation")
+		})
+	}
+}
+
 // An SGR the session sent with a number x/vt's SGR skips, which changes how
 // a terminal draws what is printed after it, fails the render, named, as the
 // cells printed under it would be drawn as x/vt keeps them: an alternative

@@ -102,9 +102,10 @@ type emulation struct {
 	// protected is set once the stream has turned character protection on,
 	// and selective once it has erased selectively (see watchProtection).
 	protected, selective bool
-	// savedModes is set once the stream has saved DEC modes, and
-	// savedRendition once it has pushed a rendition (see watchSaves).
-	savedModes, savedRendition bool
+	// savedModes is set once the stream has saved DEC modes, savedRendition
+	// once it has pushed a rendition, and savedPalette once it has pushed
+	// its colours (see watchSaves).
+	savedModes, savedRendition, savedPalette bool
 	// undrawable is set once the stream has set an attribute a cell doesn't
 	// keep, and doubleSize once it has made a line double-width or
 	// double-height (see watchRendition).
@@ -741,16 +742,19 @@ func (e *emulation) popTitle(ps int) {
 
 // watchSaves registers the handlers that note the stream saving state the
 // terminal keeps aside for a later sequence to put back: DEC private modes
-// saved by XTSAVE (CSI ? Pm s), whichever modes Pm names; and a rendition
-// pushed by XTPUSHSGR (CSI Pm # {, or its alias CSI Pm # p), the whole pen or
-// the attributes Pm names. x/vt keeps neither and ignores what restores
-// each, XTRESTORE (CSI ? Pm r) and XTPOPSGR (CSI # }, or CSI # q), so once
-// one is saved the render can't tell what a restore on the session's
-// terminal puts back, and a joiner's terminal, which the save never reached,
-// would put back its own. x/vt keys a CSI handler by its prefix and
-// intermediate too, so XTSAVE's handler sees neither SCOSC nor DECSLRM, both
-// the bare CSI s, and the alias's sees no CSI p without the #, such as
-// DECSTR's CSI ! p. x/vt has no handler of its own for either; these return
+// saved by XTSAVE (CSI ? Pm s), whichever modes Pm names; a rendition pushed
+// by XTPUSHSGR (CSI Pm # {, or its alias CSI Pm # p), the whole pen or the
+// attributes Pm names; and the dynamic and ANSI colours saved by
+// XTPUSHCOLORS (CSI Pm # P), pushed on xterm's stack of palettes or, by a
+// parameter, stored in a place on it. x/vt keeps none of them and ignores
+// what restores each, XTRESTORE (CSI ? Pm r), XTPOPSGR (CSI # }, or CSI # q)
+// and XTPOPCOLORS (CSI Pm # Q), so once one is saved the render can't tell
+// what a restore on the session's terminal puts back, and a joiner's
+// terminal, which the save never reached, would put back its own. x/vt keys a
+// CSI handler by its prefix and intermediate too, so XTSAVE's handler sees
+// neither SCOSC nor DECSLRM, both the bare CSI s, the alias's sees no CSI p
+// without the #, such as DECSTR's CSI ! p, and XTPUSHCOLORS's no DCH, the
+// bare CSI P. x/vt has no handler of its own for any of them; these return
 // false all the same, as watchColours' do.
 func (e *emulation) watchSaves() {
 	t := e.term
@@ -764,6 +768,10 @@ func (e *emulation) watchSaves() {
 			return false
 		})
 	}
+	t.RegisterCsiHandler(ansi.Command(0, '#', 'P'), func(ansi.Params) bool {
+		e.savedPalette = true
+		return false
+	})
 }
 
 // watchRendition registers the handlers that note the stream drawing what
