@@ -855,6 +855,12 @@ type forwardTestPeer struct {
 	// transport has ended, and forwardSSH, which learns from Wait that a peer
 	// has left, hasn't learned it yet.
 	waitGate chan struct{}
+	// failGate, if not nil, holds an unanswered open past the end until it
+	// closes: the mux has failed the open, and the goroutine that passes the
+	// failure on hasn't run yet. failing closes when an open reaches it.
+	failGate    chan struct{}
+	failing     chan struct{}
+	markFailing func()
 }
 
 func newForwardTestPeer() *forwardTestPeer {
@@ -864,9 +870,11 @@ func newForwardTestPeer() *forwardTestPeer {
 		ended:    make(chan struct{}),
 		answered: make(chan struct{}),
 		opened:   make(chan struct{}),
+		failing:  make(chan struct{}),
 	}
 	p.end = sync.OnceFunc(func() { close(p.ended); close(p.channels); close(p.requests) })
 	p.markOpened = sync.OnceFunc(func() { close(p.opened) })
+	p.markFailing = sync.OnceFunc(func() { close(p.failing) })
 	return p
 }
 
@@ -881,12 +889,12 @@ func (p *forwardTestPeer) OpenChannel(string, []byte) (ssh.Channel, <-chan *ssh.
 		<-p.answered
 		return nil, nil, p.rejection
 	}
-	select {
-	case <-p.answered:
-		return nil, nil, nil
-	case <-p.ended:
-		return nil, nil, errors.New("ssh: unexpected packet in response to channel open: <nil>")
+	<-p.ended
+	if p.failGate != nil {
+		p.markFailing()
+		<-p.failGate
 	}
+	return nil, nil, errors.New("ssh: unexpected packet in response to channel open: <nil>")
 }
 
 func (p *forwardTestPeer) Close() error {
@@ -936,32 +944,278 @@ func (o forwardTestOpen) Reject(reason ssh.RejectionReason, message string) erro
 	return nil
 }
 
+// forwardHold is what a row of the table below holds past the node's end,
+// until it calls release.
+type forwardHold int
+
+const (
+	holdNothing forwardHold = iota
+	// holdWait holds the node's Wait: forwardSSH hasn't learned that the
+	// node left.
+	holdWait
+	// holdFailure holds an unanswered open the node's end has failed: the
+	// goroutine passing the failure on hasn't run.
+	holdFailure
+)
+
+// forwardOrder runs forwardSSH between a guest and a relay node, both
+// forwardTestPeers, for one row of the table below.
+type forwardOrder struct {
+	guest, node *forwardTestPeer
+	answer      func() // R: hands the node's rejection back; idempotent
+	release     func() // lets what the row held go on; idempotent
+	done        chan error
+}
+
+// newForwardOrder starts forwardSSH, with the guest downstream. rejection, if
+// not nil, is the node's answer to the guest's open; nil leaves it unanswered.
+// hold is what the row holds past the node's end, until release.
+func newForwardOrder(t *testing.T, rejection *ssh.OpenChannelError, hold forwardHold) *forwardOrder {
+	guest, node := newForwardTestPeer(), newForwardTestPeer()
+	if rejection != nil {
+		// OpenChannel reads it before it waits, so it is set before any open.
+		node.rejection = rejection
+	}
+	f := &forwardOrder{
+		guest:   guest,
+		node:    node,
+		answer:  sync.OnceFunc(func() { close(node.answered) }),
+		release: func() {},
+		done:    make(chan error, 1),
+	}
+	gate := make(chan struct{})
+	switch hold {
+	case holdWait:
+		node.waitGate = gate
+		f.release = sync.OnceFunc(func() { close(gate) })
+	case holdFailure:
+		node.failGate = gate
+		f.release = sync.OnceFunc(func() { close(gate) })
+	}
+	// A row that fails part way leaves its gates shut, and forwardSSH joins
+	// the goroutines blocked on them. The gates open first, then both peers
+	// end, so forwardSSH can return and the bubble's goroutines exit. Nothing
+	// here waits: synctest.Test waits for them once the cleanups have run.
+	t.Cleanup(func() {
+		if rejection != nil {
+			// Only an open with a rejection waits for answered: one with
+			// none fails once its peer ends, as both do just below.
+			f.answer()
+		}
+		f.release()
+		guest.end()
+		node.end()
+	})
+	go func() {
+		f.done <- forwardSSH(t.Context(), guest.sshPeer(), node.sshPeer(), abortConnection, discardCounter, nil)
+	}()
+	return f
+}
+
+// open has the guest open a channel, and returns where its rejection arrives
+// once the open has reached the node (O).
+func (f *forwardOrder) open(t *testing.T, stalled bool) <-chan *ssh.OpenChannelError {
+	t.Helper()
+	rejected := f.guest.open(stalled)
+	synctest.Wait() // the open has reached the node, which holds it until it's answered or the node ends
+	require.True(t, isDone(f.node.opened), "the guest's open didn't reach the node")
+	return rejected
+}
+
+// requireRunning fails the row if forwardSSH has returned.
+func (f *forwardOrder) requireRunning(t *testing.T, msg string) {
+	t.Helper()
+	select {
+	case err := <-f.done:
+		t.Fatalf("%s: forwardSSH returned %v", msg, err)
+	default:
+	}
+}
+
+// requireReturned fails the row unless forwardSSH has returned, and gives
+// what it returned.
+func (f *forwardOrder) requireReturned(t *testing.T, msg string) error {
+	t.Helper()
+	select {
+	case err := <-f.done:
+		return err
+	default:
+		t.Fatal(msg)
+		return nil
+	}
+}
+
+// requireGuestRejected fails the row unless the guest has been sent want. A
+// rejection reaches the guest only while its transport is up, and forwardSSH
+// closes that just before it returns, so one that arrived came before C.
+func requireGuestRejected(t *testing.T, rejected <-chan *ssh.OpenChannelError, want *ssh.OpenChannelError) {
+	t.Helper()
+	select {
+	case got := <-rejected:
+		require.Equal(t, want, got, "the guest was sent another rejection")
+	default:
+		t.Fatal("the guest's connection closed with its open unanswered")
+	}
+}
+
 // A relay node whose own upstream failed rejects the entry's channel open and
 // closes its transport at once (rejectSSHChannels). The entry has the rejection
 // before it sees that transport end, but the goroutine that passes it on can
-// run after: the guest must still be told why, not have its connection closed
-// with its open unanswered.
-func TestSSHForwardPassesOnARejectionFromAPeerThatThenLeft(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		guest, node := newForwardTestPeer(), newForwardTestPeer()
-		node.rejection = &ssh.OpenChannelError{Reason: ssh.ConnectionFailed, Message: "upstream has no session"}
-		done := make(chan error, 1)
-		go func() {
-			done <- forwardSSH(t.Context(), guest.sshPeer(), node.sshPeer(), abortConnection, discardCounter, nil)
-		}()
-		rejected := guest.open(false)
-		synctest.Wait() // the open is in flight toward the node
-		node.end()      // which rejected it, then left
-		synctest.Wait() // forwardSSH has done all it does before the rejection is handed back
-		close(node.answered)
-		require.ErrorIs(t, <-done, io.EOF, "forwardSSH ends with the node's transport ending")
-		select {
-		case rejection := <-rejected:
-			require.Equal(t, &ssh.OpenChannelError{Reason: ssh.ConnectionFailed, Message: "upstream has no session"}, rejection)
-		default:
-			t.Fatal("the guest's connection closed with its open unanswered")
-		}
-	})
+// run after (#629): the guest must still be told why, not have its connection
+// closed with its open unanswered. The rows take a guest's open through the
+// forwarder's checkpoints, in the orders below, and row 7 an open the node
+// sends toward the guest:
+//
+//	O    The open reaches the node: the node's opened closes.
+//	R    The node's answer, its rejection, is handed back: answered closes.
+//	P    The guest receives its rejection: the node's, or ConnectionFailed
+//	     for an open the node never answered. In row 6 the node's end has
+//	     failed the open, and failGate holds the goroutine passing the
+//	     failure on until the test releases it.
+//	E    The node ends: end(). In rows 2 and 5 waitGate holds its Wait, so
+//	     the transport has ended and forwardSSH, which learns it from Wait,
+//	     hasn't learned it yet.
+//	D C  forwardSSH drains and returns. Neither has an acknowledgement of
+//	     its own: forwardSSH returning is both.
+//
+// The test takes a step only once the one before it is acknowledged, after a
+// synctest.Wait has settled it: O by opened, a held failure by failing, P by
+// the guest's rejection arriving, D C by forwardSSH returning. R, E and
+// releasing what a row held are the test's own acts.
+//
+// The orders the table doesn't run:
+//   - P apart from R, as in R E P or E R D P. forwardSSH can't tell those
+//     from rows the table runs: it counts the open as in flight until the
+//     guest's Reject has returned, whenever the answer was handed back. So
+//     R E P runs as row 2 or row 3, as D comes after P or before it, and
+//     E R D P as row 3. Row 4 parts R from P for good: its guest has stopped
+//     reading, and P never comes.
+//   - D before E: forwardSSH learns that the node left from its Wait, which
+//     returns only once the node has ended.
+//
+// With the open unanswered, x/crypto's mux fails it before its Wait returns,
+// but the goroutine passing the failure on can run before forwardSSH learns
+// that the node left (row 5) or after (row 6).
+//
+// No time passes in any row but row 4, so each sees forwardSSH return well
+// inside the drain's bound (5 s), or else it was waiting for something it
+// shouldn't. Row 4's guest never reads, so only the bound ends the wait: the
+// bound (5 s) < the guest's stall, which lasts until its transport closes,
+// and forwardSSH returns 5 s after the node left, not a nanosecond before.
+func TestSSHForwardARejectionFromAPeerThatLeftInEveryOrder(t *testing.T) {
+	upstreamFailed := &ssh.OpenChannelError{Reason: ssh.ConnectionFailed, Message: "upstream has no session"}
+	for _, row := range []struct {
+		name   string
+		answer *ssh.OpenChannelError // the node's answer to the guest's open; nil leaves it unanswered
+		hold   forwardHold
+		run    func(t *testing.T, f *forwardOrder)
+	}{
+		// Row 1: answered before the node leaves.
+		{"O R P E D C", upstreamFailed, holdNothing, func(t *testing.T, f *forwardOrder) {
+			rejected := f.open(t, false)
+			f.answer()
+			synctest.Wait() // R P: the rejection has been handed back and passed on
+			requireGuestRejected(t, rejected, upstreamFailed)
+			f.requireRunning(t, "both peers are up")
+			f.node.end()
+			synctest.Wait() // E D C: the node has ended, and forwardSSH has drained and returned
+			require.ErrorIs(t, f.requireReturned(t, "forwardSSH outlived the node's transport"), io.EOF)
+		}},
+		// Row 2: the node has ended, but forwardSSH hasn't learned it. An
+		// answer that arrived before the end is still handed back, as
+		// x/crypto's mux hands it back.
+		{"O E R P D C", upstreamFailed, holdWait, func(t *testing.T, f *forwardOrder) {
+			rejected := f.open(t, false)
+			f.node.end()
+			synctest.Wait() // E: the node has ended, and its Wait is held, so forwardSSH hasn't learned it
+			f.requireRunning(t, "forwardSSH hadn't learned that the node left")
+			f.answer()
+			synctest.Wait() // R P: the rejection has been handed back and passed on
+			requireGuestRejected(t, rejected, upstreamFailed)
+			f.release()
+			synctest.Wait() // D C: forwardSSH has learned that the node left, drained and returned
+			require.ErrorIs(t, f.requireReturned(t, "forwardSSH outlived the node's transport"), io.EOF)
+		}},
+		// Row 3, #629's order: forwardSSH is draining when the answer is
+		// handed back, and waits for it to reach the guest.
+		{"O E D R P C", upstreamFailed, holdNothing, func(t *testing.T, f *forwardOrder) {
+			rejected := f.open(t, false)
+			f.node.end()
+			synctest.Wait() // E D: forwardSSH has learned that the node left, and done all it does before the rejection is handed back
+			f.requireRunning(t, "the guest's open is unanswered")
+			require.False(t, isDone(f.guest.ended), "forwardSSH closed the guest's connection with its open unanswered")
+			f.answer()
+			synctest.Wait() // R P C: the rejection has been handed back and passed on, and forwardSSH has returned
+			requireGuestRejected(t, rejected, upstreamFailed)
+			require.ErrorIs(t, f.requireReturned(t, "forwardSSH outlived the node's transport"), io.EOF,
+				"forwardSSH ends with the node's transport ending")
+		}},
+		// Row 4: R before E, and the guest has stopped reading, so P never
+		// comes. A guest can't hold its connection open by not taking the
+		// rejection: the wait for it is bounded like the drain.
+		{"O R E D C, the guest stalled", upstreamFailed, holdNothing, func(t *testing.T, f *forwardOrder) {
+			f.open(t, true)
+			f.answer()
+			synctest.Wait() // R: the rejection has been handed back, and is stuck in a write the guest isn't reading
+			f.node.end()
+			synctest.Wait() // E D: forwardSSH has learned that the node left, and is draining, its bound armed
+			time.Sleep(sshForwardDrainTimeout - time.Nanosecond)
+			synctest.Wait() // everything due before the drain's bound has run
+			f.requireRunning(t, "forwardSSH gave up on the rejection before the drain's bound")
+			time.Sleep(time.Nanosecond)
+			synctest.Wait() // the bound has expired, and forwardSSH has returned
+			require.EqualError(t, f.requireReturned(t, "a guest that stopped reading held its connection past the drain's bound"),
+				"ssh: buffered data drain timed out")
+		}},
+		// Row 5: E with the open unanswered. It fails as the node's mux
+		// closes, and the guest is told so before C. The node's Wait is held
+		// so that P comes before D, as the row's name says.
+		{"O E P D C, unanswered", nil, holdWait, func(t *testing.T, f *forwardOrder) {
+			rejected := f.open(t, false)
+			f.node.end()
+			synctest.Wait() // E P: the open has failed with the node's end, and the guest has been told; the node's Wait is held
+			requireGuestRejected(t, rejected,
+				&ssh.OpenChannelError{Reason: ssh.ConnectionFailed, Message: "ssh: unexpected packet in response to channel open: <nil>"})
+			f.requireRunning(t, "forwardSSH hadn't learned that the node left")
+			f.release()
+			synctest.Wait() // D C: forwardSSH has learned that the node left, drained and returned
+			require.ErrorIs(t, f.requireReturned(t, "forwardSSH outlived the node's transport"), io.EOF)
+		}},
+		// Row 6: E with the open unanswered, and the goroutine passing its
+		// failure on held until forwardSSH is draining. The drain waits for
+		// it to reach the guest.
+		{"O E D P C, unanswered", nil, holdFailure, func(t *testing.T, f *forwardOrder) {
+			rejected := f.open(t, false)
+			f.node.end()
+			synctest.Wait() // E D: the open has failed with the node's end, the goroutine passing that on is held, and forwardSSH has learned that the node left and done all it does before the failure is passed on
+			require.True(t, isDone(f.node.failing), "the open's failure didn't reach the hold")
+			f.requireRunning(t, "the guest's open is unanswered")
+			require.False(t, isDone(f.guest.ended), "forwardSSH closed the guest's connection with its open unanswered")
+			require.Empty(t, rejected, "the guest was told before the failure was passed on")
+			f.release()
+			synctest.Wait() // P C: the failure has been passed on, and forwardSSH has returned
+			requireGuestRejected(t, rejected,
+				&ssh.OpenChannelError{Reason: ssh.ConnectionFailed, Message: "ssh: unexpected packet in response to channel open: <nil>"})
+			require.ErrorIs(t, f.requireReturned(t, "forwardSSH outlived the node's transport"), io.EOF)
+		}},
+		// Row 7: an open the node sent toward the guest, the survivor, which
+		// never answers. Only the guest could answer it, and the node that
+		// would take the answer has left, so forwardSSH doesn't wait for it.
+		{"an open toward the survivor, unanswered", nil, holdNothing, func(t *testing.T, f *forwardOrder) {
+			f.node.open(false)
+			synctest.Wait() // the node's open has reached the guest, which never answers it
+			require.True(t, isDone(f.guest.opened), "the node's open didn't reach the guest")
+			f.node.end()
+			synctest.Wait() // E D C: the node has ended, and forwardSSH has drained and returned, with no time passed
+			require.ErrorIs(t, f.requireReturned(t, "forwardSSH waited for an open toward the guest, which survived the node"), io.EOF)
+		}},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				row.run(t, newForwardOrder(t, row.answer, row.hold))
+			})
+		})
+	}
 }
 
 // A rewrite words the rejections the downstream, the guest, is sent. The
@@ -982,24 +1236,6 @@ func TestSSHForwardRewritesOnlyTheDownstreamsRejections(t *testing.T) {
 		require.Equal(t, "upstream has no session", (<-node.open(false)).Message)
 		node.end()
 		require.ErrorIs(t, <-done, io.EOF)
-	})
-}
-
-// Waiting for that rejection is bounded like the drain: a guest that has
-// stopped reading cannot hold its connection open by not taking it.
-func TestSSHForwardWaitsForThatRejectionOnlyAsLongAsTheDrain(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		guest, node := newForwardTestPeer(), newForwardTestPeer()
-		node.rejection = &ssh.OpenChannelError{Reason: ssh.ConnectionFailed, Message: "upstream has no session"}
-		close(node.answered)
-		done := make(chan error, 1)
-		go func() {
-			done <- forwardSSH(t.Context(), guest.sshPeer(), node.sshPeer(), abortConnection, discardCounter, nil)
-		}()
-		guest.open(true)
-		synctest.Wait() // the rejection is stuck in a write the guest is not reading
-		node.end()
-		require.EqualError(t, <-done, "ssh: buffered data drain timed out")
 	})
 }
 
