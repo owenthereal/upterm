@@ -31,6 +31,46 @@ func TestBashCompletionAsksTheBinary(t *testing.T) {
 	require.False(t, strings.Contains(text, "__upterm_handle_reply"), "the V1 script")
 }
 
+// The root and the groups run only to report an unknown command, so their
+// pages show no usage line of their own, as for a command that can't run; a
+// command that runs keeps its line.
+func TestOnlyPagesOfCommandsThatRunShowAUsageLine(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Chdir(t.TempDir())
+	for _, dir := range []string{"docs", "etc/man/man1", "etc/completion"} {
+		require.NoError(t, os.MkdirAll(dir, 0o755))
+	}
+
+	main()
+
+	for page, usage := range map[string]string{
+		"upterm.md":         "upterm [flags]",
+		"upterm_session.md": "upterm session [flags]",
+		"upterm_config.md":  "upterm config [flags]",
+	} {
+		text, err := os.ReadFile(filepath.Join("docs", page))
+		require.NoError(t, err)
+		require.NotContains(t, string(text), "```\n"+usage+"\n```", page)
+	}
+	text, err := os.ReadFile(filepath.Join("docs", "upterm_version.md"))
+	require.NoError(t, err)
+	require.Contains(t, string(text), "```\nupterm version [flags]\n```")
+
+	// A man page always has a synopsis: the root's and a group's name their
+	// commands, as their --help does.
+	for page, synopsis := range map[string]string{
+		"upterm.1":         "upterm [command]",
+		"upterm-session.1": "upterm session [command]",
+		"upterm-config.1":  "upterm config [command]",
+		"upterm-version.1": "upterm version [flags]",
+	} {
+		text, err := os.ReadFile(filepath.Join("etc", "man", "man1", page))
+		require.NoError(t, err)
+		require.Contains(t, string(text), ".SH SYNOPSIS\n\\fB"+synopsis+"\\fP\n", page)
+	}
+}
+
 // The cask installs the man pages it lists and no others.
 func TestCaskListsEveryManPage(t *testing.T) {
 	config, err := os.ReadFile(filepath.Join("..", "..", ".goreleaser.yml"))

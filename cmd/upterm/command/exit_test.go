@@ -2,12 +2,14 @@ package command
 
 import (
 	"bytes"
+	"cmp"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -18,7 +20,7 @@ import (
 )
 
 // runCLI runs upterm with args in-process, as Main does: the root Main runs,
-// ExecuteC, then Exit. stdin, stdout and stderr are pipes, so stderr holds
+// execute, then Exit. stdin, stdout and stderr are pipes, so stderr holds
 // both what the command wrote itself and what Exit printed, and code is the
 // status main would exit with.
 //
@@ -36,6 +38,13 @@ func runCLI(t *testing.T, args ...string) (stdout, stderr string, code int) {
 // runCLICmd is runCLI, and the command that ran.
 func runCLICmd(t *testing.T, args ...string) (stdout, stderr string, code int, cmd *cobra.Command) {
 	t.Helper()
+
+	// A run leaves the command it ran and the flags it applied in package
+	// state; the real binary exits with them. Put them back, so that a later
+	// test asking whether CI hides addresses doesn't inherit a flag this
+	// run set.
+	origRunning, origSupplied := runningCmd, suppliedFlags
+	t.Cleanup(func() { runningCmd, suppliedFlags = origRunning, origSupplied })
 
 	stdinR, stdinW, err := os.Pipe()
 	require.NoError(t, err)
@@ -69,7 +78,7 @@ func runCLICmd(t *testing.T, args ...string) (stdout, stderr string, code int, c
 	root := cliRoot()
 	// Never nil: cobra reads nil as "take os.Args", the test binary's.
 	root.SetArgs(append([]string{}, args...))
-	cmd, err = root.ExecuteC()
+	cmd, err = execute(root)
 	code = Exit(cmd, err, os.Stderr)
 	// A command that fails skips PersistentPostRunE, which closes the log
 	// file, and Exit has just written to it; Windows won't remove the state
@@ -217,6 +226,115 @@ func TestUnknownCommandsSuggestOnOneLine(t *testing.T) {
 		require.Equal(t, 0, code, group) // help, as today
 		require.Contains(t, stdout, "Available Commands:", group)
 		require.Empty(t, stderr, group)
+	}
+}
+
+// Help for an unknown command, asked for with --help or -h or through
+// upterm help, is the error running it is: the same line on stderr, nothing
+// on stdout, and 1. Help for a known command, or for none, is unchanged.
+func TestHelpForAnUnknownCommandIsAnError(t *testing.T) {
+	setupSessionRoots(t)
+	withConfig(t, "")
+
+	const (
+		root       = "upterm: unknown command \"sesion\"; did you mean session or version?\n"
+		session    = "upterm: unknown command \"lsit\" for upterm session; did you mean list, set or wait?\n"
+		config     = "upterm: unknown command \"edti\" for upterm config; did you mean edit?\n"
+		completion = "upterm: unknown command \"bahs\" for upterm completion; did you mean bash?\n"
+		// bsh is within two edits of bash, fish and zsh.
+		completionBsh = "upterm: unknown command \"bsh\" for upterm completion; did you mean bash, fish or zsh?\n"
+	)
+	for _, tc := range []struct {
+		args []string
+		want string
+	}{
+		{[]string{"sesion", "--help"}, root},
+		{[]string{"sesion", "-h"}, root},
+		{[]string{"--help", "sesion"}, root},
+		{[]string{"help", "sesion"}, root},
+		{[]string{"session", "lsit", "--help"}, session},
+		{[]string{"session", "lsit", "-h"}, session},
+		{[]string{"help", "session", "lsit"}, session},
+		{[]string{"config", "edti", "--help"}, config},
+		{[]string{"help", "config", "edti"}, config},
+		{[]string{"completion", "bahs", "--help"}, completion},
+		{[]string{"help", "completion", "bahs"}, completion},
+		// cobra takes the word after --help for its value and leaves the
+		// rest at the root; a typo after a known command is still a typo.
+		{[]string{"--help", "session", "lsit"}, session},
+		{[]string{"-h", "session", "lsit"}, session},
+		{[]string{"-h", "se", "lsit"}, session},
+		{[]string{"--help", "config", "edti"}, config},
+		{[]string{"--help", "completion", "bsh"}, completionBsh},
+	} {
+		stdout, stderr, code := runCLI(t, tc.args...)
+		require.Equal(t, 1, code, tc.args)
+		require.Empty(t, stdout, tc.args)
+		require.Equal(t, tc.want, stderr, tc.args)
+	}
+
+	for _, args := range [][]string{
+		{"--help"}, {"-h"}, {"help"},
+		{"session", "--help"}, {"help", "session"},
+		{"session", "list", "--help"}, {"help", "session", "list"},
+		{"help", "completion"},
+	} {
+		path := slices.DeleteFunc(slices.Clone(args), func(arg string) bool {
+			return arg == "help" || arg == "--help" || arg == "-h"
+		})
+		c, _, err := cliRoot().Find(path)
+		require.NoError(t, err)
+		first, _, _ := strings.Cut(cmp.Or(c.Long, c.Short), "\n")
+
+		stdout, stderr, code := runCLI(t, args...)
+		require.Equal(t, 0, code, args)
+		require.Empty(t, stderr, args)
+		require.True(t, strings.HasPrefix(stdout, first+"\n"), "%q: %s", args, stdout)
+	}
+}
+
+// With --help in front, cobra leaves the words after the first command at the
+// root, and the root prints its help. Words that name a command, and a command
+// with no commands of its own followed by arguments, are known.
+func TestHelpBeforeKnownCommandsIsHelp(t *testing.T) {
+	setupSessionRoots(t)
+	withConfig(t, "")
+
+	first, _, _ := strings.Cut(cmp.Or(Root().Long, Root().Short), "\n")
+	for _, args := range [][]string{
+		{"--help", "session"},
+		{"--help", "session", "list"},
+		{"--help", "session", "info", "NAME"},
+		{"-h", "se", "i", "NAME"},
+		{"--help", "completion", "bash"},
+	} {
+		stdout, stderr, code := runCLI(t, args...)
+		require.Equal(t, 0, code, args)
+		require.Empty(t, stderr, args)
+		require.True(t, strings.HasPrefix(stdout, first+"\n"), "%q: %s", args, stdout)
+	}
+}
+
+// The root and the groups run only to report an unknown command, so their
+// usage names their commands and not a run of their own; a command that
+// runs keeps its line.
+func TestOnlyCommandsThatRunShowAUsageLine(t *testing.T) {
+	setupSessionRoots(t)
+	withConfig(t, "")
+	for _, tc := range []struct {
+		args       []string
+		want, gone string
+	}{
+		{[]string{"--help"}, "Usage:\n  upterm [command]\n", "upterm [flags]"},
+		{[]string{"session", "--help"}, "Usage:\n  upterm session [command]\n\nAliases:", "upterm session [flags]"},
+		{[]string{"help", "config"}, "Usage:\n  upterm config [command]\n", "upterm config [flags]"},
+		{[]string{"completion", "--help"}, "Usage:\n  upterm completion [command]\n", "upterm completion [flags]"},
+		{[]string{"version", "--help"}, "Usage:\n  upterm version [flags]\n", "upterm version [command]"},
+	} {
+		stdout, _, code := runCLI(t, tc.args...)
+		require.Equal(t, 0, code, tc.args)
+		require.Contains(t, stdout, tc.want, tc.args)
+		require.NotContains(t, stdout, tc.gone, tc.args)
 	}
 }
 

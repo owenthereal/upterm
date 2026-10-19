@@ -42,6 +42,18 @@ type joinFlags struct {
 	typed  string // the target as the guest typed it
 }
 
+// The help of flags that upterm host and join share, and attach too for
+// --escape-char: each behaves the same in every command that has it, so it
+// is told once, from join's side. -i's explicit list is shared; its default
+// differs, so each command adds its own.
+const (
+	knownHostsHelp       = "Known keys of relays. An unknown relay key is shown for confirmation, as ssh does."
+	skipHostKeyCheckHelp = "Accept an unknown relay key and record it without asking (similar to SSH's StrictHostKeyChecking=accept-new). A changed key is still refused."
+	proxyHelp            = "HTTP proxy to reach the relay through (e.g. http://proxy.example.com:3128). Works with ssh, ws and wss relays. Without it, ws and wss use HTTPS_PROXY/HTTP_PROXY, and ssh goes direct."
+	escapeCharHelp       = "The character that starts upterm's keys at the start of a line, or 'none' to turn them off."
+	identitiesOnlyHelp   = "Supplying this makes the list the whole set, like OpenSSH's IdentitiesOnly: each file must load, a public key (.pub) file selects that key in the SSH agent, and other agent keys are not offered."
+)
+
 func joinCmd() *cobra.Command {
 	var f joinFlags
 	cmd := &cobra.Command{
@@ -62,7 +74,8 @@ A forced command (upterm host --force-command) starts again on each rejoin;
 nothing the previous one did is undone.
 
 Exits with the session's status when one arrives, 0 when you leave (~.), 130
-when stopped, and 255 when it can't join.`,
+when stopped, and 255 when it can't join, including a usage or configuration
+error.`,
 		Example: `  # Join a session, with the connect string the host shares:
   upterm join ssh://ID@uptermd.upterm.dev
 
@@ -94,15 +107,15 @@ when stopped, and 255 when it can't join.`,
 	// suggest the join target it reaches. resolveTarget still reads join's
 	// flags after a target that stands alone.
 	flags.SetInterspersed(false)
-	flags.StringSliceVarP(&f.privateKeys, "private-key", "i", defaultPrivateKeys(), "Identity files. Supplying this makes the list the whole set, like OpenSSH's IdentitiesOnly: each file must load, and a .pub selects that key in the SSH agent, as upterm host -i does. By default, the agent's keys are offered first, then the listed files that exist and the agent doesn't hold, and a generated key when there are neither.")
-	flags.StringVar(&f.knownHosts, "known-hosts", defaultKnownHost(), "Known keys of relays. An unknown relay key is shown for confirmation, as ssh does.")
+	flags.StringSliceVarP(&f.privateKeys, "private-key", "i", defaultPrivateKeys(), "Identity files. "+identitiesOnlyHelp+" By default, the agent's keys are offered first, then the listed files that exist and the agent doesn't hold, and a generated key when there are neither.")
+	flags.StringVar(&f.knownHosts, "known-hosts", defaultKnownHost(), knownHostsHelp)
 	// Keep help and generated docs portable without changing the runtime
 	// defaults, as upterm host does.
 	flags.Lookup("private-key").DefValue = "[~/.ssh/id_{ed25519,ed25519_sk,ecdsa,ecdsa_sk,dsa,rsa}]"
 	flags.Lookup("known-hosts").DefValue = "~/.ssh/known_hosts"
-	flags.BoolVar(&f.skipHostKeyCheck, "skip-host-key-check", false, "Accept an unknown relay key and record it without asking (similar to SSH's StrictHostKeyChecking=accept-new). A changed key is still refused.")
-	flags.StringVar(&f.proxy, "proxy", "", "HTTP proxy to reach the relay through (e.g. http://proxy.example.com:3128). Works with ssh, ws and wss targets. Without it, ws and wss use HTTPS_PROXY/HTTP_PROXY, and ssh goes direct.")
-	flags.StringVar(&f.escapeChar, "escape-char", "~", "Escape character for leaving (ESC-CHAR followed by . at the start of a line) or suspending (ESC-CHAR followed by ^Z, Unix only), or 'none' to disable.")
+	flags.BoolVar(&f.skipHostKeyCheck, "skip-host-key-check", false, skipHostKeyCheckHelp)
+	flags.StringVar(&f.proxy, "proxy", "", proxyHelp)
+	flags.StringVar(&f.escapeChar, "escape-char", "~", escapeCharHelp)
 	flags.BoolVar(&f.wait, "wait", false, "On the first join, wait for a host as a rejoin does, with no 30 s limit.")
 	perRun(flags, "wait")
 	return cmd

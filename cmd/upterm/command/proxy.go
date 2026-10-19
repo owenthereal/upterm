@@ -14,19 +14,32 @@ import (
 
 func proxyCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "proxy",
+		Use:   "proxy [flags] URL",
 		Short: "Proxy a terminal session via WebSocket",
-		Long:  "Proxy a terminal session via WebSocket, to be used alongside SSH ProxyCommand.",
-		Example: `  # Host shares a session running $SHELL over WebSocket:
-  upterm host --server wss://uptermd.upterm.dev -- YOUR_COMMAND
+		Long: `Carry ssh's connection to a session over a WebSocket, as its ProxyCommand:
+the SSH line of a host on a ws:// or wss:// relay runs it.
 
-  # Client connects to the host session via WebSocket:
-  ssh -o ProxyCommand='upterm proxy wss://TOKEN@uptermd.upterm.dev' TOKEN@uptermd.upterm.dev:443`,
+URL is the ws:// or wss:// URL in the ProxyCommand of the host's SSH line.
+upterm join is the simpler way to join such a session: it takes the
+connect string on the host's Join line, and needs no ssh options.
+
+Exit status: 1 when it can't connect to the relay, including a usage or
+configuration error. Once connected, the first result reported decides: 0
+for end-of-input from ssh, 1 when the relay closes the connection or a read
+or write fails.`,
+		Example: `  # A host shares a session over a WebSocket:
+  upterm host --server wss://uptermd.upterm.dev
+
+  # A guest joins with the SSH line the host prints, which runs upterm proxy:
+  ssh -o ProxyCommand='upterm proxy wss://ID@uptermd.upterm.dev' ID@uptermd.upterm.dev:443
+
+  # The simpler way:
+  upterm join wss://ID@uptermd.upterm.dev`,
 		Args: cobra.ExactArgs(1),
 		RunE: proxyRunE,
 	}
 
-	cmd.Flags().StringVar(&flagProxy, "proxy", "", "HTTP proxy to connect to the server through (e.g. http://proxy.example.com:3128). Without it, HTTPS_PROXY/HTTP_PROXY are used.")
+	cmd.Flags().StringVar(&flagProxy, "proxy", "", "HTTP proxy to reach the relay through (e.g. http://proxy.example.com:3128). Without it, HTTPS_PROXY/HTTP_PROXY are used.")
 
 	return cmd
 }

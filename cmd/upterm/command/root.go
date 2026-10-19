@@ -31,61 +31,19 @@ func Root() *cobra.Command {
 	rootCmd := &cobra.Command{
 		Use:   "upterm",
 		Short: "Instant Terminal Sharing",
-		Long: `Upterm is an open-source solution for sharing terminal sessions instantly over secure SSH tunnels to the public internet.
+		Long: `Upterm shares a terminal session: you host a command, and guests join it
+from their own terminals, through a relay, with upterm join or plain ssh.
 
-Configuration Priority (highest to lowest):
-  1. Command-line flags
-  2. Environment variables (UPTERM_ prefix)
-  3. Config file (see below)
-  4. Default values
+Flags can also be set with UPTERM_ environment variables and the config
+file: see 'upterm config --help'.`,
+		Example: `  # Host $SHELL; upterm prints how guests join it:
+  upterm host
 
-Config File:
-  ~/.config/upterm/config.yaml (Linux)
-  ~/Library/Application Support/upterm/config.yaml (macOS)
-  %LOCALAPPDATA%\upterm\config.yaml (Windows)
+  # A guest joins with the connect string the host shares:
+  upterm join ssh://ID@uptermd.upterm.dev
 
-  Run 'upterm config path' to see your config file location.
-  Run 'upterm config edit' to create and edit the config file.
-
-Environment Variables:
-  All flags can be set via environment variables with the UPTERM_ prefix.
-  Flag names are converted by replacing hyphens (-) with underscores (_).
-
-  Examples:
-    --hide-client-ip  → UPTERM_HIDE_CLIENT_IP=true
-    --read-only       → UPTERM_READ_ONLY=true
-    --accept          → UPTERM_ACCEPT=true`,
-		Example: `  # Host a terminal session running $SHELL, attaching client's IO to the host's:
-  $ upterm host
-
-  # Display the connection string for sharing with client(s):
-  $ upterm session current
-  Session: SESSION_ID
-
-  Command:          /bin/bash
-  Host:             ssh://uptermd.upterm.dev:22
-
-  ➤ Join:
-      upterm join ssh://TOKEN@uptermd.upterm.dev
-  ➤ SSH:
-      ssh TOKEN@uptermd.upterm.dev
-  ➤ SFTP:
-      sftp TOKEN@uptermd.upterm.dev
-  ➤ SCP:
-      scp <local> TOKEN@uptermd.upterm.dev:<remote>
-      scp TOKEN@uptermd.upterm.dev:<remote> <local>
-
-  Connected Clients:
-    host local SSH-2.0-upterm-attach SHA256:FINGERPRINT
-
-  # A client joins the host session, and rejoins on its own if the connection drops:
-  $ upterm join ssh://TOKEN@uptermd.upterm.dev
-
-  # Or with plain ssh (no install needed):
-  $ ssh TOKEN@uptermd.upterm.dev
-
-  # Set flags via environment variables:
-  $ UPTERM_HIDE_CLIENT_IP=true upterm host`,
+  # Or with plain ssh:
+  ssh ID@uptermd.upterm.dev`,
 		// For every command: cobra checks the root's. Exit prints each error
 		// once, as one line, and never the usage; cobra would print
 		// "Error: ...", often the usage block too, and then main its own copy.
@@ -108,6 +66,7 @@ Environment Variables:
 				return err
 			}
 			suppliedFlags = supplied
+			runningCmd = cmd
 			warnDeprecations(cmd.ErrOrStderr(), deps)
 
 			debug, _ := cmd.Flags().GetBool("debug")
@@ -143,7 +102,7 @@ Environment Variables:
 
 	logPath := utils.UptermLogFilePath()
 	rootCmd.PersistentFlags().Bool("debug", os.Getenv("DEBUG") != "",
-		fmt.Sprintf("enable debug level logging (log file: %s).", logPath))
+		fmt.Sprintf("Enable debug logging (log file: %s). A non-empty DEBUG turns it on too.", logPath))
 
 	rootCmd.AddCommand(attachCmd())
 	rootCmd.AddCommand(configCmd())
@@ -160,6 +119,14 @@ Environment Variables:
 			reportUnknownCommands(c)
 		}
 	}
+	helpOnlyForKnownCommands(rootCmd)
+
+	// The root and the groups run only to report an unknown command, so
+	// their usage shows the commands they hold and no run of their own:
+	// cobra's template, its runnable line kept for a command without
+	// subcommands.
+	rootCmd.SetUsageTemplate(strings.Replace(rootCmd.UsageTemplate(),
+		"{{if .Runnable}}", "{{if and .Runnable (not .HasSubCommands)}}", 1))
 
 	return rootCmd
 }
@@ -255,6 +222,68 @@ func reportUnknownCommands(c *cobra.Command) {
 		}
 		return unknownCommandError(c, args[0])
 	}
+}
+
+// helpOnlyForKnownCommands makes help for an unknown command the error that
+// running it is, whether --help, -h or upterm help asks for it.
+//
+// cobra looks for --help before a command checks its arguments, and prints
+// the help itself, whatever follows the command; so the help func prints
+// nothing for the root or a group given an unknown command, and execute
+// returns the error. cobra's help command prints the help of the nearest
+// command it finds; here it returns the error instead.
+func helpOnlyForKnownCommands(root *cobra.Command) {
+	help := root.HelpFunc()
+	root.SetHelpFunc(func(c *cobra.Command, args []string) {
+		if _, _, unknown := unknownCommand(c, c.Flags().Args()); unknown {
+			return
+		}
+		help(c, args)
+	})
+
+	root.InitDefaultHelpCmd()
+	for _, c := range root.Commands() {
+		if c.Name() != "help" {
+			continue
+		}
+		c.Run = nil
+		c.RunE = func(c *cobra.Command, args []string) error {
+			target, rest, err := c.Root().Find(args)
+			if err != nil {
+				return err
+			}
+			if at, arg, unknown := unknownCommand(target, rest); unknown {
+				return unknownCommandError(at, arg)
+			}
+			if target.Context() == nil {
+				target.SetContext(c.Context())
+			}
+			target.InitDefaultHelpFlag()
+			target.InitDefaultVersionFlag()
+			return target.Help()
+		}
+	}
+}
+
+// unknownCommand walks args down the command tree from c: while the command
+// it is at has commands and words remain, a word naming one of them (an alias
+// included) goes into it. The first word that names none is unknown, and
+// unknownCommand returns it with the command it was looked up in, which is
+// what unknownCommandError names; what follows a command with no commands of
+// its own is that command's arguments.
+//
+// A typo can follow a known command: in `upterm --help session lsit` cobra's
+// lookup takes session for --help's value and leaves "session lsit" at the
+// root, so checking the first word alone would find session known.
+func unknownCommand(c *cobra.Command, args []string) (at *cobra.Command, word string, unknown bool) {
+	for len(args) > 0 && c.HasSubCommands() {
+		sub, _, err := c.Find(args[:1])
+		if err != nil || sub == c {
+			return c, args[0], true
+		}
+		c, args = sub, args[1:]
+	}
+	return nil, "", false
 }
 
 // bindFlagsToEnv binds cmd's flags to the config file and environment

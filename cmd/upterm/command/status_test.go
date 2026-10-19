@@ -181,6 +181,7 @@ func TestAttachStatusHidesClientIPsAsConfigured(t *testing.T) {
 			require.NoError(t, err)
 			_, _, err = bindFlagsToEnv(attach)
 			require.NoError(t, err)
+			asRunningCmd(t, attach)
 
 			setupSessionRoots(t)
 			dir := claimSession(t, "s")

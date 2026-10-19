@@ -125,6 +125,7 @@ func TestValuesHostingRefusesAtStartupAreProblems(t *testing.T) {
 		{"name", "a/b", "use letters, digits, '.', '_' and '-'", []string{"build-shell"}},
 		{"output", "yaml", `invalid output format "yaml"`, []string{"json", "go-template={{.SessionID}}"}},
 		{"detach", "true", "--detach requires --accept", []string{"false"}},
+		{"server", "ssh://:2222", "missing host in address", []string{"ssh://uptermd.example.com:2222", "ssh://[::1]:2222"}},
 	} {
 		t.Run(tc.key+"="+tc.bad, func(t *testing.T) {
 			restoreFlags(t)
@@ -204,6 +205,7 @@ func TestAFileCommandsAcceptHasNoProblems(t *testing.T) {
 		"values":   "server: wss://uptermd.example.com\njoin-timeout: 10m\nread-only: true\nprivate-key:\n  - /a\n  - /b\nauthorized-user: github:alice,github:bob\ndebug: true\n",
 		"ssh":      "server: ssh://uptermd.example.com:2222\nallow-local-tcp-forwarding: true\n",
 		"no ports": "server: ws://uptermd.example.com\n",
+		"bare ssh": "server: ssh://uptermd.example.com\n",
 	} {
 		t.Run(name, func(t *testing.T) {
 			require.Empty(t, validateConfigFile(Root(), writeConfig(t, body)))
@@ -387,4 +389,12 @@ func TestConfigViewKeepsWhatHomebrewChecks(t *testing.T) {
 	require.Equal(t, 0, code)
 	require.Contains(t, stdout, "# Upterm Configuration File")
 	require.Contains(t, stdout, "server: ssh://uptermd.upterm.dev:22")
+}
+
+// The example config's hide-client-ip entry says what the setting does: an
+// uncommented false shows guests' addresses in CI too, so the example must not
+// offer false as the default.
+func TestTheExampleConfigSaysWhatHideClientIPDoes(t *testing.T) {
+	require.Contains(t, exampleConfig(), "# Hide guests' IP addresses from upterm's output (default: hidden in CI only; false shows them there too)\n# hide-client-ip: true\n")
+	require.NotContains(t, exampleConfig(), "# hide-client-ip: false")
 }

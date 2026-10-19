@@ -22,13 +22,25 @@ import (
 
 func upgradeCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "upgrade",
+		Use:   "upgrade [VERSION]",
 		Short: "Upgrade the CLI",
-		Example: `  # Upgrade to the latest version:
+		Long: `Replace this upterm with a release from GitHub: the latest, or VERSION
+(0.37.0 or v0.37.0), which may be older than this one.
+
+It replaces the running binary, through any symlink to it, and not another
+upterm on your PATH. It refuses, and names the command to use instead, when
+a package manager confirms it owns the binary: Homebrew, Scoop, or a dpkg or
+rpm package. It also refuses when it can't write the binary's directory, or
+can't check whether a package owns it. Without VERSION, a build newer than
+the latest release is left as it is.
+
+Exit status: 0 when upterm is up to date or was replaced; 1 when it couldn't
+be, a package manager owns it, or its arguments are wrong.`,
+		Example: `  # Upgrade to the latest release:
   upterm upgrade
 
-  # Upgrade to a specific version:
-  upterm upgrade 0.2.0`,
+  # Install a particular release, older ones too:
+  upterm upgrade v0.38.0`,
 		Args: cobra.MaximumNArgs(1),
 		// A broken config file doesn't stop it.
 		Annotations: map[string]string{annotationConfig: "none"},

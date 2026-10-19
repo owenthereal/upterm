@@ -359,6 +359,11 @@ func unixNanoUTC(n int64) time.Time {
 	return time.Unix(0, n).UTC()
 }
 
+// nameOrIDHelp says what the session argument of attach and the session
+// commands is, as resolveSession reads it.
+const nameOrIDHelp = `NAME|ID is the session's name (the one 'upterm host' printed, or --name
+gave it) or its session ID; 'upterm session list' shows both.`
+
 func sessionCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:     "session",
@@ -376,24 +381,30 @@ func sessionCmd() *cobra.Command {
 }
 
 func list() *cobra.Command {
-	runtimeDir := utils.UptermRuntimeDir()
 	stateDir := utils.UptermStateDir()
 	cmd := &cobra.Command{
 		Use:     "list",
 		Aliases: []string{"ls", "l"},
-		Short:   "List shared sessions",
-		Long: fmt.Sprintf(`List shared sessions.
+		Short:   "List running sessions",
+		Long: fmt.Sprintf(`List the running sessions, one row each: name, status, session ID, command
+and relay. * marks the session this terminal is in ($UPTERM_ADMIN_SOCKET).
 
-Which sessions exist comes from the records in: %s
-A session started under a different XDG_RUNTIME_DIR is listed from there too,
-and reached through the admin socket path its record carries.
+The sessions come from the records in: %s
+Sessions started under another XDG_RUNTIME_DIR are listed too. Listing
+deletes the records of sessions that ended more than %s ago, after which
+'upterm session info' and 'upterm session wait' no longer know them.
 
-Sockets are stored in: %s
+-o json prints a JSON array of what 'upterm session info NAME -o json'
+prints, one per running session, and [] when none is running.
 
-Follows the XDG Base Directory Specification with fallback to $HOME/.upterm
-in constrained environments where XDG directories are unavailable.`, sessiondir.ResultsRoot(stateDir), sessiondir.SessionsRoot(runtimeDir)),
-		Example: `  # List shared sessions:
-  upterm session list`,
+Exit status: 0, or 1 when the records directory can't be read, or for a usage
+or configuration error. A session whose own record can't be read is left out
+of the list.`, sessiondir.ResultsRoot(stateDir), retentionText(sessiondir.RecordRetention)),
+		Example: `  # List the running sessions:
+  upterm session list
+
+  # As JSON, for a script:
+  upterm session list -o json`,
 		Args: cobra.ExactArgs(0),
 		RunE: listRunE,
 	}
@@ -401,36 +412,43 @@ in constrained environments where XDG directories are unavailable.`, sessiondir.
 	// Only the command line sets it: an output key or UPTERM_OUTPUT is meant
 	// for the commands that take one, and must neither turn this listing into
 	// JSON nor make it fail.
-	cmd.Flags().StringVarP(&flagListOutput, "output", "o", "", "Output format: json")
+	cmd.Flags().StringVarP(&flagListOutput, "output", "o", "", "Output format: json (command line only)")
 	_ = cmd.RegisterFlagCompletionFunc("output", completeValues("json"))
 	_ = cmd.Flags().SetAnnotation("output", annotationCLIOnly, []string{"true"})
 	// Registered here as `session info` registers it: env and config bind only
 	// to a command's own flags, so without it the listing's JSON would print
 	// the guest addresses they hide everywhere else.
-	cmd.Flags().BoolVar(&flagHideClientIP, "hide-client-ip", false, "Hide client IP addresses from output (auto-enabled in CI environments).")
+	cmd.Flags().BoolVar(&flagHideClientIP, "hide-client-ip", false, hideClientIPHelp)
 
 	return cmd
 }
 
 func show() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:     "info",
+		Use:     "info NAME|ID",
 		Aliases: []string{"i"},
-		Short:   "Display terminal session by name",
-		Long: `Display terminal session by name.
+		Short:   "Show a session, given its name or session ID",
+		Long: `Show a session, given its name or session ID: its status, how guests join
+it, who is connected, and what guests may do.
 
-A session that has ended still answers, from the record it left behind: its
-admin socket died with its process, but its outcome did not.
+` + nameOrIDHelp + ` A name is
+looked up before an ID.
+
+A session that has ended still answers, from the record it left behind: how
+it ended.
 
 Output formats:
-  -o json                           JSON output
+  -o json   JSON
 
 Exits 4 when no session has the name, and 1 for any other failure.`,
-		Example: `  # Display session by name:
-  upterm session info NAME
+		Example: `  # Show the session named build:
+  upterm session info build
 
-  # Output as JSON:
-  upterm session info NAME -o json`,
+  # The same session, by its session ID:
+  upterm session info d3k5fia7m4us73ehblug
+
+  # As JSON:
+  upterm session info build -o json`,
 		Args:              cobra.ExactArgs(1),
 		ValidArgsFunction: completeSessionNames,
 		RunE:              infoRunE,
@@ -439,7 +457,7 @@ Exits 4 when no session has the name, and 1 for any other failure.`,
 	cmd.Flags().StringVarP(&flagOutput, "output", "o", "", "Output format: json")
 	_ = cmd.RegisterFlagCompletionFunc("output", completeValues("json"))
 	perRun(cmd.Flags(), "output")
-	cmd.Flags().BoolVar(&flagHideClientIP, "hide-client-ip", false, "Hide client IP addresses from output (auto-enabled in CI environments).")
+	cmd.Flags().BoolVar(&flagHideClientIP, "hide-client-ip", false, hideClientIPHelp)
 
 	return cmd
 }
@@ -469,38 +487,31 @@ const waitPollFailureBudget = 30 * time.Second
 // wait blocks until the named session has ended and returns its outcome.
 func wait() *cobra.Command {
 	return &cobra.Command{
-		Use:   "wait NAME",
+		Use:   "wait NAME|ID",
 		Short: "Wait for a session to end",
-		Long: `Block until the named session has ended, then exit with its outcome.
+		Long: fmt.Sprintf(`Wait for a session to end, given its name or session ID, and exit with its
+outcome.
 
-Exit status follows the session:
+`+nameOrIDHelp+`
 
-* The command's own code: the session's command exited.
-* 0: explicit session stop, or --join-timeout elapsed.
-* 128+N: the host or command was terminated by signal N.
-* 125: canceled, unavailable outcome, or observer failure.
+Given a name, it waits for the session that holds the name when it starts,
+so let 'upterm host --detach' return before you wait, as in the example. A
+session that has already ended is reported from its record, which
+'upterm session list' deletes once it is %s old.
 
-Signal N is the recorded originating signal number (signalNumber in session
-info JSON), independent of the machine reading the record. Legacy signal
-records without a valid number are unavailable (125). Parent-context
-cancellation is recorded as canceled (125); legacy stopped records remain 0.
-Lookup, read and replacement errors, and cancellation of the waiter's context,
-return 125 and retain their diagnostic.
-
-125 is a convention, not a guarantee: a session's own command can exit 125
-too. To tell the two apart, read 'reason' from 'upterm session info NAME -o json'.
-
-A session that has already ended is reported from its record and is not an
-error. Interrupting this command leaves the session running: it observes and
-never stops anything.
-
-Wait binds to the launch found when it starts. If a new same-named host is
-started in the shell background, wait may return the previous launch's record
-before the new launch claims the name. Start the detached host synchronously
-as in the example below, then run 'upterm session wait NAME'.`,
+Exit status follows the session: its command's status when the command
+exited; 0 when it was stopped, or no guest joined within its join timeout;
+128+N when the host or its command was killed by signal N; 125 when the
+outcome can't be known or read, when no session has the name, or for a usage
+or configuration error. A command can exit 125 too; 'upterm session info
+NAME -o json' has the reason. Ctrl-C stops waiting, with 130 on Unix, and
+leaves the session running.`, retentionText(sessiondir.RecordRetention)),
 		Example: `  # Wait for a detached session and take its exit status:
   upterm host --detach --accept --name build -- make
-  upterm session wait build`,
+  upterm session wait build
+
+  # Wait for a session given its session ID:
+  upterm session wait d3k5fia7m4us73ehblug`,
 		Args:              cobra.ExactArgs(1),
 		ValidArgsFunction: completeSessionNames,
 		// Usage and config errors exit with that failure code too, not only what
@@ -632,9 +643,11 @@ func launchLabel(rec *sessiondir.Record) string {
 
 func stop() *cobra.Command {
 	return &cobra.Command{
-		Use:   "stop NAME",
+		Use:   "stop NAME|ID",
 		Short: "Stop a running session",
-		Long: `Stop a running session by name.
+		Long: `Stop a running session, given its name or session ID.
+
+` + nameOrIDHelp + `
 
 The session's command is hung up, then terminated, then killed if it stays,
 and every attached terminal is released. The session's record keeps its
@@ -644,7 +657,10 @@ A session that has already ended is reported as such and is not an error.
 
 Exits 4 when no session has the name, and 1 for any other failure.`,
 		Example: `  # Stop the session named build-shell:
-  upterm session stop build-shell`,
+  upterm session stop build-shell
+
+  # Stop a session given its session ID:
+  upterm session stop d3k5fia7m4us73ehblug`,
 		Args:              cobra.ExactArgs(1),
 		ValidArgsFunction: completeSessionNames,
 		RunE: func(c *cobra.Command, args []string) error {
@@ -786,9 +802,11 @@ func pidOf(rec *sessiondir.Record) string {
 func setCmd() *cobra.Command {
 	var joinTimeout time.Duration
 	cmd := &cobra.Command{
-		Use:   "set NAME",
+		Use:   "set NAME|ID",
 		Short: "Change a session's join timeout",
-		Long: `Change a session's join timeout.
+		Long: `Change a session's join timeout, given its name or session ID.
+
+` + nameOrIDHelp + `
 
 --join-timeout D ends the session D from now unless a guest joins first. It
 replaces any join timeout already set, including one given to
@@ -830,7 +848,10 @@ info NAME' shows what the session holds.`,
   upterm session set build --join-timeout 20m
 
   # Turn the join timeout off:
-  upterm session set build --join-timeout 0`,
+  upterm session set build --join-timeout 0
+
+  # Give a session 10 minutes, given its session ID:
+  upterm session set d3k5fia7m4us73ehblug --join-timeout 10m`,
 		Args:              cobra.ExactArgs(1),
 		ValidArgsFunction: completeSessionNames,
 		RunE: func(c *cobra.Command, args []string) error {
@@ -1017,50 +1038,56 @@ func printSetOutcome(out io.Writer, name string, resp *api.SetJoinTimeoutRespons
 }
 
 func current() *cobra.Command {
-	runtimeDir := utils.UptermRuntimeDir()
 	cmd := &cobra.Command{
 		Use:     "current",
 		Aliases: []string{"c"},
-		Short:   "Display the current terminal session",
-		Long: fmt.Sprintf(`Display the current terminal session.
+		Short:   "Show the session this terminal is in",
+		Long: `Show the session this terminal is in, from $UPTERM_ADMIN_SOCKET.
 
-By default, reads the admin socket path from $UPTERM_ADMIN_SOCKET (automatically set
-when you run 'upterm host').
-
-Sockets are stored in: %s
-
-Follows the XDG Base Directory Specification with fallback to $HOME/.upterm
-in constrained environments where XDG directories are unavailable.
+upterm host sets $UPTERM_ADMIN_SOCKET for the commands it runs, so a shell
+in a session can show it, and a prompt can mark it. --admin-socket asks
+another session's admin socket instead.
 
 Output formats:
-  -o json                           JSON output
-  -o go-template='{{.ClientCount}}' Custom Go template
+  -o json                             JSON
+  -o go-template='{{.ClientCount}}'   a Go template
 
-Template variables: SessionID, ClientCount, Host, Command, ForceCommand
+Template variables: SessionID, ClientCount (this session's terminals and
+guests), GuestCount, CountsKnown, Host, Command, ForceCommand, Access,
+ConnectedClients, LaunchID, Open, JoinStateSource, JoinTimeout, JoinDeadline,
+FirstGuestJoinedAt, Name, Status, Reconnect, TunnelReason, TunnelLostAt,
+NextAttemptAt, StartConfirmed, ReadOnly, FileTransfer,
+FileTransferApprovalRequired, LocalForwarding, SSHCommand and JoinCommand.
+From LaunchID on, a variable the session's upterm doesn't report is empty,
+false, nil or a zero time (0001-01-01 ...), so test it first:
+{{with .Name}}{{.}}{{end}}, or {{if not .TunnelLostAt.IsZero}}...{{end}}.
 
 Exits 4 when not in a session ($UPTERM_ADMIN_SOCKET is unset, or no session
 answers at it), and 1 for any other failure. With -o, not being in a session
-prints nothing.`, sessiondir.SessionsRoot(runtimeDir)),
-		Example: `  # Display the active session as defined in $UPTERM_ADMIN_SOCKET:
+prints nothing.`,
+		Example: `  # Show the session this terminal is in:
   upterm session current
 
-  # Output as JSON:
+  # As JSON:
   upterm session current -o json
 
-  # Custom format for shell prompt (outputs nothing if not in session):
+  # For a shell prompt (prints nothing outside a session):
   upterm session current -o go-template='🆙 {{.ClientCount}} '
 
-  # For terminal title:
-  upterm session current -o go-template='upterm: {{.ClientCount}} clients | {{.SessionID}}'`,
+  # For a terminal title, with the session's name when its upterm reports it:
+  upterm session current -o go-template='upterm{{with .Name}} {{.}}{{end}}: {{.ClientCount}} clients'`,
 		Args: cobra.ExactArgs(0),
 		RunE: currentRunE,
 	}
 
-	cmd.PersistentFlags().StringVarP(&flagAdminSocket, "admin-socket", "", currentAdminSocketFile(), "Admin socket path; defaults to $UPTERM_ADMIN_SOCKET.")
+	cmd.PersistentFlags().StringVarP(&flagAdminSocket, "admin-socket", "", currentAdminSocketFile(), "Admin socket of the session to show.")
+	// The variable, not its value: the help and the generated docs show
+	// where the default comes from, never this shell's socket.
+	cmd.PersistentFlags().Lookup("admin-socket").DefValue = "$" + upterm.HostAdminSocketEnvVar
 	cmd.Flags().StringVarP(&flagOutput, "output", "o", "", "Output format: json or go-template='...'")
 	_ = cmd.RegisterFlagCompletionFunc("output", completeValues("json", "go-template="))
 	perRun(cmd.Flags(), "output")
-	cmd.Flags().BoolVar(&flagHideClientIP, "hide-client-ip", false, "Hide client IP addresses from output (auto-enabled in CI environments).")
+	cmd.Flags().BoolVar(&flagHideClientIP, "hide-client-ip", false, hideClientIPHelp)
 
 	return cmd
 }
