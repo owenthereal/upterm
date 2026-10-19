@@ -34,6 +34,33 @@ type joinSnapshot struct {
 	JoinedAt time.Time     // the first guest's join; zero until one does
 }
 
+// joinClock is the time a joinState reads and the timers it arms. A nil
+// field stands for the real one, which orReal fills in, so the zero
+// joinClock is the real clock.
+//
+// A fake must be safe across goroutines. In a running Host, now is called
+// from the ready actor, the lifecycle actor and the admin RPC goroutine;
+// afterFunc from the ready actor and the admin RPC goroutine; and the stop
+// afterFunc returns from the lifecycle actor, teardown and the admin RPC
+// goroutine. Each is called with the joinState's mutex held.
+type joinClock struct {
+	now       func() time.Time
+	afterFunc func(time.Duration, func()) (stop func() bool)
+}
+
+// orReal fills an unset field with time.Now or time.AfterFunc.
+func (c joinClock) orReal() joinClock {
+	if c.now == nil {
+		c.now = time.Now
+	}
+	if c.afterFunc == nil {
+		c.afterFunc = func(d time.Duration, f func()) func() bool {
+			return time.AfterFunc(d, f).Stop
+		}
+	}
+	return c
+}
+
 // joinState is the single owner of a session's no-guest deadline.
 //
 // Every event that bears on it -- readiness, a guest joining, a caller
@@ -50,8 +77,7 @@ type joinSnapshot struct {
 // set or a join bumps gen, which turns any expire already on its way for an
 // older deadline into a no-op.
 type joinState struct {
-	now       func() time.Time
-	afterFunc func(time.Duration, func()) (stop func() bool)
+	joinClock
 
 	mu        sync.Mutex
 	timeout   time.Duration
@@ -66,15 +92,13 @@ type joinState struct {
 }
 
 // newJoinState returns the join state for a session launched with timeout,
-// which counts from readiness; zero sets none.
-func newJoinState(timeout time.Duration) *joinState {
+// which counts from readiness; zero sets none. It reads time and arms its
+// timer on clock, whose unset fields are the real clock's.
+func newJoinState(timeout time.Duration, clock joinClock) *joinState {
 	return &joinState{
-		now: time.Now,
-		afterFunc: func(d time.Duration, f func()) func() bool {
-			return time.AfterFunc(d, f).Stop
-		},
-		timeout: timeout,
-		fired:   make(chan struct{}),
+		joinClock: clock.orReal(),
+		timeout:   timeout,
+		fired:     make(chan struct{}),
 	}
 }
 

@@ -233,6 +233,8 @@ func TestForwardingPresenceDoesNotDisarmJoinTimeout(t *testing.T) {
 				f.h.AdminSocketFile = filepath.Join(f.root, "admin.sock")
 			}
 			f.h.AllowLocalTCPForwarding = true
+			clock := newFakeJoinClock()
+			f.h.joinClock = clock.clock()
 			f.h.JoinTimeout = 800 * time.Millisecond
 			f.start(t)
 			awaitJoinTimeoutSignal(t, f.ready, "readiness")
@@ -245,6 +247,10 @@ func TestForwardingPresenceDoesNotDisarmJoinTimeout(t *testing.T) {
 			if registry {
 				require.True(t, f.record(t).FirstGuestJoinedAt.IsZero())
 			}
+			// The presence callback runs after the lifecycle has handled the
+			// forward, so presence that counted as a join would already have
+			// stopped the timer.
+			clock.only(t, 800*time.Millisecond).fire()
 			require.NoError(t, f.result(t))
 			if registry {
 				require.Equal(t, sessiondir.ReasonJoinTimeout, f.record(t).Reason)
@@ -293,20 +299,27 @@ func TestUnacceptedForwardingDoesNotPublishPresence(t *testing.T) {
 
 func TestJoinTimeoutAcceptedSFTPDisarmsDeadline(t *testing.T) {
 	f := newJoinTimeoutHost(t)
+	clock := newFakeJoinClock()
+	f.h.joinClock = clock.clock()
 	f.h.JoinTimeout = 200 * time.Millisecond
 	f.start(t)
 	awaitJoinTimeoutSignal(t, f.ready, "readiness")
+	joins := f.h.joins
+	armed := clock.only(t, 200*time.Millisecond)
 	client := f.guestClient(t)
 	transfer, err := sftp.NewClient(client)
 	require.NoError(t, err)
 	awaitJoinTimeoutSignal(t, f.joined, "SFTP join")
+	// Checked directly, because expire's own check of the join would keep
+	// even a live timer from ending the session.
+	require.True(t, armed.stopped(), "SFTP stopped the timer")
+	require.True(t, joins.snapshot().Deadline.IsZero(), "SFTP cleared the deadline")
 	require.NoError(t, transfer.Close())
 	awaitJoinTimeoutSignal(t, f.left, "SFTP left")
-	select {
-	case err := <-f.done:
-		t.Fatalf("SFTP did not disarm deadline: %v", err)
-	case <-time.After(400 * time.Millisecond):
-	}
+	require.Len(t, clock.timers(), 1, "leaving armed nothing new")
+	// A fire already on its way when the join stopped the timer.
+	armed.fire()
+	require.False(t, hasFired(joins), "SFTP did not disarm deadline")
 	require.False(t, f.record(t).FirstGuestJoinedAt.IsZero())
 	f.finish(t, "0")
 	require.NoError(t, f.result(t))
