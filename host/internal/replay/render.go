@@ -1026,6 +1026,9 @@ func (e *emulation) eligible(parts uio.ReplayParts) (rep, error) {
 	if e.leds {
 		return rep{}, &IneligibleError{State: "keyboard LEDs"}
 	}
+	if e.logFile {
+		return rep{}, &IneligibleError{State: "a log file"}
+	}
 	if splitWide(e.term.MainScreen()) || splitWide(e.term.AltScreen()) {
 		return rep{}, &IneligibleError{State: splitWideState}
 	}

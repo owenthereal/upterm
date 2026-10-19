@@ -3934,6 +3934,41 @@ func TestReplayFailsOnKeyboardLEDs(t *testing.T) {
 	}
 }
 
+// OSC 46, which sets the file xterm logs to once logging starts, fails the
+// render, named: x/vt keeps no log file, where a raw replay sets the
+// joiner's. Every one counts, one xterm ignores too, and the note stays
+// through RIS. An OSC of another number renders.
+func TestReplayFailsOnALogFile(t *testing.T) {
+	join := func(t *testing.T, stream string) error {
+		t.Helper()
+		_, fellBack := fanOut(t, New(), []byte("text\r\n"+stream+"more\r\n"), []uio.SizeEvent{event(1, 0, 80, 24)}, 4<<10)
+		return fellBack
+	}
+	for _, tc := range []struct{ name, stream string }{
+		{"a log file", "\x1b]46;/tmp/xterm.log\x07"},
+		{"a log file ended by ST", "\x1b]46;/tmp/xterm.log\x1b\\"},
+		{"its number with a leading 0", "\x1b]046;/tmp/xterm.log\x07"},
+		{"a ?, which xterm answers with the bell", "\x1b]46;?\x07"},
+		{"an empty one, which xterm ignores", "\x1b]46;\x07"},
+		{"no data at all", "\x1b]46\x07"},
+		{"one, then RIS", "\x1b]46;/tmp/xterm.log\x07\x1bc"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			requireIneligible(t, join(t, tc.stream), "a log file")
+		})
+	}
+	for _, tc := range []struct{ name, stream string }{
+		{"OSC 45", "\x1b]45;/tmp/xterm.log\x07"},
+		{"OSC 460", "\x1b]460;/tmp/xterm.log\x07"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			require.NoError(t, join(t, tc.stream))
+			_, err := renderAt(t, 80, 24, "text\r\n"+tc.stream+"more\r\n")
+			require.NoError(t, err, "given to the emulation")
+		})
+	}
+}
+
 // screenTitleString is a window title string of GNU screen's and tmux's, as
 // tmux reads one: ESC k after an ESC and any C0 controls tmux executes where
 // they stand but CAN and SUB, then the title, up to the ESC, CAN or SUB that

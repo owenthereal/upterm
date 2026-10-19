@@ -172,6 +172,9 @@ type emulation struct {
 	// leds is set once the stream has lit or put out the keyboard's LEDs (see
 	// watchLEDs).
 	leds bool
+	// logFile is set once the stream has set the file the terminal logs to
+	// (see watchLogFile).
+	logFile bool
 	// pastEdge is what the emulator keeps of the tab stops past the screen's
 	// right edge (see the type).
 	pastEdge pastEdge
@@ -270,10 +273,10 @@ func (replayer) Start(ctx context.Context, deadline time.Time, c *uio.Capture, s
 // conformance level, a reset of a mode a terminal starts with set, a
 // 94-character set x/vt drops, a 96-character set, a window operation,
 // printer controller mode, a memory lock, a key format, locator reporting,
-// the locator's events, a change to iTerm2's state and the keyboard's LEDs
-// noted, auto print and the tab stops past the screen's edge kept, and the
-// meter stopped by ctx or the deadline. Each callback and handler runs inside
-// the emulator's Write and touches only the emulation.
+// the locator's events, a change to iTerm2's state, the keyboard's LEDs and a
+// log file noted, auto print and the tab stops past the screen's edge kept,
+// and the meter stopped by ctx or the deadline. Each callback and handler
+// runs inside the emulator's Write and touches only the emulation.
 func (e *emulation) setUp() {
 	t := e.term
 	t.SetScrollbackSize(0)
@@ -321,6 +324,7 @@ func (e *emulation) setUp() {
 	e.watchLocator()
 	e.watchITerm2()
 	e.watchLEDs()
+	e.watchLogFile()
 }
 
 // colours is the last change the stream made, by OSC, to each of the colours
@@ -1645,6 +1649,24 @@ func (e *emulation) watchITerm2() {
 func (e *emulation) watchLEDs() {
 	e.term.RegisterCsiHandler('q', func(ansi.Params) bool {
 		e.leds = true
+		return false
+	})
+}
+
+// watchLogFile registers the handler that notes OSC 46, which sets the file
+// xterm logs what it receives to once logging starts, by DECSET 46 or its
+// menu. x/vt keeps no log file, where a raw replay sets the joiner's, and so
+// where its logging writes. xterm takes it only when built to allow logging
+// and a change of its file, neither of which it is by default: built with
+// logging alone it rings the bell instead, as it does for a ?, and it ignores
+// one with no file. Every one counts all the same, as another build or
+// terminal may take it, and the note stays, whatever follows, RIS included,
+// which leaves xterm's file as it is. The query filter drops no OSC 46. x/vt
+// has no handler of its own for it; this returns false all the same, as
+// watchColours' do.
+func (e *emulation) watchLogFile() {
+	e.term.RegisterOscHandler(46, func([]byte) bool {
+		e.logFile = true
 		return false
 	})
 }
