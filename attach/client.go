@@ -53,6 +53,10 @@ type Client struct {
 	// connection they can block, to stand in for a daemon that has stopped
 	// reading its socket.
 	dial func(ctx context.Context, socket string) (net.Conn, error)
+
+	// limits is the Terminal's: see Terminal.limits. Run copies it into the
+	// Terminal it builds; the zero value is the defaults.
+	limits terminalLimits
 }
 
 // Seams for a test of the order the daemon's cause is read in; nil outside
@@ -147,6 +151,7 @@ func (c *Client) Run(ctx context.Context) (Result, error) {
 		// keystrokes.
 		DeclareInteractive: c.Pty != nil && c.Stdin != nil,
 		Logger:             c.Logger,
+		limits:             c.limits,
 	}).Run(ctx, client, setupBy)
 	if err != nil {
 		return Result{}, err

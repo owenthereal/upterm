@@ -148,6 +148,17 @@ func refusingDoor(t *testing.T) *ssh.Client {
 	return c
 }
 
+// A field left zero, or set below zero, takes its default; one set above zero
+// is kept as it is.
+func TestTerminalLimitsDefaults(t *testing.T) {
+	require.Equal(t, terminalLimits{5 * time.Second, time.Second, time.Second, 1 << 20},
+		terminalLimits{}.orDefault())
+	require.Equal(t, 200*time.Millisecond,
+		terminalLimits{outputDrain: 200 * time.Millisecond}.orDefault().outputDrain)
+	require.Equal(t, time.Second,
+		terminalLimits{inputFlush: -time.Second}.orDefault().inputFlush)
+}
+
 // Whatever fails startup, Run has closed the client by the time it returns the
 // error, so the caller has nothing to clean up after. setupBy is an hour off
 // and ctx is never cancelled, so neither of Run's own timers is what closes it.
@@ -222,9 +233,7 @@ func TestTerminalOnReadyRunsBeforeTheFirstOutputByte(t *testing.T) {
 func TestTerminalReportsAnAbandonedRestoreAndHoldsReleasedOpen(t *testing.T) {
 	// Long enough that the copy has read and fed the session's output before
 	// the drain gives up on it, however slowly it is scheduled.
-	old := outputDrainTimeout
-	outputDrainTimeout = time.Second
-	t.Cleanup(func() { outputDrainTimeout = old })
+	lim := terminalLimits{outputDrain: time.Second}
 
 	door := serveDoor(t, func(s gssh.Session) {
 		_, _ = io.WriteString(s, "\x1b[?1049h") // enter the alternate screen
@@ -233,7 +242,7 @@ func TestTerminalReportsAnAbandonedRestoreAndHoldsReleasedOpen(t *testing.T) {
 	// The very first write parks: the tracker has seen ?1049h (it is fed
 	// before the write), the drain times out, and the restore is skipped.
 	sink := &gatedWriteSink{release: make(chan struct{})}
-	res, err := (&Terminal{Stdout: sink, Pty: &Pty{Term: "xterm", Size: termsize.Default}}).
+	res, err := (&Terminal{Stdout: sink, Pty: &Pty{Term: "xterm", Size: termsize.Default}, limits: lim}).
 		Run(context.Background(), dialDoor(t, door), time.Now().Add(testTimeout))
 	require.NoError(t, err)
 	require.Contains(t, string(res.Unrestored), "\x1b[?1049l")
@@ -254,9 +263,7 @@ func TestTerminalReportsAnAbandonedRestoreAndHoldsReleasedOpen(t *testing.T) {
 // waits for it as it waits for the copy, and a restore that was attempted is
 // not handed back as Unrestored.
 func TestTerminalReleasedWaitsForARestoreStillInFlight(t *testing.T) {
-	old := outputDrainTimeout
-	outputDrainTimeout = 200 * time.Millisecond
-	t.Cleanup(func() { outputDrainTimeout = old })
+	lim := terminalLimits{outputDrain: 200 * time.Millisecond}
 
 	door := serveDoor(t, func(s gssh.Session) {
 		_, _ = io.WriteString(s, "\x1b[?1049h")
@@ -264,7 +271,7 @@ func TestTerminalReleasedWaitsForARestoreStillInFlight(t *testing.T) {
 	})
 	// The session's output is taken; the restore after it parks.
 	sink := &gatedWriteSink{release: make(chan struct{}), open: 1}
-	res, err := (&Terminal{Stdout: sink, Pty: &Pty{Term: "xterm", Size: termsize.Default}}).
+	res, err := (&Terminal{Stdout: sink, Pty: &Pty{Term: "xterm", Size: termsize.Default}, limits: lim}).
 		Run(context.Background(), dialDoor(t, door), time.Now().Add(testTimeout))
 	require.NoError(t, err)
 	require.Empty(t, res.Unrestored)
@@ -281,9 +288,10 @@ func TestTerminalReleasedWaitsForARestoreStillInFlight(t *testing.T) {
 	}
 }
 
-// runSuspending runs a Terminal on door with a pty, a typed-into Stdin and a
-// Suspend that hands the terminal straight back, and hands back its Result.
-func runSuspending(t *testing.T, door *fakeDoor, stdout io.Writer, stdin io.Reader, hooked *atomic.Bool) <-chan Result {
+// runSuspending runs a Terminal on door with lim, a pty, a typed-into Stdin
+// and a Suspend that hands the terminal straight back, and hands back its
+// Result.
+func runSuspending(t *testing.T, door *fakeDoor, lim terminalLimits, stdout io.Writer, stdin io.Reader, hooked *atomic.Bool) <-chan Result {
 	t.Helper()
 	client := dialDoor(t, door)
 	done := make(chan Result, 1)
@@ -293,7 +301,8 @@ func runSuspending(t *testing.T, door *fakeDoor, stdout io.Writer, stdin io.Read
 			Suspend: func() (termsize.Size, bool) {
 				hooked.Store(true)
 				return termsize.Size{}, true
-			}}).Run(context.Background(), client, time.Now().Add(testTimeout))
+			},
+			limits: lim}).Run(context.Background(), client, time.Now().Add(testTimeout))
 		if err != nil {
 			t.Errorf("Run: %v", err)
 		}
@@ -307,9 +316,7 @@ func runSuspending(t *testing.T, door *fakeDoor, stdout io.Writer, stdin io.Read
 // modes, and the restore is handed back — even though the parked write
 // returns, and the drain finishes, before the drain's bound.
 func TestTerminalUnrestoredHoldsWhatASuspendCouldNotWrite(t *testing.T) {
-	old := outputDrainTimeout
-	outputDrainTimeout = 200 * time.Millisecond
-	t.Cleanup(func() { outputDrainTimeout = old })
+	lim := terminalLimits{outputDrain: 200 * time.Millisecond}
 
 	ended := make(chan struct{})
 	door := serveDoor(t, func(s gssh.Session) {
@@ -322,7 +329,7 @@ func TestTerminalUnrestoredHoldsWhatASuspendCouldNotWrite(t *testing.T) {
 	pr, pw := io.Pipe()
 	defer func() { _ = pw.Close() }()
 	var hooked atomic.Bool
-	done := runSuspending(t, door, sink, pr, &hooked)
+	done := runSuspending(t, door, lim, sink, pr, &hooked)
 
 	waitFor(t, func() bool { return sink.writes.Load() == 1 }, "the session's screen never reached the terminal")
 	_, err := pw.Write([]byte("\r~\x1a"))
@@ -351,9 +358,7 @@ func TestTerminalUnrestoredHoldsWhatASuspendCouldNotWrite(t *testing.T) {
 // leaves the terminal in them once that write lands: the restore is handed
 // back, and Released waits for the write.
 func TestTerminalUnrestoredHoldsWhatAStalledResumeLeaves(t *testing.T) {
-	old := outputDrainTimeout
-	outputDrainTimeout = 200 * time.Millisecond
-	t.Cleanup(func() { outputDrainTimeout = old })
+	lim := terminalLimits{outputDrain: 200 * time.Millisecond}
 
 	door := serveDoor(t, func(s gssh.Session) {
 		_, _ = io.WriteString(s, suspendScreen)
@@ -365,7 +370,7 @@ func TestTerminalUnrestoredHoldsWhatAStalledResumeLeaves(t *testing.T) {
 	pr, pw := io.Pipe()
 	defer func() { _ = pw.Close() }()
 	var hooked atomic.Bool
-	done := runSuspending(t, door, sink, pr, &hooked)
+	done := runSuspending(t, door, lim, sink, pr, &hooked)
 
 	waitFor(t, func() bool { return sink.writes.Load() == 1 }, "the session's screen never reached the terminal")
 	_, err := pw.Write([]byte("\r~\x1a"))
@@ -400,9 +405,7 @@ func TestTerminalUnrestoredHoldsWhatAStalledResumeLeaves(t *testing.T) {
 func TestTerminalUnrestoredWaitsForAFeedInProgress(t *testing.T) {
 	// Long enough that the copy has read the session's output, and reached
 	// the feed, before the drain gives up on it.
-	old := outputDrainTimeout
-	outputDrainTimeout = time.Second
-	t.Cleanup(func() { outputDrainTimeout = old })
+	lim := terminalLimits{outputDrain: time.Second}
 
 	feeding, release := make(chan struct{}), make(chan struct{})
 	testHookFeeding = func() { close(feeding); <-release }
@@ -418,7 +421,7 @@ func TestTerminalUnrestoredWaitsForAFeedInProgress(t *testing.T) {
 	t.Cleanup(func() { close(sink.release) })
 	done := make(chan Result, 1)
 	go func() {
-		res, _ := (&Terminal{Stdout: sink, Pty: &Pty{Term: "xterm", Size: termsize.Default}}).
+		res, _ := (&Terminal{Stdout: sink, Pty: &Pty{Term: "xterm", Size: termsize.Default}, limits: lim}).
 			Run(context.Background(), dialDoor(t, door), time.Now().Add(testTimeout))
 		done <- res
 	}()
@@ -447,10 +450,10 @@ func TestTerminalReleasedIsClosedOnAnOrdinaryEnd(t *testing.T) {
 	}
 }
 
-// runStatusTerminal runs a Terminal on door with a pty, a typed-into Stdin and
-// the Status hook status, until ctx ends or the session does, and hands back
-// its Result.
-func runStatusTerminal(t *testing.T, ctx context.Context, door *fakeDoor, stdout io.Writer, stdin io.Reader, status func(context.Context) []string) <-chan Result {
+// runStatusTerminal runs a Terminal on door with lim, a pty, a typed-into Stdin
+// and the Status hook status, until ctx ends or the session does, and hands
+// back its Result.
+func runStatusTerminal(t *testing.T, ctx context.Context, door *fakeDoor, lim terminalLimits, stdout io.Writer, stdin io.Reader, status func(context.Context) []string) <-chan Result {
 	t.Helper()
 	client := dialDoor(t, door)
 	done := make(chan Result, 1)
@@ -459,6 +462,7 @@ func runStatusTerminal(t *testing.T, ctx context.Context, door *fakeDoor, stdout
 			Pty:    &Pty{Term: "xterm", Size: termsize.Default},
 			Status: status,
 			Logger: slog.New(slog.DiscardHandler),
+			limits: lim,
 		}).Run(ctx, client, time.Now().Add(testTimeout))
 		if err != nil {
 			t.Errorf("Run: %v", err)
@@ -576,7 +580,7 @@ func runFloodWithStatus(t *testing.T, lines []string) string {
 	defer func() { _ = pw.Close() }()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	done := runStatusTerminal(t, ctx, door, sink, pr, answering(lines, make(chan struct{})))
+	done := runStatusTerminal(t, ctx, door, terminalLimits{}, sink, pr, answering(lines, make(chan struct{})))
 
 	waitFor(t, func() bool { return sink.Len() >= 64<<10 }, "the flood never reached the terminal")
 	_, err := pw.Write([]byte("\r~?"))
@@ -612,7 +616,7 @@ func runPausedWithStatus(t *testing.T, before, after string, lines []string) str
 	defer func() { _ = pw.Close() }()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	done := runStatusTerminal(t, ctx, door, sink, pr, answering(lines, asked))
+	done := runStatusTerminal(t, ctx, door, terminalLimits{}, sink, pr, answering(lines, asked))
 
 	waitFor(t, func() bool { return strings.Contains(sink.String(), before) }, "the session's output never reached the terminal")
 	_, err := pw.Write([]byte("\r~?"))
@@ -642,6 +646,10 @@ func runAmbiguousStringWithStatus(t *testing.T, lines []string) string {
 	return runPausedWithStatus(t, "\x1bPq\x18", "\x1b\\", lines)
 }
 
+// blockedDrain is the drain runBlockedStdoutThenDetach gives its terminal, and
+// what TestABlockedTerminalNeverHoldsInput's bound is measured from.
+const blockedDrain = 3 * time.Second
+
 // runBlockedStdoutThenDetach: Stdout takes nothing, so the copy is parked in
 // its first write; the client types "~?", and once the lookup has been asked,
 // "~.". It hands back the Result and how long the two keys took to end Run.
@@ -649,9 +657,7 @@ func runBlockedStdoutThenDetach(t *testing.T) (Result, time.Duration) {
 	t.Helper()
 	// Long enough that a lookup holding the input for the turn's whole
 	// bound, and the drain after it, is told apart from the drain alone.
-	old := outputDrainTimeout
-	outputDrainTimeout = 3 * time.Second
-	t.Cleanup(func() { outputDrainTimeout = old })
+	lim := terminalLimits{outputDrain: blockedDrain}
 
 	door := serveDoor(t, func(s gssh.Session) {
 		_, _ = io.WriteString(s, "output")
@@ -662,7 +668,7 @@ func runBlockedStdoutThenDetach(t *testing.T) (Result, time.Duration) {
 	pr, pw := io.Pipe()
 	t.Cleanup(func() { _ = pw.Close() })
 	asked := make(chan struct{})
-	done := runStatusTerminal(t, context.Background(), door, sink, pr, answering([]string{"upterm: STATUS"}, asked))
+	done := runStatusTerminal(t, context.Background(), door, lim, sink, pr, answering([]string{"upterm: STATUS"}, asked))
 
 	select {
 	case <-sink.entered:
@@ -685,12 +691,8 @@ func runBlockedStdoutThenDetach(t *testing.T) (Result, time.Duration) {
 // has closed, the client's own mode tracker.
 func runIdleMidSequenceWithStatus(t *testing.T, lines []string) (string, *uio.ModeTracker) {
 	t.Helper()
-	old := statusSafeTimeout
-	statusSafeTimeout = 300 * time.Millisecond
-	t.Cleanup(func() { statusSafeTimeout = old })
-	// The door's own copy: it is the server's goroutine, which nothing here
-	// orders before the cleanup above.
-	bound := statusSafeTimeout
+	// The status bound this terminal is given, which the door pauses past.
+	const bound = 300 * time.Millisecond
 	var modes *uio.ModeTracker
 	testHookTracker = func(m *uio.ModeTracker) { modes = m }
 	t.Cleanup(func() { testHookTracker = nil })
@@ -714,7 +716,7 @@ func runIdleMidSequenceWithStatus(t *testing.T, lines []string) (string, *uio.Mo
 	defer func() { _ = pw.Close() }()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	done := runStatusTerminal(t, ctx, door, sink, pr, answering(lines, asked))
+	done := runStatusTerminal(t, ctx, door, terminalLimits{statusSafe: bound}, sink, pr, answering(lines, asked))
 
 	waitFor(t, func() bool { return strings.Contains(sink.String(), "\x1b[?1000h\x1b[?1000") }, "the session's output never reached the terminal")
 	_, err := pw.Write([]byte("\r~?"))
@@ -793,9 +795,7 @@ func (s *statusGateSink) String() string {
 func runBlockedStatusThenResume(t *testing.T, lines []string, next string) string {
 	t.Helper()
 	// The bound a write that does not return is waited on for.
-	old := outputDrainTimeout
-	outputDrainTimeout = 200 * time.Millisecond
-	t.Cleanup(func() { outputDrainTimeout = old })
+	const drain = 200 * time.Millisecond
 
 	writeNext := make(chan struct{})
 	door := serveDoor(t, func(s gssh.Session) {
@@ -813,7 +813,7 @@ func runBlockedStatusThenResume(t *testing.T, lines []string, next string) strin
 	defer func() { _ = pw.Close() }()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	done := runStatusTerminal(t, ctx, door, sink, pr, answering(lines, make(chan struct{})))
+	done := runStatusTerminal(t, ctx, door, terminalLimits{outputDrain: drain}, sink, pr, answering(lines, make(chan struct{})))
 
 	waitFor(t, func() bool { return strings.Contains(sink.String(), "ready") }, "the session's output never reached the terminal")
 	_, err := pw.Write([]byte("\r~?"))
@@ -826,7 +826,7 @@ func runBlockedStatusThenResume(t *testing.T, lines []string, next string) strin
 	close(writeNext)
 	// Well past the bound, so that an output given up at it has had every
 	// chance to let next through.
-	time.Sleep(3 * outputDrainTimeout)
+	time.Sleep(3 * drain)
 	close(sink.release)
 	waitFor(t, func() bool { return strings.Contains(sink.String(), next) }, "the session's output never reached the terminal")
 	cancel()
@@ -840,9 +840,7 @@ func runBlockedStatusThenResume(t *testing.T, lines []string, next string) strin
 // terminal, and what unblocks it.
 func runBlockedStatusThenDetach(t *testing.T, modes string) (Result, *statusGateSink, func()) {
 	t.Helper()
-	old := outputDrainTimeout
-	outputDrainTimeout = 200 * time.Millisecond
-	t.Cleanup(func() { outputDrainTimeout = old })
+	lim := terminalLimits{outputDrain: 200 * time.Millisecond}
 
 	door := serveDoor(t, func(s gssh.Session) {
 		_, _ = io.WriteString(s, modes)
@@ -854,7 +852,7 @@ func runBlockedStatusThenDetach(t *testing.T, modes string) (Result, *statusGate
 	t.Cleanup(unblock)
 	pr, pw := io.Pipe()
 	t.Cleanup(func() { _ = pw.Close() })
-	done := runStatusTerminal(t, context.Background(), door, sink, pr, answering([]string{"upterm: STATUS"}, make(chan struct{})))
+	done := runStatusTerminal(t, context.Background(), door, lim, sink, pr, answering([]string{"upterm: STATUS"}, make(chan struct{})))
 
 	waitFor(t, func() bool { return strings.Contains(sink.String(), modes) }, "the session's output never reached the terminal")
 	_, err := pw.Write([]byte("\r~?"))
@@ -891,7 +889,7 @@ func runStatusReleasedAfterDetach(t *testing.T) (*syncSink, func()) {
 	sink := &syncSink{}
 	pr, pw := io.Pipe()
 	t.Cleanup(func() { _ = pw.Close() })
-	done := runStatusTerminal(t, context.Background(), door, sink, pr, status)
+	done := runStatusTerminal(t, context.Background(), door, terminalLimits{}, sink, pr, status)
 
 	waitFor(t, func() bool { return strings.Contains(sink.String(), "ready") }, "the session's output never reached the terminal")
 	_, err := pw.Write([]byte("\r~?"))
@@ -925,7 +923,7 @@ func TestABlockedTerminalNeverHoldsInput(t *testing.T) {
 	// Stdout takes nothing; the client types "~?" then "~.".
 	res, elapsed := runBlockedStdoutThenDetach(t)
 	require.Equal(t, Detached, res.Reason)
-	require.Less(t, elapsed, outputDrainTimeout+2*time.Second)
+	require.Less(t, elapsed, blockedDrain+2*time.Second)
 }
 
 // Past the bound the status is dropped rather than written inside the
@@ -1047,7 +1045,7 @@ func runFailedWrite(t *testing.T, stdout *failOnSink) (Result, time.Duration) {
 	t.Cleanup(func() { _ = pw.Close() })
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
-	done := runStatusTerminal(t, ctx, door, stdout, pr, answering([]string{"upterm: STATUS"}, make(chan struct{})))
+	done := runStatusTerminal(t, ctx, door, terminalLimits{}, stdout, pr, answering([]string{"upterm: STATUS"}, make(chan struct{})))
 
 	if stdout.mark != "ready" {
 		waitFor(t, func() bool { return strings.Contains(stdout.String(), "ready") }, "the session's output never reached the terminal")
@@ -1155,7 +1153,7 @@ func TestStatusLinesCarryNoControls(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	line := "upterm:   guest SSH-2.0-\x1b[?1049h\x1b]0;x\x07 \x9b1m \u009b2m\r\n…"
-	done := runStatusTerminal(t, ctx, door, sink, pr, answering([]string{line}, make(chan struct{})))
+	done := runStatusTerminal(t, ctx, door, terminalLimits{}, sink, pr, answering([]string{line}, make(chan struct{})))
 
 	waitFor(t, func() bool { return sink.String() == "ready" }, "the session's output never reached the terminal")
 	_, err := pw.Write([]byte("\r~?"))
@@ -1214,12 +1212,8 @@ func TestEveryStatusLineClearsTheRestOfItsRow(t *testing.T) {
 // A dropped status costs only that press: once the program has left the
 // sequence that kept it out, ~? shows the status again.
 func TestStatusWorksAgainAfterADrop(t *testing.T) {
-	old := statusSafeTimeout
-	statusSafeTimeout = 300 * time.Millisecond
-	t.Cleanup(func() { statusSafeTimeout = old })
-	// The door's own copy, for the reason runIdleMidSequenceWithStatus takes
-	// one.
-	bound := statusSafeTimeout
+	// The status bound this terminal is given, which the door pauses past.
+	const bound = 300 * time.Millisecond
 
 	asked := make(chan struct{})
 	door := serveDoor(t, func(s gssh.Session) {
@@ -1249,7 +1243,7 @@ func TestStatusWorksAgainAfterADrop(t *testing.T) {
 	defer func() { _ = pw.Close() }()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	done := runStatusTerminal(t, ctx, door, sink, pr, status)
+	done := runStatusTerminal(t, ctx, door, terminalLimits{statusSafe: bound}, sink, pr, status)
 
 	waitFor(t, func() bool { return strings.Contains(sink.String(), "\x1b[?1000") }, "the session's output never reached the terminal")
 	_, err := pw.Write([]byte("\r~?"))
@@ -1291,9 +1285,7 @@ func TestOfferStatusRefusesAnOfferWhileOneWaits(t *testing.T) {
 // reason to give it up. With the budget spent as the copy ends, the copy's
 // end and the timer are ready together, many times over.
 func TestTheRestoreIsNotGivenUpWhileTheTurnIsFree(t *testing.T) {
-	old := outputDrainTimeout
-	outputDrainTimeout = time.Nanosecond
-	t.Cleanup(func() { outputDrainTimeout = old })
+	lim := terminalLimits{outputDrain: time.Nanosecond}
 
 	for i := range 50 {
 		door := serveDoor(t, func(s gssh.Session) {
@@ -1304,6 +1296,7 @@ func TestTheRestoreIsNotGivenUpWhileTheTurnIsFree(t *testing.T) {
 		res, err := (&Terminal{Stdout: io.Discard, Escape: '~',
 			Pty:    &Pty{Term: "xterm", Size: termsize.Default},
 			Logger: slog.New(slog.NewTextHandler(logs, nil)),
+			limits: lim,
 		}).Run(context.Background(), dialDoor(t, door), time.Now().Add(testTimeout))
 		require.NoError(t, err)
 		awaitClosed(t, res.Released, "Released never closed")

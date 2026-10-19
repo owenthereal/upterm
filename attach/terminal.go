@@ -18,22 +18,21 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
-// outputDrainTimeout bounds how long Run waits, after the session has ended,
-// for what the session sent to reach Stdout. A var so a test can shorten it.
-var outputDrainTimeout = 5 * time.Second
+// defaultOutputDrainTimeout bounds how long Run waits, after the session has
+// ended, for what the session sent to reach Stdout.
+const defaultOutputDrainTimeout = 5 * time.Second
 
-// inputFlushTimeout bounds what a detach still owes the session — the Enter
-// that preceded ~., or an escape byte held at EOF — so that a session no
-// longer taking input cannot keep the detach from happening. A var so a test
-// can shorten it.
-var inputFlushTimeout = time.Second
+// defaultInputFlushTimeout bounds what a detach still owes the session — the
+// Enter that preceded ~., or an escape byte held at EOF — so that a session no
+// longer taking input cannot keep the detach from happening.
+const defaultInputFlushTimeout = time.Second
 
-// inputBacklogLimit bounds what may sit unwritten in forwardInput's queue
-// while the session is not taking input. 1 MiB, the same figure as
+// defaultInputBacklogLimit bounds what may sit unwritten in forwardInput's
+// queue while the session is not taking input. 1 MiB, the same figure as
 // uio.DefaultGuestBufferSize: more than a terminal can be typed at, and
 // small enough that a client holds no meaningful amount of what it will
-// never deliver. A var so a test can shorten it.
-var inputBacklogLimit = 1 << 20
+// never deliver.
+const defaultInputBacklogLimit = 1 << 20
 
 // testHookFeeding, when a test sets it, runs inside trackerMu just before the
 // output copy feeds a chunk to the tracker, so that the test can hold a feed
@@ -45,12 +44,38 @@ var testHookFeeding func()
 // Released has closed. Nil outside tests.
 var testHookTracker func(*uio.ModeTracker)
 
-// statusSafeTimeout bounds how long ~?'s lines wait for the session's output
-// to leave an escape sequence before they are dropped. It is about as long as
-// the lookup that produced them is given: lines that can't be shown by then
-// would arrive long after the key that asked for them. A var so a test can
-// shorten it.
-var statusSafeTimeout = time.Second
+// defaultStatusSafeTimeout bounds how long ~?'s lines wait for the session's
+// output to leave an escape sequence before they are dropped. It is about as
+// long as the lookup that produced them is given: lines that can't be shown by
+// then would arrive long after the key that asked for them.
+const defaultStatusSafeTimeout = time.Second
+
+// terminalLimits bounds a terminal's waits and its input backlog; a zero
+// field takes its default, and so does a negative one.
+type terminalLimits struct {
+	outputDrain  time.Duration // default 5 s
+	inputFlush   time.Duration // default 1 s
+	statusSafe   time.Duration // default 1 s
+	inputBacklog int           // default 1 MiB
+}
+
+// orDefault returns l with every field that is zero or negative replaced by
+// its default.
+func (l terminalLimits) orDefault() terminalLimits {
+	if l.outputDrain <= 0 {
+		l.outputDrain = defaultOutputDrainTimeout
+	}
+	if l.inputFlush <= 0 {
+		l.inputFlush = defaultInputFlushTimeout
+	}
+	if l.statusSafe <= 0 {
+		l.statusSafe = defaultStatusSafeTimeout
+	}
+	if l.inputBacklog <= 0 {
+		l.inputBacklog = defaultInputBacklogLimit
+	}
+	return l
+}
 
 // Pty is a pty request: the terminal type and geometry the client's own
 // terminal has. A client that requests one is eligible to be the session's
@@ -109,6 +134,12 @@ type Terminal struct {
 	Status func(ctx context.Context) []string
 
 	Logger *slog.Logger
+
+	// limits bounds this terminal's waits and its input backlog, and the zero
+	// value is the defaults. Run reads it once, as it starts. Client.Run
+	// copies its own into the Terminal it builds; tests set it to shorten a
+	// wait or to shrink the backlog.
+	limits terminalLimits
 }
 
 // Reason says how an attachment ended.
@@ -228,6 +259,9 @@ func (t *Terminal) Run(ctx context.Context, client *ssh.Client, setupBy time.Tim
 	if logger == nil {
 		logger = slog.Default()
 	}
+	// Read once, here: everything below works from this copy, the goroutines
+	// that can outlive Run included.
+	lim := t.limits.orDefault()
 
 	// parent is the caller's context; ctx is the one internal cleanup
 	// cancels. Told apart deliberately: see record below.
@@ -324,7 +358,7 @@ func (t *Terminal) Run(ctx context.Context, client *ssh.Client, setupBy time.Tim
 	// Stdout, the copy's or a status's, closes o.failed; a read ending,
 	// however it ends, is no failure, and Wait says what it meant.
 	var (
-		o = &output{w: t.Stdout, turn: make(chan struct{}, 1), released: make(chan struct{}),
+		o = &output{w: t.Stdout, drain: lim.outputDrain, turn: make(chan struct{}, 1), released: make(chan struct{}),
 			statusClosing: make(chan struct{}), failed: make(chan struct{})}
 		copied = make(chan struct{})
 	)
@@ -382,7 +416,7 @@ func (t *Terminal) Run(ctx context.Context, client *ssh.Client, setupBy time.Tim
 	}
 	if t.Stdin != nil {
 		g.Add(func() error {
-			if t.forwardInput(ctx, sess, stdin, o, logger) {
+			if t.forwardInput(ctx, sess, stdin, o, lim, logger) {
 				record(Result{Reason: Detached})
 			}
 			return nil
@@ -437,7 +471,7 @@ func (t *Terminal) Run(ctx context.Context, client *ssh.Client, setupBy time.Tim
 	// both write to the same terminal, and a terminal that has stopped stops
 	// them both. Nothing here may hold Run — a stopped terminal is exactly
 	// when the caller needs it to return.
-	tail := time.NewTimer(outputDrainTimeout)
+	tail := time.NewTimer(lim.outputDrain)
 	defer tail.Stop()
 	select {
 	case <-copied:
@@ -485,13 +519,13 @@ func (t *Terminal) Run(ctx context.Context, client *ssh.Client, setupBy time.Tim
 					o.writeWithin(tail.C, restore, logger)
 				} else {
 					o.abandon()
-					logging.WarnWithin(logger, logging.LogBound, "abandoning the terminal's mode restore: a status write still holds the output", "timeout", outputDrainTimeout)
+					logging.WarnWithin(logger, logging.LogBound, "abandoning the terminal's mode restore: a status write still holds the output", "timeout", lim.outputDrain)
 				}
 			}
 		}
 	case <-tail.C:
 		o.abandon()
-		logging.WarnWithin(logger, logging.LogBound, "abandoning output still undelivered to the terminal", "timeout", outputDrainTimeout)
+		logging.WarnWithin(logger, logging.LogBound, "abandoning output still undelivered to the terminal", "timeout", lim.outputDrain)
 	}
 
 	mu.Lock()
@@ -513,6 +547,9 @@ func (t *Terminal) Run(ctx context.Context, client *ssh.Client, setupBy time.Tim
 // last of them has returned.
 type output struct {
 	w io.Writer
+	// drain is the limits' outputDrain, the bound the tail and a suspend give
+	// the mode writes, which writeWithin logs when a write's deadline passes.
+	drain time.Duration
 
 	// What the session did to this terminal, watched on the way past so it
 	// can be undone on the way out. Only for a terminal: a viewer redirected
@@ -781,13 +818,13 @@ func (o *output) closeStatus() {
 // The copy writes the lines at the end of a chunk, on the turn it already
 // holds, once the session's output is outside every sequence and in ASCII, as
 // takeStatus has it. With the output idle nothing would, so this takes the
-// turn the way a suspend does, within turnWait (outputDrainTimeout) because
-// the copy may be parked in a write to a terminal that has stopped, and
-// writes them itself if the output is there. If it is not, the lines wait for
-// the copy to come out of it, within safeWait (statusSafeTimeout) of being
-// offered; past either bound they are dropped, and the input carries on. A
-// dropped status shows nothing, the one case ~? does, and pressing it again
-// works once the program has moved on.
+// turn the way a suspend does, within turnWait (the limits' outputDrain)
+// because the copy may be parked in a write to a terminal that has stopped,
+// and writes them itself if the output is there. If it is not, the lines wait
+// for the copy to come out of it, within safeWait (the limits' statusSafe) of
+// being offered; past either bound they are dropped, and the input carries
+// on. A dropped status shows nothing, the one case ~? does, and pressing it
+// again works once the program has moved on.
 //
 // A write of its own owns the output until it returns, not until a deadline:
 // a write cannot be interrupted, and a turn given back at a deadline would let
@@ -867,9 +904,9 @@ func writeAll(w io.Writer, p []byte) error {
 //
 // The output is held from the one to the other: written in between, it would
 // be drawn over the shell's screen, and a mode it set would make a liar of
-// the restore. The hold is taken from the copy within outputDrainTimeout,
-// because the copy may be parked in a write to a terminal that has stopped
-// taking bytes, and nothing interrupts that.
+// the restore. The hold is taken from the copy within drain, the limits'
+// outputDrain, because the copy may be parked in a write to a terminal that
+// has stopped taking bytes, and nothing interrupts that.
 //
 // It reports whether the terminal is still this client's to draw on. It is
 // not when the process came back without it — bg: the terminal is the
@@ -889,9 +926,9 @@ func writeAll(w io.Writer, p []byte) error {
 // Both are bounded for the reason every other request on this path is: they
 // fail when the connection has gone, which is when the group is unwinding,
 // and a handler blocked on a stopped terminal would park the unwind here.
-func (t *Terminal) suspend(sess *ssh.Session, o *output, logger *slog.Logger) (kept bool) {
+func (t *Terminal) suspend(sess *ssh.Session, o *output, drain time.Duration, logger *slog.Logger) (kept bool) {
 	if o.modes != nil {
-		leave := time.NewTimer(outputDrainTimeout)
+		leave := time.NewTimer(drain)
 		defer leave.Stop()
 		select {
 		case o.turn <- struct{}{}:
@@ -899,7 +936,7 @@ func (t *Terminal) suspend(sess *ssh.Session, o *output, logger *slog.Logger) (k
 			// Still in the session's modes, with nothing written to take it
 			// out of them.
 			o.abandon()
-			logging.WarnWithin(logger, logging.LogBound, "detaching instead of suspending: the terminal is not taking output", "timeout", outputDrainTimeout)
+			logging.WarnWithin(logger, logging.LogBound, "detaching instead of suspending: the terminal is not taking output", "timeout", drain)
 			return false
 		}
 		if restore := o.restore(); len(restore) > 0 && !o.writeWithin(leave.C, restore, logger) {
@@ -910,7 +947,7 @@ func (t *Terminal) suspend(sess *ssh.Session, o *output, logger *slog.Logger) (k
 	}
 	size, kept := t.Suspend()
 	if kept && o.modes != nil {
-		back := time.NewTimer(outputDrainTimeout)
+		back := time.NewTimer(drain)
 		defer back.Stop()
 		if snapshot := o.snapshot(); len(snapshot) > 0 && !o.writeWithin(back.C, snapshot, logger) {
 			// The session's modes are on their way back, in a write that
@@ -978,7 +1015,7 @@ func (o *output) writeWithin(deadline <-chan time.Time, p []byte, logger *slog.L
 		}
 		return err == nil
 	case <-deadline:
-		logging.WarnWithin(logger, logging.LogBound, "the terminal did not take its mode restore", "timeout", outputDrainTimeout)
+		logging.WarnWithin(logger, logging.LogBound, "the terminal did not take its mode restore", "timeout", o.drain)
 		return false
 	}
 }
@@ -1065,7 +1102,7 @@ func copyOutput(r io.Reader, o *output) error {
 // would park it here, before the caller has recorded the detach and before
 // anything has cancelled: the attachment is ending either way, and the
 // connection close that follows cancellation says so.
-func (t *Terminal) forwardInput(ctx context.Context, sess *ssh.Session, stdin io.Writer, o *output, logger *slog.Logger) (detached bool) {
+func (t *Terminal) forwardInput(ctx context.Context, sess *ssh.Session, stdin io.Writer, o *output, lim terminalLimits, logger *slog.Logger) (detached bool) {
 	var opts []EscapeOption
 	if t.Status != nil && o.modes != nil {
 		opts = append(opts, WithStatus())
@@ -1073,15 +1110,15 @@ func (t *Terminal) forwardInput(ctx context.Context, sess *ssh.Session, stdin io
 	filter := NewEscapeFilter(t.Escape, t.Suspend != nil, opts...)
 	// One ~? at a time: one pressed while another is still being looked up
 	// or written is dropped, so a terminal that has stopped taking bytes
-	// collects no goroutines however often it is pressed. Its bounds are read
-	// here, once: a showStatus can outlive Run, and a test that shortens one
-	// puts it back once Run has returned.
+	// collects no goroutines however often it is pressed. Its bounds are the
+	// ones Run read as it started, passed in by value, so a showStatus that
+	// outlives Run keeps them.
 	var showing atomic.Bool
-	safeWait, turnWait := statusSafeTimeout, outputDrainTimeout
+	safeWait, turnWait := lim.statusSafe, lim.outputDrain
 	buf := make([]byte, 4096)
 	r := uio.NewContextReader(ctx, t.Stdin)
 
-	q := newInputQueue()
+	q := newInputQueue(lim.inputBacklog)
 	// Closed on every path, including the ones that do not wait: it is what
 	// the writer ends on, and a queue left open leaks it.
 	defer q.close()
@@ -1094,7 +1131,7 @@ func (t *Terminal) forwardInput(ctx context.Context, sess *ssh.Session, stdin io
 	// releases it.
 	flush := func() {
 		q.close()
-		q.waitDrained(inputFlushTimeout)
+		q.waitDrained(lim.inputFlush)
 	}
 
 	dropped := false
@@ -1124,7 +1161,7 @@ func (t *Terminal) forwardInput(ctx context.Context, sess *ssh.Session, stdin io
 				// has to stay responsive.
 				dropped = true
 				logging.WarnWithin(logger, logging.LogBound, "dropping input: the session is not taking it",
-					"backlog-bytes", inputBacklogLimit)
+					"backlog-bytes", lim.inputBacklog)
 			}
 			if action == EscapeStatus && showing.CompareAndSwap(false, true) {
 				// Off this goroutine, which has to stay free for ~. and for
@@ -1135,7 +1172,7 @@ func (t *Terminal) forwardInput(ctx context.Context, sess *ssh.Session, stdin io
 					t.showStatus(ctx, o, safeWait, turnWait, logger)
 				}()
 			}
-			if action == EscapeSuspend && !t.suspend(sess, o, logger) {
+			if action == EscapeSuspend && !t.suspend(sess, o, lim.outputDrain, logger) {
 				flush()
 				return true
 			}
@@ -1162,6 +1199,10 @@ func (t *Terminal) forwardInput(ctx context.Context, sess *ssh.Session, stdin io
 // reader never blocks on it, which is the point; the writer parks in the
 // session's Write for as long as the session is not taking input.
 type inputQueue struct {
+	// limit is the most that may sit in buf; append refuses what would go
+	// past it.
+	limit int
+
 	mu     sync.Mutex
 	more   *sync.Cond
 	buf    []byte
@@ -1172,19 +1213,19 @@ type inputQueue struct {
 	done chan struct{}
 }
 
-func newInputQueue() *inputQueue {
-	q := &inputQueue{done: make(chan struct{})}
+func newInputQueue(limit int) *inputQueue {
+	q := &inputQueue{limit: limit, done: make(chan struct{})}
 	q.more = sync.NewCond(&q.mu)
 	return q
 }
 
-// append queues p and reports whether it was taken. Beyond inputBacklogLimit
+// append queues p and reports whether it was taken. Beyond the queue's limit
 // it is not: the session has stopped reading and nothing queued for it is
 // going anywhere.
 func (q *inputQueue) append(p []byte) bool {
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	if len(q.buf)+len(p) > inputBacklogLimit {
+	if len(q.buf)+len(p) > q.limit {
 		return false
 	}
 	q.buf = append(q.buf, p...)
