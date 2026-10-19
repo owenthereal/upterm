@@ -356,16 +356,30 @@ func TestReconcileAcrossAnIndexDrop(t *testing.T) {
 	require.False(t, sessions.active(reg))
 }
 
-// writeOver writes s into reg's key as a plain PUT does, without acquiring
-// it: the lock session stays reg's, and the index moves on. It returns the
-// entry for a test to deliver as the watch would.
+// writeOver writes s into the fake's entry as a plain PUT does, without
+// acquiring it: the lock session that holds the entry keeps it, and the index
+// moves on. It returns the entry for a test to deliver as the watch would.
+//
+// reg is the registration whose write it follows. By default the write lands
+// at reg.index + 1, outside the fake's allocator; in monotonic mode it takes
+// the allocator's next index, and reg may be nil, as when the registration's
+// reply hasn't arrived yet.
 func writeOver(t *testing.T, consul *fakeConsul, reg *Registration, s *Session) *api.KVPair {
 	t.Helper()
 	value, err := json.Marshal(s)
 	require.NoError(t, err)
 	consul.mu.Lock()
 	defer consul.mu.Unlock()
-	consul.pair = &api.KVPair{Key: consul.pair.Key, Value: value, Session: reg.lease, ModifyIndex: reg.index + 1}
+	require.NotNil(t, consul.pair, "no entry to write over")
+	var index uint64
+	if consul.monotonic {
+		index = consul.nextIndex()
+	} else {
+		require.NotNil(t, reg, "by default a plain write lands past the registration it follows")
+		index = reg.index + 1
+	}
+	consul.pair = &api.KVPair{Key: consul.pair.Key, Value: value, Session: consul.pair.Session, ModifyIndex: index}
+	consul.pokeLocked()
 	return consul.pair
 }
 

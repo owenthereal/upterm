@@ -64,6 +64,13 @@ type sshd struct {
 	// go. ctx is the host connection's.
 	onRegistered func(ctx context.Context, reg *Registration)
 
+	// beforeConfirm is a test hook, run in adopt once add has given reg its
+	// slot and immediately before confirm reads the store's view of it: the
+	// window in which a delivery can land after the slot exists and before
+	// adoption checks the store again. It runs for every adoption, so a hook
+	// meant for one registration picks it out by generation.
+	beforeConfirm func(reg *Registration)
+
 	server         *ssh.Server
 	sessions       *localSessions
 	forwardHandler *streamlocalForwardHandler
@@ -660,6 +667,9 @@ func (s *sshd) adopt(ctx ssh.Context, reg *Registration, conn *gossh.ServerConn)
 		if prev.reg.lease != "" && prev.reg.lease != reg.lease {
 			go s.releaseReplaced(prev.reg)
 		}
+	}
+	if s.beforeConfirm != nil {
+		s.beforeConfirm(reg)
 	}
 	// Another node's newer registration may have reached this node's view of
 	// the store before reg had a slot here to reconcile.

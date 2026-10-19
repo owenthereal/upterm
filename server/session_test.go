@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"path"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1056,26 +1057,61 @@ func (suite *ConsulStoreTestSuite) TestConfirmedAtIsTheLeaseCreationSendTime() {
 }
 
 // delayedTxnReply lets Consul apply every transaction at once, but holds the
-// reply to the first one until release is called. entered closes once it is
-// holding that reply.
+// replies to the ones whose ordinals it was made with, each until its own
+// release. Ordinals count from 1 the transactions that went through it and
+// were answered; one that fails to reach Consul isn't counted.
 type delayedTxnReply struct {
+	next  http.RoundTripper
+	txns  atomic.Int64
+	holds map[int]*heldReply // fixed at construction
+}
+
+// heldReply is one held transaction's acknowledgement and release.
+type heldReply struct {
 	entered chan struct{}
 	resume  chan struct{}
-	delayed atomic.Bool // not a sync.Once: later transactions mustn't wait on the first
 	resumed sync.Once
-	next    http.RoundTripper
+}
+
+// newDelayedTxnReply holds the replies to the transactions numbered hold,
+// counted as delayedTxnReply says; the others pass through, so a later
+// transaction never waits on an earlier one that is held.
+func newDelayedTxnReply(next http.RoundTripper, hold ...int) *delayedTxnReply {
+	d := &delayedTxnReply{next: next, holds: make(map[int]*heldReply, len(hold))}
+	for _, n := range hold {
+		d.holds[n] = &heldReply{entered: make(chan struct{}), resume: make(chan struct{})}
+	}
+	return d
 }
 
 func (d *delayedTxnReply) RoundTrip(r *http.Request) (*http.Response, error) {
 	resp, err := d.next.RoundTrip(r)
-	if err == nil && r.URL.Path == "/v1/txn" && d.delayed.CompareAndSwap(false, true) {
-		close(d.entered)
-		<-d.resume
+	if err == nil && r.URL.Path == "/v1/txn" {
+		if h, ok := d.holds[int(d.txns.Add(1))]; ok {
+			close(h.entered)
+			<-h.resume
+		}
 	}
 	return resp, err
 }
 
-func (d *delayedTxnReply) release() { d.resumed.Do(func() { close(d.resume) }) }
+// entered closes once the nth transaction's reply is held: Consul has applied
+// it, and its caller hasn't had the reply.
+func (d *delayedTxnReply) entered(n int) <-chan struct{} { return d.held(n).entered }
+
+// release lets the nth transaction's reply through. It is idempotent.
+func (d *delayedTxnReply) release(n int) {
+	h := d.held(n)
+	h.resumed.Do(func() { close(h.resume) })
+}
+
+func (d *delayedTxnReply) held(n int) *heldReply {
+	h, ok := d.holds[n]
+	if !ok {
+		panic(fmt.Sprintf("delayedTxnReply doesn't hold transaction %d", n))
+	}
+	return h
+}
 
 // storeWithADelayedReply is a store of its own, on the suite's key prefix,
 // whose first transaction's reply arrives only once the returned delay is
@@ -1084,7 +1120,7 @@ func (suite *ConsulStoreTestSuite) storeWithADelayedReply() (*consulSessionStore
 	consulURL := suite.consulURL
 	store, err := newConsulSessionStore(consulURL, 5*time.Minute, sessionTestLogger)
 	suite.Require().NoError(err)
-	delay := &delayedTxnReply{entered: make(chan struct{}), resume: make(chan struct{}), next: http.DefaultTransport}
+	delay := newDelayedTxnReply(http.DefaultTransport, 1)
 	cfg := api.DefaultConfig()
 	cfg.Address, cfg.Scheme = consulURL.Host, consulURL.Scheme
 	cfg.HttpClient = &http.Client{Transport: delay}
@@ -1108,7 +1144,7 @@ func (suite *ConsulStoreTestSuite) registerDelayed(store *consulSessionStore, de
 		done <- registered{reg, err}
 	}()
 	select {
-	case <-delay.entered:
+	case <-delay.entered(1):
 	case <-time.After(5 * time.Second):
 		suite.FailNow("the delayed registration never committed")
 	}
@@ -1149,14 +1185,14 @@ func holdsLease(store *consulSessionStore, id, lease string) bool {
 func (suite *ConsulStoreTestSuite) TestALateReplyLeavesTheNewerHoldInPlace() {
 	store, delay := suite.storeWithADelayedReply()
 	defer func() { _ = store.Close() }()
-	defer delay.release()
+	defer delay.release(1)
 	ctx, id := context.Background(), suite.uniq("late-reply")
 
 	first := suite.registerDelayed(store, delay, &Session{ID: id, NodeAddr: "a:22", Generation: 1})
 	reg2, err := store.Register(ctx, &Session{ID: id, NodeAddr: "a:22", Generation: 2})
 	suite.Require().NoError(err)
 	defer func() { _ = store.Release(ctx, reg2) }()
-	delay.release()
+	delay.release(1)
 	reg1 := suite.awaitRegistered(first)
 
 	suite.Equal(uint64(2), cachedGeneration(store, id), "the late reply replaced the newer registration in the cache")
@@ -1175,7 +1211,7 @@ func (suite *ConsulStoreTestSuite) TestALateReplyLeavesTheNewerHoldInPlace() {
 func (suite *ConsulStoreTestSuite) TestALateReplyLeavesAnotherNodesNewerEntryCached() {
 	store, delay := suite.storeWithADelayedReply()
 	defer func() { _ = store.Close() }()
-	defer delay.release()
+	defer delay.release(1)
 	ctx, id := context.Background(), suite.uniq("late-reply-other-node")
 
 	first := suite.registerDelayed(store, delay, &Session{ID: id, NodeAddr: "a:22", Generation: 1})
@@ -1184,7 +1220,7 @@ func (suite *ConsulStoreTestSuite) TestALateReplyLeavesAnotherNodesNewerEntryCac
 	defer func() { _ = suite.store2.Release(ctx, reg2) }()
 	suite.Require().Eventually(func() bool { return cachedGeneration(store, id) == 2 },
 		2*time.Second, 10*time.Millisecond, "the watch never delivered generation 2")
-	delay.release()
+	delay.release(1)
 	reg1 := suite.awaitRegistered(first)
 
 	suite.Equal(uint64(2), cachedGeneration(store, id), "the late reply replaced the newer registration in the cache")
@@ -1203,7 +1239,7 @@ func (suite *ConsulStoreTestSuite) TestALateReplyLeavesAnotherNodesNewerEntryCac
 func (suite *ConsulStoreTestSuite) TestALateReplyFromBeforeAnIndexDropIsNotCached() {
 	store, delay := suite.storeWithADelayedReply()
 	defer func() { _ = store.Close() }()
-	defer delay.release()
+	defer delay.release(1)
 	ctx, id := context.Background(), suite.uniq("late-reply-index-drop")
 
 	first := suite.registerDelayed(store, delay, &Session{ID: id, NodeAddr: "a:22", Generation: 1})
@@ -1217,7 +1253,7 @@ func (suite *ConsulStoreTestSuite) TestALateReplyFromBeforeAnIndexDropIsNotCache
 	// The watch's index drops, as it does when the entry with the highest
 	// index goes, or after a restore.
 	store.updateSessionReplica(1, nil)
-	delay.release()
+	delay.release(1)
 	reg1 := suite.awaitRegistered(first)
 	defer func() { _ = store.Release(ctx, reg1) }()
 
@@ -1255,14 +1291,26 @@ func (suite *ConsulStoreTestSuite) TestRenewReportsAnEntryItNoLongerHolds() {
 
 // lostTxnReply lets Consul apply every transaction, but loses the reply to the
 // first one, as a client timeout or a failure after the write would.
+//
+// It can hold that reply before losing it. entered, if not nil, closes once
+// Consul has applied the transaction; resume, if not nil, holds the loss until
+// it closes, and the test closes it once. Nil channels lose the reply at once.
 type lostTxnReply struct {
-	lost atomic.Bool
-	next http.RoundTripper
+	lost    atomic.Bool
+	next    http.RoundTripper
+	entered chan struct{}
+	resume  chan struct{}
 }
 
 func (l *lostTxnReply) RoundTrip(r *http.Request) (*http.Response, error) {
 	resp, err := l.next.RoundTrip(r)
 	if err == nil && r.URL.Path == "/v1/txn" && l.lost.CompareAndSwap(false, true) {
+		if l.entered != nil {
+			close(l.entered)
+		}
+		if l.resume != nil {
+			<-l.resume
+		}
 		_ = resp.Body.Close()
 		return nil, errors.New("reply lost")
 	}
@@ -1307,7 +1355,7 @@ func (suite *ConsulStoreTestSuite) TestALostReplyToACommittedRegistrationStillSu
 func (suite *ConsulStoreTestSuite) TestALateReplyDoesNotRestoreARemovedEntry() {
 	store, delay := suite.storeWithADelayedReply()
 	defer func() { _ = store.Close() }()
-	defer delay.release()
+	defer delay.release(1)
 	ctx, id := context.Background(), suite.uniq("late-reply-removed")
 
 	first := suite.registerDelayed(store, delay, &Session{ID: id, NodeAddr: "a:22", Generation: 1})
@@ -1318,7 +1366,7 @@ func (suite *ConsulStoreTestSuite) TestALateReplyDoesNotRestoreARemovedEntry() {
 	suite.Require().NoError(suite.store2.Release(ctx, reg2))
 	suite.Require().Eventually(func() bool { return !store.HasInCache(id) },
 		2*time.Second, 10*time.Millisecond, "the watch never delivered the removal")
-	delay.release()
+	delay.release(1)
 	reg1 := suite.awaitRegistered(first)
 	defer func() { _ = store.Release(ctx, reg1) }()
 
@@ -1466,19 +1514,49 @@ func TestSessionCacheTakesTheSnapshotWholeAfterAnIndexDrop(t *testing.T) {
 	assert.Zero(t, gen("again"), "the dropped snapshot's index isn't the floor")
 }
 
-// fakeConsul answers the calls a store makes for a single session entry. Its
-// first write is at index 100 and every later one at 6, as when Consul's index
-// goes backwards between them; reset loses the entry, as a restore can.
+// fakeConsul answers the calls a store makes for a single session entry. It
+// applies every transaction whatever its checks. It answers no renewals (an
+// unexpected request fails the test), so a test on it ends before a lease
+// keeper's first renewal, at half the store's TTL.
+//
+// Its transactions' writes take their indexes from nextIndex. By default the
+// first is at index 100 and every later one at 6, as when Consul's index goes
+// backwards between them; a delete takes no index, and writeOver writes just
+// past the registration it writes over. In monotonic mode every change to the
+// entry, writeOver's and a delete included, takes the next index of one rising
+// sequence. reset loses the entry, as a restore can.
+//
+// It tracks the lock sessions it creates (live), records every one it destroys
+// (destroyed), and wakes a waiter (changed) after each change to them or to the
+// entry.
 type fakeConsul struct {
 	*httptest.Server
-	mu     sync.Mutex
-	pair   *api.KVPair
-	leases int
-	writes int
+	mu   sync.Mutex
+	pair *api.KVPair
+	// monotonic has every change to the entry take the next of 100, 101,
+	// 102, …; the monotonicIndexes option sets it.
+	monotonic bool
+	leases    int
+	writes    int    // indexes nextIndex has given out
+	last      uint64 // the last of them
+	alive     map[string]bool
+	destroys  []string
+	changes   chan struct{}
 }
 
-func newFakeConsul(t *testing.T) *fakeConsul {
-	f := &fakeConsul{}
+// monotonicIndexes is a newFakeConsul option: every change to the entry, a
+// delete included, takes the next index of one rising sequence from 100, so a
+// delivery of what snapshot read is never older than anything the fake had
+// done by then.
+func monotonicIndexes(f *fakeConsul) { f.monotonic = true }
+
+func newFakeConsul(t *testing.T, options ...func(*fakeConsul)) *fakeConsul {
+	f := &fakeConsul{alive: make(map[string]bool), changes: make(chan struct{}, 1)}
+	for _, option := range options {
+		option(f)
+	}
+	// Each change is signalled before its reply is written, so a waiter that
+	// sees a call return finds its wakeup already queued.
 	f.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
 		defer f.mu.Unlock()
@@ -1486,7 +1564,10 @@ func newFakeConsul(t *testing.T) *fakeConsul {
 		switch {
 		case r.URL.Path == "/v1/session/create":
 			f.leases++
-			_ = json.NewEncoder(w).Encode(map[string]string{"ID": fmt.Sprintf("lease-%d", f.leases)})
+			lease := fmt.Sprintf("lease-%d", f.leases)
+			f.alive[lease] = true
+			f.pokeLocked()
+			_ = json.NewEncoder(w).Encode(map[string]string{"ID": lease})
 		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/v1/kv/"):
 			if f.pair == nil {
 				w.WriteHeader(http.StatusNotFound)
@@ -1502,21 +1583,22 @@ func newFakeConsul(t *testing.T) *fakeConsul {
 			}
 			last := ops[len(ops)-1].KV
 			if last.Verb == api.KVDelete {
-				f.pair = nil
+				f.deleteLocked()
+				f.pokeLocked()
 				_ = json.NewEncoder(w).Encode(api.TxnResponse{})
 				return
 			}
-			f.writes++
-			index := uint64(100)
-			if f.writes > 1 {
-				index = 6
-			}
-			f.pair = &api.KVPair{Key: last.Key, Value: last.Value, Session: last.Session, ModifyIndex: index}
+			f.pair = &api.KVPair{Key: last.Key, Value: last.Value, Session: last.Session, ModifyIndex: f.nextIndex()}
+			f.pokeLocked()
 			_ = json.NewEncoder(w).Encode(api.TxnResponse{Results: api.TxnResults{&api.TxnResult{KV: f.pair}}})
 		case strings.HasPrefix(r.URL.Path, "/v1/session/destroy/"):
-			if f.pair != nil && f.pair.Session == strings.TrimPrefix(r.URL.Path, "/v1/session/destroy/") {
-				f.pair = nil
+			lease := strings.TrimPrefix(r.URL.Path, "/v1/session/destroy/")
+			f.destroys = append(f.destroys, lease)
+			delete(f.alive, lease)
+			if f.pair != nil && f.pair.Session == lease {
+				f.deleteLocked()
 			}
+			f.pokeLocked()
 			_, _ = w.Write([]byte("true"))
 		default:
 			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
@@ -1527,28 +1609,201 @@ func newFakeConsul(t *testing.T) *fakeConsul {
 	return f
 }
 
+// nextIndex is the fake's one index allocator: its transactions' writes take
+// their indexes from it, and in monotonic mode so do writeOver and every
+// delete. The caller holds f.mu. By default it gives 100, then 6 ever after;
+// in monotonic mode it counts up from 100.
+func (f *fakeConsul) nextIndex() uint64 {
+	f.writes++
+	switch {
+	case f.monotonic:
+		f.last = 99 + uint64(f.writes)
+	case f.writes == 1:
+		f.last = 100
+	default:
+		f.last = 6
+	}
+	return f.last
+}
+
+// index is the last index nextIndex gave out, 0 before any: in monotonic mode,
+// that of the fake's latest change. A delivery of the fake's current state
+// takes its index and entry from snapshot, which reads both under one lock:
+// read apart, a change can land between them, and the delivery pair one
+// change's entry with another's index.
+func (f *fakeConsul) index() uint64 {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.last
+}
+
+// snapshot is what a watch delivery of the fake's current state carries: its
+// entry, if it has one, and index(), read under one lock, so no change lands
+// between the two.
+func (f *fakeConsul) snapshot() (uint64, api.KVPairs) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.pair == nil {
+		return f.last, nil
+	}
+	return f.last, api.KVPairs{f.pair}
+}
+
+// deleteLocked removes the entry. In monotonic mode the delete moves the index
+// on, as Consul's does; by default it takes none. The caller holds f.mu.
+func (f *fakeConsul) deleteLocked() {
+	f.pair = nil
+	if f.monotonic {
+		f.nextIndex()
+	}
+}
+
+// pokeLocked wakes changed's waiter, if it isn't already due a wakeup. The
+// caller holds f.mu, so the waiter's re-read finds the change.
+func (f *fakeConsul) pokeLocked() {
+	select {
+	case f.changes <- struct{}{}:
+	default:
+	}
+}
+
+// changed receives after the entry is written or deleted, or a lock session
+// is created or destroyed. It holds one wakeup, which stands for every change
+// since the last receive, so a waiter re-reads what it waits for each time.
+func (f *fakeConsul) changed() <-chan struct{} { return f.changes }
+
+// live reports whether lease was created here and hasn't been destroyed.
+func (f *fakeConsul) live(lease string) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.alive[lease]
+}
+
+// destroyed is every lock session destroyed here, in order, whether or not it
+// held the entry.
+func (f *fakeConsul) destroyed() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return slices.Clone(f.destroys)
+}
+
 func (f *fakeConsul) entry() *api.KVPair {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.pair
 }
 
+// reset loses the entry, a delete as deleteLocked indexes it, and leaves the
+// lock sessions as they are.
 func (f *fakeConsul) reset() {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.pair = nil
+	f.deleteLocked()
+	f.pokeLocked()
 }
 
 // newFakeConsulStore is a store on f with no watch running; tests deliver
 // what the watch would.
 func newFakeConsulStore(t *testing.T, f *fakeConsul) *consulSessionStore {
+	return newFakeConsulStoreWith(t, f, nil)
+}
+
+// newFakeConsulStoreWith is newFakeConsulStore with its calls to f made
+// through rt, such as a delayedTxnReply or a lostTxnReply; nil keeps the
+// client's own transport. The store's calls are its only traffic: with no
+// watch running, rt holds nothing a delivery needs.
+func newFakeConsulStoreWith(t *testing.T, f *fakeConsul, rt http.RoundTripper) *consulSessionStore {
 	cfg := api.DefaultConfig()
 	cfg.Address = f.URL
+	if rt != nil {
+		cfg.HttpClient = &http.Client{Transport: rt}
+	}
 	client, err := api.NewClient(cfg)
 	require.NoError(t, err)
 	logger := slog.New(slog.DiscardHandler)
 	return &consulSessionStore{client: client, logger: logger, ttl: time.Minute, keyPrefix: "fake",
 		cache: newSessionCache(logger), held: make(map[string]map[string]struct{})}
+}
+
+// The fake records every lease destroyed, whether or not it held the entry,
+// and only the lease that holds the entry takes it along. Each destroy is a
+// change a waiter is woken for.
+func TestFakeConsulRecordsEveryLeaseItDestroys(t *testing.T) {
+	consul := newFakeConsul(t)
+	store := newFakeConsulStore(t, consul)
+	ctx := context.Background()
+	first, err := store.Register(ctx, &Session{ID: "id", NodeAddr: "node-a:22", Generation: 1})
+	require.NoError(t, err)
+	second, err := store.Register(ctx, &Session{ID: "id", NodeAddr: "node-b:22", Generation: 2})
+	require.NoError(t, err)
+	require.NotEqual(t, first.lease, second.lease)
+	require.Equal(t, second.lease, consul.entry().Session, "the entry isn't under the second lease")
+	require.True(t, consul.live(first.lease))
+	require.True(t, consul.live(second.lease))
+	poked := func() bool {
+		select {
+		case <-consul.changed():
+			return true
+		default:
+			return false
+		}
+	}
+	poked() // the registrations' own changes
+
+	require.NoError(t, store.Release(ctx, first))
+	assert.True(t, poked(), "destroying a lease that doesn't hold the entry was no change")
+	require.NotNil(t, consul.entry(), "destroying a lease that doesn't hold the entry removed it")
+	assert.Equal(t, second.lease, consul.entry().Session)
+	assert.Equal(t, []string{first.lease}, consul.destroyed())
+	assert.False(t, consul.live(first.lease))
+	assert.True(t, consul.live(second.lease))
+
+	require.NoError(t, store.Release(ctx, second))
+	assert.True(t, poked(), "destroying the lease that holds the entry was no change")
+	assert.Nil(t, consul.entry(), "destroying the lease that holds the entry left it")
+	assert.Equal(t, []string{first.lease, second.lease}, consul.destroyed())
+	assert.False(t, consul.live(first.lease))
+	assert.False(t, consul.live(second.lease))
+}
+
+// In monotonic mode every change to the entry takes the next index of one
+// sequence: a registration's write, a plain write over it, the next
+// registration's write, and a delete.
+func TestFakeConsulIndexesOneSequence(t *testing.T) {
+	consul := newFakeConsul(t, monotonicIndexes)
+	store := newFakeConsulStore(t, consul)
+	ctx := context.Background()
+	first, err := store.Register(ctx, &Session{ID: "id", NodeAddr: "node-a:22", Generation: 1})
+	require.NoError(t, err)
+	// No registration to write over: the write follows the entry's lease.
+	over := writeOver(t, consul, nil, &Session{ID: "id", NodeAddr: "node-b:22", Generation: 1})
+	assert.Equal(t, first.lease, over.Session, "a plain write moved the lock")
+	second, err := store.Register(ctx, &Session{ID: "id", NodeAddr: "node-a:22", Generation: 2})
+	require.NoError(t, err)
+	assert.Equal(t, []uint64{100, 101, 102}, []uint64{first.index, over.ModifyIndex, second.index})
+	assert.Equal(t, uint64(102), consul.index())
+
+	require.NoError(t, store.Release(ctx, second)) // the entry goes with the lease that holds it
+	require.Nil(t, consul.entry())
+	assert.Equal(t, uint64(103), consul.index(), "a delete didn't move the index")
+}
+
+// By default the fake's index goes backwards after its first write, as
+// Consul's can, and a plain write lands just past the registration it writes
+// over, outside that sequence.
+func TestFakeConsulDefaultModeKeepsItsIndexes(t *testing.T) {
+	consul := newFakeConsul(t)
+	store := newFakeConsulStore(t, consul)
+	ctx := context.Background()
+	first, err := store.Register(ctx, &Session{ID: "id", NodeAddr: "node-a:22", Generation: 1})
+	require.NoError(t, err)
+	assert.Equal(t, uint64(100), first.index)
+	over := writeOver(t, consul, first, &Session{ID: "id", NodeAddr: "node-b:22", Generation: 1})
+	assert.Equal(t, uint64(101), over.ModifyIndex)
+	second, err := store.Register(ctx, &Session{ID: "id", NodeAddr: "node-a:22", Generation: 2})
+	require.NoError(t, err)
+	assert.Equal(t, uint64(6), second.index)
+	assert.Equal(t, uint64(6), consul.index())
 }
 
 // Consul's index can go backwards, so what this instance holds can't be
