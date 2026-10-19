@@ -97,8 +97,8 @@ type emulation struct {
 	colours colours
 	// graphics is set once the stream has drawn an image (see watchGraphics).
 	graphics bool
-	// dcs is set once the stream has sent a device control string (see
-	// watchDCS).
+	// dcs is set once the stream has sent a device control string that
+	// changes the terminal's state (see watchDCS).
 	dcs bool
 	// sync is what the stream last did with synchronized output's DCS form.
 	sync syncForms
@@ -213,13 +213,13 @@ func (replayer) Start(ctx context.Context, deadline time.Time, c *uio.Capture, s
 // screen, the history kept through the scroll-off function instead, replies
 // to queries discarded, the title, the icon name and the title stack, the
 // working directory, the colours, the clipboard and synchronized output's
-// DCS form kept, images, device control strings, title modes, character
-// protection, selective erases, saves, renditions and line sizes the cells
-// can't hold, a status line, a font, a rectangular attribute extent, a
-// conformance level and a reset of a mode a terminal starts with set noted,
-// the tab stops past the screen's edge kept, and the meter stopped by ctx or
-// the deadline. Each callback and handler runs inside the emulator's Write
-// and touches only the emulation.
+// DCS form kept, images, device control strings that change the terminal's
+// state, title modes, character protection, selective erases, saves,
+// renditions and line sizes the cells can't hold, a status line, a font, a
+// rectangular attribute extent, a conformance level and a reset of a mode a
+// terminal starts with set noted, the tab stops past the screen's edge kept,
+// and the meter stopped by ctx or the deadline. Each callback and handler
+// runs inside the emulator's Write and touches only the emulation.
 func (e *emulation) setUp() {
 	t := e.term
 	t.SetScrollbackSize(0)
@@ -443,39 +443,71 @@ func (e *emulation) watchGraphics() {
 	})
 }
 
-// watchDCS registers a handler, under every key x/vt's parser can dispatch a
-// DCS by, that notes the stream sent one. x/vt has no DCS handler of its own,
-// so it drops each one, where a raw replay carries it to the joiner's
-// terminal, which acts on it: a tmux passthrough, which a joiner running in
-// tmux hands on to the terminal tmux runs in, DECUDK's keys, DECDLD's soft
-// font, ReGIS. Of the DCS a program sends, the query filter drops only the
-// requests, DECRQSS, XTGETTCAP and XTGETXRES, before the ring. A sixel is one
-// too, which watchGraphics also notes.
+// watchDCS registers the handlers that note a device control string that
+// changes the terminal's state. x/vt has no DCS handler of its own, so it
+// drops each one, where a raw replay carries it to the joiner's terminal,
+// which acts on it: a tmux passthrough, which a joiner running in tmux hands
+// on to the terminal tmux runs in, DECUDK's keys, DECDLD's soft font, ReGIS,
+// DECRSTS's and DECRSPS's restores, XTSETTCAP's key names and DECAUPSS's
+// character set. A terminal ignores the rest, as xterm does, so for them the
+// raw replay hands the joiner nothing the render leaves out: vim's probe of
+// whether it does, DCS z z ST, a final none acts on, or one of these under a
+// private prefix, which xterm reads as the final. Of the DCS a program
+// sends, the query filter drops only the requests, DECRQSS, XTGETTCAP and
+// XTGETXRES, before the ring, and watchGraphics notes a sixel, as an image.
+//
+// x/vt keys a handler by the DCS's prefix, its last intermediate and its
+// final byte, not its parameters, so these are noted whatever their
+// parameters: xterm takes DECAUPSS and DECRSPS only with a one-digit one and
+// XTSETTCAP only with none, where a DEC terminal reads a number. tmux's
+// passthrough is DCS tmux;, its final the t and its data what follows, which
+// tmux takes under any prefix, parameters and intermediate, so every key
+// whose final is t gets a handler that notes data that starts mux;. A C0
+// control or an ESC as the first byte makes the key 0: x/vt keeps it and
+// what follows as the string's data, up to the next ESC, where a DEC
+// terminal ignores the control and reads the string after it, which may be
+// any of these, or ends the string at that first ESC and reads what follows
+// as it comes; so key 0 is noted whatever its data.
 //
 // Synchronized output's DCS form, DCS = 1 s and DCS = 2 s, which begins and
 // ends an update, isn't noted: like ?2026, it only holds back the drawing, and
 // the render begins an update open at the handoff point again (see
 // syncForms). Its key gets a handler of its own, which keeps that, and notes
-// anything else sent under it, data after the s included; and RIS (ESC c)
+// anything else sent under it, data after the s included, which a terminal
+// that takes the form may read as a beginning or an end; and RIS (ESC c)
 // gets one that ends such an update, as x/vt's own RIS, which runs after it,
 // resets ?2026.
-//
-// The key is the DCS's prefix, its last intermediate and its final byte. The
-// parser takes a prefix only as the first byte, one of < = > ?, and after an
-// intermediate any byte from 0 on as the final (a DEC terminal ignores such a
-// string). A C0 control or an ESC as the first byte makes the key 0: x/vt
-// keeps it and what follows as the string's data, up to the next ESC, where a
-// DEC terminal ignores the C0, or ends the string at that first ESC, and reads
-// what follows as it comes, so the two read those bytes apart. That is 6,636
-// keys, registered in well under a millisecond.
 func (e *emulation) watchDCS() {
 	t := e.term
 	note := func(ansi.Params, []byte) bool {
 		e.dcs = true
 		return false
 	}
-	sync := ansi.Command('=', 0, 's')
-	t.RegisterDcsHandler(sync, func(params ansi.Params, data []byte) bool {
+	for _, cmd := range []int{
+		0,                         // a C0 control or an ESC first
+		ansi.Command(0, 0, '|'),   // DECUDK
+		ansi.Command(0, 0, '{'),   // DECDLD
+		ansi.Command(0, 0, 'p'),   // ReGIS, and iTerm2's tmux integration
+		ansi.Command(0, '$', 'p'), // DECRSTS
+		ansi.Command(0, '$', 't'), // DECRSPS
+		ansi.Command(0, '+', 'p'), // XTSETTCAP
+		ansi.Command(0, '!', 'u'), // DECAUPSS
+	} {
+		t.RegisterDcsHandler(cmd, note)
+	}
+	passthrough := func(_ ansi.Params, data []byte) bool {
+		if bytes.HasPrefix(data, []byte("mux;")) {
+			e.dcs = true
+		}
+		return false
+	}
+	for _, prefix := range []byte{0, '<', '=', '>', '?'} {
+		t.RegisterDcsHandler(ansi.Command(prefix, 0, 't'), passthrough)
+		for inter := byte(0x20); inter <= 0x2f; inter++ {
+			t.RegisterDcsHandler(ansi.Command(prefix, inter, 't'), passthrough)
+		}
+	}
+	t.RegisterDcsHandler(ansi.Command('=', 0, 's'), func(params ansi.Params, data []byte) bool {
 		if n, _, _ := params.Param(0, 0); len(params) != 1 || n != 1 && n != 2 || len(data) != 0 {
 			e.dcs = true
 		} else {
@@ -488,19 +520,6 @@ func (e *emulation) watchDCS() {
 		e.sync.began = false
 		return false
 	})
-	t.RegisterDcsHandler(0, note)
-	for _, prefix := range []byte{0, '<', '=', '>', '?'} {
-		for final := byte(0x40); final <= 0x7e; final++ {
-			if cmd := ansi.Command(prefix, 0, final); cmd != sync {
-				t.RegisterDcsHandler(cmd, note)
-			}
-		}
-		for inter := byte(0x20); inter <= 0x2f; inter++ {
-			for final := byte(0x30); final <= 0x7e; final++ {
-				t.RegisterDcsHandler(ansi.Command(prefix, inter, final), note)
-			}
-		}
-	}
 }
 
 // syncForms is what the stream last did with synchronized output's DCS form,

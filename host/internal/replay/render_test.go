@@ -976,20 +976,28 @@ func TestReplayFailsOnTerminalGraphics(t *testing.T) {
 	}
 }
 
-// A DCS the session sent, which x/vt has no handler for and drops, fails the
-// render, named, as a raw replay carries it to the joiner's terminal, which
-// acts on it: a tmux passthrough, which a joiner running in tmux hands on to
-// the terminal tmux runs in; DECUDK's keys, DECDLD's soft font, ReGIS and
-// XTSETTCAP; and any other, under a private prefix or with a parameter after
-// its intermediate. So does one whose first byte is an ESC, which x/vt reads
-// as the string's data, to the next ESC, where a DEC terminal ends the string
-// at it: the filter drops an ESC P that an ESC follows, so it comes by the
-// 8-bit introducer, which the filter passes. An image in a tmux passthrough
-// is read as a DEC terminal reads it, the DCS ended by its first ESC and the
-// image a sequence of its own, so it is named as the image. The queries the
-// filter drops render, and so does synchronized output's DCS form, DCS = 1 s
-// and DCS = 2 s, which only holds back the drawing, as ?2026 does; anything
-// else under its key doesn't.
+// A DCS the session sent that changes the terminal's state, which x/vt has no
+// handler for and drops, fails the render, named, as a raw replay carries it
+// to the joiner's terminal, which acts on it: a tmux passthrough, which a
+// joiner running in tmux hands on to the terminal tmux runs in; DECUDK's
+// keys, DECDLD's soft font, ReGIS, under whose final iTerm2's tmux
+// integration begins too, DECRSTS's and DECRSPS's restores, XTSETTCAP and
+// DECAUPSS. So does one whose first byte is an ESC or a C0 control, which
+// x/vt reads as the string's data, where a DEC terminal ends the string at
+// the ESC, or ignores the control and reads the string after it, here
+// DECUDK: the filter drops either after an ESC P, so each comes by the 8-bit
+// introducer, which the filter passes. An image in a tmux passthrough is read
+// as a DEC terminal reads it, the DCS ended by its first ESC and the image a
+// sequence of its own, so it is named as the image.
+//
+// Any other DCS renders, as a terminal ignores it, and so a raw replay hands
+// the joiner something it drops too: vim's probe of whether the terminal
+// does, one under a final no terminal acts on, one under a private prefix,
+// with a parameter after its intermediate or under a listed final after a
+// private prefix, which xterm reads as the final, and one under tmux's final
+// that isn't its passthrough. So do the queries the filter drops, and
+// synchronized output's DCS form, DCS = 1 s and DCS = 2 s, which only holds
+// back the drawing, as ?2026 does; anything else under its key doesn't.
 func TestReplayFailsOnADeviceControlString(t *testing.T) {
 	join := func(t *testing.T, stream string) error {
 		t.Helper()
@@ -1001,10 +1009,14 @@ func TestReplayFailsOnADeviceControlString(t *testing.T) {
 		{"DECUDK", "\x1bP1;1|17/736F6D65\x1b\\"},
 		{"DECDLD", "\x1bP0;1;1;4;0;0{ @~~~~/~~~~\x1b\\"},
 		{"ReGIS", "\x1bP0pS(E)\x1b\\"},
+		{"iTerm2's tmux integration", "\x1bP1000p%exit\r\n\x1b\\"},
+		{"DECRSTS", "\x1bP2$p1;2;100;0;0\x1b\\"},
+		{"DECRSPS's cursor", "\x1bP1$t1;1;1;@;@;@;0;2;@;BB%5%5\x1b\\"},
+		{"DECRSPS's tab stops", "\x1bP2$t9/17/25\x1b\\"},
 		{"XTSETTCAP", "\x1bP+p544e=787465726d\x1b\\"},
-		{"a private prefix", "\x1bP?1x\x1b\\"},
-		{"a parameter after the intermediate", "\x1bP$1x\x1b\\"},
+		{"DECAUPSS", "\x1bP1!uA\x1b\\"},
 		{"an ESC first", "\x90\x1b[31mX\x1b\\"},
+		{"a C0 control first", "\x90\r1;1|17/736F6D65\x1b\\"},
 		{"the synchronized output key with another value", "\x1bP=3s\x1b\\"},
 		{"the synchronized output key with two parameters", "\x1bP=1;2s\x1b\\"},
 		{"the synchronized output key with data", "\x1bP=1sx\x1b\\"},
@@ -1017,6 +1029,12 @@ func TestReplayFailsOnADeviceControlString(t *testing.T) {
 		requireIneligible(t, join(t, "\x1bPtmux;\x1b\x1b_Ga=T,f=100;AAAA\x1b\x1b\\\x1b\\"), "terminal graphics")
 	})
 	for _, tc := range []struct{ name, stream string }{
+		{"vim's probe", "\x1b[3;1H\x1bPzz\x1b\\\x1b[0%m"},
+		{"an unknown final", "\x1bP1;2xsome data\x1b\\"},
+		{"a private prefix", "\x1bP?1x\x1b\\"},
+		{"a parameter after the intermediate", "\x1bP$1x\x1b\\"},
+		{"DECUDK's final after a private prefix", "\x1bP?1;1|17/736F6D65\x1b\\"},
+		{"tmux's final, not its passthrough", "\x1bPtmux\x1b\\"},
 		{"DECRQSS", "\x1bP$qm\x1b\\"},
 		{"XTGETTCAP", "\x1bP+q544e\x1b\\"},
 		{"a synchronized update begun", "\x1bP=1s\x1b\\"},
@@ -1028,11 +1046,66 @@ func TestReplayFailsOnADeviceControlString(t *testing.T) {
 	}
 }
 
-// dcsLog is a logger for x/vt that records whether x/vt logged a DCS it has no
-// handler for, but for synchronized output's DCS form, DCS = 1 s or DCS = 2 s
-// with no data, which the emulation leaves unnoted. It reads x/vt's own
-// message, so it knows nothing of the keys the emulation registers.
-type dcsLog struct{ dropped, logged bool }
+// vimStartup is what Vim 9.2 sent an 80x24 terminal from its start until it
+// waited for a key, and vimQuit what it sent then for a typed :q, captured by
+// script(1) with no vimrc (so defaults.vim), TERM=xterm-256color and a UTF-8
+// locale. Among the probes it sends at startup is its check that the
+// terminal ignores what it doesn't know: on the third row, a DCS no terminal
+// acts on and a CSI with an intermediate, then a cursor position request, to
+// see whether the cursor moved.
+const (
+	vimStartup = "\x1b[?1006;1000h\x1b[?1002h\x1b[?1049h\x1b[22;0;0t\x1b[>4;2m\x1b[?1h\x1b=\x1b[?2004h\x1b[?1004h" +
+		"\x1b[1;24r\x1b[?12h\x1b[?12l\x1b[22;2t\x1b[22;1t\x1b[27m\x1b[23m\x1b[29m\x1b[m" +
+		"\x1b[H\x1b[2J\x1b[2;1H▽\x1b[6n\x1b[2;1H  \x1b[3;1H\x1bPzz\x1b\\\x1b[0%m\x1b[6n" +
+		"\x1b[3;1H           \x1b[1;1H\x1b[>c\x1b]10;?\x07\x1b]11;?\x07\x1b[?25l" +
+		"\x1b[2;1H\x1b[94m~                                                                               " +
+		"\x1b[3;1H~                                                                               " +
+		"\x1b[4;1H~                                                                               " +
+		"\x1b[5;1H~                                                                               " +
+		"\x1b[6;1H~                                                                               " +
+		"\x1b[7;1H~                                                                               " +
+		"\x1b[8;1H~                                                                               " +
+		"\x1b[9;1H~                                                                               " +
+		"\x1b[10;1H~                                                                               " +
+		"\x1b[11;1H~                                                                               " +
+		"\x1b[12;1H~                                                                               " +
+		"\x1b[13;1H~                                                                               " +
+		"\x1b[14;1H~                                                                               " +
+		"\x1b[15;1H~                                                                               " +
+		"\x1b[16;1H~                                                                               " +
+		"\x1b[17;1H~                                                                               " +
+		"\x1b[18;1H~                                                                               " +
+		"\x1b[19;1H~                                                                               " +
+		"\x1b[20;1H~                                                                               " +
+		"\x1b[21;1H~                                                                               " +
+		"\x1b[22;1H~                                                                               " +
+		"\x1b[23;1H~                                                                               \x1b[m" +
+		"\x1b[24;63H0,0-1\x1b[9CAll\x1b[7;32HVIM - Vi IMproved\x1b[9;33Hversion 9.2.1200" +
+		"\x1b[10;29Hby Bram Moolenaar et al.\x1b[11;19HVim is open source and freely distributable" +
+		"\x1b[13;26HHelp poor children in Uganda!" +
+		"\x1b[14;18Htype  :help Kuwasha\x1b[34m<Enter>\x1b[m    for information " +
+		"\x1b[16;18Htype  :q\x1b[34m<Enter>\x1b[m               to exit         " +
+		"\x1b[17;18Htype  :help\x1b[34m<Enter>\x1b[m  or  \x1b[34m<F1>\x1b[m  for on-line help" +
+		"\x1b[18;18Htype  :help version9\x1b[34m<Enter>\x1b[m   for version info\x1b[?25h" +
+		"\x1b[1;1H\x1b[?4m"
+	vimQuit = "\x1b[?25l\x1b[24;63H\x1b[K" +
+		"\x1b[24;1H:q\r\x1b[?1006;1000l\x1b[?1002l\x1b[?2004l\x1b[>4;m\x1b[23;2t\x1b[23;1t" +
+		"\x1b[24;1H\x1b[K" +
+		"\x1b[24;1H\x1b[?1004l\x1b[?2004l\x1b[?1l\x1b>\x1b[?1049l\x1b[23;0;0t\x1b[?25h\x1b[>4;m"
+)
+
+// A join while vim's startup is in the ring renders, its probe among it, and
+// leaves the joiner as the session's terminal, before vim quits and after.
+func TestReplayRendersVimsStartup(t *testing.T) {
+	j := joinOwn(t, 80, 24, "", vimStartup)
+	j.then(t, vimQuit)
+}
+
+// dcsLog is a logger for x/vt that records, of the DCS x/vt logged as having
+// no handler for, whether one changes the terminal's state and whether one
+// draws, as dcsEffect reads each. It reads x/vt's own message, so it knows
+// nothing of the keys the emulation registers.
+type dcsLog struct{ logged, changes, draws bool }
 
 func (l *dcsLog) Printf(format string, v ...any) {
 	if format != "unhandled sequence: DCS %q %q" || len(v) != 2 {
@@ -1041,22 +1114,62 @@ func (l *dcsLog) Printf(format string, v ...any) {
 	l.logged = true
 	head, _ := v[0].(string)
 	data, _ := v[1].([]byte)
-	if (head == "=1s" || head == "=2s") && len(data) == 0 {
-		return
-	}
-	l.dropped = true
+	changes, draws := dcsEffect(head, data)
+	l.changes = l.changes || changes
+	l.draws = l.draws || draws
 }
 
-// The emulation notes a DCS exactly when x/vt drops one, by x/vt's own log,
-// but for synchronized output's DCS form: for each introducer, 7-bit and
-// 8-bit, and each terminator, around every body of up to four bytes drawn
-// from C0 controls, DEL, a C1 byte, every prefix, parameter bytes, the
-// intermediates and the finals at each end of their ranges, and every such
-// body after an ESC; and around every header of at most a prefix, a
-// parameter and an intermediate before any byte from 0x30 to 0x7E, with data
-// or none. A key the emulation misses fails it, and so does a DCS x/vt comes
-// to handle itself, which it then no longer logs.
-func TestReplayNotesEveryDCSXVTDrops(t *testing.T) {
+// dcsEffect is whether a DCS changes the terminal's state, and whether it
+// draws a sixel, from head, its prefix, parameters, intermediate and final as
+// x/vt writes them, and its data. x/vt writes a prefix only first, the
+// parameters as numbers, ';' and ':', an intermediate only just before the
+// final, and nothing at all for a string whose first byte was a C0 control or
+// an ESC, which a DEC terminal reads otherwise. The ones that change it are
+// tmux's passthrough, by its data under any prefix, parameters and
+// intermediate, as tmux reads it; DECUDK, DECDLD, ReGIS, DECRSTS, DECRSPS,
+// XTSETTCAP and DECAUPSS, under no prefix; and synchronized output's key
+// with anything but DCS = 1 s or DCS = 2 s.
+func dcsEffect(head string, data []byte) (changes, draws bool) {
+	if head == "" {
+		return true, false
+	}
+	var prefix, inter byte
+	final := head[len(head)-1]
+	if len(head) > 1 && strings.IndexByte("<=>?", head[0]) >= 0 {
+		prefix = head[0]
+	}
+	if len(head) > 1 && head[len(head)-2] >= 0x20 && head[len(head)-2] <= 0x2f {
+		inter = head[len(head)-2]
+	}
+	switch {
+	case final == 't' && bytes.HasPrefix(data, []byte("mux;")):
+		return true, false
+	case prefix == '=' && inter == 0 && final == 's':
+		return (head != "=1s" && head != "=2s") || len(data) != 0, false
+	case prefix != 0:
+		return false, false
+	}
+	switch [2]byte{inter, final} {
+	case [2]byte{0, 'q'}:
+		return false, true
+	case [2]byte{0, '|'}, [2]byte{0, '{'}, [2]byte{0, 'p'}, [2]byte{'$', 'p'}, [2]byte{'$', 't'}, [2]byte{'+', 'p'}, [2]byte{'!', 'u'}:
+		return true, false
+	}
+	return false, false
+}
+
+// The emulation notes a DCS, as one that changes the terminal's state or as a
+// sixel, exactly when x/vt drops one that dcsEffect says does, by x/vt's own
+// log: for each introducer, 7-bit and 8-bit, and each terminator, around
+// every body of up to four bytes drawn from C0 controls, DEL, a C1 byte,
+// every prefix, parameter bytes, the intermediates and the finals at each end
+// of their ranges, and every such body after an ESC; and around every header
+// of at most a prefix, a parameter and an intermediate before any byte from
+// 0x30 to 0x7E, with no data, data, the mux; of tmux's passthrough, or mux,
+// which falls short of it. A key the emulation misses, or one it notes beyond
+// those, fails it, and so does a DCS x/vt comes to handle itself, which it
+// then no longer logs.
+func TestReplayNotesTheDCSThatChangeState(t *testing.T) {
 	e := start(t, captureOf("", event(1, 0, 80, 24)))
 	log := &dcsLog{}
 	e.term.SetLogger(log)
@@ -1090,7 +1203,7 @@ func TestReplayNotesEveryDCSXVTDrops(t *testing.T) {
 		for _, param := range []string{"", "1"} {
 			for _, inter := range inters {
 				for final := byte(0x30); final <= 0x7e; final++ {
-					for _, data := range []string{"", "x"} {
+					for _, data := range []string{"", "x", "mux;", "mux"} {
 						b := []byte(prefix + param)
 						if inter != 0 {
 							b = append(b, inter)
@@ -1103,28 +1216,38 @@ func TestReplayNotesEveryDCSXVTDrops(t *testing.T) {
 	}
 
 	var seq []byte
-	logged := 0
+	logged, changes, draws := 0, 0, 0
 	for _, intro := range []string{"\x1bP", "\x90"} {
 		for _, end := range []string{"\x1b\\", "\x9c"} {
 			for _, body := range bodies {
 				// A CAN after each puts the parser back in ground, whatever
 				// the body left it in, and dispatches nothing.
 				seq = append(append(append(append(seq[:0], intro...), body...), end...), 0x18)
-				e.dcs, log.dropped, log.logged = false, false, false
+				e.dcs, e.graphics = false, false
+				*log = dcsLog{}
 				if _, err := e.term.Write(seq); err != nil {
 					t.Fatalf("%q: %v", seq, err)
 				}
-				if e.dcs != log.dropped {
-					t.Fatalf("%q: the emulation noted a DCS: %v; x/vt dropped one: %v", seq, e.dcs, log.dropped)
+				if e.dcs != log.changes || e.graphics != log.draws {
+					t.Fatalf("%q: the emulation noted a DCS: %v, an image: %v; x/vt dropped one that changes the state: %v, that draws: %v",
+						seq, e.dcs, e.graphics, log.changes, log.draws)
 				}
 				if log.logged {
 					logged++
 				}
+				if log.changes {
+					changes++
+				}
+				if log.draws {
+					draws++
+				}
 			}
 		}
 	}
-	t.Logf("%d sequences, %d with a DCS x/vt logged", 4*len(bodies), logged)
+	t.Logf("%d sequences, %d with a DCS x/vt logged: %d that change the state, %d that draw", 4*len(bodies), logged, changes, draws)
 	require.Positive(t, logged, "x/vt's log was read")
+	require.Positive(t, changes, "a DCS that changes the state was sent")
+	require.Positive(t, draws, "a sixel was sent")
 }
 
 // selectionsOf is what xterm's selections hold once a terminal that holds
