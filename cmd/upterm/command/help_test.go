@@ -59,7 +59,7 @@ var exitStatuses = map[string]string{
 
 	"upterm session current": "Exits 4 when not in a session ($UPTERM_ADMIN_SOCKET is unset, or no session answers at it), and 1 for any other failure. With -o, not being in a session prints nothing.",
 	"upterm session info":    "Exits 4 when no session has the name, and 1 for any other failure.",
-	"upterm session list":    "Exit status: 0, or 1 on failure, such as session records that can't be read or a usage or configuration error.",
+	"upterm session list":    "Exit status: 0, or 1 when the records directory can't be read, or for a usage or configuration error. A session whose own record can't be read is left out of the list.",
 	"upterm session set":     "Exits 0 when the session took the change, was already claimed, is ending, or has already ended, 4 when no session has the name, and 1 for any other failure -- including a change that could not be confirmed, which may still have taken effect: running set again restarts the window, and 'upterm session info NAME' shows what the session holds.",
 	"upterm session stop":    "Exits 4 when no session has the name, and 1 for any other failure.",
 	"upterm session wait":    "Exit status follows the session: its command's status when the command exited; 0 when it was stopped, or no guest joined within its join timeout; 128+N when the host or its command was killed by signal N; 125 when the outcome can't be known or read, when no session has the name, or for a usage or configuration error. A command can exit 125 too; 'upterm session info NAME -o json' has the reason. Ctrl-C stops waiting, with 130 on Unix, and leaves the session running.",

@@ -397,8 +397,9 @@ deletes the records of sessions that ended more than %s ago, after which
 -o json prints a JSON array of what 'upterm session info NAME -o json'
 prints, one per running session, and [] when none is running.
 
-Exit status: 0, or 1 on failure, such as session records that can't be read
-or a usage or configuration error.`, sessiondir.ResultsRoot(stateDir), retentionText(sessiondir.RecordRetention)),
+Exit status: 0, or 1 when the records directory can't be read, or for a usage
+or configuration error. A session whose own record can't be read is left out
+of the list.`, sessiondir.ResultsRoot(stateDir), retentionText(sessiondir.RecordRetention)),
 		Example: `  # List the running sessions:
   upterm session list
 
