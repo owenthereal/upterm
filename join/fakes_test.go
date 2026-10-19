@@ -18,6 +18,7 @@ import (
 	"github.com/owenthereal/upterm/upterm"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/crypto/ssh"
+	"google.golang.org/grpc/test/bufconn"
 )
 
 // testTimeout bounds every wait a test makes on a run.
@@ -53,21 +54,33 @@ func send[T any](t *testing.T, c chan<- T, v T) {
 // fakeRelay is a relay that serves each connection with its own relayKnobs,
 // for a run that connects more than once.
 type fakeRelay struct {
+	t       *testing.T
 	scripts []relayKnobs
-	addr    string
+	ln      *bufconn.Listener
+	addr    string       // the relay's address, host:port, as join's side sees it
+	dials   atomic.Int32 // calls to Dial
 
 	mu     sync.Mutex
 	dialed []*relayConn // join's side of each connection, in the order dialed
 	seen   []*connLog   // the relay's side, in the order accepted
 }
 
+// relays numbers the fake relays, so that each has an address of its own:
+// bufconn gives every connection the same one.
+var relays atomic.Int32
+
 // newFakeRelay serves connection i with scripts[min(i, len(scripts)-1)].
 func newFakeRelay(t *testing.T, scripts ...relayKnobs) *fakeRelay {
 	t.Helper()
 	require.NotEmpty(t, scripts)
-	r := &fakeRelay{scripts: scripts}
+	r := &fakeRelay{
+		t:       t,
+		scripts: scripts,
+		ln:      bufconn.Listen(relayBuffer),
+		addr:    fmt.Sprintf("relay%d.test:22", relays.Add(1)),
+	}
 	hostKey := newSigner(t)
-	r.addr = listen(t, func(i int, conn net.Conn) { r.script(i).serve(conn, hostKey, r.log(i)) })
+	listen(t, r.ln, func(i int, conn net.Conn) { r.script(i).serve(conn, hostKey, r.log(i)) })
 	return r
 }
 
@@ -83,17 +96,37 @@ func (r *fakeRelay) log(i int) *connLog {
 	return r.seen[i]
 }
 
+// maxDials bounds how many times one relay may be dialed. No test dials one
+// more than a few dozen times.
+const maxDials = 200
+
 // Dial is a Config.Dial. Attempts are sequential, so the order dialed is the
 // order accepted, and connection i is the same connection on both sides.
+//
+// A broken join can attempt again and again at one fake instant, and fake
+// time doesn't move while it does, so the test would hang rather than fail.
+// So past maxDials, Dial fails the test and parks the attempt until ctx ends.
+// Parked, the attempt is durably blocked: the test's wait for the run times
+// out and reports, and the test's end closes the run's input, which stops a
+// run that is reading it. Once the test's context is done, the test may have
+// completed, and failing a completed test panics, so then Dial only returns
+// that context's error.
 func (r *fakeRelay) Dial(ctx context.Context) (net.Conn, error) {
-	var d net.Dialer
-	c, err := d.DialContext(ctx, "tcp", r.addr)
+	if n := r.dials.Add(1); n > maxDials {
+		if err := r.t.Context().Err(); err != nil {
+			return nil, err
+		}
+		r.t.Errorf("join dialed the relay %d times, more than any test here needs: it is likely looping", n)
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	c, err := r.ln.DialContext(ctx)
 	if err != nil {
 		return nil, err
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	rc := &relayConn{Conn: c, i: len(r.dialed)}
+	rc := &relayConn{Conn: c, addr: relayAddr{host: r.addr, conn: len(r.dialed)}}
 	r.dialed = append(r.dialed, rc)
 	return rc, nil
 }
@@ -182,7 +215,7 @@ func (r *fakeRelay) input(t *testing.T, i int) string {
 // RemoteAddr says which connection it is, for checkHostKey.
 type relayConn struct {
 	net.Conn
-	i      int
+	addr   relayAddr
 	closed atomic.Bool
 }
 
@@ -191,13 +224,16 @@ func (c *relayConn) Close() error {
 	return c.Conn.Close()
 }
 
-func (c *relayConn) RemoteAddr() net.Addr { return relayAddr{Addr: c.Conn.RemoteAddr(), conn: c.i} }
+func (c *relayConn) RemoteAddr() net.Addr { return c.addr }
 
 // relayAddr is the relay's address on connection conn.
 type relayAddr struct {
-	net.Addr
+	host string // host:port
 	conn int
 }
+
+func (relayAddr) Network() string  { return "tcp" }
+func (a relayAddr) String() string { return a.host }
 
 type option func(*Config)
 
@@ -211,10 +247,13 @@ type option func(*Config)
 func config(t *testing.T, relay *fakeRelay, opts ...option) Config {
 	t.Helper()
 	// Nothing is ever written, so a Read blocks: an empty reader would be EOF,
-	// which is the guest's terminal going away.
-	idle, _ := io.Pipe()
+	// which is the guest's terminal going away. The test's end closes it, so
+	// that a Read still blocked on it returns, and the reader of a run that
+	// has returned exits: a synctest bubble ends only once it has.
+	idle, keyboard := io.Pipe()
+	t.Cleanup(func() { _ = keyboard.Close() })
 	cfg := Config{
-		Target:       Target{Scheme: "ssh", User: "abc", Host: relay.addr},
+		Target:       Target{Scheme: "ssh", User: "abc", Host: relayHost},
 		Dial:         relay.Dial,
 		CheckHostKey: relay.checkHostKey,
 		Terminal:     &attach.Terminal{Stdout: &syncSink{}, Pty: &attach.Pty{Term: "xterm"}, Escape: '~'},

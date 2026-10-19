@@ -18,6 +18,7 @@ import (
 	"github.com/owenthereal/upterm/upterm"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/crypto/ssh"
+	"google.golang.org/grpc/test/bufconn"
 )
 
 // defaultRelayVersion is what a relay announces when its knobs name no
@@ -36,9 +37,11 @@ const handshakeTimeout = 10 * time.Second
 // errFixtureRefused is how the fixture relay turns a key away.
 var errFixtureRefused = errors.New("fixture relay: key refused")
 
-// relayKnobs is one connection's behaviour, on an x/crypto server over
-// loopback TCP (both SSH ends write their version line before reading, so an
-// unbuffered net.Pipe deadlocks; x/crypto's own tests use TCP for this).
+// relayKnobs is one connection's behaviour, on an x/crypto server over an
+// in-memory bufconn connection. It is buffered, which SSH needs: both ends
+// write their version line before reading, so an unbuffered net.Pipe
+// deadlocks. In a synctest bubble, a read or write waiting on it is durably
+// blocked, and its deadlines run on the bubble's clock.
 // Zero means: accept any key, no banner, version "SSH-2.0-uptermd-0.37.0" (a
 // release, so refusals at authentication are definitive), accept the session
 // channel, its pty and its shell, and then keep the session open, quiet, and
@@ -300,15 +303,19 @@ func (k relayKnobs) script(ch ssh.Channel, sconn *ssh.ServerConn, silent *atomic
 
 func sameKey(a, b ssh.PublicKey) bool { return bytes.Equal(a.Marshal(), b.Marshal()) }
 
-// listen serves each connection to a loopback listener with serve, which is
-// told the connection's index in the order they were accepted, and returns
-// the listener's address. The test's cleanup closes the listener and every
-// connection it accepted, and waits for their goroutines.
-func listen(t *testing.T, serve func(i int, conn net.Conn)) string {
-	t.Helper()
+// relayHost is the relay a fixture's join names: its Target.Host, host:port,
+// and the hostname CheckHostKey is given.
+const relayHost = "relay.test:22"
 
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	require.NoError(t, err)
+// relayBuffer is how much each direction of a fixture connection holds before
+// a write blocks.
+const relayBuffer = 1 << 20
+
+// listen serves each connection ln accepts with serve, which is told the
+// connection's index in the order they were accepted. The test's cleanup
+// closes ln and every connection it accepted, and waits for their goroutines.
+func listen(t *testing.T, ln net.Listener, serve func(i int, conn net.Conn)) {
+	t.Helper()
 
 	var (
 		mu     sync.Mutex
@@ -349,7 +356,6 @@ func listen(t *testing.T, serve func(i int, conn net.Conn)) string {
 		mu.Unlock()
 		wg.Wait()
 	})
-	return ln.Addr().String()
 }
 
 // open dials the relay k describes and runs the handshake as an attempt does,
@@ -359,14 +365,15 @@ func (k relayKnobs) open(t *testing.T, signers []ssh.Signer, checkHostKey ssh.Ho
 	t.Helper()
 
 	hostKey := newSigner(t)
-	addr := listen(t, func(_ int, conn net.Conn) { k.serve(conn, hostKey, &connLog{}) })
-	nc, err := net.Dial("tcp", addr)
+	ln := bufconn.Listen(relayBuffer)
+	listen(t, ln, func(_ int, conn net.Conn) { k.serve(conn, hostKey, &connLog{}) })
+	nc, err := ln.Dial()
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = nc.Close() })
 
 	ev := &evidence{}
 	require.NoError(t, nc.SetDeadline(time.Now().Add(handshakeTimeout)))
-	conn, chans, reqs, err := ssh.NewClientConn(nc, addr, clientConfig("abc", signers, checkHostKey, ev))
+	conn, chans, reqs, err := ssh.NewClientConn(nc, relayHost, clientConfig("abc", signers, checkHostKey, ev))
 	if err != nil {
 		return nil, ev, err
 	}

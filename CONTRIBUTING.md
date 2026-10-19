@@ -16,6 +16,66 @@ Please note we have a code of conduct, please follow it in all your interactions
 4. You may merge the Pull Request in once you have the sign-off of two other developers, or if you 
    do not have permission to do that, you may request the second reviewer to merge it for you.
 
+## Tests
+
+A test must pass or fail on what the code does, not on how fast the machine running it is.
+
+**Run timing in a bubble.** A test of anything timer-driven runs its whole body in
+[`synctest.Test`](https://pkg.go.dev/testing/synctest) and makes its fakes, channels, timers and
+listeners inside it. There, settling and advancing are different things. `synctest.Wait()` returns
+once every other goroutine in the bubble is blocked: it runs what is due now and never moves the
+clock. The clock moves only when every goroutine, the test's included, is blocked, which in practice
+means the test calls `time.Sleep` or waits on a channel. So an immediate consequence is act,
+`synctest.Wait()`, assert; a timer-driven one is `time.Sleep(d)`, `synctest.Wait()`, assert; and a
+deadline is checked on both sides, as Go's `ContextWithTimeout` example does:
+
+```go
+time.Sleep(timeout - time.Nanosecond)
+synctest.Wait() // everything due before the timeout has run
+require.False(t, fired(), "fired before its timeout")
+time.Sleep(time.Nanosecond)
+synctest.Wait() // the timeout's own work has run
+require.True(t, fired(), "didn't fire at its timeout")
+```
+
+Comment each `synctest.Wait()` with what it has settled. `t.Run` isn't allowed in a bubble, so each
+subtest calls `synctest.Test` itself. A goroutine blocked on a real socket, a pty, a child process,
+a file or a `sync.Mutex` doesn't count as blocked, so a test that needs one stays on the real clock,
+as does one that checks a monotonic clock reading, which a bubble's `time.Now` doesn't carry.
+
+**Keep the timing relationship.** A timing test tells correct code from broken code by an
+inequality, such as "a piece every 100 ms < the 200 ms stall timeout < the length of the run".
+Write it in the test's comment, and keep it when you change either side: set the instance's
+timing, or rescale the workload, but don't just drop an override. Break the code the test guards
+and check that the test fails, rather than hangs.
+
+**Wait on signals, not polls.** Outside a bubble, wait for a signal from the component that makes
+the change, not for a condition to come true with `Eventually` or a sleep. To show something didn't
+happen, assert after a signal proving it would have by then. `Eventually` is only for a process or
+server boundary, with a comment naming which.
+
+**Put timing and hooks on the instance.** Give a component its timeouts, and any hook read on a
+goroutine that can outlive a test, as fields set when it is made; a zero value means the default.
+Set those fields in a test, never a package-level variable that production code reads.
+
+**Every goroutine a fixture starts can exit.** `synctest.Test` waits for all of them. A fixture
+closes what it owns (pipes, listeners, connections) and releases every gate it holds, idempotently,
+in a `t.Cleanup` registered inside the bubble, so that a failed assertion fails only its own test,
+rather than ending in a deadlock panic that stops the whole test binary. A fake that broken code
+could call in a loop at one instant counts its calls and stops the code past a cap, so the test
+fails instead of hanging.
+
+**Give every goroutine a component starts one owner**, whose stop waits for it, with a bound, and
+have the owner close the connection it owns. Where a goroutine is parked in a call its owner can't
+interrupt, say in a comment what ends it, as AsyncWriter's drain, Watch's probe and the lease
+keeper's abandoned call do. **Have the actor that knows an outcome record it:** a group of
+goroutines returning says only that the group stopped, not why.
+
+**Test orderings at checkpoints.** A test of a race holds the code at the points inside the bug,
+such as "transaction committed" or "reply held", not around the method calls. Each gate signals its
+arrival, and the test releases the next step only after that signal. Run every order the code
+allows, and check the invariant in each.
+
 ## Code of Conduct
 
 ### Our Pledge
