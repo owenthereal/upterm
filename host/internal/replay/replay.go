@@ -190,6 +190,9 @@ type emulation struct {
 	// extraCursors is set once the stream has shown an extra cursor of
 	// kitty's, or coloured them (see watchExtraCursors).
 	extraCursors bool
+	// unscroll is set once the stream has scrolled the screen down filling
+	// it from the scrollback (see watchUnscroll).
+	unscroll bool
 	// pastEdge is what the emulator keeps of the tab stops past the screen's
 	// right edge (see the type).
 	pastEdge pastEdge
@@ -289,11 +292,11 @@ func (replayer) Start(ctx context.Context, deadline time.Time, c *uio.Capture, s
 // 94-character set x/vt drops, a 96-character set, a window operation,
 // printer controller mode, a memory lock, a key format, locator reporting,
 // the locator's events, a change to iTerm2's state, the keyboard's LEDs, a
-// log file, a window property, a coding other than UTF-8, sized text and
-// extra cursors noted, auto print, 8-bit controls and the tab stops past the
-// screen's edge kept, and the meter stopped by ctx or the deadline. Each
-// callback and handler runs inside the emulator's Write and touches only the
-// emulation.
+// log file, a window property, a coding other than UTF-8, sized text, extra
+// cursors and an unscroll noted, auto print, 8-bit controls and the tab stops
+// past the screen's edge kept, and the meter stopped by ctx or the deadline.
+// Each callback and handler runs inside the emulator's Write and touches only
+// the emulation.
 func (e *emulation) setUp() {
 	t := e.term
 	t.SetScrollbackSize(0)
@@ -347,6 +350,7 @@ func (e *emulation) setUp() {
 	e.watchControls()
 	e.watchSizedText()
 	e.watchExtraCursors()
+	e.watchUnscroll()
 }
 
 // colours is the last change the stream made, by OSC, to each of the colours
@@ -1831,6 +1835,26 @@ func extraCursorsSet(params ansi.Params) bool {
 		return false
 	}
 	return true
+}
+
+// watchUnscroll registers the handler that notes kitty's unscroll, CSI Ps +
+// T, which scrolls the screen down Ps lines, as SD does, but fills the lines
+// it opens at the top from the scrollback, taking each line out of it, as
+// mintty does too. x/vt drops it, scrolling nothing, where a raw replay hands
+// it to the joiner's kitty, which scrolls its screen and its scrollback as
+// the session's did. Every one counts, one kitty ignores too, as one with
+// more than one parameter, or one of 0 lines, which moves nothing, and the
+// note stays, whatever follows, RIS included: the raw ring is exact whatever
+// came after. x/vt keys a CSI handler by its prefix and intermediate too, so
+// this one sees neither SD (CSI Ps T), which x/vt follows, nor XTRMTITLE
+// (CSI > Pm T), nor one with a prefix as well, which kitty ignores. The query
+// filter drops none. x/vt has no handler of its own for it; this returns
+// false all the same, as watchColours' do.
+func (e *emulation) watchUnscroll() {
+	e.term.RegisterCsiHandler(ansi.Command(0, '+', 'T'), func(ansi.Params) bool {
+		e.unscroll = true
+		return false
+	})
 }
 
 // sgrUndrawable reports whether params, an SGR's, hold a number x/vt's SGR

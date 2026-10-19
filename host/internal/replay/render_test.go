@@ -4198,6 +4198,48 @@ func TestReplayFailsOnExtraCursors(t *testing.T) {
 	}
 }
 
+// kitty's unscroll (CSI Ps + T), which scrolls the screen down as SD does but
+// fills the lines it opens from the scrollback, taking them out of it, fails
+// the render, named: x/vt drops it, scrolling nothing, where a raw replay
+// hands it to the joiner's kitty, which scrolls as the session's did. Every
+// one counts, one kitty ignores too, and the note stays once the screen
+// scrolls back up, or RIS comes. SD (CSI Ps T), which x/vt follows,
+// XTRMTITLE (CSI > Pm T), a + after a prefix and a + on SU (CSI Ps S), which
+// kitty ignores, render.
+func TestReplayFailsOnAnUnscroll(t *testing.T) {
+	join := func(t *testing.T, stream string) error {
+		t.Helper()
+		_, fellBack := fanOut(t, New(), []byte("text\r\n"+stream+"more\r\n"), []uio.SizeEvent{event(1, 0, 80, 24)}, 4<<10)
+		return fellBack
+	}
+	for _, tc := range []struct{ name, stream string }{
+		{"three lines", "\x1b[3+T"},
+		{"one line, by default", "\x1b[+T"},
+		{"lines that scrolled off brought back", strings.Repeat("line\r\n", 30) + "\x1b[5+T"},
+		{"none, which moves nothing", "\x1b[0+T"},
+		{"two parameters, which kitty ignores", "\x1b[1;2+T"},
+		{"on the alternate screen", "\x1b[?1049h\x1b[2+T\x1b[?1049l"},
+		{"one, then scrolled back up", "\x1b[3+T\x1b[3S"},
+		{"one, then RIS", "\x1b[3+T\x1bc"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			requireIneligible(t, join(t, tc.stream), "an unscroll")
+		})
+	}
+	for _, tc := range []struct{ name, stream string }{
+		{"SD", "\x1b[2T"},
+		{"XTRMTITLE", "\x1b[>1T"},
+		{"a + after a prefix", "\x1b[>3+T"},
+		{"a + on SU", "\x1b[2+S"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			require.NoError(t, join(t, tc.stream))
+			_, err := renderAt(t, 80, 24, "text\r\n"+tc.stream+"more\r\n")
+			require.NoError(t, err, "given to the emulation")
+		})
+	}
+}
+
 // screenTitleString is a window title string of GNU screen's and tmux's, as
 // tmux reads one: ESC k after an ESC and any C0 controls tmux executes where
 // they stand but CAN and SUB, then the title, up to the ESC, CAN or SUB that

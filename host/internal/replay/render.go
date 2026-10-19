@@ -1044,6 +1044,9 @@ func (e *emulation) eligible(parts uio.ReplayParts) (rep, error) {
 	if e.extraCursors {
 		return rep{}, &IneligibleError{State: "extra cursors"}
 	}
+	if e.unscroll {
+		return rep{}, &IneligibleError{State: "an unscroll"}
+	}
 	if splitWide(e.term.MainScreen()) || splitWide(e.term.AltScreen()) {
 		return rep{}, &IneligibleError{State: splitWideState}
 	}
