@@ -17,13 +17,21 @@ import (
 
 // preamble starts every render, after what begins again a synchronized
 // update open at the handoff point (see synced): the cursor to the start of
-// its row, the default pen, and the screen erased from there down. The
+// its row, then the terminal made what the encoder takes it to be, whatever a
+// program left it holding, and the screen erased from there down. That is the
+// default pen, no link (an OSC 8 with no URL closes one), ASCII designated
+// into G0 to G3, G0 in GL (SI) and G2 in GR (LS2R). A program that exits or
+// is killed mid-link leaves its link open, and a binary file printed to a
+// terminal can leave any charset in place, and the render's text would print
+// through either, linked or remapped. GR maps no UTF-8 a print sends, but
+// DECSC saves it, and the render takes it to be G2 (see unrestored). The
 // joiner's own output above the cursor stays, for the blank screen drawn
 // after the history to scroll into its scrollback.
-const preamble = "\r\x1b[m\x1b[J"
+const preamble = "\r\x1b[m\x1b]8;;\x07\x1b(B\x1b)B\x1b*B\x1b+B\x0f\x1b}\x1b[J"
 
 // render reconstructs the emulator's state at the handoff point on the
-// joiner's terminal, which it takes to be at its defaults: the history that
+// joiner's terminal, which it takes to be at its defaults, the preamble
+// making it so for the pen, the link and the charsets: the history that
 // scrolled off, then both screens, both saved cursors and every state that
 // decides how the next bytes are read, so that the raw stream from the
 // handoff point on lands on it as it did on the session's own terminal.
@@ -223,7 +231,10 @@ func (r *renderer) screen(scr *vt.Screen) {
 // hiddenAlt rebuilds the alternate screen while the main screen shows, when
 // there is anything to rebuild: its cells, which a later ?47h shows as they
 // are; its saved slot; and its kitty keyboard stack, which a push changes only
-// while that screen shows.
+// while that screen shows. Once there, it sets the slot whatever it holds, as
+// alt does. A slot no DECSC filled is no reason to go there: the trip costs
+// two screen switches, and a joiner's own slot there then stays, which only a
+// program that restores on the alternate screen before saving there reads.
 //
 // It goes there and back by ?1049, not ?47: Alacritty and Windows Terminal
 // have ?1049 but ignore ?47, so on them a trip by ?47 would erase the main
@@ -244,9 +255,7 @@ func (r *renderer) hiddenAlt() {
 	_ = enc.penTo(uv.Style{})
 	_ = enc.saveBy("\x1b[?1049h", mainScreen)
 	r.screen(alt)
-	if !defaultSlot(alt.SavedCursor()) {
-		r.slot(alt, altScreen)
-	}
+	r.slot(alt, altScreen)
 	_ = enc.bytes(r.parts.HiddenAltKeys)
 	_ = enc.restoreBy("\x1b[?1049l", mainScreen)
 }
@@ -296,7 +305,9 @@ func (r *renderer) slotDone() {
 
 // alt shows the alternate screen through the mode that entered it, when it
 // shows, and draws it: its rows, its saved slot and its kitty keyboard
-// stack.
+// stack. The slot is set even when no DECSC filled it, as the main screen's
+// always is, so that a live DECRC there restores the defaults it restores on
+// the session's terminal, not what the joiner's own programs saved there.
 //
 // ?47h and ?1047h carry the cursor in, and back out on the program's own ?47l
 // or ?1047l, so the main screen's cursor is no state of its own; neither
@@ -319,9 +330,7 @@ func (r *renderer) alt() {
 	}
 	alt := t.AltScreen()
 	r.screen(alt)
-	if !defaultSlot(alt.SavedCursor()) {
-		r.slot(alt, altScreen)
-	}
+	r.slot(alt, altScreen)
 	_ = enc.bytes(r.parts.AltKeys)
 }
 

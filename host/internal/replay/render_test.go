@@ -1971,3 +1971,81 @@ func TestReplayRestoresTheCursorSCORCReturnsTo(t *testing.T) {
 	}
 	require.Empty(t, sameState(a, b, *aHist, *bHist, "", ""))
 }
+
+// joinOwn joins, through the fan-out, a joiner whose terminal, b, a program
+// left in the state own sets, as joinAt does one at its defaults: b is given
+// own, then what the joiner was sent, and must then be in a's state.
+func joinOwn(t *testing.T, cols, rows int, own, stream string) *joined {
+	t.Helper()
+	sent, fellBack := fanOut(t, New(), []byte(stream), []uio.SizeEvent{event(1, 0, cols, rows)}, 64<<10)
+	require.NoError(t, fellBack)
+	require.True(t, bytes.HasPrefix(sent, []byte(preamble)), "the render, not the raw ring")
+
+	j := &joined{render: sent}
+	j.a, j.aHist = newReference(cols, rows)
+	j.aTitle = watchTitle(j.a)
+	_, _ = j.a.WriteString(stream)
+	j.b, j.bHist = newReference(cols, rows)
+	j.bTitle = watchTitle(j.b)
+	_, _ = j.b.WriteString(own)
+	_, _ = j.b.Write(sent)
+	j.requireSame(t)
+	return j
+}
+
+// The render draws from no link and the ASCII charsets, G0 in GL and G2 in
+// GR, as a terminal starts. A joiner's terminal that a program left with a
+// link open or other charsets in place, as a program that exits or is killed
+// mid-link does, or a binary file printed to it, is made so before the
+// history and the screen are drawn, so each prints as itself, unlinked where
+// the session's isn't, and the live bytes after it land as on the session's.
+func TestReplayStartsFromNoLinkAndTheASCIICharsets(t *testing.T) {
+	var stream strings.Builder
+	stream.WriteString("qx plain lqkj\r\n\x1b]8;;https://s.example\x07qx linked\x1b]8;;\x07 lqkj\r\n")
+	for i := range 8 {
+		fmt.Fprintf(&stream, "line %d qxlj\r\n", i)
+	}
+	stream.WriteString("\x1b]8;;https://s.example\x07qx\x1b]8;;\x07 at the end")
+	for _, own := range []struct{ name, state string }{
+		{"an open link", "\x1b]8;;https://joiner.example\x07"},
+		{"an open link with an id", "\x1b]8;id=1;https://joiner.example\x07"},
+		{"line drawing in G0", "\x1b(0"},
+		{"G1 shifted in", "\x1b)0\x0e"},
+		{"G2 and G3 designated, G2 shifted in", "\x1b*0\x1b+A\x1bn"},
+		{"G3 shifted in", "\x1b+0\x1bo"},
+		{"GR shifted", "\x1b|"},
+		{"all of them", "\x1b]8;;https://joiner.example\x07\x1b(0\x1b)A\x1b*0\x1b+A\x1bo\x1b~"},
+	} {
+		t.Run(own.name, func(t *testing.T) {
+			j := joinOwn(t, 80, 5, own.state, stream.String())
+			j.then(t, "\r\nqx after\r\n\x1b]8;;https://s.example\x07qx\x1b]8;;\x07")
+		})
+	}
+}
+
+// A slot no DECSC has filled restores the cursor home in the default pen,
+// link and charsets, as xterm's does. The render sets the slot of each screen
+// it draws on, as the session's holds it, filled or not, so a live DECRC
+// restores the same on a joiner whose own programs saved a slot of their own
+// there. The hidden alternate screen's is set when the render goes there for
+// its cells.
+func TestReplaySetsASlotTheSessionNeverSaved(t *testing.T) {
+	// Each leaves the cursor home, so the render scrolls none of the
+	// joiner's own rows into its scrollback.
+	const ownMain = "\x1b[4;9H\x1b[1;31m\x1b]8;;https://joiner.example\x07\x1b(0\x1b7\x1b(B\x1b]8;;\x07\x1b[m\x1b[H"
+	const ownAlt = "\x1b[?1049h\x1b[3;7H\x1b[4;32m\x1b)0\x0e\x1b7\x0f\x1b[m\x1b[?1049l\x1b[H"
+	for _, tc := range []struct{ name, own, stream, live string }{
+		{"the main screen's", ownMain, "text\r\nmore", "\x1b8"},
+		{"the main screen's, under the alternate screen by ?47", ownMain, "text\r\n\x1b[?47h\x1b[Halt", "\x1b[?47l\x1b8"},
+		{"the alternate screen's, by ?1049", ownMain + ownAlt, "text\r\n\x1b[?1049h\x1b[Halt", "\x1b8"},
+		{"the alternate screen's, by ?47", ownMain + ownAlt, "text\r\n\x1b[?47h\x1b[Halt", "\x1b8"},
+		{"the alternate screen's, by ?1047", ownMain + ownAlt, "text\r\n\x1b[?1047h\x1b[Halt", "\x1b8"},
+		{"the hidden alternate screen's", ownMain + ownAlt, "text\r\n\x1b[?1049h\x1b[Halt\x1b[?1049lmore", "\x1b[?47h\x1b8"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			j := joinOwn(t, 80, 24, tc.own, tc.stream)
+			j.then(t, tc.live)
+			j.then(t, "qx")
+		})
+	}
+}
