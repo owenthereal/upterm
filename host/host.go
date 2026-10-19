@@ -273,6 +273,24 @@ type Host struct {
 	joinClock joinClock
 	// onJoinDeadlineFired is a per-Host test barrier for a late losing deadline.
 	onJoinDeadlineFired func(stop <-chan struct{})
+	// onStatus, if set, is called after each of a run's status-bearing
+	// transitions -- setting the phase, or the tunnel up, reconnecting or
+	// lost -- once the state's lock is released. A transition may leave
+	// Status as it was. A wakeup, not a history: concurrent writers can call
+	// it in either order, and a later transition can come before an earlier
+	// call. A per-Host test hook, set before Run and called on the writer's
+	// goroutine; it must not block.
+	onStatus func()
+	// onRecord, if set, is called once one of the run's status writes has
+	// succeeded -- the ready write, the supervisor's tunnel writes (lost,
+	// reconnecting, back up), the ending write, or the final record -- with
+	// the status that write carried. The claim's starting write, the join
+	// timeout's writes, the first guest join's write and the host-keys write
+	// are not among them. A wakeup, as onStatus is: by the time it runs, a
+	// later write may have replaced that status. A per-Host test hook, set
+	// before Run and called on the writer's goroutine, teardown's included;
+	// it must not block. A host with no record never calls it.
+	onRecord func(status string)
 	// onJoinPublish is a per-Host test barrier run before each join-timeout
 	// record write: blocking in it holds the write, and an error skips it as
 	// a failed write.
@@ -578,7 +596,7 @@ func (c *Host) Run(ctx context.Context) (runErr error) {
 	// polling for "" to learn Run has ended doesn't mistake the name claim for
 	// the end. Registered ahead of the final record write, which reads it, so
 	// it is cleared after that write.
-	state := &sessionState{}
+	state := &sessionState{onChange: c.onStatus}
 	c.state.Store(state)
 	defer c.state.Store(nil)
 
@@ -705,7 +723,7 @@ func (c *Host) Run(ctx context.Context) (runErr error) {
 			}
 
 			state.setPhase(phaseEnding)
-			if err := dir.Update(func(r *sessiondir.Record) {
+			if err := c.updateRecord(dir, func(r *sessiondir.Record) {
 				r.SessionID = sessionID
 				r.FinishedAt = time.Now().UTC()
 				state.apply(r)
@@ -1061,7 +1079,7 @@ func (c *Host) Run(ctx context.Context) (runErr error) {
 			if recordDir == nil {
 				return
 			}
-			if err := recordDir.Update(state.apply); err != nil {
+			if err := c.updateRecord(recordDir, state.apply); err != nil {
 				logger.Warn("failed to publish the tunnel's state", "error", err)
 			}
 		},
@@ -1100,7 +1118,7 @@ func (c *Host) Run(ctx context.Context) (runErr error) {
 			<-readySettled
 			state.setPhase(phaseEnding)
 			if c.SessionDir != nil {
-				if err := c.SessionDir.Update(state.apply); err != nil {
+				if err := c.updateRecord(c.SessionDir, state.apply); err != nil {
 					logger.Warn("failed to publish that the session is ending", "error", err)
 				}
 			}
@@ -1330,7 +1348,7 @@ func (c *Host) Run(ctx context.Context) (runErr error) {
 					err = c.onReadyPublish()
 				}
 				if err == nil {
-					err = c.SessionDir.Update(func(r *sessiondir.Record) {
+					err = c.updateRecord(c.SessionDir, func(r *sessiondir.Record) {
 						r.SessionID = sessionID
 						state.apply(r)
 						publishedStatus = r.Status
@@ -1464,6 +1482,21 @@ func (c *Host) JoinState() *api.JoinState {
 		return nil
 	}
 	return apiJoinState(c.joins.snapshot())
+}
+
+// updateRecord writes dir's record through update and, once the write has
+// succeeded, gives onRecord the status it carried: captured inside the update,
+// under the record's lock, so it is the written record's.
+func (c *Host) updateRecord(dir *sessiondir.Dir, update func(*sessiondir.Record)) error {
+	var status string
+	err := dir.Update(func(r *sessiondir.Record) {
+		update(r)
+		status = r.Status
+	})
+	if err == nil && c.onRecord != nil {
+		c.onRecord(status)
+	}
+	return err
 }
 
 // Status reports the session's status as its record would, from Run's entry
