@@ -3163,6 +3163,40 @@ func TestReplayFallsBackOnADefaultModeReset(t *testing.T) {
 	})
 }
 
+// ANSI's SRM (mode 12) is one a terminal starts with set, as xterm does, where
+// its reset turns local echo on: a joiner given the render would echo nothing
+// the joiner types, where a raw replay makes its terminal echo each key. Left
+// reset at the handoff, it fails the render, named; a set leaves it as it
+// starts, and so does RIS on xterm, as x/vt's forgets it, while DECSTR leaves
+// it reset on both.
+func TestReplayFallsBackOnSRMReset(t *testing.T) {
+	join := func(t *testing.T, stream string) error {
+		t.Helper()
+		_, fellBack := fanOut(t, New(), []byte("text\r\n"+stream+"more\r\n"), []uio.SizeEvent{event(1, 0, 80, 24)}, 4<<10)
+		return fellBack
+	}
+	for _, tc := range []struct{ name, stream string }{
+		{"reset", "\x1b[12l"},
+		{"set, then reset", "\x1b[12h\x1b[12l"},
+		{"reset, then a soft reset", "\x1b[12l\x1b[!p"},
+		{"reset among others", "\x1b[4;12;20l"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			requireIneligible(t, join(t, tc.stream), "a default mode reset (12)")
+		})
+	}
+	for _, tc := range []struct{ name, stream string }{
+		{"set, as it starts", "\x1b[12h"},
+		{"reset, then set", "\x1b[12l\x1b[12h"},
+		{"reset, then RIS", "\x1b[12l\x1bc"},
+		{"DEC's mode 12 reset", "\x1b[?12l"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			require.NoError(t, join(t, tc.stream))
+		})
+	}
+}
+
 // A 96-character set designated into G1, G2 or G3 (ESC - F, ESC . F,
 // ESC / F) fails the render, named, whatever follows: x/vt drops the
 // designation and keeps the set designated before, where xterm takes ESC - A

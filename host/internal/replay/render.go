@@ -1053,13 +1053,25 @@ func (e *emulation) unrestored(parts uio.ReplayParts) string {
 // DECLRMM, which changes what CSI s means, and any other mode the tracker
 // doesn't know, but those a terminal starts with set, whose set leaves them
 // as they start and whose reset eligible fails on (see defaultModes).
+//
+// ANSI's SRM is one a terminal starts with set too, as xterm does, which
+// echoes what is typed on its own screen once it is reset: a joiner given the
+// render would echo nothing, where a raw replay leaves its terminal echoing.
+// It is the reset left at the handoff that counts, unlike the DEC ones: x/vt
+// keeps it as xterm does through a set and DECSTR, and its RIS forgets it,
+// where xterm's sets it again, as the joiner's terminal starts.
 func (e *emulation) unrestoredMode(p uio.ReplayParts) string {
 	modes := e.term.Modes()
 	for _, m := range slices.SortedFunc(maps.Keys(modes), compareModes) {
 		set := modes[m].IsSet()
 		dec, ok := m.(ansi.DECMode)
 		if !ok {
-			if set && m != ansi.ModeInsertReplace {
+			switch {
+			case m == ansi.ModeSendReceive:
+				if modes[m].IsReset() {
+					return "a default mode reset (12)"
+				}
+			case set && m != ansi.ModeInsertReplace:
 				return fmt.Sprintf("mode %d", m.Mode())
 			}
 			continue
