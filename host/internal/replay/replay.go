@@ -159,9 +159,10 @@ type emulation struct {
 	// key's modifiers otherwise than the tracker restores (see
 	// watchKeyFormats).
 	keyFormat bool
-	// locator is set once the stream has turned DEC locator reporting on (see
+	// locator is set once the stream has turned DEC locator reporting on, and
+	// locatorEvents once it has selected a button event for a report (see
 	// watchLocator).
-	locator bool
+	locator, locatorEvents bool
 	// pastEdge is what the emulator keeps of the tab stops past the screen's
 	// right edge (see the type).
 	pastEdge pastEdge
@@ -252,10 +253,10 @@ func (replayer) Start(ctx context.Context, deadline time.Time, c *uio.Capture, s
 // font, a rectangular attribute extent, a conformance level, a reset of a mode
 // a terminal starts with set, a 94-character set x/vt drops, a 96-character
 // set, a window operation, printer controller mode, a memory lock, a key
-// format and locator reporting noted, auto print and the tab stops past the
-// screen's edge kept, and the meter stopped by ctx or the deadline. Each
-// callback and handler runs inside the emulator's Write and touches only the
-// emulation.
+// format, locator reporting and the locator's events noted, auto print and the
+// tab stops past the screen's edge kept, and the meter stopped by ctx or the
+// deadline. Each callback and handler runs inside the emulator's Write and
+// touches only the emulation.
 func (e *emulation) setUp() {
 	t := e.term
 	t.SetScrollbackSize(0)
@@ -1428,25 +1429,38 @@ func keyResets(params ansi.Params) bool {
 	return true
 }
 
-// watchLocator registers the handler that notes DECELR (CSI Ps ; Pu ' z)
+// watchLocator registers the handlers that note DECELR (CSI Ps ; Pu ' z)
 // turning DEC locator reporting on, by its first parameter as xterm reads it:
-// 1 on, 2 on for one report, and any other value off. x/vt keeps none of it,
-// where a raw replay turns it on in the joiner's terminal, which then reports
-// the joiner's mouse to the program by itself. The note stays, whatever
-// follows, though a later DECELR or RIS turns reporting off: falling back
-// costs only the raw replay, and a one-report locator turns itself off on the
-// session's terminal once the mouse is reported, which the stream doesn't
-// show. DECSLE (CSI Pm ' {), which selects the button events a report is sent
-// for, and DECEFR (CSI Pt ; Pl ; Pb ; Pr ' w), which sends one once the
-// pointer leaves a rectangle and which xterm takes only while reporting is on,
-// aren't noted: they change nothing until a DECELR turns it on. The query
-// filter drops DECRQLP (CSI Ps ' |), which asks for the locator's position.
-// x/vt has no handler of its own for it; this returns false all the same, as
-// watchColours' do.
+// 1 on, 2 on for one report, and any other value off; and DECSLE
+// (CSI Pm ' {) selecting a button event a report is sent for, by any of its
+// parameters as xterm reads them: 1 a press, 3 a release, where 0 clears
+// both, 2 and 4 one each, and xterm ignores the rest. x/vt keeps none of it,
+// where a raw replay sets each on the joiner's terminal: one with reporting
+// on reports the joiner's mouse to the program by itself, and xterm keeps the
+// events selected, RIS included, for a DECELR that turns reporting on later,
+// the program's live one among them. The notes stay, whatever follows, though
+// a later DECELR or RIS turns reporting off and a DECSLE clears an event:
+// falling back costs only the raw replay, and a one-report locator turns
+// itself off on the session's terminal once the mouse is reported, which the
+// stream doesn't show. DECEFR (CSI Pt ; Pl ; Pb ; Pr ' w), which sends a
+// report once the pointer leaves a rectangle, xterm takes only while
+// reporting is on and forgets at the next DECELR, so it isn't noted. The
+// query filter drops DECRQLP (CSI Ps ' |), which asks for the locator's
+// position. x/vt has no handler of its own for either; these return false all
+// the same, as watchColours' do.
 func (e *emulation) watchLocator() {
-	e.term.RegisterCsiHandler(ansi.Command(0, '\'', 'z'), func(params ansi.Params) bool {
+	t := e.term
+	t.RegisterCsiHandler(ansi.Command(0, '\'', 'z'), func(params ansi.Params) bool {
 		if n, _, _ := params.Param(0, 0); n == 1 || n == 2 {
 			e.locator = true
+		}
+		return false
+	})
+	t.RegisterCsiHandler(ansi.Command(0, '\'', '{'), func(params ansi.Params) bool {
+		for _, p := range params {
+			if n := p.Param(0); n == 1 || n == 3 {
+				e.locatorEvents = true
+			}
 		}
 		return false
 	})

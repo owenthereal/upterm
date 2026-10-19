@@ -958,6 +958,9 @@ func (e *emulation) eligible(parts uio.ReplayParts) (rep, error) {
 	if e.locator {
 		return rep{}, &IneligibleError{State: "locator reporting"}
 	}
+	if e.locatorEvents {
+		return rep{}, &IneligibleError{State: "locator events"}
+	}
 	if splitWide(e.term.MainScreen()) || splitWide(e.term.AltScreen()) {
 		return rep{}, &IneligibleError{State: splitWideState}
 	}

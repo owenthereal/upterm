@@ -3578,34 +3578,49 @@ func TestReplayFailsOnAKeyFormat(t *testing.T) {
 // DEC locator reporting turned on, by DECELR 1 or 2 (CSI Ps ; Pu ' z), fails
 // the render, named, whatever follows: the joiner's terminal would report
 // the mouse to the program on its own, where a raw replay turns it on there.
-// DECELR 0, or any other value, turns it off, and alone renders, as does
-// DECSLE (CSI Pm ' {), which selects the events reported once it is on, and
-// DECEFR (CSI Pt ; Pl ; Pb ; Pr ' w), which xterm ignores while it is off.
-// DECRQLP (CSI Ps ' |), which asks for the locator's position, the query
-// filter drops.
+// So does DECSLE (CSI Pm ' {) selecting a button event to report, by a
+// parameter of 1 (a press) or 3 (a release), named apart: xterm keeps the
+// selection, RIS included, for a DECELR that turns reporting on later, the
+// program's live one among them, which would then report otherwise on a
+// joiner given the render. DECELR 0, or any other value, turns reporting off,
+// and alone renders, as does a DECSLE that only clears events (0, 2 or 4),
+// and DECEFR (CSI Pt ; Pl ; Pb ; Pr ' w), which xterm ignores while
+// reporting is off. DECRQLP (CSI Ps ' |), which asks for the locator's
+// position, the query filter drops.
 func TestReplayFailsOnLocatorReporting(t *testing.T) {
 	join := func(t *testing.T, stream string) error {
 		t.Helper()
 		_, fellBack := fanOut(t, New(), []byte("text\r\n"+stream+"more\r\n"), []uio.SizeEvent{event(1, 0, 80, 24)}, 4<<10)
 		return fellBack
 	}
-	for _, tc := range []struct{ name, stream string }{
-		{"on", "\x1b[1'z"},
-		{"on for one report", "\x1b[2'z"},
-		{"on, in pixels", "\x1b[1;1'z"},
-		{"on, with the events selected", "\x1b[1'z\x1b[1;3'{"},
-		{"on, then off", "\x1b[1'z\x1b[0'z"},
-		{"on, then RIS", "\x1b[2'z\x1bc"},
+	for _, tc := range []struct{ name, stream, state string }{
+		{"on", "\x1b[1'z", "locator reporting"},
+		{"on for one report", "\x1b[2'z", "locator reporting"},
+		{"on, in pixels", "\x1b[1;1'z", "locator reporting"},
+		{"on, with the events selected", "\x1b[1'z\x1b[1;3'{", "locator reporting"},
+		{"the events selected, then on", "\x1b[1;3'{\x1b[1'z", "locator reporting"},
+		{"on, then off", "\x1b[1'z\x1b[0'z", "locator reporting"},
+		{"on, then RIS", "\x1b[2'z\x1bc", "locator reporting"},
+		{"the events selected", "\x1b[1;3'{", "locator events"},
+		{"a press selected", "\x1b[1'{", "locator events"},
+		{"a release selected", "\x1b[3'{", "locator events"},
+		{"a press selected among clears", "\x1b[0;2;1;4'{", "locator events"},
+		{"a press selected, then cleared", "\x1b[1'{\x1b[0'{", "locator events"},
+		{"a release selected, then RIS", "\x1b[3'{\x1bc", "locator events"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			requireIneligible(t, join(t, tc.stream), "locator reporting")
+			requireIneligible(t, join(t, tc.stream), tc.state)
 		})
 	}
 	for _, tc := range []struct{ name, stream string }{
 		{"off", "\x1b[0'z"},
 		{"off, with no parameter", "\x1b['z"},
 		{"a value xterm reads as off", "\x1b[3'z"},
-		{"the events selected", "\x1b[1;3'{"},
+		{"every event cleared", "\x1b[0'{"},
+		{"every event cleared, with no parameter", "\x1b['{"},
+		{"an empty parameter, which xterm reads as 0", "\x1b[2;'{"},
+		{"a press and a release cleared", "\x1b[2;4'{"},
+		{"an event xterm doesn't have", "\x1b[5'{"},
 		{"a filter rectangle", "\x1b[1;1;10;10'w"},
 		{"the position asked for", "\x1b[1'|"},
 	} {
