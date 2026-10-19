@@ -2023,6 +2023,41 @@ func TestReplayStartsFromNoLinkAndTheASCIICharsets(t *testing.T) {
 	}
 }
 
+// A terminal that has no SCS for G2 or G3, as the Linux console's doesn't,
+// takes an ESC * or ESC + alone and prints the final byte after it. The
+// preamble designates before its CR, so its erase from the row's start
+// clears what such a terminal printed there, wherever the joiner's cursor
+// was on the row, and none of it is left on the screen or carried into the
+// history drawn after it.
+func TestReplayErasesWhatAnUnknownDesignationPrints(t *testing.T) {
+	var stream strings.Builder
+	for i := range 8 {
+		fmt.Fprintf(&stream, "line %d\r\n", i)
+	}
+	stream.WriteString("the end")
+	sent, fellBack := fanOut(t, New(), []byte(stream.String()), []uio.SizeEvent{event(1, 0, 80, 5)}, 64<<10)
+	require.NoError(t, fellBack)
+	// What such a terminal is given: each ESC * or ESC + taken alone, and the
+	// final byte after it printed.
+	printed := regexp.MustCompile(`\x1b[*+]([\x30-\x7e])`).ReplaceAll(sent, []byte("$1"))
+	require.NotEqual(t, sent, printed, "the render designates G2 and G3")
+
+	for _, own := range []string{"", "prompt$ upterm join"} {
+		t.Run(fmt.Sprintf("the cursor after %q", own), func(t *testing.T) {
+			a, aHist := newReference(80, 5)
+			_, _ = a.WriteString(stream.String())
+			b, bHist := newReference(80, 5)
+			_, _ = b.WriteString(own)
+			_, _ = b.Write(printed)
+			for y := range b.Height() {
+				require.NotContains(t, b.MainScreen().Line(y).String(), "B", "row %d", y)
+			}
+			require.NotContains(t, string(bytes.Join(*bHist, nil)), "B", "the history")
+			require.Empty(t, sameState(a, b, *aHist, *bHist, "", ""), "%q", printed)
+		})
+	}
+}
+
 // A slot no DECSC has filled restores the cursor home in the default pen,
 // link and charsets, as xterm's does. The render sets the slot of each screen
 // it draws on, as the session's holds it, filled or not, so a live DECRC

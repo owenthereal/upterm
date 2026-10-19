@@ -15,9 +15,12 @@ import (
 // the joiner's terminal as it goes: the pen, link and charsets it has
 // emitted, and what each screen's DECSC slot holds of them. Every SGR, OSC 8
 // and SCS it writes goes from the model, never from a default, so it is
-// right whatever the render wrote before it, the render's preamble having
-// made the terminal what the model starts from (see reset); and an ESC 8
-// takes the model back to what the matching ESC 7 recorded.
+// right whatever the render wrote before it; and an ESC 8 takes the model
+// back to what the matching ESC 7 recorded. The model starts from a terminal
+// at its defaults (see reset): the render's preamble makes the pen, link and
+// charsets so, and the render sets the saved slots itself before any restore
+// of its own reads them, the main screen's always and the alternate screen's
+// whenever it draws on that screen.
 //
 // Each method fails before an append would cross the cap, leaving the buffer
 // and the model as they were, so nothing past the cap is ever allocated;

@@ -16,18 +16,23 @@ import (
 )
 
 // preamble starts every render, after what begins again a synchronized
-// update open at the handoff point (see synced): the cursor to the start of
-// its row, then the terminal made what the encoder takes it to be, whatever a
-// program left it holding, and the screen erased from there down. That is the
-// default pen, no link (an OSC 8 with no URL closes one), ASCII designated
-// into G0 to G3, G0 in GL (SI) and G2 in GR (LS2R). A program that exits or
-// is killed mid-link leaves its link open, and a binary file printed to a
-// terminal can leave any charset in place, and the render's text would print
-// through either, linked or remapped. GR maps no UTF-8 a print sends, but
-// DECSC saves it, and the render takes it to be G2 (see unrestored). The
+// update open at the handoff point (see synced). It makes the terminal what
+// the encoder takes it to be, whatever a program left it holding: ASCII
+// designated into G0 to G3, G0 in GL (SI) and G2 in GR (LS2R); then the
+// cursor to the start of its row, the default pen and no link (an OSC 8 with
+// no URL closes one); and it erases the screen from there down. A program
+// that exits or is killed mid-link leaves its link open, and a binary file
+// printed to a terminal can leave any charset in place, and the render's text
+// would print through either, linked or remapped. GR maps no UTF-8 a print
+// sends, but DECSC saves it, and the render takes it to be G2 (see
+// unrestored).
+//
+// The charsets come before the CR because a terminal with no SCS for G2 or
+// G3, as the Linux console's, takes the ESC alone and prints the final byte
+// after it, at the cursor; the erase from the row's start then clears it. The
 // joiner's own output above the cursor stays, for the blank screen drawn
 // after the history to scroll into its scrollback.
-const preamble = "\r\x1b[m\x1b]8;;\x07\x1b(B\x1b)B\x1b*B\x1b+B\x0f\x1b}\x1b[J"
+const preamble = "\x1b(B\x1b)B\x1b*B\x1b+B\x0f\x1b}\r\x1b[m\x1b]8;;\x07\x1b[J"
 
 // render reconstructs the emulator's state at the handoff point on the
 // joiner's terminal, which it takes to be at its defaults, the preamble
@@ -129,7 +134,7 @@ func (e *emulation) synced() string {
 		mode = form{ansi.SetModeSynchronizedOutput, true}
 	}
 	dcs := form{endSyncDCS, false}
-	if e.sync.dcs {
+	if e.sync.began {
 		dcs = form{beginSyncDCS, true}
 	}
 	order := [2]form{dcs, mode}

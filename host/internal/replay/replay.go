@@ -329,7 +329,9 @@ func (e *emulation) watchGraphics() {
 // ends an update, isn't noted: like ?2026, it only holds back the drawing, and
 // the render begins an update open at the handoff point again (see
 // syncForms). Its key gets a handler of its own, which keeps that, and notes
-// anything else sent under it, data after the s included.
+// anything else sent under it, data after the s included; and RIS (ESC c)
+// gets one that ends such an update, as x/vt's own RIS, which runs after it,
+// resets ?2026.
 //
 // The key is the DCS's prefix, its last intermediate and its final byte. The
 // parser takes a prefix only as the first byte, one of < = > ?, and after an
@@ -350,13 +352,13 @@ func (e *emulation) watchDCS() {
 		if n, _, _ := params.Param(0, 0); len(params) != 1 || n != 1 && n != 2 || len(data) != 0 {
 			e.dcs = true
 		} else {
-			e.sync = syncForms{dcs: n == 1, dcsLast: true}
+			e.sync = syncForms{began: n == 1, dcsLast: true}
 		}
 		return false
 	})
 	// RIS ends an update the DCS form began, as x/vt's resets ?2026.
 	t.RegisterEscHandler('c', func() bool {
-		e.sync.dcs = false
+		e.sync.began = false
 		return false
 	})
 	t.RegisterDcsHandler(0, note)
@@ -382,9 +384,9 @@ func (e *emulation) watchDCS() {
 // an end outside one does nothing. But a terminal that takes only one form
 // follows that form's last, so the render begins each again (see synced).
 type syncForms struct {
-	// dcs is set when the DCS form's last was DCS = 1 s, a beginning, and
+	// began is set when the DCS form's last was DCS = 1 s, a beginning, and
 	// dcsLast when the DCS form was the last of the two.
-	dcs, dcsLast bool
+	began, dcsLast bool
 }
 
 // syncByMode notes ?2026 set or reset, as the last of the two forms.
