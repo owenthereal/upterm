@@ -3027,3 +3027,45 @@ func TestReplayFallsBackOnADefaultModeReset(t *testing.T) {
 		}
 	})
 }
+
+// A 96-character set designated into G1, G2 or G3 (ESC - F, ESC . F,
+// ESC / F) fails the render, named, whatever follows: x/vt drops the
+// designation and keeps the set designated before, where xterm takes ESC - A
+// as ISO Latin-1's supplemental set, so the cells printed under it and the
+// live text a shift sends there land otherwise on a joiner given the render.
+// Every final counts, one xterm ignores too, and neither a 94-character set
+// designated after it nor RIS clears the note. A 94-character set renders,
+// and the live text printed under it lands as on the session's terminal.
+func TestReplayFailsOnA96CharacterSet(t *testing.T) {
+	join := func(t *testing.T, stream string) error {
+		t.Helper()
+		_, fellBack := fanOut(t, New(), []byte("text\r\n"+stream+"more\r\n"), []uio.SizeEvent{event(1, 0, 80, 24)}, 4<<10)
+		return fellBack
+	}
+	for _, tc := range []struct{ name, stream string }{
+		{"Latin-1's supplement into G1", "\x1b-A"},
+		{"Latin-1's supplement into G2", "\x1b.A"},
+		{"Latin-1's supplement into G3", "\x1b/A"},
+		{"shifted in and printed", "\x1b-A\x0eAB\x0f"},
+		{"a set xterm takes only at a VT510's level", "\x1b.F"},
+		{"a final xterm ignores", "\x1b/Z"},
+		{"then a 94-character set into the same G-set", "\x1b-A\x1b)B"},
+		{"then RIS", "\x1b-A\x1bc"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			requireIneligible(t, join(t, tc.stream), "a 96-character set")
+		})
+	}
+	for _, tc := range []struct{ name, stream string }{
+		{"line drawing into G0", "\x1b(0"},
+		{"line drawing into G1", "\x1b)0"},
+		{"the UK set into G2", "\x1b*A"},
+		{"ASCII into G3", "\x1b+B"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			require.NoError(t, join(t, tc.stream))
+			j := joinAt(t, 80, 24, "text\r\n"+tc.stream+"more\r\n")
+			j.then(t, "\x0eqx\x1bnqx\x1boqx\x0fqx\r\n")
+		})
+	}
+}

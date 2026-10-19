@@ -880,6 +880,9 @@ func (e *emulation) eligible(parts uio.ReplayParts) (rep, error) {
 	if e.conformance {
 		return rep{}, &IneligibleError{State: "a conformance level"}
 	}
+	if e.charset96 {
+		return rep{}, &IneligibleError{State: "a 96-character set"}
+	}
 	if splitWide(e.term.MainScreen()) || splitWide(e.term.AltScreen()) {
 		return rep{}, &IneligibleError{State: splitWideState}
 	}

@@ -130,6 +130,9 @@ type emulation struct {
 	// conformance is set once the stream has set the terminal's conformance
 	// level (see watchConformanceLevel).
 	conformance bool
+	// charset96 is set once the stream has designated a 96-character set
+	// (see watchCharsets96).
+	charset96 bool
 	// pastEdge is what the emulator keeps of the tab stops past the screen's
 	// right edge (see the type).
 	pastEdge pastEdge
@@ -209,17 +212,18 @@ func (replayer) Start(ctx context.Context, deadline time.Time, c *uio.Capture, s
 	return e, nil
 }
 
-// setUp makes the emulator a replay's: no scrollback on either
-// screen, the history kept through the scroll-off function instead, and a
-// clear of it noted (see history.erase), replies to queries discarded, the title, the icon name and the title stack, the
-// working directory, the colours, the clipboard and synchronized output's
-// DCS form kept, images, device control strings that change the terminal's
-// state, title modes, character protection, selective erases, saves,
-// renditions and line sizes the cells can't hold, a status line, a font, a
-// rectangular attribute extent, a conformance level and a reset of a mode a
-// terminal starts with set noted, the tab stops past the screen's edge kept,
-// and the meter stopped by ctx or the deadline. Each callback and handler
-// runs inside the emulator's Write and touches only the emulation.
+// setUp makes the emulator a replay's: no scrollback on either screen, the
+// history kept through the scroll-off function instead, and a clear of it
+// noted (see history.erase), replies to queries discarded, the title, the
+// icon name and the title stack, the working directory, the colours, the
+// clipboard and synchronized output's DCS form kept, images, device control
+// strings that change the terminal's state, title modes, character
+// protection, selective erases, saves, renditions and line sizes the cells
+// can't hold, a status line, a font, a rectangular attribute extent, a
+// conformance level, a reset of a mode a terminal starts with set and a
+// 96-character set noted, the tab stops past the screen's edge kept, and the
+// meter stopped by ctx or the deadline. Each callback and handler runs inside
+// the emulator's Write and touches only the emulation.
 func (e *emulation) setUp() {
 	t := e.term
 	t.SetScrollbackSize(0)
@@ -254,6 +258,7 @@ func (e *emulation) setUp() {
 	e.watchConformanceLevel()
 	e.watchTabStops()
 	e.watchDefaultModes()
+	e.watchCharsets96()
 }
 
 // colours is the last change the stream made, by OSC, to each of the colours
@@ -1052,6 +1057,33 @@ func (e *emulation) watchDefaultModes() {
 		}
 		return false
 	})
+}
+
+// watchCharsets96 registers the handlers that note a 96-character set
+// designated into G1, G2 or G3, by ESC - F, ESC . F or ESC / F. x/vt takes
+// only 94-character sets, by ESC ( to ESC + with A, B or 0, and drops these,
+// keeping the set designated before, where xterm takes ESC - A, at its
+// default VT420 level, as ISO Latin-1's supplemental set, whose characters a
+// print shifted there draws in place of ASCII's, and more finals at a
+// VT510's (B, F, H, L and M). So the cells printed under one may be other
+// than the emulator's, and a live print shifted there lands otherwise on a
+// joiner given the render than on the session's terminal. The note stays,
+// whatever follows: a later designation or RIS sets the G-set again on both,
+// but leaves the cells printed before it, and a DECSC saves the set for a
+// DECRC to put back. x/vt keys an ESC handler by its last intermediate and
+// its final byte, so each final, 0x30 to 0x7E, gets a handler: one xterm
+// ignores, another terminal may take. x/vt has no handler of its own for any
+// of them; these return false all the same, as watchColours' do.
+func (e *emulation) watchCharsets96() {
+	note := func() bool {
+		e.charset96 = true
+		return false
+	}
+	for _, inter := range []byte{'-', '.', '/'} {
+		for final := byte(0x30); final <= 0x7e; final++ {
+			e.term.RegisterEscHandler(ansi.Command(0, inter, final), note)
+		}
+	}
 }
 
 // sgrUndrawable reports whether params, an SGR's, hold a number x/vt's SGR
