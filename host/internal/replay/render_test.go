@@ -981,17 +981,17 @@ func TestReplayFailsOnTerminalGraphics(t *testing.T) {
 // to the joiner's terminal, which acts on it: a tmux passthrough, which a
 // joiner running in tmux hands on to the terminal tmux runs in; DECUDK's
 // keys, DECDLD's soft font, ReGIS, under whose final iTerm2's tmux
-// integration begins too, DECRSTS's and DECRSPS's restores, XTSETTCAP and
-// DECAUPSS. So does one whose first byte is an ESC or a C0 control, which
-// x/vt reads as the string's data, where a DEC terminal ends the string at
-// the ESC, or ignores the control and reads the string after it, here
-// DECUDK: the filter drops either after an ESC P, so each comes by the 8-bit
-// introducer, which the filter passes. An image in a tmux passthrough is read
-// as a DEC terminal reads it, the DCS ended by its first ESC and the image a
-// sequence of its own, so it is named as the image.
+// integration begins too, DECRSTS's and DECRSPS's restores, XTSETTCAP,
+// DECAUPSS and DECDMAC's macros. So does one whose first byte is an ESC or a
+// C0 control, which x/vt reads as the string's data, where a DEC terminal
+// ends the string at the ESC, or ignores the control and reads the string
+// after it, here DECUDK: the filter drops either after an ESC P, so each
+// comes by the 8-bit introducer, which the filter passes. An image in a tmux
+// passthrough is read as a DEC terminal reads it, the DCS ended by its first
+// ESC and the image a sequence of its own, so it is named as the image.
 //
-// Any other DCS renders, as a terminal ignores it, and so a raw replay hands
-// the joiner something it drops too: vim's probe of whether the terminal
+// Any other DCS renders, as xterm ignores it, and so a raw replay hands the
+// joiner something it drops too: vim's probe of whether the terminal
 // does, one under a final no terminal acts on, one under a private prefix,
 // with a parameter after its intermediate or under a listed final after a
 // private prefix, which xterm reads as the final, and one under tmux's final
@@ -1006,6 +1006,7 @@ func TestReplayFailsOnADeviceControlString(t *testing.T) {
 	}
 	for _, tc := range []struct{ name, stream string }{
 		{"a tmux passthrough", "\x1bPtmux;\x1b\x1b[31mX\x1b\\"},
+		{"a tmux passthrough of text", "\x1bPtmux;hello\x1b\\"},
 		{"DECUDK", "\x1bP1;1|17/736F6D65\x1b\\"},
 		{"DECDLD", "\x1bP0;1;1;4;0;0{ @~~~~/~~~~\x1b\\"},
 		{"ReGIS", "\x1bP0pS(E)\x1b\\"},
@@ -1015,6 +1016,7 @@ func TestReplayFailsOnADeviceControlString(t *testing.T) {
 		{"DECRSPS's tab stops", "\x1bP2$t9/17/25\x1b\\"},
 		{"XTSETTCAP", "\x1bP+p544e=787465726d\x1b\\"},
 		{"DECAUPSS", "\x1bP1!uA\x1b\\"},
+		{"DECDMAC", "\x1bP1;0;0!zA\x1b\\"},
 		{"an ESC first", "\x90\x1b[31mX\x1b\\"},
 		{"a C0 control first", "\x90\r1;1|17/736F6D65\x1b\\"},
 		{"the synchronized output key with another value", "\x1bP=3s\x1b\\"},
@@ -1127,8 +1129,8 @@ func (l *dcsLog) Printf(format string, v ...any) {
 // an ESC, which a DEC terminal reads otherwise. The ones that change it are
 // tmux's passthrough, by its data under any prefix, parameters and
 // intermediate, as tmux reads it; DECUDK, DECDLD, ReGIS, DECRSTS, DECRSPS,
-// XTSETTCAP and DECAUPSS, under no prefix; and synchronized output's key
-// with anything but DCS = 1 s or DCS = 2 s.
+// XTSETTCAP, DECAUPSS and DECDMAC, under no prefix; and synchronized
+// output's key with anything but DCS = 1 s or DCS = 2 s.
 func dcsEffect(head string, data []byte) (changes, draws bool) {
 	if head == "" {
 		return true, false
@@ -1152,7 +1154,7 @@ func dcsEffect(head string, data []byte) (changes, draws bool) {
 	switch [2]byte{inter, final} {
 	case [2]byte{0, 'q'}:
 		return false, true
-	case [2]byte{0, '|'}, [2]byte{0, '{'}, [2]byte{0, 'p'}, [2]byte{'$', 'p'}, [2]byte{'$', 't'}, [2]byte{'+', 'p'}, [2]byte{'!', 'u'}:
+	case [2]byte{0, '|'}, [2]byte{0, '{'}, [2]byte{0, 'p'}, [2]byte{'$', 'p'}, [2]byte{'$', 't'}, [2]byte{'+', 'p'}, [2]byte{'!', 'u'}, [2]byte{'!', 'z'}:
 		return true, false
 	}
 	return false, false
@@ -1165,8 +1167,8 @@ func dcsEffect(head string, data []byte) (changes, draws bool) {
 // every prefix, parameter bytes, the intermediates and the finals at each end
 // of their ranges, and every such body after an ESC; and around every header
 // of at most a prefix, a parameter and an intermediate before any byte from
-// 0x30 to 0x7E, with no data, data, the mux; of tmux's passthrough, or mux,
-// which falls short of it. A key the emulation misses, or one it notes beyond
+// 0x30 to 0x7E, with no data, data, the mux; of tmux's passthrough, alone
+// or before more, or mux, which falls short of it. A key the emulation misses, or one it notes beyond
 // those, fails it, and so does a DCS x/vt comes to handle itself, which it
 // then no longer logs.
 func TestReplayNotesTheDCSThatChangeState(t *testing.T) {
@@ -1203,7 +1205,7 @@ func TestReplayNotesTheDCSThatChangeState(t *testing.T) {
 		for _, param := range []string{"", "1"} {
 			for _, inter := range inters {
 				for final := byte(0x30); final <= 0x7e; final++ {
-					for _, data := range []string{"", "x", "mux;", "mux"} {
+					for _, data := range []string{"", "x", "mux;", "mux;x", "mux"} {
 						b := []byte(prefix + param)
 						if inter != 0 {
 							b = append(b, inter)

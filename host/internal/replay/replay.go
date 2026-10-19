@@ -448,13 +448,17 @@ func (e *emulation) watchGraphics() {
 // drops each one, where a raw replay carries it to the joiner's terminal,
 // which acts on it: a tmux passthrough, which a joiner running in tmux hands
 // on to the terminal tmux runs in, DECUDK's keys, DECDLD's soft font, ReGIS,
-// DECRSTS's and DECRSPS's restores, XTSETTCAP's key names and DECAUPSS's
-// character set. A terminal ignores the rest, as xterm does, so for them the
-// raw replay hands the joiner nothing the render leaves out: vim's probe of
-// whether it does, DCS z z ST, a final none acts on, or one of these under a
-// private prefix, which xterm reads as the final. Of the DCS a program
-// sends, the query filter drops only the requests, DECRQSS, XTGETTCAP and
-// XTGETXRES, before the ring, and watchGraphics notes a sixel, as an image.
+// DECRSTS's and DECRSPS's restores, XTSETTCAP's key names, DECAUPSS's
+// character set and DECDMAC's macros, which DECINVM (CSI Pn * z) later
+// invokes. Of these xterm ignores DECRSTS and DECDMAC, which Windows Terminal
+// and DEC's terminals act on. xterm ignores the rest, so for them the raw
+// replay hands an xterm joiner nothing the render leaves out: vim's probe of
+// whether it does, DCS z z ST, a final xterm has no use for, or one of these
+// under a private prefix, which xterm reads as the final. A terminal may act
+// on one of its own all the same, as kitty does on its remote control, DCS
+// @kitty-cmd, which isn't noted. Of the DCS a program sends, the query
+// filter drops only the requests, DECRQSS, XTGETTCAP and XTGETXRES, before
+// the ring, and watchGraphics notes a sixel, as an image.
 //
 // x/vt keys a handler by the DCS's prefix, its last intermediate and its
 // final byte, not its parameters, so these are noted whatever their
@@ -492,6 +496,7 @@ func (e *emulation) watchDCS() {
 		ansi.Command(0, '$', 't'), // DECRSPS
 		ansi.Command(0, '+', 'p'), // XTSETTCAP
 		ansi.Command(0, '!', 'u'), // DECAUPSS
+		ansi.Command(0, '!', 'z'), // DECDMAC
 	} {
 		t.RegisterDcsHandler(cmd, note)
 	}
