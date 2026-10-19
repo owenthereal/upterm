@@ -572,7 +572,9 @@ func TestContinuationStateLeavesThePendingWrap(t *testing.T) {
 		"\x1b[1 q", "\x1b[2 q", "\x1b[3 q", "\x1b[4 q", "\x1b[5 q", "\x1b[6 q",
 		"\x1b[?7l", "\x1b[m", "\x1b[1;4:3;38;2;1;2;3m",
 		"\x1b]8;;https://x.example\x07", "\x1b]8;id=1;\x07",
-		"\x1b]7;file://host/dir\x07", "\x1b]52;c;QQ==\x07",
+		"\x1b]7;file://host/dir\x07", "\x1b]22;hand2\x07",
+		"\x1b[5 t", "\x1b[5 u", "\x1b[ t", "\x1b[ u",
+		"\x1b]52;c;QQ==\x07",
 		"\x00",
 	} {
 		term := vt.NewEmulator(4, 2)

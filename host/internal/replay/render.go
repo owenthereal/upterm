@@ -139,10 +139,11 @@ func (e *emulation) render() ([]byte, error) {
 		colours:   &e.colours,
 		cwd:       e.cwd,
 		cwdTold:   e.cwdTold,
-		// The pointer shape, which can't be sent once too long to keep.
+		// The pointer shape, if set, and whether it was too long to keep.
 		pointer:     e.pointer,
 		pointerSet:  e.pointerSet,
 		pointerOver: e.pointerOver,
+		// The bell's volumes and the clipboard writes still in force.
 		warningBell: e.warningBell,
 		marginBell:  e.marginBell,
 		clips:       e.clips,
