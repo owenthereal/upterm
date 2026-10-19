@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
@@ -192,6 +193,12 @@ type reconnectHost struct {
 	// hostKeyChecks counts the calls to the host's own HostKeyCallback, the
 	// one that may prompt: the first connection's, and never a redial's.
 	hostKeyChecks atomic.Int32
+	// records is woken by the host's onRecord, for awaitStatus, and statuses
+	// by its onStatus, for awaitLiveStatus. An option that sets either hook
+	// replaces the fixture's. Unless its own hook pokes the fixture's
+	// wakeups, awaitStatus or awaitLiveStatus, whichever that hook fed, then
+	// reads once and, if that read doesn't match, waits out its bound.
+	records, statuses *wakeups
 }
 
 // reconnectOption changes the fixture before the host runs.
@@ -237,6 +244,8 @@ func newReconnectHost(t *testing.T, scheme string, opts ...reconnectOption) *rec
 		ready:     make(chan string, 1),
 		done:      make(chan error, 1),
 		logs:      &lockedBuffer{},
+		records:   newWakeups(),
+		statuses:  newWakeups(),
 	}
 	t.Cleanup(func() {
 		if t.Failed() {
@@ -263,6 +272,8 @@ func newReconnectHost(t *testing.T, scheme string, opts ...reconnectOption) *rec
 			return nil
 		},
 		SessionReadyCallback: func(status string) { f.ready <- status },
+		onRecord:             f.records.poked,
+		onStatus:             f.statuses.poke,
 	}
 	for _, opt := range opts {
 		opt(f)
@@ -307,41 +318,41 @@ func (f *reconnectHost) record(t *testing.T) *sessiondir.Record {
 	return rec
 }
 
-// awaitStatus polls the record until it says want, and returns it.
+// awaitStatus waits for the record to say want, and returns the record that
+// said it. It reads the record at the start, and again each time one of the
+// run's status writes (ready, a tunnel change, ending, the final record) has
+// landed: the writes onRecord reports.
 func (f *reconnectHost) awaitStatus(t *testing.T, want string, within time.Duration) *sessiondir.Record {
 	t.Helper()
-	deadline := time.Now().Add(within)
-	for {
-		rec, err := sessiondir.ReadRecord(f.stateRoot, f.h.Name)
-		if err == nil && rec.Status == want {
-			return rec
+	var (
+		rec *sessiondir.Record
+		err error
+	)
+	f.records.until(t, within, func() bool {
+		rec, err = sessiondir.ReadRecord(f.stateRoot, f.h.Name)
+		return err == nil && rec.Status == want
+	}, func() string {
+		if err != nil {
+			return fmt.Sprintf("the record never said %s: %v", want, err)
 		}
-		if time.Now().After(deadline) {
-			if err != nil {
-				t.Fatalf("the record never said %s within %s: %v", want, within, err)
-			}
-			t.Fatalf("the record never said %s within %s; it says %s (reason %q, error %q)",
-				want, within, rec.Status, rec.TunnelReason, rec.TunnelError)
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
+		return fmt.Sprintf("the record never said %s; it says %s (reason %q, error %q)",
+			want, rec.Status, rec.TunnelReason, rec.TunnelError)
+	})
+	return rec
 }
 
-// awaitLiveStatus polls Host.Status until it says want, for a host with no
-// record.
+// awaitLiveStatus waits for Host.Status to say want, for a host with no
+// record. It reads the status at the start, and again after each of the
+// state's transitions.
 func (f *reconnectHost) awaitLiveStatus(t *testing.T, want string, within time.Duration) {
 	t.Helper()
-	deadline := time.Now().Add(within)
-	for {
-		got := f.h.Status()
-		if got == want {
-			return
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("the host never reported %s within %s; it reports %q", want, within, got)
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
+	var got string
+	f.statuses.until(t, within, func() bool {
+		got = f.h.Status()
+		return got == want
+	}, func() string {
+		return fmt.Sprintf("the host never reported %s; it reports %q", want, got)
+	})
 }
 
 // awaitReady returns the status SessionReadyCallback was given.
@@ -1155,4 +1166,61 @@ func TestALossDuringTheConfirmationPrompt(t *testing.T) {
 	sess, err := f.relay.sessions.GetSession(f.created.SessionId)
 	require.NoError(t, err)
 	require.GreaterOrEqual(t, sess.Generation, uint64(2), "registered again, under a later generation")
+}
+
+// receiveWithin is the next value on ch, failing the test if none arrives
+// within the bound.
+func receiveWithin[T any](t *testing.T, ch <-chan T, within time.Duration) T {
+	t.Helper()
+	select {
+	case v := <-ch:
+		return v
+	case <-time.After(within):
+		t.Fatalf("nothing arrived within %s", within)
+		var zero T
+		return zero
+	}
+}
+
+// Publication comes before notification. The only write in flight is the
+// ready write: the host has no guests, its tunnel stays up, and the test
+// starts nothing else until the hook has run. So no competing writer can
+// replace the status between the write and the check.
+func TestOnRecordFiresAfterTheWriteHasLanded(t *testing.T) {
+	checked := make(chan string, 1)
+	newReconnectHost(t, "ssh", func(f *reconnectHost) {
+		f.h.onRecord = func(status string) {
+			if status != sessiondir.StatusReady {
+				return
+			}
+			rec, err := sessiondir.ReadRecord(f.stateRoot, f.h.Name)
+			if err != nil {
+				return // reported by the channel staying empty
+			}
+			select {
+			case checked <- rec.Status:
+			default:
+			}
+		}
+	})
+	require.Equal(t, sessiondir.StatusReady, receiveWithin(t, checked, 5*time.Second),
+		"onRecord fired before the write it reports had landed")
+}
+
+// The waiter is armed before Run starts, and accepts ready only on a re-read
+// that a wakeup caused, so the transition has to notify.
+func TestOnStatusWakesAWaiterArmedBeforeRun(t *testing.T) {
+	w := newWakeups()
+	var recorded atomic.Bool
+	f := newReconnectHost(t, "ssh", withoutRecord, func(f *reconnectHost) {
+		f.h.onStatus = w.poke
+		f.h.onRecord = func(string) { recorded.Store(true) }
+	})
+	w.untilNotified(t, 5*time.Second, func() bool { return f.h.Status() == sessiondir.StatusReady }, func() string {
+		return fmt.Sprintf("no status wakeup was followed by ready; the host reports %q", f.h.Status())
+	})
+	// The ready callback runs after every write the ready path makes, so a
+	// record wakeup from it would have come by now.
+	require.Equal(t, sessiondir.StatusReady, f.awaitReady(t))
+	require.False(t, recorded.Load(), "a host without a record had a record wakeup")
 }

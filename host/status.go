@@ -83,16 +83,31 @@ type sessionState struct {
 	reason  string
 	lastErr string
 	nextAt  time.Time
+
+	// onChange, if set, is called after each call to a mutator of the
+	// status's facts (setPhase and the three tunnel ones), once the lock is
+	// released, so it may read the state. The status may be unchanged. Set
+	// before the state is shared, and never written again. A test hook,
+	// called on the mutator's goroutine; it must not block.
+	onChange func()
+}
+
+// changed calls onChange, if it is set.
+func (s *sessionState) changed() {
+	if s.onChange != nil {
+		s.onChange()
+	}
 }
 
 // setPhase moves the phase forward. A move backwards is ignored: a session
 // that has begun ending does not run again.
 func (s *sessionState) setPhase(p phase) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if p > s.phase {
 		s.phase = p
 	}
+	s.mu.Unlock()
+	s.changed()
 }
 
 // setReconnect records whether the relay derives session IDs, so a redial
@@ -111,9 +126,10 @@ func (s *sessionState) setReconnect(supported bool) {
 // of it is left to report.
 func (s *sessionState) tunnelUp() {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	s.tunnel = tunnelUp
 	s.lostAt, s.reason, s.lastErr, s.nextAt = time.Time{}, "", "", time.Time{}
+	s.mu.Unlock()
+	s.changed()
 }
 
 // tunnelReconnecting says the tunnel is down and the host is redialling it:
@@ -122,9 +138,10 @@ func (s *sessionState) tunnelUp() {
 // at nextAt. Called again after each failed attempt, with the same lostAt.
 func (s *sessionState) tunnelReconnecting(lostAt time.Time, reason, lastErr string, nextAt time.Time) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	s.tunnel = tunnelReconnecting
 	s.lostAt, s.reason, s.lastErr, s.nextAt = lostAt, reason, lastErr, nextAt
+	s.mu.Unlock()
+	s.changed()
 }
 
 // tunnelLost says the tunnel is down and will not come back: the relay does
@@ -132,9 +149,10 @@ func (s *sessionState) tunnelReconnecting(lostAt time.Time, reason, lastErr stri
 // There is no next attempt.
 func (s *sessionState) tunnelLost(lostAt time.Time, lastErr string) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	s.tunnel = tunnelLost
 	s.lostAt, s.reason, s.lastErr, s.nextAt = lostAt, sessiondir.TunnelReasonReconnectUnsupported, lastErr, time.Time{}
+	s.mu.Unlock()
+	s.changed()
 }
 
 // status is the status the facts give now.

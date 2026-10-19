@@ -511,6 +511,9 @@ func (suite *ConsulStoreTestSuite) TestReplicationViaCacheAndWatch() {
 		HostUser: "testuser",
 	}
 
+	t := suite.T()
+	replicated := observe(t, suite.store2)
+
 	// Store session in store1
 	_, err := suite.store1.Register(context.Background(), session)
 	suite.NoError(err)
@@ -518,8 +521,10 @@ func (suite *ConsulStoreTestSuite) TestReplicationViaCacheAndWatch() {
 		_ = suite.store1.Delete(sessionID)
 	}()
 
-	// Wait for watch to propagate to store2's cache
-	suite.waitForSessionInCache(sessionID)
+	// Wait for store2's watch to deliver it. The cache takes each delivery
+	// before the observers see it, so the read below finds it there.
+	replicated.await(t, 5*time.Second, present(sessionID, 0))
+	suite.True(suite.store2.HasInCache(sessionID), "store2's cache never took the session its watch delivered")
 
 	// Verify data integrity and measure lookup performance
 	start := time.Now()
@@ -542,16 +547,20 @@ func (suite *ConsulStoreTestSuite) TestReplicationHandlesDeletion() {
 	}
 
 	// Store session and wait for replication
+	t := suite.T()
+	replicated := observe(t, suite.store2)
 	_, err := suite.store1.Register(context.Background(), session)
 	suite.NoError(err)
-	suite.waitForSessionInCache(sessionID)
+	replicated.await(t, 5*time.Second, present(sessionID, 0))
+	suite.True(suite.store2.HasInCache(sessionID), "store2's cache never took the session its watch delivered")
 
 	// Delete from store1
 	err = suite.store1.Delete(sessionID)
 	suite.NoError(err)
 
-	// Wait for deletion to propagate via watch
-	suite.waitForSessionRemovedFromCache(sessionID)
+	// Wait for store2's watch to deliver the deletion
+	replicated.await(t, 5*time.Second, absent(sessionID))
+	suite.False(suite.store2.HasInCache(sessionID), "store2's cache kept the session after its watch delivered the deletion")
 
 	// Verify session is actually deleted
 	_, err = suite.store2.Get(sessionID)
@@ -580,7 +589,11 @@ func (suite *ConsulStoreTestSuite) TestBatchOperations() {
 		{ID: "batch-consul-3", NodeAddr: "192.168.1.3:2222", HostUser: "user3"},
 	}
 
-	// Store all sessions in store1
+	// Store all sessions in store1. Observe doesn't replay, so both stores'
+	// observers are subscribed first: one subscribed after the registers could
+	// miss the only delivery that shows them.
+	t := suite.T()
+	local, replicated := observe(t, suite.store1), observe(t, suite.store2)
 	for _, session := range sessions {
 		_, err := suite.store1.Register(context.Background(), session)
 		suite.NoError(err)
@@ -591,13 +604,12 @@ func (suite *ConsulStoreTestSuite) TestBatchOperations() {
 		}
 	}()
 
-	// Wait for all sessions to propagate via watch
-	suite.EventuallyWithT(func(t *assert.CollectT) {
-		assert := assert.New(t)
-		for _, session := range sessions {
-			assert.True(suite.store2.HasInCache(session.ID), "Session %s should be in store2's cache", session.ID)
-		}
-	}, 2*time.Second, 10*time.Millisecond)
+	// Wait for all sessions to propagate via watch, to store2 and to store1
+	for _, session := range sessions {
+		replicated.await(t, 5*time.Second, present(session.ID, 0))
+		suite.True(suite.store2.HasInCache(session.ID), "store2's cache never took %s, which its watch delivered", session.ID)
+		local.await(t, 5*time.Second, present(session.ID, 0))
+	}
 
 	// Test List operation
 	allSessions, err := suite.store1.List()
@@ -608,6 +620,14 @@ func (suite *ConsulStoreTestSuite) TestBatchOperations() {
 	sessionIDs := []string{"batch-consul-1", "batch-consul-2", "batch-consul-3"}
 	err = suite.store1.BatchDelete(sessionIDs)
 	suite.NoError(err)
+
+	// BatchDelete drops the entries from store1's cache, but a delivery from
+	// before the delete that lands after it puts them back until the next
+	// delivery. Wait for store1's watch to deliver the deletes: no later
+	// delivery is from before them.
+	for _, sessionID := range sessionIDs {
+		local.await(t, 5*time.Second, absent(sessionID))
+	}
 
 	// Verify all sessions are deleted
 	for _, sessionID := range sessionIDs {
@@ -1421,21 +1441,6 @@ func (suite *ConsulStoreTestSuite) TestLeaseExpiryAndRenewal() {
 	suite.Nil(pair)
 	pair, _ = suite.consulGet(renewed.ID())
 	suite.NotNil(pair)
-}
-
-// Helper methods for replication testing
-func (suite *ConsulStoreTestSuite) waitForSessionInCache(sessionID string) {
-	suite.EventuallyWithT(func(t *assert.CollectT) {
-		assert := assert.New(t)
-		assert.True(suite.store2.HasInCache(sessionID), "Session should be in store2's cache via watch")
-	}, 2*time.Second, 10*time.Millisecond)
-}
-
-func (suite *ConsulStoreTestSuite) waitForSessionRemovedFromCache(sessionID string) {
-	suite.EventuallyWithT(func(t *assert.CollectT) {
-		assert := assert.New(t)
-		assert.False(suite.store2.HasInCache(sessionID), "Session should be removed from store2's cache via watch")
-	}, 2*time.Second, 10*time.Millisecond)
 }
 
 // The cache takes writes in whatever order they reach it, and keeps the

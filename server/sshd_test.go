@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"errors"
 	"io"
 	"log/slog"
 	"net"
@@ -372,6 +373,22 @@ func (s *testSSHD) gauge(t *testing.T) float64 {
 	return v
 }
 
+// activeSessions is the gauge s.gauge reads, gathered from g. It returns what
+// went wrong rather than failing the test, so a hook running off the test's
+// goroutine can call it.
+func activeSessions(g prometheus.Gatherer) (float64, error) {
+	families, err := g.Gather()
+	if err != nil {
+		return 0, err
+	}
+	for _, f := range families {
+		if f.GetName() == "test_server_sessions_active_count" && len(f.GetMetric()) == 1 {
+			return f.GetMetric()[0].GetGauge().GetValue(), nil
+		}
+	}
+	return 0, errors.New("sessions_active_count not exported")
+}
+
 // createSession has the host create a session over client and returns its ID.
 func (s *testSSHD) createSession(t *testing.T, client *ssh.Client) string {
 	t.Helper()
@@ -422,7 +439,29 @@ func Test_sshd_SessionsActiveGauge(t *testing.T) {
 }
 
 func Test_sshd_SessionsActiveGauge_DisconnectWithoutForward(t *testing.T) {
-	s := newTestSSHD(t)
+	// The hook reads what the connection's end left behind while it runs.
+	// Read after the hook's wakeup instead, it would pass with the hook run
+	// before end, since end can finish before the test reads.
+	type ending struct {
+		id        string
+		gauge     float64
+		gatherErr error
+		getErr    error
+	}
+	endings := make(chan ending, 1)
+	s := newTestSSHD(t, func(d *sshd) {
+		// newTestSSHD's provider registers on the registry s.gauge reads.
+		metrics := d.MetricsProvider.(*prometheusProvider).registerer.(prometheus.Gatherer)
+		sessions := d.SessionManager
+		d.onEnded = func(reg *Registration) {
+			gauge, gatherErr := activeSessions(metrics)
+			_, getErr := sessions.GetSession(reg.ID())
+			select {
+			case endings <- ending{reg.ID(), gauge, gatherErr, getErr}:
+			default:
+			}
+		}
+	})
 
 	client := s.dial(t)
 	sessionID := s.createSession(t, client)
@@ -432,12 +471,11 @@ func Test_sshd_SessionsActiveGauge_DisconnectWithoutForward(t *testing.T) {
 	// cleanup runs; the connection ending must still release the count and
 	// delete the session from the store.
 	require.NoError(t, client.Close())
-	require.Eventually(t, func() bool { return s.gauge(t) == 0 }, 5*time.Second, 10*time.Millisecond,
-		"gauge should drop when the owning connection ends")
-	require.Eventually(t, func() bool {
-		_, err := s.sshd.SessionManager.GetSession(sessionID)
-		return err != nil
-	}, 5*time.Second, 10*time.Millisecond, "session should be deleted when the owning connection ends")
+	got := receiveWithin(t, endings, "the owning connection's end never ran")
+	require.Equal(t, sessionID, got.id)
+	require.NoError(t, got.gatherErr)
+	require.Equal(t, 0.0, got.gauge, "gauge should drop when the owning connection ends")
+	require.Error(t, got.getErr, "session should be deleted when the owning connection ends")
 }
 
 func Test_sshd_ForwardRequiresActiveSession(t *testing.T) {

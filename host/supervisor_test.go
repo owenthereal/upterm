@@ -237,6 +237,9 @@ type supervisorFixture struct {
 	jitters  *jitterLog
 	cancel   context.CancelFunc
 	done     chan struct{}
+	// records is woken once each of the supervisor's record writes has
+	// landed, for awaitStatus.
+	records *wakeups
 
 	agentsMu sync.Mutex
 	agents   []*fakeAgent
@@ -269,6 +272,7 @@ func newSupervisorFixture(t *testing.T, supported bool) *supervisorFixture {
 		dir:     claimTestDir(t),
 		jitters: &jitterLog{},
 		done:    make(chan struct{}),
+		records: newWakeups(),
 	}
 	f.listener = internal.NewTunnelListener(f.first.ln)
 	f.route.Set("node-1:22", "user-1")
@@ -295,7 +299,9 @@ func newSupervisorFixture(t *testing.T, supported bool) *supervisorFixture {
 		publish: func() {
 			if err := f.dir.Update(state.apply); err != nil {
 				t.Errorf("publishing the record: %v", err)
+				return
 			}
+			f.records.poke()
 		},
 		sessionID:  supervisorSessionID,
 		generation: 1,
@@ -325,20 +331,19 @@ func (f *supervisorFixture) record(t *testing.T) sessiondir.Record {
 	return f.dir.Record()
 }
 
-// awaitStatus polls the record until its status is want, and returns it.
+// awaitStatus waits for the record's status to be want, and returns the
+// record that had it. It reads the record at the start, and again each time
+// a write has landed.
 func (f *supervisorFixture) awaitStatus(t *testing.T, want string, within time.Duration) sessiondir.Record {
 	t.Helper()
-	deadline := time.Now().Add(within)
-	for {
-		rec := f.dir.Record()
-		if rec.Status == want {
-			return rec
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("the status is %q, not %q, after %s: %+v", rec.Status, want, within, rec)
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
+	var rec sessiondir.Record
+	f.records.until(t, within, func() bool {
+		rec = f.dir.Record()
+		return rec.Status == want
+	}, func() string {
+		return fmt.Sprintf("the status is %q, not %q: %+v", rec.Status, want, rec)
+	})
+	return rec
 }
 
 // awaitReturn waits for run to return.
