@@ -267,6 +267,10 @@ type Host struct {
 	// leaves.
 	JoinTimeout time.Duration
 
+	// joinClock is the clock each Run's join state reads and arms its
+	// timeout on. A per-Host test hook, so a test can fire the timeout
+	// itself; zero is the real clock.
+	joinClock joinClock
 	// onJoinDeadlineFired is a per-Host test barrier for a late losing deadline.
 	onJoinDeadlineFired func(stop <-chan struct{})
 	// onJoinPublish is a per-Host test barrier run before each join-timeout
@@ -663,7 +667,7 @@ func (c *Host) Run(ctx context.Context) (runErr error) {
 		runSignalNumber *int
 	)
 
-	joins := newJoinState(c.JoinTimeout)
+	joins := newJoinState(c.JoinTimeout, c.joinClock)
 	// On the Host for JoinState, before anything that could ask runs. Cleared
 	// on the way out for SessionDir's reason: a Host between runs has no
 	// session to answer for.
