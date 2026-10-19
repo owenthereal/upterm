@@ -79,8 +79,10 @@ type emulation struct {
 	titled, titleOver bool
 	// titles is the title stack (see titleStack), and titleIndexed is set
 	// once the stream has saved or restored a title by its index on it.
-	titles       titleStack
-	titleIndexed bool
+	// titleModes is set once the stream has set a title mode (see
+	// watchTitles).
+	titles                   titleStack
+	titleIndexed, titleModes bool
 	// cwd is the working directory the stream last reported, by OSC 7, and
 	// cwdTold whether it reported one at all, as title and titled are.
 	cwd     string
@@ -199,11 +201,11 @@ func (replayer) Start(ctx context.Context, deadline time.Time, c *uio.Capture, s
 // screen, the history kept through the scroll-off function instead, replies
 // to queries discarded, the title and the title stack, the working
 // directory, the colours, the clipboard and synchronized output's DCS form
-// kept, images, device control strings, character protection, selective
-// erases, saves, renditions and line sizes the cells can't hold, a status
-// line, a font, a rectangular attribute extent and a conformance level noted,
-// and the meter stopped by ctx or the deadline. Each callback and handler runs inside the
-// emulator's Write and touches only the emulation.
+// kept, images, device control strings, title modes, character protection,
+// selective erases, saves, renditions and line sizes the cells can't hold, a
+// status line, a font, a rectangular attribute extent and a conformance level
+// noted, and the meter stopped by ctx or the deadline. Each callback and
+// handler runs inside the emulator's Write and touches only the emulation.
 func (e *emulation) setUp() {
 	t := e.term
 	t.SetScrollbackSize(0)
@@ -644,14 +646,34 @@ type titleEntry struct {
 // the window title.
 func savesTitle(ps int) bool { return ps == 0 || ps == 2 }
 
-// watchTitles registers the handler that keeps the title stack. A third
-// parameter from 1 on is an index on xterm's stack, counted from its bottom:
-// a push stores into that entry in place and a pop reads it, where the
-// session's terminal may have pushed below the ring's first entry, so which
-// entry that is can't be told, and the render falls back on it. x/vt has no
-// CSI t handler of its own; this returns false all the same, as
-// watchColours' do.
+// watchTitles registers the handlers that keep the title stack and note the
+// title modes. A third parameter from 1 on is an index on xterm's stack,
+// counted from its bottom: a push stores into that entry in place and a pop
+// reads it, where the session's terminal may have pushed below the ring's
+// first entry, so which entry that is can't be told, and the render falls
+// back on it.
+//
+// XTSMTITLE (CSI > Pm t) sets title modes, each parameter from 0 to 3 one,
+// as xterm reads them: titles set, or reported, in hexadecimal, or as UTF-8.
+// x/vt keeps none, where a raw replay sets them on the joiner's terminal, so
+// a title the program sets in hexadecimal after the handoff point would show
+// as its digits on a joiner given the render. One with no parameters sets
+// the defaults, which set none. The note stays once XTRMTITLE (CSI > Pm T)
+// turns them off again: the raw ring is exact whatever came after. x/vt keys
+// a CSI handler by its prefix too, so the window operations' handler sees no
+// XTSMTITLE, and x/vt's SD (CSI Ps T) no XTRMTITLE.
+//
+// x/vt has no handler of its own for either; these return false all the same,
+// as watchColours' do.
 func (e *emulation) watchTitles() {
+	e.term.RegisterCsiHandler(ansi.Command('>', 0, 't'), func(params ansi.Params) bool {
+		for _, p := range params {
+			if n := p.Param(-1); n >= 0 && n <= 3 {
+				e.titleModes = true
+			}
+		}
+		return false
+	})
 	e.term.RegisterCsiHandler('t', func(params ansi.Params) bool {
 		op, _, _ := params.Param(0, 0)
 		if op != 22 && op != 23 {

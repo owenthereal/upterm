@@ -728,6 +728,9 @@ func (e *emulation) eligible(parts uio.ReplayParts) (rep, error) {
 	if e.titleIndexed {
 		return rep{}, &IneligibleError{State: "a title stack entry by index"}
 	}
+	if e.titleModes {
+		return rep{}, &IneligibleError{State: "a title mode"}
+	}
 	if e.savedModes {
 		return rep{}, &IneligibleError{State: "saved DEC modes"}
 	}

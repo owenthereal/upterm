@@ -1599,6 +1599,51 @@ func TestReplayFailsOnATitleStackTooLargeToReplay(t *testing.T) {
 	requireIneligible(t, err, "a saved title too long to replay")
 }
 
+// A title mode the session set by XTSMTITLE (CSI > Pm t), which makes the
+// terminal take the titles a program sets, or report them, in hexadecimal or
+// as UTF-8, fails the render, named: x/vt keeps none, so a joiner given the
+// render would show a title the program sets in hexadecimal after the
+// handoff point as its digits, where the session's terminal, and a joiner
+// given the raw ring, decode it. Each parameter from 0 to 3 sets one, as
+// xterm reads them, and the note stays once XTRMTITLE (CSI > Pm T) turns
+// them off again. XTRMTITLE alone, XTSMTITLE with no parameters, which sets
+// the defaults, and a mode xterm doesn't have render, and x/vt, which keys a
+// CSI handler by its prefix too, doesn't take XTRMTITLE for SD (CSI Ps T)
+// and scroll.
+func TestReplayFailsOnATitleMode(t *testing.T) {
+	join := func(t *testing.T, stream string) error {
+		t.Helper()
+		_, fellBack := fanOut(t, New(), []byte("text\r\n"+stream+"more\r\n"), []uio.SizeEvent{event(1, 0, 80, 24)}, 4<<10)
+		return fellBack
+	}
+	for _, tc := range []struct{ name, stream string }{
+		{"titles set in hexadecimal", "\x1b[>0t"},
+		{"titles reported in hexadecimal", "\x1b[>1t"},
+		{"titles set as UTF-8", "\x1b[>2t"},
+		{"titles reported as UTF-8", "\x1b[>3t"},
+		{"two modes", "\x1b[>0;1t"},
+		{"a mode xterm doesn't have, then one it has", "\x1b[>4;1t"},
+		{"a mode set, then reset", "\x1b[>1t\x1b[>1T"},
+		{"a mode set, then every one reset", "\x1b[>1t\x1b[>T"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			requireIneligible(t, join(t, tc.stream), "a title mode")
+		})
+	}
+	for _, tc := range []struct{ name, stream string }{
+		{"a mode reset", "\x1b[>1T"},
+		{"every mode reset", "\x1b[>T"},
+		{"the defaults set", "\x1b[>t"},
+		{"a mode xterm doesn't have", "\x1b[>4t"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			require.NoError(t, join(t, tc.stream))
+			j := joinAt(t, 80, 24, "text\r\n"+tc.stream+"more\r\n")
+			require.Equal(t, "text", j.a.MainScreen().Line(0).String(), "scrolled")
+		})
+	}
+}
+
 // DEC private modes the session saved by XTSAVE (CSI ? Pm s) fail the
 // render, named: x/vt keeps none and ignores the XTRESTORE (CSI ? Pm r) that
 // puts them back, so the render can't tell what a later restore sets on the
