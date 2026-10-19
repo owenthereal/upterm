@@ -4008,6 +4008,48 @@ func TestReplayFailsOnAWindowProperty(t *testing.T) {
 	}
 }
 
+// ESC % @, which leaves UTF-8 for xterm's default coding, ISO-8859-1, fails
+// the render, named: x/vt reads UTF-8 alone, where a raw replay hands the
+// joiner's terminal the selection, so it reads the bytes after it as the
+// session's terminal does. The note stays once ESC % G selects UTF-8 again,
+// or RIS comes, which leaves the coding as it is: what was printed in
+// between may be other characters to x/vt. x/vt keys the sequence by its
+// last intermediate, so ESC ( % @, which xterm ignores, is noted too.
+//
+// ESC % G, which selects UTF-8, as x/vt reads, renders, and so do ESC % 8,
+// the Linux console's old UTF-8 selection, which xterm ignores, and ESC @.
+func TestReplayFailsOnANonUTF8Coding(t *testing.T) {
+	join := func(t *testing.T, stream string) error {
+		t.Helper()
+		_, fellBack := fanOut(t, New(), []byte("text\r\n"+stream+"more\r\n"), []uio.SizeEvent{event(1, 0, 80, 24)}, 4<<10)
+		return fellBack
+	}
+	for _, tc := range []struct{ name, stream string }{
+		{"ISO-8859-1 selected", "\x1b%@"},
+		{"ISO-8859-1 selected and printed", "\x1b%@caf\xe9\r\n"},
+		{"then UTF-8 again", "\x1b%@\x1b%G"},
+		{"ISO-8859-1 printed, then UTF-8 again", "\x1b%@caf\xe9\x1b%G"},
+		{"then RIS", "\x1b%@\x1bc"},
+		{"after a G-set's intermediate", "\x1b(%@"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			requireIneligible(t, join(t, tc.stream), "a non-UTF-8 coding")
+		})
+	}
+	for _, tc := range []struct{ name, stream string }{
+		{"UTF-8 selected", "\x1b%G"},
+		{"UTF-8 selected, then printed", "\x1b%Gcafé\r\n"},
+		{"the Linux console's old UTF-8 selection", "\x1b%8"},
+		{"ESC @", "\x1b@"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			require.NoError(t, join(t, tc.stream))
+			_, err := renderAt(t, 80, 24, "text\r\n"+tc.stream+"more\r\n")
+			require.NoError(t, err, "given to the emulation")
+		})
+	}
+}
+
 // screenTitleString is a window title string of GNU screen's and tmux's, as
 // tmux reads one: ESC k after an ESC and any C0 controls tmux executes where
 // they stand but CAN and SUB, then the title, up to the ESC, CAN or SUB that

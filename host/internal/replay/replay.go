@@ -178,6 +178,9 @@ type emulation struct {
 	// windowProperty is set once the stream has set or deleted a property of
 	// the terminal's window (see watchWindowProperty).
 	windowProperty bool
+	// nonUTF8 is set once the stream has left UTF-8 for another coding (see
+	// watchCoding).
+	nonUTF8 bool
 	// pastEdge is what the emulator keeps of the tab stops past the screen's
 	// right edge (see the type).
 	pastEdge pastEdge
@@ -277,10 +280,10 @@ func (replayer) Start(ctx context.Context, deadline time.Time, c *uio.Capture, s
 // 94-character set x/vt drops, a 96-character set, a window operation,
 // printer controller mode, a memory lock, a key format, locator reporting,
 // the locator's events, a change to iTerm2's state, the keyboard's LEDs, a
-// log file and a window property noted, auto print and the tab stops past
-// the screen's edge kept, and the meter stopped by ctx or the deadline. Each
-// callback and handler runs inside the emulator's Write and touches only the
-// emulation.
+// log file, a window property and a coding other than UTF-8 noted, auto
+// print and the tab stops past the screen's edge kept, and the meter stopped
+// by ctx or the deadline. Each callback and handler runs inside the
+// emulator's Write and touches only the emulation.
 func (e *emulation) setUp() {
 	t := e.term
 	t.SetScrollbackSize(0)
@@ -330,6 +333,7 @@ func (e *emulation) setUp() {
 	e.watchLEDs()
 	e.watchLogFile()
 	e.watchWindowProperty()
+	e.watchCoding()
 }
 
 // colours is the last change the stream made, by OSC, to each of the colours
@@ -1691,6 +1695,29 @@ func (e *emulation) watchLogFile() {
 func (e *emulation) watchWindowProperty() {
 	e.term.RegisterOscHandler(3, func([]byte) bool {
 		e.windowProperty = true
+		return false
+	})
+}
+
+// watchCoding registers the handler that notes ESC % @, which xterm and the
+// Linux console read as leaving UTF-8 for their default coding, ISO-8859-1.
+// x/vt reads UTF-8 alone, where a raw replay hands the joiner's terminal the
+// selection, after which it reads each byte past ASCII as a character of its
+// own, as the session's terminal does, where x/vt reads a UTF-8 sequence:
+// the bytes printed after the handoff, the program's own, among them. The
+// note stays, whatever follows: an ESC % G that selects UTF-8 again leaves
+// what was printed in between, which x/vt may have read as other characters,
+// and xterm puts back at ESC % @ the character sets it saved at the ESC % G
+// before it, and resets them at the next, which x/vt doesn't; and RIS leaves
+// the coding as it is. ESC % G itself, UTF-8 as x/vt reads, isn't noted.
+// Every one counts, though an xterm whose resources make UTF-8 its only
+// coding ignores it. x/vt keys a handler by the last intermediate alone, so
+// ESC ( % @, which xterm ignores, is noted too; watchCharsets94 notes other
+// finals after %. x/vt has no handler of its own for it; this returns false
+// all the same, as watchColours' do.
+func (e *emulation) watchCoding() {
+	e.term.RegisterEscHandler(ansi.Command(0, '%', '@'), func() bool {
+		e.nonUTF8 = true
 		return false
 	})
 }

@@ -1032,6 +1032,9 @@ func (e *emulation) eligible(parts uio.ReplayParts) (rep, error) {
 	if e.windowProperty {
 		return rep{}, &IneligibleError{State: "a window property"}
 	}
+	if e.nonUTF8 {
+		return rep{}, &IneligibleError{State: "a non-UTF-8 coding"}
+	}
 	if splitWide(e.term.MainScreen()) || splitWide(e.term.AltScreen()) {
 		return rep{}, &IneligibleError{State: splitWideState}
 	}
