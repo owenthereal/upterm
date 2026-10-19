@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -26,13 +28,30 @@ import (
 // repaintsOnWinch prints first once, and then, on every SIGWINCH, the size
 // its terminal has at that moment, rows first, as `stty size` prints it: a
 // full-screen program repainting at the size it is told. first is printf's
-// format, so octal escapes in it are sequences.
+// format, so octal escapes in it are sequences. Once it has set its trap and
+// printed first it creates the file ready.
 //
 // The trap's body is single-quoted so that $(stty size) runs each time the
 // trap does. Double-quoted, the shell would expand it once, as the trap is
 // set, and every repaint would report the size the command started at.
-func repaintsOnWinch(first string) []string {
-	return []string{"sh", "-c", `trap 'printf "REPAINT %s\n" "$(stty size)"' WINCH; printf '` + first + `'; while :; do sleep 0.05; done`}
+func repaintsOnWinch(first, ready string) []string {
+	return []string{"sh", "-c", `trap 'printf "REPAINT %s\n" "$(stty size)"' WINCH; printf '` + first + `'; : > "$1"; while :; do sleep 0.05; done`, "sh", ready}
+}
+
+// startRepainting is startHost for a session whose command is
+// repaintsOnWinch(first), returned once the command has printed first. Every
+// client that joins is nudged, but a nudge that reaches the shell before it
+// has set its trap is lost, so a client joining while the command starts is
+// repainted or not by how fast the shell gets to its trap. A client joining
+// after this returns always is.
+func startRepainting(t *testing.T, first string, srv *Server) *hostHarness {
+	t.Helper()
+	ready := filepath.Join(t.TempDir(), "ready")
+	srv.Command = repaintsOnWinch(first, ready)
+	h := startHost(t, srv)
+	require.Eventually(t, func() bool { _, err := os.Stat(ready); return err == nil },
+		harnessTimeout, time.Millisecond, "the command never printed its first output")
+	return h
 }
 
 // replayed reads what a client of a repaintsOnWinch session is sent until
@@ -160,7 +179,7 @@ var cursorMoves = []string{"\x1b[H", "\x1b[1A"}
 // cursor moves.
 func TestASmallerGuestGetsTheEmulatedScreen(t *testing.T) {
 	line := ringMark + strings.Repeat("x", 60)
-	h := startHost(t, &Server{Command: repaintsOnWinch(`\033[H\033[2J` + line + `\n\033[1A\033[K` + line + `\n`)})
+	h := startRepainting(t, `\033[H\033[2J`+line+`\n\033[1A\033[K`+line+`\n`, &Server{})
 	_, viewer, _ := h.connectHost(t, nil)
 	readUntil(t, viewer, line+"\r\n\x1b[1A\x1b[K"+line)
 
@@ -187,9 +206,14 @@ func TestAnEqualGuestGetsExactGeometry(t *testing.T) {
 		fmt.Fprintf(&first, `line %02d\n`, i+1)
 	}
 	first.WriteString(`\033[5;10H\033[4munder\033[m\033[2A\033[Kup\033[12;1HEQUAL-MARK`)
-	h := startHost(t, &Server{Command: repaintsOnWinch(first.String())})
+	h := startRepainting(t, first.String(), &Server{})
 	_, viewer, _ := h.connectHost(t, nil)
-	ring := readUntil(t, viewer, "EQUAL-MARK")
+	// The viewer's own join nudged the command, and its repaint follows the
+	// mark. It is waited for before the guest joins, so that it is in the ring
+	// the guest captures and in the reference alike: left to chance, it would
+	// reach the ring before the capture on some runs and after it on others,
+	// and only on the first would the guest's screen show it.
+	ring := readUntil(t, viewer, "EQUAL-MARKREPAINT 24 80\r\n")
 
 	_, out := h.connectGuest(t, withWindow(desktop))
 	got := replayed(t, out, desktop)
@@ -208,17 +232,21 @@ func TestAnEqualGuestGetsExactGeometry(t *testing.T) {
 // would not wrap at all.
 func TestAPinnedSessionEmulatesAtItsSize(t *testing.T) {
 	line := "PINNED-MARK" + strings.Repeat("x", 74)
-	h := startHost(t, &Server{Command: repaintsOnWinch(line + `\n`), PtySize: desktop, PinPtySize: true})
+	h := startRepainting(t, line+`\n`, &Server{PtySize: desktop, PinPtySize: true})
 	_, viewer, _ := h.connectHost(t, nil)
-	readUntil(t, viewer, line)
+	// The viewer's own join nudged the command, and its repaint follows the
+	// line. It is waited for before the guest joins, so that the screen the
+	// guest is handed always shows it: left to chance, it would reach the ring
+	// before the capture on some runs and after it on others.
+	readUntil(t, viewer, line+"\r\nREPAINT 24 80\r\n")
 
 	big := termsize.Size{Cols: 100, Rows: 40}
 	_, out := h.connectGuest(t, withWindow(big))
 	// The pinned pty's own size is what the command repaints at.
 	term := newTerminal(t, big, replayed(t, out, desktop))
 	rows := term.rows()
-	require.Equal(t, []string{line[:desktop.Cols], line[desktop.Cols:], ""}, rows[:3])
-	require.Equal(t, uv.Pos(0, 2), term.CursorPosition())
+	require.Equal(t, []string{line[:desktop.Cols], line[desktop.Cols:], "REPAINT 24 80"}, rows[:3])
+	require.Equal(t, uv.Pos(0, 3), term.CursorPosition())
 }
 
 // A session in origin mode holds state the reconstruction doesn't restore,
@@ -226,9 +254,8 @@ func TestAPinnedSessionEmulatesAtItsSize(t *testing.T) {
 // and the session's log has one line at Info saying why.
 func TestAnIneligibleJoinFallsBackAndSaysWhy(t *testing.T) {
 	logs := newSessionLog()
-	h := startHost(t, &Server{
-		Command: repaintsOnWinch(`\033[?6hORIGIN-MARK`),
-		Logger:  slog.New(slog.NewTextHandler(logs, nil)),
+	h := startRepainting(t, `\033[?6hORIGIN-MARK`, &Server{
+		Logger: slog.New(slog.NewTextHandler(logs, nil)),
 	})
 	_, viewer, _ := h.connectHost(t, nil)
 	ring := readUntil(t, viewer, "ORIGIN-MARK")
