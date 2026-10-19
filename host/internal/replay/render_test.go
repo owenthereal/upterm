@@ -5,7 +5,9 @@ import (
 	"context"
 	"fmt"
 	"image/color"
+	"maps"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -739,11 +741,15 @@ func TestReplayClearsATitleTheSessionCleared(t *testing.T) {
 
 // A colour the session set by OSC, which the query filter lets into the ring
 // as it drops only the queries, and which the render doesn't restore, fails
-// it, named: a palette entry or a special colour, by OSC 4 or 5, even once
-// reset, and a dynamic colour, by OSC 10 to 19, by any specification, one of
-// several in one OSC included, until its own reset, OSC 110 to 119. A dynamic
-// colour set and then reset is the joiner's own again, and renders; so does a
-// palette reset alone, and a query, which never reaches the ring.
+// it, named, until its reset: an entry of xterm's colour table, a palette
+// entry or a special colour, by OSC 4 or 5, until OSC 104 or 105 resets it,
+// and a dynamic colour, by OSC 10 to 19, by any specification, one of several
+// in one OSC included, until its own reset, OSC 110 to 119. A change xterm
+// and other terminals read apart counts as a setting too: OSC 110 to 119 with
+// anything after the ';', which xterm ignores and others read as a reset, and
+// an OSC 4, 5, 104 or 105 naming an entry xterm can't read, which it stops
+// at. A colour set and then reset renders, as do a reset alone and a query,
+// which never reaches the ring.
 func TestReplayFailsOnAChangedColour(t *testing.T) {
 	join := func(t *testing.T, stream string) error {
 		t.Helper()
@@ -752,8 +758,8 @@ func TestReplayFailsOnAChangedColour(t *testing.T) {
 	}
 	for _, tc := range []struct{ name, stream string }{
 		{"a palette entry", "\x1b]4;1;rgb:ff/00/00\x07"},
-		{"a palette entry reset", "\x1b]4;1;rgb:ff/00/00\x07\x1b]104;1\x07"},
 		{"a special colour", "\x1b]5;0;rgb:ff/00/00\x1b\\"},
+		{"a special colour by its palette number", "\x1b]4;256;rgb:ff/00/00\x07"},
 		{"the foreground", "\x1b]10;#ffffff\x07"},
 		{"the background", "\x1b]11;rgb:00/00/80\x07"},
 		{"the background by a name", "\x1b]11;navy\x1b\\"},
@@ -762,6 +768,17 @@ func TestReplayFailsOnAChangedColour(t *testing.T) {
 		{"the last dynamic colour, and one past it", "\x1b]19;rgb:ff/00/00;rgb:00/ff/00\x07"},
 		{"the background after the foreground", "\x1b]10;rgb:ff/ff/ff;rgb:00/00/00\x07\x1b]110\x07"},
 		{"another colour's reset", "\x1b]11;rgb:00/00/80\x07\x1b]110\x07"},
+		{"the background reset, then set", "\x1b]111\x07\x1b]11;rgb:00/00/80\x07"},
+		{"the background reset with more than xterm reads", "\x1b]11;rgb:00/00/80\x07\x1b]111;rgb:00/00/80\x07"},
+		{"the whole table reset, then an entry set", "\x1b]104\x07\x1b]4;1;rgb:ff/00/00\x07"},
+		{"two entries set, the first reset", "\x1b]4;1;rgb:ff/00/00;2;rgb:00/ff/00\x07\x1b]104;1\x07"},
+		{"a special colour set, the palette reset", "\x1b]5;0;rgb:ff/00/00\x07\x1b]104;0\x07"},
+		{"the special colours reset, then one set", "\x1b]105\x07\x1b]5;4;rgb:ff/00/00\x07"},
+		{"an entry xterm can't read", "\x1b]4;1x;rgb:ff/00/00\x07"},
+		{"an entry past the table", "\x1b]4;261;rgb:ff/00/00\x07"},
+		{"a reset list xterm stops in", "\x1b]104;1;x;2\x07"},
+		{"a reset list with an empty entry", "\x1b]104;;1\x07"},
+		{"a special colour past the last", "\x1b]105;5\x07"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			requireIneligible(t, join(t, tc.stream), "a changed palette or dynamic colour")
@@ -770,11 +787,137 @@ func TestReplayFailsOnAChangedColour(t *testing.T) {
 	for _, tc := range []struct{ name, stream string }{
 		{"the background reset", "\x1b]11;rgb:00/00/80\x07\x1b]111\x07"},
 		{"each one reset", "\x1b]10;red;blue;green\x07\x1b]110\x07\x1b]111;\x07\x1b]112\x1b\\"},
+		{"a palette entry reset", "\x1b]4;1;rgb:ff/00/00\x07\x1b]104;1\x07"},
+		{"the whole table reset", "\x1b]4;1;rgb:ff/00/00\x07\x1b]5;0;rgb:ff/00/00\x07\x1b]104\x07"},
+		{"a special colour reset", "\x1b]4;258;rgb:ff/00/00\x07\x1b]105;2\x07"},
 		{"a palette reset alone", "\x1b]104\x07"},
 		{"a query", "\x1b]11;?\x07\x1b]4;1;?\x07"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			require.NoError(t, join(t, tc.stream))
+		})
+	}
+}
+
+// xtermColours is what xterm holds of the colours a program sets by OSC, each
+// as the specification that set it, and "", or no entry, where it is at its
+// default: the ten dynamic colours, OSC 10 to 19, and the colour table, the
+// 256 palette entries and then the five special colours, OSC 4 and 5.
+type xtermColours struct {
+	dynamic [10]string
+	table   map[int]string
+}
+
+// coloursOf is what xterm holds of those colours once a terminal at its
+// defaults is given p, the OSCs these tests send read as xterm reads them:
+// each specification of OSC 10 to 19 sets the next dynamic colour on, and
+// OSC 110 to 119 with nothing after the number or its ';' resets one; OSC 4
+// and 5 set the entries each pair names, OSC 5 numbering the special colours
+// from 0, and OSC 104 and 105 reset those listed, or with none listed, the
+// whole table, or every special colour.
+func coloursOf(p []byte) xtermColours {
+	c := xtermColours{table: map[int]string{}}
+	term := vt.NewEmulator(80, 24)
+	term.SetReplyFunc(func([]byte) {})
+	for i := range c.dynamic {
+		term.RegisterOscHandler(10+i, func(data []byte) bool {
+			for k, colour := range strings.Split(string(data), ";")[1:] {
+				if i+k < len(c.dynamic) && colour != "" {
+					c.dynamic[i+k] = colour
+				}
+			}
+			return true
+		})
+		term.RegisterOscHandler(110+i, func(data []byte) bool {
+			if _, rest, _ := strings.Cut(string(data), ";"); rest == "" {
+				c.dynamic[i] = ""
+			}
+			return true
+		})
+	}
+	for _, osc := range []struct{ set, reset, first int }{{4, 104, 0}, {5, 105, 256}} {
+		term.RegisterOscHandler(osc.set, func(data []byte) bool {
+			f := strings.Split(string(data), ";")[1:]
+			for k := 0; k+1 < len(f); k += 2 {
+				n, _ := strconv.Atoi(f[k])
+				c.table[osc.first+n] = f[k+1]
+			}
+			return true
+		})
+		term.RegisterOscHandler(osc.reset, func(data []byte) bool {
+			_, list, _ := strings.Cut(string(data), ";")
+			if list == "" {
+				maps.DeleteFunc(c.table, func(n int, _ string) bool { return n >= osc.first })
+				return true
+			}
+			for _, f := range strings.Split(list, ";") {
+				n, _ := strconv.Atoi(f)
+				delete(c.table, osc.first+n)
+			}
+			return true
+		})
+	}
+	_, _ = term.Write(p)
+	return c
+}
+
+// A colour the session reset, which a raw replay resets on the joiner's
+// terminal as well, the render resets there too, at its end: each dynamic
+// colour whose last change was its reset, by that reset, OSC 110 to 119; and
+// the entries of xterm's colour table whose last change was a reset, the
+// palette's and then the special colours', by one OSC 104 listing them, or
+// listing none once the whole table was. A joiner whose own programs left it
+// colours of their own then ends with the ones a raw replay leaves it, those
+// the session reset at their defaults and the rest its own, as xterm reads
+// the OSCs (see coloursOf). The first case is x/vt's own background too,
+// which x/vt reads only from a reset with nothing after the number.
+func TestReplayResetsTheColoursTheSessionReset(t *testing.T) {
+	const own = "\x1b]10;rgb:aa/aa/aa\x07\x1b]11;rgb:00/00/80\x07\x1b]12;rgb:ff/00/00\x07\x1b]17;rgb:00/ff/00\x07" +
+		"\x1b]4;1;rgb:ff/00/00;200;rgb:00/ff/00\x07\x1b]5;0;rgb:00/00/ff\x07"
+	join := func(t *testing.T, stream, resets string) []byte {
+		t.Helper()
+		sent, fellBack := fanOut(t, New(), []byte(stream), []uio.SizeEvent{event(1, 0, 80, 24)}, 64<<10)
+		require.NoError(t, fellBack)
+		require.True(t, bytes.HasPrefix(sent, []byte(preamble)), "the render, not the raw ring")
+		require.True(t, bytes.HasSuffix(sent, []byte(resets)), "%q", sent)
+		require.Equal(t, strings.Count(resets, "\x1b]1"), bytes.Count(sent, []byte("\x1b]1")), "%q", sent)
+		require.Equal(t, coloursOf([]byte(own+stream)), coloursOf([]byte(own+string(sent))), "the joiner's colours: %q", sent)
+		return sent
+	}
+
+	t.Run("the background, on x/vt", func(t *testing.T) {
+		const stream = "\x1b]11;rgb:00/80/00\x07text\r\n\x1b]111\x07more\r\n"
+		sent := join(t, stream, "\x1b]111\x07")
+		a, _ := newReference(80, 24)
+		_, _ = a.WriteString(stream)
+		b, _ := newReference(80, 24)
+		_, _ = b.WriteString(own)
+		before := b.BackgroundColor()
+		_, _ = b.Write(sent)
+		require.NotEqual(t, before, b.BackgroundColor(), "the joiner's own background")
+		require.Equal(t, a.BackgroundColor(), b.BackgroundColor())
+	})
+
+	for _, tc := range []struct{ name, stream, resets string }{
+		{"none", "text\r\n", ""},
+		{"the background", "text\r\n\x1b]111\x07more\r\n", "\x1b]111\x07"},
+		{"the foreground and the cursor colour, ended by ST", "text\r\n\x1b]110\x1b\\\x1b]112\x1b\\more\r\n", "\x1b]110\x07\x1b]112\x07"},
+		{"the background, by a reset with nothing after its ';'", "\x1b]11;navy\x07\x1b]111;\x07text\r\n", "\x1b]111\x07"},
+		{"the highlight colours", "\x1b]17;rgb:00/00/80\x07\x1b]117\x07\x1b]119\x07text\r\n", "\x1b]117\x07\x1b]119\x07"},
+		{"three set by one, each reset", "\x1b]10;red;blue;green\x07\x1b]112\x07\x1b]110\x07\x1b]111\x07text\r\n", "\x1b]110\x07\x1b]111\x07\x1b]112\x07"},
+		{"the whole table", "text\r\n\x1b]104\x07more\r\n", "\x1b]104\x07"},
+		{"the whole table, by an empty list", "\x1b]104;\x07text\r\n", "\x1b]104\x07"},
+		{"a palette entry", "\x1b]104;1\x07text\r\n", "\x1b]104;1\x07"},
+		{"a palette entry, set and then reset", "\x1b]4;1;rgb:00/00/80\x07text\r\n\x1b]104;1\x07more\r\n", "\x1b]104;1\x07"},
+		{"palette entries, in the table's order", "\x1b]4;7;red;3;blue\x07\x1b]104;7;3\x07text\r\n", "\x1b]104;3;7\x07"},
+		{"a special colour", "\x1b]5;0;rgb:00/00/80\x07\x1b]105;0\x07text\r\n", "\x1b]104;256\x07"},
+		{"every special colour", "\x1b]105\x07text\r\n", "\x1b]104;256;257;258;259;260\x07"},
+		{"the whole table, then an entry again", "\x1b]4;1;red\x07\x1b]104\x07\x1b]104;1\x07text\r\n", "\x1b]104\x07"},
+		{"an entry, then the whole table", "\x1b]104;1\x07\x1b]4;2;red\x07\x1b]104\x07text\r\n", "\x1b]104\x07"},
+		{"a palette entry and the background", "\x1b]111\x07\x1b]104;200\x07text\r\n", "\x1b]104;200\x07\x1b]111\x07"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			join(t, tc.stream, tc.resets)
 		})
 	}
 }

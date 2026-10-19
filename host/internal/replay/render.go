@@ -71,6 +71,7 @@ func (e *emulation) render() ([]byte, error) {
 		rows:      e.join.Rows,
 		fits:      e.join.Cols == e.term.Width(),
 		rep:       rep,
+		colours:   &e.colours,
 		cwd:       e.cwd,
 		cwdTold:   e.cwdTold,
 		clips:     e.clips,
@@ -173,6 +174,9 @@ type renderer struct {
 	// client doesn't.
 	fits bool
 	rep  rep
+	// colours is the last change the stream made to each colour, none of
+	// them a setting once the render is eligible.
+	colours *colours
 	// cwd is the working directory to send, if cwdTold, and cwdOver says it
 	// didn't fit.
 	cwd              string
@@ -442,8 +446,9 @@ func (r *renderer) reportModes() {
 // print, which the charsets would remap and insert mode would shift: the
 // charsets, insert mode, the application keypad, reverse video, the title
 // stack and then the title, the cursor's style, autowrap, and the active pen
-// and link. The working directory and the clipboard writes still in force,
-// which change none of that, come last of all.
+// and link. The colours the stream reset, the working directory and the
+// clipboard writes still in force, which change none of that, come last of
+// all.
 //
 // Autowrap goes off here, after every wrap reprint. A character that fills
 // the line leaves a wrap pending with autowrap on or off, so where ?7l goes
@@ -480,10 +485,47 @@ func (r *renderer) continuation(reprinted int) {
 	cur := t.ActiveScreen().Cursor()
 	_ = enc.penTo(cur.Pen)
 	_ = enc.linkTo(cur.Link)
+	r.colourResets()
 	r.workingDirectory()
 	r.clipboard()
 	if len(enc.buf) == reprinted {
 		_ = enc.put("\x00")
+	}
+}
+
+// colourResets resets each colour whose last change in the stream was its
+// reset (see colours), as a raw replay leaves it on a joiner's terminal that
+// a program of its own gave a colour of its own. The entries of the colour
+// table go by one OSC 104, which lists them by their place in the table,
+// special colours included, as xterm's takes them, or lists none when every
+// entry was reset, which resets them all. Each dynamic colour goes by its own
+// reset, OSC 110 to 119, as xterm ignores one that names more.
+func (r *renderer) colourResets() {
+	enc, c := r.enc, r.colours
+	n := 0
+	for _, ch := range c.table {
+		if ch == colourReset {
+			n++
+		}
+	}
+	switch n {
+	case 0:
+	case tableSize:
+		_ = enc.put("\x1b]104\x07")
+	default:
+		list := make([]byte, 0, len("\x1b]104\x07")+4*n)
+		list = append(list, "\x1b]104"...)
+		for i, ch := range c.table {
+			if ch == colourReset {
+				list = strconv.AppendInt(append(list, ';'), int64(i), 10)
+			}
+		}
+		_ = enc.bytes(append(list, '\a'))
+	}
+	for i, ch := range c.dynamic {
+		if ch == colourReset {
+			_ = enc.put("\x1b]", strconv.Itoa(110+i), "\x07")
+		}
 	}
 }
 

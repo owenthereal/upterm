@@ -85,7 +85,8 @@ type emulation struct {
 	// cwdTold whether it reported one at all, as title and titled are.
 	cwd     string
 	cwdTold bool
-	// colours is what the stream changed of the terminal's colours.
+	// colours is the last change the stream made to each of the terminal's
+	// colours.
 	colours colours
 	// graphics is set once the stream has drawn an image (see watchGraphics).
 	graphics bool
@@ -232,54 +233,154 @@ func (e *emulation) setUp() {
 	e.watchAttributeExtent()
 }
 
-// colours is what the stream changed, by OSC, of the colours a terminal keeps
-// until they are reset, which the render doesn't restore: a raw replay
-// carries them to the joiner, and a render without them leaves the joiner
-// drawing in its own.
+// colours is the last change the stream made, by OSC, to each of the colours
+// a terminal keeps until they are reset. The render can't set one again: a
+// colour the stream set fails it, as a raw replay carries the setting to the
+// joiner. But it resets each one the stream reset last (see
+// renderer.colourResets), as a raw replay does on a joiner's terminal that a
+// program of its own left with colours of their own.
 //
 // x/vt keeps the default foreground, background and cursor colours, but only
 // those its colour parser reads, which takes no X11 colour name such as
 // "navy", and only from an OSC that sets one of them; it keeps no palette
-// from the stream at all. So the stream's OSCs are read here instead. A
-// palette entry or a special colour (OSC 4 or 5) counts once set, a reset
-// after it included: telling which entries a reset (OSC 104 or 105) puts
-// back would take keeping the palette. Each of xterm's ten dynamic colours,
-// OSC 10 to 19, the default foreground, background and cursor colours among
-// them, counts from a setting to its own reset, OSC 110 to 119.
+// from the stream at all. So the stream's OSCs are read here instead, as
+// xterm reads them: its ten dynamic colours, OSC 10 to 19, the default
+// foreground, background and cursor colours among them, each reset by its
+// own OSC 110 to 119; and its colour table (see tableSize), whose entries
+// OSC 4 and 5 set and OSC 104 and 105 reset.
 type colours struct {
-	palette bool
-	dynamic [10]bool
+	dynamic [10]colourChange
+	table   [tableSize]colourChange
 }
+
+// colourChange is the last change the stream made to one colour, the zero
+// value none.
+type colourChange uint8
+
+const (
+	// colourSet is a setting, or a change terminals don't all read alike,
+	// which the render can't make the same on every joiner's.
+	colourSet colourChange = iota + 1
+	// colourReset is a reset every terminal reads as one.
+	colourReset
+)
+
+// tableSize is how many entries xterm's colour table holds: the 256 palette
+// entries, then its five special colours, those it draws bold, underlined,
+// blinking, reversed and italic text in. OSC 5 and 105 number the special
+// colours from 0, and OSC 4 and 104 from 256, after the palette.
+const tableSize = 256 + 5
 
 // changed reports a colour the stream set and hasn't reset.
 func (c *colours) changed() bool {
-	return c.palette || slices.Contains(c.dynamic[:], true)
+	return slices.Contains(c.dynamic[:], colourSet) || slices.Contains(c.table[:], colourSet)
+}
+
+// tableEntry is the entry of the colour table f names in an OSC 4, 5, 104 or
+// 105 that numbers the entries from first, if f is the number of one: digits
+// and nothing else, short of the table's end.
+func tableEntry(f []byte, first int) (int, bool) {
+	n := 0
+	for _, b := range f {
+		if b < '0' || b > '9' {
+			return 0, false
+		}
+		if n = 10*n + int(b-'0'); first+n >= tableSize {
+			return 0, false
+		}
+	}
+	return first + n, len(f) > 0
+}
+
+// setEntries notes OSC 4 or 5, numbering the table's entries from first, whose
+// pairs of an entry and a colour each set the entry, whatever the colour. An
+// entry that isn't the number of one, which xterm stops at, makes the whole
+// table count as set, as which entries another terminal set then can't be
+// told.
+func (c *colours) setEntries(data []byte, first int) {
+	// data is the whole OSC, its number first.
+	_, pairs, _ := bytes.Cut(data, []byte{';'})
+	entry := true // each pair's first field
+	for f := range bytes.SplitSeq(pairs, []byte{';'}) {
+		if entry {
+			i, ok := tableEntry(f, first)
+			if !ok {
+				c.fillTable(0, colourSet)
+				return
+			}
+			c.table[i] = colourSet
+		}
+		entry = !entry
+	}
+}
+
+// resetEntries notes OSC 104 or 105, numbering the table's entries from
+// first, which resets each entry it lists, or with none listed, every entry
+// from first on: the whole table for OSC 104, the special colours for
+// OSC 105. A list xterm can't read all of, which it stops in, makes the whole
+// table count as set, as which entries another terminal reset then can't be
+// told: for OSC 104 ; ; 1, xterm resets none and Alacritty every one.
+func (c *colours) resetEntries(data []byte, first int) {
+	_, list, _ := bytes.Cut(data, []byte{';'})
+	if len(list) == 0 {
+		c.fillTable(first, colourReset)
+		return
+	}
+	for f := range bytes.SplitSeq(list, []byte{';'}) {
+		i, ok := tableEntry(f, first)
+		if !ok {
+			c.fillTable(0, colourSet)
+			return
+		}
+		c.table[i] = colourReset
+	}
+}
+
+// fillTable makes ch the last change to every entry of the table from first
+// on.
+func (c *colours) fillTable(first int, ch colourChange) {
+	for i := first; i < tableSize; i++ {
+		c.table[i] = ch
+	}
 }
 
 // watchColours registers the OSC handlers that keep colours. The last
 // handler registered for an OSC is called first, so each of these is called
 // before x/vt's own, and returns false, so that x/vt's still handles the OSC.
 func (e *emulation) watchColours() {
-	t := e.term
-	for _, cmd := range []int{4, 5} {
-		t.RegisterOscHandler(cmd, func([]byte) bool {
-			e.colours.palette = true
-			return false
-		})
-	}
-	for i := range e.colours.dynamic {
+	t, c := e.term, &e.colours
+	for i := range c.dynamic {
 		t.RegisterOscHandler(10+i, func(data []byte) bool {
 			// After the number, each specification sets the next colour on,
 			// as in xterm, so OSC 10 ; fg ; bg sets the background too. Each
 			// one counts: the query filter drops an OSC that asks for any.
 			n := bytes.Count(data, []byte{';'})
-			for k := i; k < min(i+n, len(e.colours.dynamic)); k++ {
-				e.colours.dynamic[k] = true
+			for k := i; k < min(i+n, len(c.dynamic)); k++ {
+				c.dynamic[k] = colourSet
 			}
 			return false
 		})
-		t.RegisterOscHandler(110+i, func([]byte) bool {
-			e.colours.dynamic[i] = false
+		t.RegisterOscHandler(110+i, func(data []byte) bool {
+			// xterm resets the colour for a reset with nothing after the
+			// number or its ';', and ignores one with more, which other
+			// terminals, Alacritty and VTE among them, read as a reset all
+			// the same: a raw replay of one leaves a colour set before it
+			// set on xterm and reset on those, so it counts as a setting.
+			if _, rest, _ := bytes.Cut(data, []byte{';'}); len(rest) == 0 {
+				c.dynamic[i] = colourReset
+			} else {
+				c.dynamic[i] = colourSet
+			}
+			return false
+		})
+	}
+	for _, osc := range []struct{ set, reset, first int }{{4, 104, 0}, {5, 105, 256}} {
+		t.RegisterOscHandler(osc.set, func(data []byte) bool {
+			c.setEntries(data, osc.first)
+			return false
+		})
+		t.RegisterOscHandler(osc.reset, func(data []byte) bool {
+			c.resetEntries(data, osc.first)
 			return false
 		})
 	}
