@@ -3092,12 +3092,13 @@ func keyboard(p ...string) string {
 
 // A program can also leave the joiner's terminal sending the keyboard or the
 // mouse otherwise than a terminal starts: the cursor keys or the keypad in
-// application mode, mouse reports in an encoding of their own, focus and
+// application mode, mouse reports of any kind in an encoding of their own,
+// urxvt's among them, which the render otherwise leaves as it is, focus and
 // colour-scheme reports, bracketed paste, modifyOtherKeys, or flags on either
 // screen's kitty keyboard stack, which a program killed before it put them
 // back leaves. The render sets each only where the session's terminal has it
-// otherwise than a terminal starts, so it resets them all first, on both
-// screens, and the joiner's terminal then sends the program what the
+// otherwise than a terminal starts, so it resets them all first, and the
+// joiner's terminal then sends the program what the
 // session's does, the stacks as deep as the session's: a stack's pops reach
 // the joiner's own flags otherwise. The rows above the joiner's cursor still
 // scroll into its scrollback (see joinOwn). A session that set them gets
@@ -3126,6 +3127,10 @@ func TestReplayResetsTheJoinersInputModes(t *testing.T) {
 		{"mouse reports of presses, in SGR's encoding", "\x1b[?1000h\x1b[?1006h", stream},
 		{"mouse reports of drags, in UTF-8's", "\x1b[?1002h\x1b[?1005h", stream},
 		{"mouse reports of any motion", "\x1b[?1003h", stream},
+		{"X10 mouse reports", "\x1b[?9h", stream},
+		{"highlight mouse tracking", "\x1b[?1001h", stream},
+		{"mouse reports in urxvt's encoding", "\x1b[?1000h\x1b[?1015h", stream},
+		{"mouse reports in SGR's pixels", "\x1b[?1000h\x1b[?1016h", stream},
 		{"focus reports", "\x1b[?1004h", stream},
 		{"bracketed paste", "\x1b[?2004h", stream},
 		{"colour-scheme reports", "\x1b[?2031h", stream},
@@ -3148,6 +3153,8 @@ func TestReplayResetsTheJoinersInputModes(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			j := joinOwn(t, 80, 12, earlier+tc.own, tc.stream)
 			require.Equal(t, keyboard(tc.stream), keyboard(earlier+tc.own, string(j.render)))
+			urxvt := ansi.DECMode(1015)
+			require.Equal(t, j.a.Mode(urxvt).IsSet(), j.b.Mode(urxvt).IsSet(), "urxvt's mouse encoding, which sameState leaves out")
 			if strings.HasPrefix(tc.stream, on) {
 				require.True(t, j.b.Mode(ansi.ModeBracketedPaste).IsSet(), "the session's modes, set after the resets")
 			}

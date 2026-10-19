@@ -41,11 +41,15 @@ import (
 //     moves the cursor or is what a DECRC restores;
 //   - every mode of the keyboard and the mouse the render sets, as the
 //     terminal starts: the cursor keys and the keypad in normal mode (DECCKM
-//     off and DECKPNM), no mouse reports and none of their encodings (?1000,
-//     ?1002, ?1003, ?1005 and ?1006 off), no focus or colour-scheme reports
-//     (?1004, ?2031), no bracketed paste (?2004), and modifyOtherKeys at the
-//     terminal's own value (XTMODKEYS 4 with none), none of which moves the
-//     cursor either;
+//     off and DECKPNM), no mouse reports of any kind and none of their
+//     encodings (?9, ?1000 to ?1003, ?1005, ?1006, ?1015 and ?1016 off), no
+//     focus or colour-scheme reports (?1004, ?2031), no bracketed paste
+//     (?2004), and modifyOtherKeys at the terminal's own value (XTMODKEYS 4
+//     with none), none of which moves the cursor either. The mouse modes the
+//     render falls back on, ?9, ?1001 and ?1016, and urxvt's encoding, which
+//     it ignores, are reset too: xterm's reset of any tracking mode turns
+//     tracking off, but of an encoding only that one, and a terminal that
+//     keeps each apart, as x/vt does, needs every one;
 //   - the main screen's kitty keyboard stack emptied (see popKeys), after
 //     the screen switch, as a pop reaches only the stack of the screen
 //     showing. The alternate screen's is popped where the render goes to
@@ -89,7 +93,7 @@ import (
 // after the history to scroll into its scrollback.
 const preamble = "\x1b7\x1b[?1047;1049;47l" +
 	"\x1b7\x1b[?69l\x1b[r\x1b8\x1b[4l\x1b[20l\x1b[?5l\x1b[?7;25h\x1b[0 q" +
-	"\x1b[?1;1000;1002;1003;1004;1005;1006;2004;2031l\x1b>\x1b[>4m" + popKeys +
+	"\x1b[?1;9;1000;1001;1002;1003;1004;1005;1006;1015;1016;2004;2031l\x1b>\x1b[>4m" + popKeys +
 	"\x1b(B\x1b)B\x1b*B\x1b+B\x0f\x1b}\r\x1b[m\x1b]8;;\x07\x1b[J"
 
 // popKeys empties the kitty keyboard stack of the screen showing, which
@@ -867,7 +871,8 @@ var (
 		// xterm skips repainting while output scrolls fast: appearance only
 		// (it starts with it set).
 		ansi.DECMode(1014): true,
-		// Mouse reports in urxvt's decimal encoding.
+		// Mouse reports in urxvt's decimal encoding. The preamble turns a
+		// joiner's own off, with the other mouse modes.
 		ansi.DECMode(1015): true,
 		// The Meta key sets the eighth bit of keyboard input.
 		ansi.DECMode(1034): true,
