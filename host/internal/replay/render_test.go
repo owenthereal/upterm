@@ -3969,6 +3969,45 @@ func TestReplayFailsOnALogFile(t *testing.T) {
 	}
 }
 
+// OSC 3, which sets a property on xterm's window (OSC 3 ; prop = value) or
+// deletes one (OSC 3 ; prop), fails the render, named: x/vt keeps no window,
+// where a raw replay sets or deletes the joiner's. Every one counts, one
+// xterm ignores too, and the note stays once another deletes the property,
+// or RIS comes. The query filter drops none, as OSC 3 asks for nothing. An
+// OSC of another number renders.
+func TestReplayFailsOnAWindowProperty(t *testing.T) {
+	join := func(t *testing.T, stream string) error {
+		t.Helper()
+		_, fellBack := fanOut(t, New(), []byte("text\r\n"+stream+"more\r\n"), []uio.SizeEvent{event(1, 0, 80, 24)}, 4<<10)
+		return fellBack
+	}
+	for _, tc := range []struct{ name, stream string }{
+		{"a property set", "\x1b]3;WM_ROLE=editor\x07"},
+		{"a property set, ended by ST", "\x1b]3;WM_ROLE=editor\x1b\\"},
+		{"a property deleted", "\x1b]3;WM_ROLE\x07"},
+		{"its number with a leading 0", "\x1b]03;WM_ROLE=editor\x07"},
+		{"a property named ?", "\x1b]3;?\x07"},
+		{"an empty one, which xterm ignores", "\x1b]3;\x07"},
+		{"no data at all", "\x1b]3\x07"},
+		{"one set, then deleted", "\x1b]3;WM_ROLE=editor\x07\x1b]3;WM_ROLE\x07"},
+		{"one, then RIS", "\x1b]3;WM_ROLE=editor\x07\x1bc"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			requireIneligible(t, join(t, tc.stream), "a window property")
+		})
+	}
+	for _, tc := range []struct{ name, stream string }{
+		{"OSC 33", "\x1b]33;WM_ROLE=editor\x07"},
+		{"OSC 300", "\x1b]300;WM_ROLE=editor\x07"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			require.NoError(t, join(t, tc.stream))
+			_, err := renderAt(t, 80, 24, "text\r\n"+tc.stream+"more\r\n")
+			require.NoError(t, err, "given to the emulation")
+		})
+	}
+}
+
 // screenTitleString is a window title string of GNU screen's and tmux's, as
 // tmux reads one: ESC k after an ESC and any C0 controls tmux executes where
 // they stand but CAN and SUB, then the title, up to the ESC, CAN or SUB that

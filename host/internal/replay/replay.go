@@ -175,6 +175,9 @@ type emulation struct {
 	// logFile is set once the stream has set the file the terminal logs to
 	// (see watchLogFile).
 	logFile bool
+	// windowProperty is set once the stream has set or deleted a property of
+	// the terminal's window (see watchWindowProperty).
+	windowProperty bool
 	// pastEdge is what the emulator keeps of the tab stops past the screen's
 	// right edge (see the type).
 	pastEdge pastEdge
@@ -273,10 +276,11 @@ func (replayer) Start(ctx context.Context, deadline time.Time, c *uio.Capture, s
 // conformance level, a reset of a mode a terminal starts with set, a
 // 94-character set x/vt drops, a 96-character set, a window operation,
 // printer controller mode, a memory lock, a key format, locator reporting,
-// the locator's events, a change to iTerm2's state, the keyboard's LEDs and a
-// log file noted, auto print and the tab stops past the screen's edge kept,
-// and the meter stopped by ctx or the deadline. Each callback and handler
-// runs inside the emulator's Write and touches only the emulation.
+// the locator's events, a change to iTerm2's state, the keyboard's LEDs, a
+// log file and a window property noted, auto print and the tab stops past
+// the screen's edge kept, and the meter stopped by ctx or the deadline. Each
+// callback and handler runs inside the emulator's Write and touches only the
+// emulation.
 func (e *emulation) setUp() {
 	t := e.term
 	t.SetScrollbackSize(0)
@@ -325,6 +329,7 @@ func (e *emulation) setUp() {
 	e.watchITerm2()
 	e.watchLEDs()
 	e.watchLogFile()
+	e.watchWindowProperty()
 }
 
 // colours is the last change the stream made, by OSC, to each of the colours
@@ -1667,6 +1672,25 @@ func (e *emulation) watchLEDs() {
 func (e *emulation) watchLogFile() {
 	e.term.RegisterOscHandler(46, func([]byte) bool {
 		e.logFile = true
+		return false
+	})
+}
+
+// watchWindowProperty registers the handler that notes OSC 3, which sets an X
+// property on xterm's window, OSC 3 ; prop = value, for other X clients, a
+// window manager among them, to read, or deletes one, OSC 3 ; prop. x/vt
+// keeps no window, where a raw replay sets or deletes the joiner's property.
+// xterm takes it only once its allowed window operations include SetXprop,
+// which they don't by default, and ignores one with no property. Every one
+// counts all the same, as another configuration or terminal may take it, and
+// the note stays, whatever follows: RIS leaves the window's properties as
+// they are, and a deletion can't be told to put back what the joiner's window
+// held before, which isn't known. OSC 3 asks for nothing, so the query filter
+// drops none. x/vt has no handler of its own for it; this returns false all
+// the same, as watchColours' do.
+func (e *emulation) watchWindowProperty() {
+	e.term.RegisterOscHandler(3, func([]byte) bool {
+		e.windowProperty = true
 		return false
 	})
 }

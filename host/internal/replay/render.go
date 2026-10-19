@@ -1029,6 +1029,9 @@ func (e *emulation) eligible(parts uio.ReplayParts) (rep, error) {
 	if e.logFile {
 		return rep{}, &IneligibleError{State: "a log file"}
 	}
+	if e.windowProperty {
+		return rep{}, &IneligibleError{State: "a window property"}
+	}
 	if splitWide(e.term.MainScreen()) || splitWide(e.term.AltScreen()) {
 		return rep{}, &IneligibleError{State: splitWideState}
 	}
