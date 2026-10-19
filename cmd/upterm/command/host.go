@@ -432,9 +432,9 @@ func validateServer(raw string) error {
 
 	switch u.Scheme {
 	case "ssh":
-		// A port alone, which withDefaultPort would make of it, dials this
-		// machine.
-		if u.Host == "" {
+		// An address with a port but no host, such as ssh://:2222, has an
+		// empty hostname, which dials this machine.
+		if u.Hostname() == "" {
 			return errors.New("missing host in address")
 		}
 	case "ws", "wss":

@@ -125,6 +125,7 @@ func TestValuesHostingRefusesAtStartupAreProblems(t *testing.T) {
 		{"name", "a/b", "use letters, digits, '.', '_' and '-'", []string{"build-shell"}},
 		{"output", "yaml", `invalid output format "yaml"`, []string{"json", "go-template={{.SessionID}}"}},
 		{"detach", "true", "--detach requires --accept", []string{"false"}},
+		{"server", "ssh://:2222", "missing host in address", []string{"ssh://uptermd.example.com:2222", "ssh://[::1]:2222"}},
 	} {
 		t.Run(tc.key+"="+tc.bad, func(t *testing.T) {
 			restoreFlags(t)

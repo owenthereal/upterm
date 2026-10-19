@@ -98,7 +98,7 @@ func Test_hostValueChecks(t *testing.T) {
 	_, err = parseForceCommand("'unclosed")
 	require.EqualError(t, err, "error parsing command 'unclosed: EOF found when expecting closing quote")
 
-	for _, ok := range []string{"ssh://uptermd.upterm.dev:22", "ssh://uptermd.upterm.dev", "ssh://[::1]:2222", "ssh://[::1]", "ssh://example.com:", "ws://example.com", "wss://example.com:8443"} {
+	for _, ok := range []string{"ssh://uptermd.upterm.dev:22", "ssh://uptermd.upterm.dev", "ssh://[::1]:2222", "ssh://[::1]", "ssh://example.com:", "ssh://host", "ssh://host:2222", "ws://example.com", "wss://example.com:8443"} {
 		require.NoError(t, validateServer(ok), ok)
 	}
 	for raw, want := range map[string]string{
@@ -107,6 +107,10 @@ func Test_hostValueChecks(t *testing.T) {
 		"example.com:22":           "unsupported server protocol example.com",
 		"ssh://":                   "missing host in address",
 		"ssh:///x":                 "missing host in address",
+		"ssh://:2222":              "missing host in address",
+		"ssh://user@:2222":         "missing host in address",
+		"ssh://:":                  "missing host in address",
+		"ssh://:22":                "missing host in address",
 		"ssh://exa mple.com:22":    "error parsing server URL",
 		"http://example.com:8080/": "unsupported server protocol http",
 	} {
