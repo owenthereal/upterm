@@ -1888,6 +1888,31 @@ func TestReplayContinuesAcrossASplitCluster(t *testing.T) {
 	}
 }
 
+// A set of a mode a terminal starts with set (see defaultModes) leaves the
+// render with nothing to send, so the joiner's terminal keeps the mode as it
+// starts and continues as the session's does. A reset of one fails the render,
+// which the comparison can't see for itself, as it never gets one to compare.
+func TestReplayContinuesAfterADefaultModeSet(t *testing.T) {
+	run := func(mode, final string) (contCase, contRun) {
+		c := contCase{
+			prefix: []byte("text\r\n\x1b[?" + mode + final),
+			sizes:  []uio.SizeEvent{event(1, 0, 20, 4)},
+			suffix: []byte("more"),
+		}
+		return c, c.run(time.Minute)
+	}
+	for _, mode := range []string{"2", "1046", "1070"} {
+		t.Run("?"+mode+" set", func(t *testing.T) {
+			c, r := run(mode, "h")
+			requireContinues(t, c, r)
+		})
+	}
+	t.Run("?2 reset", func(t *testing.T) {
+		_, r := run("2", "l")
+		require.Equal(t, "ineligible: a default mode reset (?2)", r.skip)
+	})
+}
+
 // Claude Code's output: truecolor runs, some of them linked, in history and
 // on the screen, and a truecolor pen and an OSC 8 link still open where the
 // replay hands off. The joiner's next text is coloured and linked as the

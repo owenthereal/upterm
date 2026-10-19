@@ -531,7 +531,8 @@ func sameSlot(a, b vt.Cursor) string {
 // side never heard of is as unset as one the other reset. The modes the
 // render ignores are left out, as it leaves them as the joiner's terminal
 // has them, but for synchronized output, which a render begins again when
-// the stream is inside an update at the handoff point.
+// the stream is inside an update at the handoff point. The modes a terminal
+// starts with set (see defaultModes) are compared by whether each is reset.
 func sameModes(a, b ansi.Modes) string {
 	modes := slices.Collect(maps.Keys(a))
 	for m := range b {
@@ -543,11 +544,38 @@ func sameModes(a, b ansi.Modes) string {
 		if dec, ok := m.(ansi.DECMode); ok && ignoredModes[dec] && dec != ansi.ModeSynchronizedOutput {
 			continue
 		}
-		if a[m].IsSet() != b[m].IsSet() {
+		differ := a[m].IsSet() != b[m].IsSet()
+		if dec, ok := m.(ansi.DECMode); ok && defaultModes[dec] {
+			// A terminal starts with these set, but x/vt starts them unset
+			// and the render sends nothing for a set, so a joiner's x/vt
+			// reads one unset that the session's, given the set, reads set:
+			// only a reset is a difference.
+			differ = a[m].IsReset() != b[m].IsReset()
+		}
+		if differ {
 			return fmt.Sprintf("mode %v: %v vs %v", m, a[m], b[m])
 		}
 	}
 	return ""
+}
+
+// The comparison of modes tells a reset of a mode a terminal starts with set
+// (see defaultModes) from a set of it, or none, which x/vt reads as unset;
+// every other mode it compares by whether it is set.
+func TestSameModesReadsADefaultModeAsSet(t *testing.T) {
+	never := ansi.Modes{}
+	set := ansi.Modes{ansi.DECMode(2): ansi.ModeSet}
+	reset := ansi.Modes{ansi.DECMode(2): ansi.ModeReset}
+	require.Empty(t, sameModes(set, never))
+	require.Empty(t, sameModes(never, set))
+	require.Empty(t, sameModes(set, set))
+	require.Contains(t, sameModes(reset, never), "mode 2")
+	require.Contains(t, sameModes(never, reset), "mode 2")
+	require.Contains(t, sameModes(set, reset), "mode 2")
+
+	other := ansi.Modes{ansi.ModeBracketedPaste: ansi.ModeSet}
+	require.Contains(t, sameModes(other, never), "mode 2004")
+	require.Empty(t, sameModes(ansi.Modes{ansi.ModeBracketedPaste: ansi.ModeReset}, never))
 }
 
 // sameState keeps SGR 31 and 38;5;1 apart, which ultraviolet compares equal,
