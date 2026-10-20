@@ -4557,13 +4557,6 @@ func TestReplayFailsOnALogFile(t *testing.T) {
 			requireIneligible(t, join(t, tc.stream), "a log file")
 		})
 	}
-	for _, tc := range []struct{ name, stream string }{} {
-		t.Run(tc.name, func(t *testing.T) {
-			require.NoError(t, join(t, tc.stream))
-			_, err := renderAt(t, 80, 24, "text\r\n"+tc.stream+"more\r\n")
-			require.NoError(t, err, "given to the emulation")
-		})
-	}
 	for _, tc := range []struct{ name, stream, state string }{
 		{"OSC 45", "\x1b]45;/tmp/xterm.log\x07", "an unhandled OSC 45"},
 		{"OSC 460", "\x1b]460;/tmp/xterm.log\x07", "an unhandled OSC 460"},
@@ -4599,13 +4592,6 @@ func TestReplayFailsOnAWindowProperty(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			requireIneligible(t, join(t, tc.stream), "a window property")
-		})
-	}
-	for _, tc := range []struct{ name, stream string }{} {
-		t.Run(tc.name, func(t *testing.T) {
-			require.NoError(t, join(t, tc.stream))
-			_, err := renderAt(t, 80, 24, "text\r\n"+tc.stream+"more\r\n")
-			require.NoError(t, err, "given to the emulation")
 		})
 	}
 	for _, tc := range []struct{ name, stream, state string }{
@@ -4734,13 +4720,6 @@ func TestReplayFailsOnSizedText(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			requireIneligible(t, join(t, tc.stream), "sized text")
-		})
-	}
-	for _, tc := range []struct{ name, stream string }{} {
-		t.Run(tc.name, func(t *testing.T) {
-			require.NoError(t, join(t, tc.stream))
-			_, err := renderAt(t, 80, 24, "text\r\n"+tc.stream+"more\r\n")
-			require.NoError(t, err, "given to the emulation")
 		})
 	}
 	for _, tc := range []struct{ name, stream, state string }{
