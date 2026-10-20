@@ -244,36 +244,34 @@ func oscVerdict(n int, data []byte) string {
 // controlVerdict is csiVerdict's for a control, b, no x/vt handler took.
 // x/vt's handlers take NUL, BEL, BS, HT, LF, VT, FF, CR, SO and SI, and of
 // C1, IND, HTS, RI, SS2 and SS3, as they take ESC D, ESC H, ESC M, ESC N and
-// ESC O (see xvtESC): each leaves nothing, or state the render rebuilds.
-// x/vt logs every other control the parser executes, by its byte.
+// ESC O (see xvtESC). x/vt logs every other control the parser executes, by
+// its byte, and none it handles, which the check doesn't see.
 //
 // A C0 control x/vt has no handler for, and DEL, render: xterm ignores them,
 // and ENQ's answerback is a reply, which changes nothing.
 //
-// Any other C1 control but ST fails the render, named by its byte alone. A
-// terminal that reads 8-bit controls may act on it where x/vt doesn't, as
-// xterm's NEL moves the cursor to the next line's start, and its SPA and EPA
-// guard the cells printed between them from erasure, and one that reads
-// UTF-8 prints a replacement character for the lone byte, where x/vt prints
-// nothing: either way, the render isn't the session's screen. A byte of the
-// range that continues a UTF-8 character is the character's, one whose lead
-// byte the ring's start cut off included (see skipCut), and one inside an
-// OSC's or a DCS's data is the string's; neither reaches here.
+// A C1 control fails the render, named by its byte alone, for the byte's
+// form rather than for what x/vt makes of it. A terminal that reads UTF-8
+// draws a replacement character for the lone byte, and one that reads 8-bit
+// controls acts on it, as xterm's NEL moves the cursor to the next line's
+// start, and its SPA and EPA guard the cells printed between them from
+// erasure. x/vt's reading, which draws nothing for the byte, matches neither
+// in every case. ST is no exception: the parser executes it, and x/vt logs
+// it, only where it ends no string, alone or after an ESC, a CSI or a DCS's
+// header, which the parser abandons; a terminal that reads UTF-8 draws it
+// there too. The OSC, DCS, APC, SOS or PM an 8-bit ST ends the parser
+// dispatches, logging nothing of the ST, so the check decides it as that
+// string.
 //
-// ST renders. The parser dispatches the OSC, DCS, APC, SOS or PM an 8-bit ST
-// ends, which the check decides as that string, and x/vt logs nothing of the
-// ST itself. It executes one only where no string has begun: alone, or after
-// an ESC, a CSI or a DCS's header, which it abandons, dispatching nothing.
-// There, on a terminal that reads 8-bit controls, the ST does nothing, as
-// ESC \ alone does nothing (see escRules). x/vt follows that reading for every
-// C1 control it handles. A terminal that reads UTF-8 prints a replacement
-// character for a lone ST instead, as it does for each of those controls.
+// A C1 byte that continues a UTF-8 character is part of the character, one
+// whose lead byte the ring's start cut off included (see skipCut), and one
+// inside an OSC's or a DCS's data is the string's; neither reaches here.
 func controlVerdict(b byte) string {
 	switch {
-	case b <= ansi.US, b == ansi.DEL, b == ansi.ST:
+	case b <= ansi.US, b == ansi.DEL:
 		return ""
 	case b >= ansi.PAD && b <= ansi.APC:
-		return fmt.Sprintf("an unhandled C1 control 0x%02X", b)
+		return fmt.Sprintf("a C1 control 0x%02X", b)
 	}
 	return "an unhandled control"
 }

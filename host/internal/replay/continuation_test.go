@@ -1805,7 +1805,7 @@ func TestReplayRendersARingThatStartsInsideACharacter(t *testing.T) {
 func TestReplayReadsWhatFollowsACutCharacter(t *testing.T) {
 	for _, tc := range []struct{ name, head, ring, state string }{
 		{"a byte that ends it early", "text\r\nab\xe2", "\x96\x1b#8more\r\n", "an unhandled ESC # 8"},
-		{"a byte past it", "text\r\nab\xc5", "\x85\x85more\r\n", "an unhandled C1 control 0x85"},
+		{"a byte past it", "text\r\nab\xc5", "\x85\x85more\r\n", "a C1 control 0x85"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			capt := &capturing{r: New()}
