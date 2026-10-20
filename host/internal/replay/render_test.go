@@ -613,6 +613,43 @@ func TestReplayRestoresASavedPendingWrap(t *testing.T) {
 	require.Equal(t, "y", cellAt(j.b, 0, 1).Content)
 }
 
+// A joiner wider than the pty joins while a wrap is pending in the pty's last
+// column, after a line of output that filled it, as coloured output does
+// that ends a line in an SGR. A client as wide that was live throughout has
+// no wrap pending there, its cursor one column past, where the next
+// character the program prints lands, and so does a raw replay's joiner: the
+// joiner's cursor is there too, not on the last character, which the next
+// one would overwrite. A DECSC the program sent at such a wrap, or the ?1049h
+// of an editor started there, saved that column too on the live client, and
+// a restore there takes the joiner's cursor back to it as well. The joiner
+// is then in the live client's state, the characters after it on its row.
+func TestReplayPlacesAWiderJoinerPastAPendingWrap(t *testing.T) {
+	const head = "$ cat log\r\n"
+	for _, tc := range []struct{ name, stream, live string }{
+		{"the cursor", "abcdefghi\x1b[31mj\x1b[m", "klm"},
+		{"the cursor, after a wide character", "abcdefgh\x1b[31m中\x1b[m", "klm"},
+		{"a slot saved by DECSC", "abcdefghi\x1b[31mj\x1b[m\x1b7\x1b[3;1Hmore", "\x1b8klm"},
+		{"a slot saved by ?1049h", "abcdefghi\x1b[31mj\x1b[m\x1b[?1049h\x1b[Hthe editor", "\x1b[?1049lklm"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stream := head + tc.stream
+			sent, fellBack := fanOutTo(t, New(), []byte(stream), []uio.SizeEvent{event(1, 0, 10, 5)}, 4<<10, termsize.Size{Cols: 15, Rows: 5})
+			require.NoError(t, fellBack)
+			require.True(t, bytes.HasPrefix(sent, []byte(endSync+preamble)), "the render, not the raw ring")
+
+			live, liveHist := newReference(15, 5)
+			_, _ = live.WriteString(stream)
+			b, bHist := newReference(15, 5)
+			_, _ = b.Write(sent)
+			for _, term := range []*vt.Emulator{live, b} {
+				_, _ = term.WriteString(tc.live)
+			}
+			require.Equal(t, live.CursorPosition(), b.CursorPosition(), "the joiner's cursor: %q", sent)
+			require.Empty(t, sameState(live, b, *liveHist, *bHist, names{}, names{}), "the render: %q", sent)
+		})
+	}
+}
+
 // The slot's own pen and link are set after its wrap reprint, which leaves
 // the cell's: a red last-column cell under a blue linked slot saves blue.
 func TestReplaySlotKeepsItsPenAfterAWrapReprint(t *testing.T) {

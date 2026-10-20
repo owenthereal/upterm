@@ -312,7 +312,7 @@ type renderer struct {
 	// fits is a joiner as wide as the render, where a character printed in
 	// the render's last column leaves a wrap pending, as it did on the
 	// session's terminal. A wider joiner gets no wrap, as a wider live
-	// client doesn't.
+	// client doesn't, but the column past it (see pastWrap).
 	fits bool
 	// stops are the tab stops to set across the joiner's width: the
 	// emulator's, then past its width those it keeps there (see pastEdge).
@@ -466,10 +466,12 @@ func (r *renderer) slot(scr *vt.Screen, screen int) {
 //
 // The position is the one saved, which a resize leaves even off the screen,
 // for DECRC to clamp; a joiner the size of the render clamps it the same way
-// as it moves there. A wrap is set by printing the cell in the last column
-// (the wide character whose second half that is, for one), on the row DECRC
-// would restore, in that cell's own pen and link, under the ASCII charsets
-// the model holds here, so the cell is as it was. The slot's own pen and link
+// as it moves there. A wider joiner gets no wrap, but the column past one,
+// where a wider live client's DECSC saved its cursor (see pastWrap). On a
+// joiner as wide, a wrap is set by printing the cell in the last column (the
+// wide character whose second half that is, for one), on the row DECRC would
+// restore, in that cell's own pen and link, under the ASCII charsets the
+// model holds here, so the cell is as it was. The slot's own pen and link
 // come after it, since the print leaves the cell's, and neither SGR nor OSC 8
 // clears the wrap.
 func (r *renderer) slotState(scr *vt.Screen) {
@@ -480,7 +482,7 @@ func (r *renderer) slotState(scr *vt.Screen) {
 		_ = enc.cup(y+1, x+1)
 		_ = enc.cell(cell)
 	} else {
-		_ = enc.cup(c.Y+1, c.X+1)
+		_ = enc.cup(c.Y+1, pastWrap(c.X, c.Saved.Wrap)+1)
 	}
 	_ = enc.penTo(c.Pen)
 	_ = enc.linkTo(c.Link)
@@ -613,7 +615,8 @@ type rep struct {
 // cursor sets REP's character, then places the active cursor: by a reprint
 // of the last column's cell when a wrap is pending there and the joiner is
 // as wide, which leaves it pending, so nothing after it moves the cursor;
-// else by CUP. It returns the length of the render once the reprint was
+// else by CUP, a wider joiner's one column past a pending wrap (see
+// pastWrap). It returns the length of the render once the reprint was
 // written, or -1 without one.
 func (r *renderer) cursor() (reprinted int) {
 	enc, t := r.enc, r.term
@@ -639,8 +642,21 @@ func (r *renderer) cursor() (reprinted int) {
 		_ = enc.cell(c)
 		return len(enc.buf)
 	}
-	_ = enc.cup(cur.Y+1, cur.X+1)
+	_ = enc.cup(cur.Y+1, pastWrap(cur.X, t.PendingWrap())+1)
 	return -1
+}
+
+// pastWrap is the column a wider joiner's cursor, or a slot it saves, goes to
+// for x, the session's, wrap saying a wrap is pending at x, which is then the
+// last column of the screen the wrap was set on (see unrestored): one column
+// past it, where the print that set the wrap left a wider live client's
+// cursor, with none pending, and where the next character lands on it; else
+// x itself. A CUP there stops at the joiner's last column.
+func pastWrap(x int, wrap bool) int {
+	if wrap {
+		return x + 1
+	}
+	return x
 }
 
 // reportModes sets the modes that make the terminal send reports unasked and

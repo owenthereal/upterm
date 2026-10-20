@@ -162,10 +162,12 @@ func sameState(a, b *vt.Emulator, aHist, bHist [][]byte, aNames, bNames names) s
 // top left, and the rest of b is blank. Where the sizes part, b holds what
 // the render leaves it:
 //   - a wrap pending at the cursor only on a joiner as wide, since a wider
-//     live client has none;
+//     live client has none, but its cursor one column past instead;
 //   - each slot at the position it was saved at, which a's own size clamps
 //     there and b's here, but a slot's pending wrap only on a joiner as wide,
-//     set by a print in the last column of the row a's DECRC would restore;
+//     set by a print in the last column of the row a's DECRC would restore,
+//     and a wider one's slot one column past it instead, where a wider live
+//     client saved its cursor;
 //   - b's own whole screen as the region where a's is its whole screen, and
 //     a's rows otherwise;
 //   - a's tab stops within a's width; past it, the ones a keeps there for a
@@ -191,6 +193,9 @@ func sameStateInside(a, b *vt.Emulator, aHist, bHist [][]byte, aNames, bNames na
 			return s.name + " screen: " + d
 		}
 		c := s.sa.SavedCursor()
+		if c.Saved.Wrap && !fits {
+			c.X++
+		}
 		c.Saved.Wrap = c.Saved.Wrap && fits
 		if c.Saved.Wrap {
 			c.Y = min(c.Y, h-1)
@@ -201,8 +206,12 @@ func sameStateInside(a, b *vt.Emulator, aHist, bHist [][]byte, aNames, bNames na
 		}
 	}
 	ca, cb := a.ActiveScreen().Cursor(), b.ActiveScreen().Cursor()
-	if ca.Position != cb.Position {
-		return fmt.Sprintf("cursor: %v vs %v", ca.Position, cb.Position)
+	at := ca.Position
+	if a.PendingWrap() && !fits {
+		at.X++
+	}
+	if at != cb.Position {
+		return fmt.Sprintf("cursor: %v vs %v", at, cb.Position)
 	}
 	if canonical(ca.Pen) != canonical(cb.Pen) {
 		return fmt.Sprintf("pen: %+v vs %+v", ca.Pen, cb.Pen)
