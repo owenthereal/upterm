@@ -41,8 +41,10 @@ const (
 
 // otherUnhandled are the other formats x/vt logs a sequence none of its
 // handlers took by, which the check leaves alone: device control strings
-// have rules of their own (see watchDCS), and so do APC, SOS and PM, and a
-// control code dispatches nothing.
+// have rules of their own (see watchDCS), and so do APC, SOS and PM. The
+// check covers CSI, ESC and OSC, and leaves controls out: x/vt logs each it
+// doesn't handle, C1's NEL (0x85), which a terminal acts on, among them, and
+// they are left as they are.
 var otherUnhandled = []string{
 	unhandled + "DCS %q %q",
 	unhandled + "APC %q",
