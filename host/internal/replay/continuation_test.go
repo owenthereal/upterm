@@ -327,7 +327,9 @@ func (g *streamGen) move() {
 	case 13:
 		g.put("\x1bM")
 	case 14:
-		g.put(g.one("\x1bD", "\x1bE"))
+		// NEL as what it does, an IND then a CR: x/vt has no NEL, so on the
+		// terminals compared here an ESC E would move nothing.
+		g.put(g.one("\x1bD", "\x1bD\r"))
 	default:
 		g.putf(g.one("\x1b[%d`", "\x1b[%da", "\x1b[%de"), g.between(1, g.cols()))
 	}
@@ -750,7 +752,7 @@ func (g *streamGen) misc() {
 		g.put("\x1b[2J\x1b[3J\x1b[H")
 		g.line()
 	default:
-		g.put(g.one("\x1bD", "\x1bE", "\x1bM"))
+		g.put(g.one("\x1bD", "\x1bD\r", "\x1bM"))
 	}
 }
 
