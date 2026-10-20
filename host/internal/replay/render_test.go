@@ -2560,6 +2560,49 @@ func TestReplayFailsOnARenditionTheRenderCantDraw(t *testing.T) {
 	}
 }
 
+// The render sets an underline colour by an SGR of its own, after the rest
+// of the pen, in the colon form, 58:2::r:g:b or 58:5:n, as nvim sends it,
+// whichever form the stream set it by: a terminal without SGR 58 that reads
+// colons skips the whole parameter, as xterm does, where it reads the
+// semicolon form's numbers as attributes of their own, 2 faint, 5 blink and
+// 0 a reset of the whole pen. SGR 59 takes it back to the default, and a pen
+// reset takes it with the rest, so the colour is set again after one. A
+// joiner given the render holds the session's cells, their underline colours
+// among them.
+func TestReplayWritesAnUnderlineColourInTheColonForm(t *testing.T) {
+	for _, tc := range []struct{ name, stream, row string }{
+		{"a direct colour", "\x1b[4:3m\x1b[58:2::255:0:0mbad\x1b[59m\x1b[4:0m ok",
+			"\x1b[4:3m\x1b[58:2::255:0:0mbad\x1b[m ok"},
+		{"a direct colour set with semicolons", "\x1b[4m\x1b[58;2;1;2;3mbad\x1b[m ok",
+			"\x1b[4m\x1b[58:2::1:2:3mbad\x1b[m ok"},
+		{"an indexed colour", "\x1b[4m\x1b[58;5;73mbad\x1b[m ok",
+			"\x1b[4m\x1b[58:5:73mbad\x1b[m ok"},
+		{"an indexed colour set with colons", "\x1b[4:1m\x1b[58:5:9mbad\x1b[m ok",
+			"\x1b[4m\x1b[58:5:9mbad\x1b[m ok"},
+		{"the colour alone changed", "\x1b[4m\x1b[58:5:1mA\x1b[58:2::0:128:255mB\x1b[m",
+			"\x1b[4m\x1b[58:5:1mA\x1b[58:2::0:128:255mB\x1b[m"},
+		{"the default colour again", "\x1b[4m\x1b[58:5:1mA\x1b[59mB\x1b[m",
+			"\x1b[4m\x1b[58:5:1mA\x1b[59mB\x1b[m"},
+		{"after a reset of the pen", "\x1b[31;4m\x1b[58:5:3mA\x1b[38;5;1mB\x1b[m",
+			"\x1b[31;4m\x1b[58:5:3mA\x1b[m\x1b[4;38;5;1m\x1b[58:5:3mB\x1b[m"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stream := "$ nvim\r\n" + tc.stream + "\r\n$ "
+			sent, fellBack := fanOut(t, New(), []byte(stream), []uio.SizeEvent{event(1, 0, 80, 24)}, 4<<10)
+			require.NoError(t, fellBack)
+			require.True(t, bytes.HasPrefix(sent, []byte(endSync+preamble)), "the render, not the raw ring")
+			require.Contains(t, string(sent), "\x1b[2;1H"+tc.row+"\x1b[1;1H", "the render: %q", sent)
+			require.NotContains(t, string(sent), "58;", "the render: %q", sent)
+
+			a, aHist := newReference(80, 24)
+			_, _ = a.WriteString(stream)
+			b, bHist := newReference(80, 24)
+			_, _ = b.Write(sent)
+			require.Empty(t, sameState(a, b, *aHist, *bHist, names{}, names{}), "the render: %q", sent)
+		})
+	}
+}
+
 // A line the session made double-width or double-height, by DECDWL (ESC # 6)
 // or DECDHL (ESC # 3 for the top half, ESC # 4 for the bottom), fails the
 // render, named: x/vt keeps no line size, so the render would draw the line

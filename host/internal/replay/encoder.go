@@ -3,9 +3,11 @@ package replay
 import (
 	"image/color"
 	"strconv"
+	"strings"
 	"unicode/utf8"
 
 	uv "github.com/charmbracelet/ultraviolet"
+	uansi "github.com/charmbracelet/x/ansi"
 	"github.com/owenthereal/x/ansi"
 
 	uio "github.com/owenthereal/upterm/io"
@@ -207,8 +209,12 @@ func (e *encoder) restoreBy(seq string, screen int) error {
 // compares colours by value, so SGR 31 and 38;5;1 compare equal, but a
 // terminal whose palette was changed shows them apart, and its own SGR
 // reports tell them apart too. ultraviolet's diff leaves out a colour it
-// compares equal, so where a colour changes only in its type, the pen is
-// written whole after a reset instead.
+// compares equal, so where the foreground or the background changes only in
+// its type, the pen is written whole after a reset instead.
+//
+// The underline colour goes apart from the rest, by an SGR of its own after
+// it, wherever it isn't already the joiner's, a reset of the pen taking it
+// back to none (see underlineColour).
 func (e *encoder) penTo(to uv.Style) error {
 	if e.err != nil {
 		return e.err
@@ -216,24 +222,66 @@ func (e *encoder) penTo(to uv.Style) error {
 	if e.pen == to {
 		return nil
 	}
-	var err error
-	if retyped(e.pen, to) {
-		err = e.put("\x1b[m", to.String())
-	} else {
-		err = e.put(uv.StyleDiff(&e.pen, &to))
+	from, rest := e.pen, to
+	from.UnderlineColor, rest.UnderlineColor = nil, nil
+	sgr := uv.StyleDiff(&from, &rest)
+	if retyped(from, rest) {
+		sgr = "\x1b[m" + rest.String()
 	}
-	if err != nil {
+	// The joiner's underline colour once sgr is written: sgr names none, so
+	// it is as it was, unless sgr starts with a reset of the whole pen, as
+	// ultraviolet's does where the rest goes back to the default.
+	under := e.pen.UnderlineColor
+	if strings.HasPrefix(sgr, "\x1b[m") {
+		under = nil
+	}
+	if under != to.UnderlineColor {
+		sgr += underlineColour(to.UnderlineColor)
+	}
+	if err := e.put(sgr); err != nil {
 		return err
 	}
 	e.pen = to
 	return nil
 }
 
-// retyped reports a colour of to that ultraviolet compares equal to from's
-// and isn't the same: a change its diff leaves out.
+// underlineColour is the SGR that sets the underline colour to c: SGR 59,
+// the default, for none; else SGR 58 in the colon form, 58:5:n for a colour
+// of the palette and 58:2::r:g:b, with an empty colour space, for any other,
+// at 8 bits a channel, as ultraviolet writes them with semicolons. nvim sends
+// the colon form only. A terminal without SGR 58 reads the semicolon form's
+// numbers as attributes of their own, 2 faint, 5 blink and 0 a reset of the
+// whole pen, as xterm, which has no SGR 58, does; but xterm skips whole a
+// parameter that has sub-parameters, unless it is 38 or 48, so it skips the
+// colon form. An SGR of its own keeps the rest of the pen from going with it
+// on a terminal that ignores a whole CSI holding a colon, as the Linux
+// console did until it took sub-parameters.
+func underlineColour(c color.Color) string {
+	switch c := c.(type) {
+	case nil:
+		return "\x1b[59m"
+	case uansi.BasicColor:
+		return "\x1b[58:5:" + strconv.Itoa(int(c)) + "m"
+	case uansi.IndexedColor:
+		return "\x1b[58:5:" + strconv.Itoa(int(c)) + "m"
+	}
+	r, g, b, _ := c.RGBA()
+	return "\x1b[58:2::" + channel(r) + ":" + channel(g) + ":" + channel(b) + "m"
+}
+
+// channel is a colour's channel, of 16 bits, at 8, as ultraviolet's SGR
+// writes it: one of 8 bits already is left as it is.
+func channel(v uint32) string {
+	if v > 0xff {
+		v >>= 8
+	}
+	return strconv.FormatUint(uint64(v), 10)
+}
+
+// retyped reports a foreground or a background of to that ultraviolet
+// compares equal to from's and isn't the same: a change its diff leaves out.
 func retyped(from, to uv.Style) bool {
-	return retypedColor(from.Fg, to.Fg) || retypedColor(from.Bg, to.Bg) ||
-		retypedColor(from.UnderlineColor, to.UnderlineColor)
+	return retypedColor(from.Fg, to.Fg) || retypedColor(from.Bg, to.Bg)
 }
 
 func retypedColor(from, to color.Color) bool {
