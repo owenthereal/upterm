@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/owenthereal/x/ansi"
+	"github.com/owenthereal/x/ansi/parser"
 	"github.com/owenthereal/x/vt"
 
 	"github.com/owenthereal/upterm/internal/termsize"
@@ -105,9 +106,14 @@ type emulation struct {
 	// titles is the title stack (see titleStack), and titleIndexed is set
 	// once the stream has saved or restored a title by its index on it.
 	// titleModes is set once the stream has set a title mode (see
-	// watchTitles).
-	titles                   titleStack
-	titleIndexed, titleModes bool
+	// watchTitles). sunTitle and numberlessTitle are set once it has set a
+	// name by an OSC with no command number, by one of xterm's
+	// Sun-compatible setters or as xterm reads an OSC 0, iconFile once it
+	// has set the window's icon by one, and linuxPalette once it has sent one
+	// the Linux console reads as a palette's (see watchNumberlessOSCs).
+	titles                                            titleStack
+	titleIndexed, titleModes                          bool
+	sunTitle, numberlessTitle, iconFile, linuxPalette bool
 	// cwd is the working directory the stream last reported, by OSC 7, and
 	// cwdTold whether it reported one at all, as title and titled are.
 	cwd     string
@@ -320,17 +326,17 @@ func (r replayer) Start(ctx context.Context, deadline time.Time, c *uio.Capture,
 // ConEmu's OSC 9 ; 9, the pointer shape, the bell's volumes, the progress
 // indicator, the colours, the clipboard and synchronized output's DCS form
 // kept, images, special colour modes, device control strings that change the
-// terminal's state, title modes, character protection, selective erases,
-// saves, renditions and line sizes the cells can't hold, a status line, a
-// font, a rectangular attribute extent, a conformance level, a reset of a
-// mode a terminal starts with set, a 94-character set x/vt drops, a
-// 96-character set, a window operation, printer controller mode, a memory
-// lock, a key format, locator reporting, the locator's events, a change to
-// iTerm2's state, the keyboard's LEDs, a log file, a window property, a
-// coding other than UTF-8, sized text, extra cursors, an unscroll, a write
-// to kitty's clipboard and a switch to the alternate screen noted, auto
-// print, 8-bit controls and the tab stops past the screen's edge kept, and
-// the meter stopped by ctx or the deadline.
+// terminal's state, title modes, the OSCs with no number xterm acts on,
+// character protection, selective erases, saves, renditions and line sizes
+// the cells can't hold, a status line, a font, a rectangular attribute
+// extent, a conformance level, a reset of a mode a terminal starts with set,
+// a 94-character set x/vt drops, a 96-character set, a window operation,
+// printer controller mode, a memory lock, a key format, locator reporting,
+// the locator's events, a change to iTerm2's state, the keyboard's LEDs, a
+// log file, a window property, a coding other than UTF-8, sized text, extra
+// cursors, an unscroll, a write to kitty's clipboard and a switch to the
+// alternate screen noted, auto print, 8-bit controls and the tab stops past
+// the screen's edge kept, and the meter stopped by ctx or the deadline.
 // Each callback and handler runs inside the emulator's Write and touches only
 // the emulation.
 func (e *emulation) setUp() {
@@ -370,6 +376,7 @@ func (e *emulation) setUp() {
 	e.watchConEmuCwd()
 	e.watchProtection()
 	e.watchTitles()
+	e.watchNumberlessOSCs()
 	e.watchSaves()
 	e.watchRendition()
 	e.watchStatusLine()
@@ -1157,6 +1164,67 @@ func (s *titleStack) saved(top titleEntry, saves func(int) bool) (titleEntry, bo
 		}
 	}
 	return titleEntry{}, false
+}
+
+// watchNumberlessOSCs registers the handler that notes the OSCs with no
+// command number that xterm or the Linux console acts on. x/ansi's parser
+// reads an OSC's command from the digits it starts with, and hands one that
+// starts with none to the handlers of parser.MissingCommand, of which x/vt
+// has none, so it drops it, where a raw replay hands it to the joiner's
+// terminal. xterm reads such an OSC by the byte where the number would end,
+// and the render would leave the joiner's own names or icon:
+//   - l sets the window title and L the icon name, xterm's Sun-compatible
+//     setters, to the rest of the string, with no ';' between (sunTitle);
+//   - ';' ends a number xterm reads as 0, so what follows it sets both the
+//     window title and the icon name, as OSC 0 does, an empty name both to
+//     "xterm" (numberlessTitle);
+//   - I sets the window's icon to the image file it names, which xterm finds
+//     as it finds its iconHint resource's (iconFile).
+//
+// The Linux console reads two of them as sequences of their own, not as
+// strings: ESC ] R resets its palette, as its terminfo entry's rs1, \Ec\E]R,
+// has reset do, and ESC ] P with seven hex digits sets a palette entry
+// (vt.c's ESnonstd); it prints what follows them. x/ansi, as xterm does,
+// reads that as the OSC's string, to the next ESC or BEL, so x/vt doesn't
+// show it, and the render, once a later ESC or BEL has ended the OSC, would
+// leave it out (linuxPalette). One that a bare ESC ends within the bytes the
+// ring's query filter holds of it the filter drops whole, the text with it,
+// so neither the ring nor the emulation has it. That counts whatever the
+// TERM: under another, a terminal that reads OSCs as xterm does swallows the
+// text too, so the fallback costs little.
+//
+// xterm sets the names under the same allowTitleOps resource as OSC 0, 1
+// and 2, which allows them by default, and the icon wherever it was built
+// with libXpm. Every one counts, an empty name and an icon xterm can't load
+// too, and each note stays, whatever follows, RIS included: the raw ring is
+// exact whatever came after, and the title stack may have saved a name.
+// xterm ignores an OSC that starts with any other byte, as x/vt does. An OSC
+// with no byte at all xterm reads as an OSC 0 with an empty name, but it
+// counts for none of these: its one known source is the rs1 of kitty's,
+// Ghostty's and Contour's terminfo entries, \E]\E\\\Ec, which reset sends to
+// end a string a program left open, and which those terminals ignore, so
+// counting it would fail every join after a reset there. xterm also takes an
+// l, L or I after digits, as OSC 2lname, which x/ansi reads as an OSC of
+// that number, so this handler doesn't see it; no program is known to send
+// one. This returns false all the same, as watchColours' handlers do.
+func (e *emulation) watchNumberlessOSCs() {
+	e.term.RegisterOscHandler(parser.MissingCommand, func(data []byte) bool {
+		// data is the whole OSC, with no number before what follows.
+		if len(data) == 0 {
+			return false
+		}
+		switch data[0] {
+		case ';':
+			e.numberlessTitle = true
+		case 'l', 'L':
+			e.sunTitle = true
+		case 'I':
+			e.iconFile = true
+		case 'R', 'P':
+			e.linuxPalette = true
+		}
+		return false
+	})
 }
 
 // watchSaves registers the handlers that note the stream saving state the

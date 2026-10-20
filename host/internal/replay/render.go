@@ -1089,6 +1089,18 @@ func (e *emulation) eligible(parts uio.ReplayParts) (rep, error) {
 	if e.titleModes {
 		return rep{}, &IneligibleError{State: "a title mode"}
 	}
+	if e.sunTitle {
+		return rep{}, &IneligibleError{State: "a Sun title"}
+	}
+	if e.numberlessTitle {
+		return rep{}, &IneligibleError{State: "a title with no number"}
+	}
+	if e.iconFile {
+		return rep{}, &IneligibleError{State: "an icon file"}
+	}
+	if e.linuxPalette {
+		return rep{}, &IneligibleError{State: "a Linux console palette"}
+	}
 	if e.screenTitles.sent {
 		return rep{}, &IneligibleError{State: "a screen title string"}
 	}

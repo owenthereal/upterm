@@ -2346,6 +2346,103 @@ func TestReplayFailsOnATitleMode(t *testing.T) {
 	}
 }
 
+// An OSC with no command number that xterm or the Linux console acts on
+// fails the render, named by what it does there: x/vt drops every OSC with
+// no number, so a joiner's xterm would keep its own names or icon, where the
+// session's xterm, and a joiner's given the raw ring, take the stream's.
+// xterm reads such an OSC by its first byte: l and L are its Sun-compatible
+// setters of the window title and the icon name; ';' ends a number xterm
+// reads as 0, so the name after it sets both, as OSC 0 does, an empty one
+// both to "xterm"; and I sets the window's icon to the image file it names.
+// The Linux console reads ESC ] R, its palette's reset, which reset sends
+// under its TERM, and ESC ] P with seven hex digits, a palette entry, as
+// sequences of their own, and prints the text after them, which x/ansi reads
+// as the OSC's string to the next ESC or BEL and x/vt doesn't show; that
+// counts whatever the TERM. Every one counts, an empty name and a name
+// holding ';' too, ended by ST or by BEL, and each note stays once an OSC 2,
+// OSC 1 or OSC 0 sets the name again, as the title stack may hold it, and
+// after RIS. OSC 2, OSC 1 and OSC 0 render as before, and so do an OSC that
+// starts with another letter, which xterm ignores, and an OSC with no byte
+// at all, which the reset of kitty's, Ghostty's and Contour's TERMs sends to
+// end a string left open, and which those terminals ignore. So does one the
+// ring's query filter dropped, which the raw ring doesn't hold either.
+func TestReplayFailsOnAnOSCWithNoNumber(t *testing.T) {
+	joinFor := func(t *testing.T, term, stream string) ([]byte, error) {
+		t.Helper()
+		return fanOut(t, NewForTerm(term), []byte("text\r\n"+stream+"more\r\n"), []uio.SizeEvent{event(1, 0, 80, 24)}, 4<<10)
+	}
+	join := func(t *testing.T, stream string) ([]byte, error) {
+		t.Helper()
+		return joinFor(t, "", stream)
+	}
+	for _, tc := range []struct{ name, stream, state string }{
+		{"the window title", "\x1b]lthe title\x1b\\", "a Sun title"},
+		{"the icon name", "\x1b]Lthe icon\x1b\\", "a Sun title"},
+		{"ended by BEL", "\x1b]lthe title\x07", "a Sun title"},
+		{"an empty title", "\x1b]l\x1b\\", "a Sun title"},
+		{"a title holding ';'", "\x1b]lone;two\x1b\\", "a Sun title"},
+		{"then an OSC 2", "\x1b]lthe title\x1b\\\x1b]2;another\x07", "a Sun title"},
+		{"then an OSC 1", "\x1b]Lthe icon\x1b\\\x1b]1;another\x07", "a Sun title"},
+		{"pushed, then an OSC 2", "\x1b]lthe title\x1b\\\x1b[22;2t\x1b]2;another\x07", "a Sun title"},
+		{"then RIS", "\x1b]lthe title\x1b\\\x1bc", "a Sun title"},
+		{"both names after a ';'", "\x1b];both\x1b\\", "a title with no number"},
+		{"both names after a ';', ended by BEL", "\x1b];both\x07", "a title with no number"},
+		{"a name holding ';' after a ';'", "\x1b];one;two\x07", "a title with no number"},
+		{"nothing after a ';'", "\x1b];\x07", "a title with no number"},
+		{"both names, then an OSC 0", "\x1b];both\x07\x1b]0;another\x07", "a title with no number"},
+		{"both names, then RIS", "\x1b];both\x07\x1bc", "a title with no number"},
+		{"an icon file", "\x1b]Ixterm-color_48x48.xpm\x1b\\", "an icon file"},
+		{"an icon file xterm loads none for", "\x1b]Inone\x07", "an icon file"},
+		{"an icon file, then RIS", "\x1b]Ixterm-color_48x48.xpm\x07\x1bc", "an icon file"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := join(t, tc.stream)
+			requireIneligible(t, err, tc.state)
+		})
+	}
+	for _, term := range []string{"linux", "xterm-256color"} {
+		for _, tc := range []struct{ name, stream string }{
+			{"the palette reset by reset", "\x1bc\x1b]Ruser@host:~$ \x1b[1mls\x1b[m\r\n"},
+			{"the palette reset, ended by BEL", "\x1b]R$ ls\x07\r\n"},
+			{"a palette entry set", "\x1b]P1ff0000$ \x1b[1mls\x1b[m\r\n"},
+			{"the palette reset, then RIS", "\x1b]R\x1b\\\x1bc"},
+		} {
+			t.Run(term+"/"+tc.name, func(t *testing.T) {
+				_, err := joinFor(t, term, tc.stream)
+				requireIneligible(t, err, "a Linux console palette")
+			})
+		}
+	}
+	for _, tc := range []struct{ name, stream, sent string }{
+		{"OSC 2", "\x1b]2;the title\x07", "\x1b]2;the title\x07"},
+		{"OSC 1", "\x1b]1;the icon\x07", "\x1b]1;the icon\x07"},
+		{"OSC 0", "\x1b]0;both\x07", "\x1b]1;both\x07\x1b]2;both\x07"},
+		{"another letter, which xterm ignores", "\x1b]xyz\x07", ""},
+		{"no byte at all", "\x1b]\x1b\\", ""},
+		{"no byte at all, ended by BEL", "\x1b]\x07", ""},
+		{"kitty's, Ghostty's and Contour's reset", "$ reset\r\n\x1b]\x1b\\\x1bc", ""},
+		// The ring's query filter drops an OSC that a bare ESC ends while it
+		// holds it, its first 8 bytes, so neither the ring nor the render
+		// holds it, or the text in it.
+		{"a palette reset the ring's filter dropped", "\x1bc\x1b]R$ \x1b[1mls\x1b[m\r\n", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stream := "text\r\n" + tc.stream + "more\r\n"
+			joined, err := join(t, tc.stream)
+			require.NoError(t, err)
+			require.True(t, bytes.HasPrefix(joined, []byte(endSync+preamble)), "the render, not the raw ring")
+			require.Contains(t, string(joined), tc.sent)
+			a, aHist := newReference(80, 24)
+			aNames := watchTitle(a)
+			_, _ = a.WriteString(stream)
+			b, bHist := newReference(80, 24)
+			bNames := watchTitle(b)
+			_, _ = b.Write(joined)
+			require.Empty(t, sameState(a, b, *aHist, *bHist, *aNames, *bNames), "the render: %q", joined)
+		})
+	}
+}
+
 // DEC private modes the session saved by XTSAVE (CSI ? Pm s) fail the
 // render, named: x/vt keeps none and ignores the XTRESTORE (CSI ? Pm r) that
 // puts them back, so the render can't tell what a later restore sets on the
