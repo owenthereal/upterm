@@ -180,6 +180,7 @@ func TestReplayRendersTheSequencesItAllows(t *testing.T) {
 		{"DA2 1", "\x1b[>1c"},
 		{"DSR 0", "\x1b[0n"},
 		{"DECSTBM, its top below its bottom", "\x1b[5;2r"},
+		{"DECSLRM, its left margin right of its right", "\x1b[?69h\x1b[5;2s\x1b[?69l"},
 		{"SCORC with a parameter", "\x1b[1u"},
 		{"DECSWBV", "\x1b[3 t"},
 		{"DECSCA 0", "\x1b[0\"q"},
@@ -227,7 +228,8 @@ func TestReplayRendersTheSequencesItAllows(t *testing.T) {
 }
 
 // droppedForms are a parameter string of each of x/vt's own CSI keys whose
-// handler drops some, of one it drops.
+// handler drops some, of one it drops, but CSI s, which drops one only while
+// DECLRMM is set, and has a case of its own.
 var droppedForms = map[int]string{
 	ansi.Command(0, 0, 'J'):   "22",
 	ansi.Command(0, 0, 'K'):   "3",
@@ -259,13 +261,21 @@ func TestDispatchCheckFollowsTheTables(t *testing.T) {
 	for key, want := range csiRules {
 		check(t, csiOf("\x1b[", key, ""), want)
 	}
-	for key, params := range droppedForms {
-		want := ""
-		if !xvtCSI[key] {
-			want = "an unhandled " + csiName(key)
+	// dropped is what a form x/vt drops of its own key fails the render by,
+	// as xvtCSI says.
+	dropped := func(key int) string {
+		if xvtCSI[key] {
+			return ""
 		}
-		check(t, csiOf("\x1b[", key, params), want)
+		return "an unhandled " + csiName(key)
 	}
+	for key, params := range droppedForms {
+		check(t, csiOf("\x1b[", key, params), dropped(key))
+	}
+	// DECSLRM's, a left margin not left of the right, which x/vt drops only
+	// while DECLRMM makes CSI s one: DECLRMM is reset after it, so the check,
+	// not the margins' mode, decides the render.
+	check(t, "\x1b[?69h\x1b[5;2s\x1b[?69l", dropped(ansi.Command(0, 0, 's')))
 	for key, want := range escRules {
 		check(t, escOf(key), want)
 	}

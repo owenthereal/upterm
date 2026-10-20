@@ -327,7 +327,9 @@ var xvtCSI = map[int]bool{
 	// bottom, as xterm does.
 	ansi.Command(0, 0, 'r'): true,
 	// SCOSC or DECSLRM, and SCORC: the saved slot, or the margins (see
-	// unrestored). x/vt drops an SCORC with a parameter, as xterm does.
+	// unrestored). x/vt drops a DECSLRM whose left margin isn't left of its
+	// right, while DECLRMM makes CSI s one, and an SCORC with a parameter, as
+	// xterm does.
 	ansi.Command(0, 0, 's'): true,
 	ansi.Command(0, 0, 'u'): true,
 }
