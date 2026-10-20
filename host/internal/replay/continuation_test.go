@@ -1758,7 +1758,9 @@ func TestEvictedRegionPrimesAFreshEmulator(t *testing.T) {
 // bytes hold C1's range, and of one whose don't, the join renders, and a
 // joiner given it holds the session's screen once the ring's lines have
 // scrolled the cut line off it; so too with a resize between the bytes
-// skipped. A cut inside a window title's character keeps the title whole:
+// skipped, and with one back to the first size later in the ring, which the
+// emulator applies as a change from the size the first left it at. A cut
+// inside a window title's character keeps the title whole:
 // the tracker primes the title as a string, whose data the bytes are.
 func TestReplayRendersARingThatStartsInsideACharacter(t *testing.T) {
 	var lines strings.Builder
@@ -1791,6 +1793,11 @@ func TestReplayRendersARingThatStartsInsideACharacter(t *testing.T) {
 	t.Run("a resize between the bytes skipped", func(t *testing.T) {
 		head := "text\r\nab\xf0"
 		join(t, head, "\x9f\x98\x80cd\r\n"+lines.String(), []uio.SizeEvent{event(1, 0, 80, 24), event(2, len(head)+1, 100, 24)})
+	})
+	t.Run("a resize between the bytes skipped, and one back later", func(t *testing.T) {
+		head, ring := "text\r\nab\xf0", "\x9f\x98\x80cd\r\n"+lines.String()
+		back := len(head) + strings.Index(ring, "line 10 ")
+		join(t, head, ring, []uio.SizeEvent{event(1, 0, 80, 24), event(2, len(head)+1, 100, 24), event(3, back, 80, 24)})
 	})
 	t.Run("a window title's", func(t *testing.T) {
 		join(t, "\x1b]2;the title \xe2\x96", "\x88 more\x07"+lines.String(), []uio.SizeEvent{event(1, 0, 80, 24)})
