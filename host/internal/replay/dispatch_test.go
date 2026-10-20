@@ -260,10 +260,33 @@ var droppedForms = map[int][]string{
 
 // Each key of the tables, given to the emulation, is decided as its row says:
 // "" renders, by the check, which leaves whatever else a handler decides to
-// the handler; a name fails the render by that name. The forms x/vt's own
-// handlers drop are decided as xvtCSI says, and every designation of a
-// character set x/vt drops by the name escVerdict gives it.
+// the handler; a name fails the render by that name. A join whose stream
+// holds a row with "", through the fan-out, its query filter and all,
+// renders too, but for the rows a handler here fails it on, deciding them by
+// the parameters or data written here, which are listed with why. The forms
+// x/vt's own handlers drop are decided as xvtCSI says, and every designation
+// of a character set x/vt drops by the name escVerdict gives it.
 func TestDispatchCheckFollowsTheTables(t *testing.T) {
+	// verdictOnly names the rows with "" that a join holding them, as written
+	// here, falls back on, each with why.
+	const (
+		noEntry  = "x names no entry of the colour table, so all of it counts as set"
+		setsOne  = "x sets the colour"
+		resetsOn = "a reset with data after its number counts as a setting"
+	)
+	verdictOnly := map[string]string{
+		"CSI Ps $ |": "DECSCPP with none resizes the window to 80 columns",
+		"CSI > Ps n": "XTMODKEYS's disable with none disables modifyFunctionKeys",
+		"ESC l":      "HP's memory lock below the region's top locks the rows above",
+		"ESC SP G":   "S8C1T selects 8-bit controls",
+		"OSC 50":     "x names a font",
+		// The colours (see watchColours).
+		"OSC 4": noEntry, "OSC 5": noEntry, "OSC 104": noEntry, "OSC 105": noEntry,
+		"OSC 13": setsOne, "OSC 14": setsOne, "OSC 15": setsOne, "OSC 16": setsOne,
+		"OSC 17": setsOne, "OSC 18": setsOne, "OSC 19": setsOne,
+		"OSC 113": resetsOn, "OSC 114": resetsOn, "OSC 115": resetsOn, "OSC 116": resetsOn,
+		"OSC 117": resetsOn, "OSC 118": resetsOn, "OSC 119": resetsOn,
+	}
 	check := func(t *testing.T, seq, want string) {
 		t.Helper()
 		e := startFor(t, captureOf("text\r\n"+seq+"more", event(1, 0, 80, 24)), termsize.Size{Cols: 80, Rows: 24})
@@ -273,8 +296,19 @@ func TestDispatchCheckFollowsTheTables(t *testing.T) {
 			requireIneligible(t, err, want)
 		}
 	}
+	// row checks a row of the tables, named name, by seq: its verdict, and
+	// with "", a join, which renders, unless verdictOnly names it.
+	row := func(t *testing.T, name, seq, want string) {
+		t.Helper()
+		check(t, seq, want)
+		if _, only := verdictOnly[name]; want != "" || only {
+			return
+		}
+		_, fellBack := fanOut(t, New(), []byte("text\r\n"+seq+"more\r\n"), []uio.SizeEvent{event(1, 0, 80, 24)}, 4<<10)
+		require.NoError(t, fellBack, "%s: %q", name, seq)
+	}
 	for key, want := range csiRules {
-		check(t, csiOf("\x1b[", key, ""), want)
+		row(t, csiName(key), csiOf("\x1b[", key, ""), want)
 	}
 	// dropped is what a form x/vt drops of its own key fails the render by,
 	// as xvtCSI says.
@@ -294,7 +328,7 @@ func TestDispatchCheckFollowsTheTables(t *testing.T) {
 	// not the margins' mode, decides the render.
 	check(t, "\x1b[?69h\x1b[5;2s\x1b[?69l", dropped(ansi.Command(0, 0, 's')))
 	for key, want := range escRules {
-		check(t, escOf(key), want)
+		row(t, escName(key), escOf(key), want)
 	}
 	for _, key := range escKeys() {
 		if _, own := xvtESC[key]; own {
@@ -312,7 +346,7 @@ func TestDispatchCheckFollowsTheTables(t *testing.T) {
 		if n == parser.MissingCommand {
 			seq = "\x1b]x\x07"
 		}
-		check(t, seq, want)
+		row(t, fmt.Sprintf("OSC %d", n), seq, want)
 	}
 	check(t, "\x1b]777;notify;title;body\x07", "")
 	check(t, "\x1b]777;notify\x07", "an unhandled OSC 777")
