@@ -1,0 +1,11 @@
+[?2004hbash-5.3$ ls
+[?2004ldocs		main.go		notes.txt
+[?2004hbash-5.3$ printf '\033[1;32mgreen\033[m\n'
+[?2004l[1;32mgreen[m
+[?2004hbash-5.3$ head -5 main.go
+[?2004l// Command greet prints a greeting for each name it is given.
+package main
+
+import (
+	"fmt"
+[?2004hbash-5.3$ 

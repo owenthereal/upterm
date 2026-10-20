@@ -1,0 +1,11 @@
+[1m[7m%[27m[1m[0m                                                                                ]2;~\k~\]7;file://host/home/user\[0m[27m[24m[J[01;32m➜  [36m~[00m [K[?1h=[?2004hlls[?1l>[?2004l
+]2;ls -G\kls\[1m[36mdocs[39;49m[0m      main.go   notes.txt
+[1m[7m%[27m[1m[0m                                                                                ]2;~\k~\]7;file://host/home/user\[0m[27m[24m[J[01;32m➜  [36m~[00m [K[?1h=[?2004hpprintf '\033[1;32mgreen\033[m\n'[?1l>[?2004l
+]2;printf '\033[1;32mgreen\033[m\n'\kprintf\[1;32mgreen[m
+[1m[7m%[27m[1m[0m                                                                                ]2;~\k~\]7;file://host/home/user\[0m[27m[24m[J[01;32m➜  [36m~[00m [K[?1h=[?2004hhhead -5 main.go[?1l>[?2004l
+]2;head -5 main.go\khead\// Command greet prints a greeting for each name it is given.
+package main
+
+import (
+	"fmt"
+[1m[7m%[27m[1m[0m                                                                                ]2;~\k~\]7;file://host/home/user\[0m[27m[24m[J[01;32m➜  [36m~[00m [K[?1h=[?2004h

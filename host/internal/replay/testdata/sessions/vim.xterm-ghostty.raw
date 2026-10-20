@@ -1,0 +1,42 @@
+[?1006;1000h[?1002h[?1049h[=1;1u[?1h=[?2004h[?1004h[1;24r[?12h[?12l[22;2t[22;1t[27m[23m[29m[m[H[2J[?25l[24;1H"main.go" 38L, 626B[2;1H▽[6n[2;1H  [3;1HPzz\[0%m[6n[3;1H           [1;1H[>c]10;?\]11;?\[1;1H[34m// Command greet prints a greeting for each name it is given.[m
+[38;5;130mpackage[m main[2;13H[K[3;1H[K[4;1H[38;5;130mimport[m ([5;9H[31m"fmt"[6;9H"os"[7;9H"strings"[m
+)
+
+[34m// greeting is the line greet prints for name.[m
+[38;5;130mfunc[m greeting(name [32mstring[m) [32mstring[m {[12;9H[38;5;130mif[m name == [31m""[m {[13;17H[38;5;130mreturn[m [31m"Hello, world!"[m[14;9H}[15;9H[38;5;130mreturn[m fmt.Sprintf([31m"Hello, [m[35m%s[m[31m!"[m, strings.TrimSpace(name))
+}
+
+[38;5;130mfunc[m main() {[19;9Hnames := os.Args[[31m1[m:][20;9H[38;5;130mif[m [36mlen[m(names) == [31m0[m {[21;17Hfmt.Println(greeting([31m""[m))[22;17H[38;5;130mreturn[m[23;9H}[24;63H1,1[11CTop[?25h[1;1H[?u[?12$p[?25l[24;53H10j[1;1H[24;53H   [11;1H[24;64H1,1[11;1H[?25h[?25l[24;1H[K[24;1H:set number[?25h[?25l[1;1H[38;5;130m  1 [m[34m// Command greet prints a greeting for each name it is given.[m
+[38;5;130m  2 package[m main
+[38;5;130m  3 
+  4 import[m (
+[38;5;130m  5 [m        [1C[31mfmt"[m
+[38;5;130m  6 [m        [31m"os"[m
+[38;5;130m  7 [m        [31m"strings"[m
+[38;5;130m  8 [m)
+[38;5;130m  9 
+ 10 [m[34m// greeting is the line greet prints for name.[m
+[38;5;130m 11 func[m greeting(name [32mstring[m) [32mstring[m {
+[38;5;130m 12 [m        [38;5;130mif[m name == [31m""[m {
+[38;5;130m 13 [m[12C    [1C[38;5;130meturn[m [31m"Hello, world!"[m
+[38;5;130m 14 [m        }
+[38;5;130m 15 [m        [1C[38;5;130meturn[m fmt.Sprintf([31m"Hello, [m[35m%s[m[31m!"[m, strings.TrimSpace(name))
+[38;5;130m 16 [m}
+[38;5;130m 17 
+ 18 func[m main() {
+[38;5;130m 19 [m        names := os.Args[[31m1[m:]
+[38;5;130m 20 [m        [38;5;130mif[m [36mlen[m(names) == [31m0[m {
+[38;5;130m 21 [m[12C    fmt.Println(greeting([31m""[m))
+[38;5;130m 22 [m[12C    [1C[38;5;130meturn
+ 23 [m        }[24;63H11,1[10CTop[?25h[11;5H[?25l[24;1H[K[24;1H/greeting[11;10H[7mgreeting[m[24;63H11,6[10CTop[?25h[?25l[24;63H[K[24;10H[?25h[?25l[11;10Hgreeting[24;63H11,6[10CTop[?25h[11;10H[?25l[24;53Ho[11;10H[24;53H [12;13H[24;1H[1m-- INSERT --[m[24;63H[K[24;63H12,2-9[8CTop[12;23r[12;1H[L[1;24r[12;1H[38;5;130m 12 
+ 13
+ 14
+ 15
+ 16
+ 17
+ 18
+ 19
+ 20
+ 21
+ 22
+ 23[m[24;63H[K[24;63H12,2-9[8CTop[?25h[12;13H[?25l[34m// hi[?25h[?25l[m[24;66H7-14[12;18H[?25h[24;1H[K[12;17H[?25l[24;53H^[[12;17H[24;53H  [12;18H[24;63H12,6-13[7CTop[12;17H[?25h[?25l[24;63H[K[24;1H:q![?25h[?25l[?1006;1000l[?1002l[?2004l[>4;m[=0;1u[23;2t[23;1t[24;1H[K[24;1H[?1004l[?2004l[?1l>[?1049l[?25h[>4;m[=0;1u

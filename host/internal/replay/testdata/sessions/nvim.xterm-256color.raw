@@ -1,0 +1,92 @@
+[?1049h[22;0;0t[?1h=[H[2J[?2004h[?69$p[?2026$p[?2027$p[?2031$p[?2048$p[0m[4:3mP$qm\[?u[c]11;?[5n[?25h]11;?[5n[?2026h[?2031h[>4;2m(B[m[H                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                [1 q[?1002h[?1006h[H[?2026lP+q5463;524742;73657472676266;73657472676262\[0m[48;2;1;2;3mP$qm\[c[?2026h(B[m// Command greet prints a greeting for each name it is given.[K
+(B[0;1mpackage(B[m main[K
+[K
+(B[0;1mimport(B[m ([K
+        [92m"fmt"(B[m[K
+        [92m"os"(B[m[K
+        [92m"strings"(B[m[K
+)[K
+[K
+// greeting is the line greet prints for name.[K
+(B[0;1mfunc(B[m greeting(name string) string {[K
+        (B[0;1mif(B[m name == [92m""(B[m {[K
+                (B[0;1mreturn(B[m [92m"Hello, world!"(B[m[K
+        }[K
+        (B[0;1mreturn(B[m fmt.Sprintf([92m"Hello, (B[m[96m%s(B[m[92m!"(B[m, strings.TrimSpace(name))[K
+}[K
+[K
+(B[0;1mfunc(B[m main() {[K
+        names := os.Args[1:][K
+        (B[0;1mif(B[m [94mlen(B[m(names) == 0 {[K
+                fmt.Println(greeting([92m""(B[m))[K
+                (B[0;1mreturn(B[m[K
+(B[0;7mmain.go                                                       1,1            Top(B[m
+[J[2 q[2 q[H// Command greet prints a greeting for each name it is given.[K
+(B[0;1mpackage(B[m main[K
+[K
+(B[0;1mimport(B[m ([K
+        [92m"fmt"(B[m[K
+        [92m"os"(B[m[K
+        [92m"strings"(B[m[K
+)[K
+[K
+// greeting is the line greet prints for name.[K
+(B[0;1mfunc(B[m greeting(name string) string {[K
+        (B[0;1mif(B[m name == [92m""(B[m {[K
+                (B[0;1mreturn(B[m [92m"Hello, world!"(B[m[K
+        }[K
+        (B[0;1mreturn(B[m fmt.Sprintf([92m"Hello, (B[m[96m%s(B[m[92m!"(B[m, strings.TrimSpace(name))[K
+}[K
+[K
+(B[0;1mfunc(B[m main() {[K
+        names := os.Args[1:][K
+        (B[0;1mif(B[m [94mlen(B[m(names) == 0 {[K
+                fmt.Println(greeting([92m""(B[m))[K
+                (B[0;1mreturn(B[m[K
+(B[0;7mmain.go                                                       1,1            Top(B[m
+[J[H[?2026lP+q4D73\[?2026h[?1004h[?2026l[?2026h[24;70H10j[H[?2026l[?2026h[24;70H   [23;64H(B[0;7m1,1[12A[?2026l[?2026h[13B(B[m:set[Cnumber[2 q[?1002l[?1006l[?2026l[?2026h[24;1H[?2026l[?2026h[H  1 // Command greet prints a greeting for each name it is given.
+  2 (B[0;1mpackage(B[m main
+  3 
+  4 (B[0;1mimport(B[m (
+  5         [92m"fmt"
+(B[m  6         [92m"os"
+(B[m  7         [92m"strings"
+(B[m  8 )
+  9 
+ 10 // greeting is the line greet prints for name.
+ 11 (B[0;1mfunc(B[m greeting(name string) string {
+ 12         (B[0;1mif(B[m name == [92m""(B[m {
+ 13                 (B[0;1mreturn(B[m [92m"Hello, world!"
+(B[m 14         }
+ 15         (B[0;1mreturn(B[m fmt.Sprintf([92m"Hello, (B[m[96m%s(B[m[92m!"(B[m, strings.TrimSpace(name))
+ 16 }
+ 17 
+ 18 (B[0;1mfunc(B[m main() {
+ 19         names := os.Args[1:]
+ 20         (B[0;1mif(B[m [94mlen(B[m(names) == 0 {
+ 21                 fmt.Println(greeting([92m""(B[m))
+ 22                 (B[0;1mreturn[2 q[?1002h[?1006h[11;5H[?2026l[?2026h(B[m[13B[11X/greeting[2 q[?1002l[?1006l[?2026l[?25l[?2026h[1;31H[30m[103mgreeting[10;8Hgreeting[11;10Hgreeting[21;33Hgreeting[23;66H(B[0;7m6[24;10H[?2026l[?25h[?2026h[24;1H[?2026l[?2026h[2 q[?1002h[?1006h[?2026l[?25l[?2026h[62C(B[m[3/5][11;10H[?2026l[?25h[?2026h[24;70Ho[11;10H[?2026l[?2026h[24;70H [24;1H[92m-- INSERT --(B[m[50C[5X[12;22r[12;1H[L[r[11;10H[30m[103mgreeting
+(B[m 12         [K[13;3H3[14;3H4[15;3H5[16;3H6[17;3H7[18;3H8[19;3H9[20;2H20[21;3H1[22;3H2[23;9H(B[0;7m[+]                                                   12,2-9[6 q[12;13H[?2026l[?2026h(B[m// hi[23;66H(B[0;7m7-14[12;18H[?2026l[?2026h(B[m[12B[12X[23;66H(B[0;7m6-13[2 q[12;17H[?2026l[?2026h[12B(B[m:q![2 q[?1002l[?1006l[?2026l[?2026h[24;1H[?2026l[?2026h[2 q[?1002h[?1006h[?2026l[?2026h[?2031l[2 q[?1002l[?1006l(B[m[?25h[0 q[?1l>[>4;0m[?2004l[?1004l[c[?2026l[?2026h[?1049l[23;0;0t[?2026l
