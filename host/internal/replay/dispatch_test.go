@@ -164,13 +164,15 @@ func TestReplayFailsOnASequenceItDoesntKnow(t *testing.T) {
 	})
 }
 
-// The sequences the tables allow render, one of each kind: the forms of its
-// own keys x/vt drops, as the terminals named in xvtCSI do; those a handler
-// here keeps or decides, in a form it doesn't note; kitty's keyboard stack,
-// which the tracker keeps; restores whose save the ring doesn't hold; and
-// those that leave nothing, vim's probe as vim sends it as it starts among
-// them, the Linux console's cursor shape as its terminfo entry's cnorm sends
-// it, and the prompt marks and notifications shells and programs send.
+// The sequences the tables allow render, one of each kind, under any TERM and
+// under tmux's, as in a session hosted inside tmux: the forms of its own keys
+// x/vt drops, as the terminals named in xvtCSI do; those a handler here keeps
+// or decides, in a form it doesn't note; kitty's keyboard stack, which the
+// tracker keeps; restores whose save the ring doesn't hold; and those that
+// leave nothing, vim's probe as vim sends it as it starts among them, the
+// Linux console's cursor shape as its terminfo entry's cnorm sends it, the
+// visual bell tmux's and screen's entries send, and the prompt marks and
+// notifications shells and programs send.
 func TestReplayRendersTheSequencesItAllows(t *testing.T) {
 	for _, tc := range []struct{ name, stream string }{
 		{"EL 3", "\x1b[3K"},
@@ -212,6 +214,7 @@ func TestReplayRendersTheSequencesItAllows(t *testing.T) {
 		{"the Linux console's UTF-8 selected", "\x1b%8"},
 		{"DECSWL", "\x1b#5"},
 		{"S7C1T", "\x1b F"},
+		{"the visual bell of tmux's and screen's TERMs", "\x1bg"},
 		{"a prompt mark", "\x1b]133;A\x07"},
 		{"VS Code's prompt mark and directory", "\x1b]633;A\x07\x1b]633;P;Cwd=/tmp\x07"},
 		{"systemd's context marker", "\x1b]3008;start=1;user=u\x1b\\"},
@@ -221,8 +224,10 @@ func TestReplayRendersTheSequencesItAllows(t *testing.T) {
 		{"kitty's colours popped", "\x1b]30101\x1b\\"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			_, fellBack := fanOut(t, New(), []byte("text\r\n"+tc.stream+"more\r\n"), []uio.SizeEvent{event(1, 0, 80, 24)}, 4<<10)
-			require.NoError(t, fellBack)
+			for _, term := range []string{"", "tmux-256color"} {
+				_, fellBack := fanOut(t, NewForTerm(term), []byte("text\r\n"+tc.stream+"more\r\n"), []uio.SizeEvent{event(1, 0, 80, 24)}, 4<<10)
+				require.NoError(t, fellBack, "TERM %q", term)
+			}
 		})
 	}
 }

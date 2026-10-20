@@ -501,6 +501,11 @@ var escRules = map[int]string{
 	ansi.Command(0, '%', '8'): "",
 	// DECSWL: a single-width line, as x/vt draws every line.
 	ansi.Command(0, '#', '5'): "",
+	// The visual bell of tmux's and screen's terminfo entries, flash=\Eg,
+	// which vim's visualbell and readline's visible bell style send: screen
+	// flashes its window for it, and tmux and xterm ignore it, so, as a bell,
+	// it leaves nothing.
+	ansi.Command(0, 0, 'g'): "",
 
 	// State no render restores, named, and noted whatever follows:
 	//   - DECDHL and DECDWL (ESC # 3, ESC # 4, ESC # 6) make a line
