@@ -209,7 +209,11 @@ func escVerdict(key int) string {
 // oscVerdict is csiVerdict's for an OSC numbered n, with data, all of it.
 // OSC 777 renders only as rxvt's notification, OSC 777 ; notify ; title ;
 // body, which shows once, as OSC 9's does: its other commands are urxvt's
-// extensions, which may do anything.
+// extensions, which may do anything. OSC 7501 renders only as Claude Code's
+// probe, OSC 7501 ; ?, which asks whether the terminal takes the status
+// Claude Code reports, and leaves nothing, no reply meaning it doesn't: a
+// status, which only a terminal that answered is sent, is state the render
+// doesn't send again.
 func oscVerdict(n int, data []byte) string {
 	if rest, own := xvtOSC[n]; own {
 		if rest {
@@ -217,6 +221,10 @@ func oscVerdict(n int, data []byte) string {
 		}
 	} else if n == 777 {
 		if bytes.HasPrefix(data, []byte("777;notify;")) {
+			return ""
+		}
+	} else if n == 7501 {
+		if bytes.Equal(data, []byte("7501;?")) {
 			return ""
 		}
 	} else if name, ok := oscRules[n]; ok {
@@ -556,7 +564,7 @@ var xvtOSC = map[int]bool{
 }
 
 // oscRules are the OSCs x/vt has no handler for, by number, as csiRules are
-// the CSIs, but for OSC 777 (see oscVerdict).
+// the CSIs, but for OSC 777 and OSC 7501 (see oscVerdict).
 var oscRules = map[int]string{
 	// Kept, or decided by their data, by a handler here: the colours,
 	// ConEmu's progress indicator and working directory, the pointer's

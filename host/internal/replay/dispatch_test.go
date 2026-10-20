@@ -138,6 +138,7 @@ func TestReplayFailsOnASequenceItDoesntKnow(t *testing.T) {
 		{"kitty's colours", "\x1b]21;foreground=red\x1b\\", "an unhandled OSC 21"},
 		{"an OSC 777 of urxvt's", "\x1b]777;preexec\x07", "an unhandled OSC 777"},
 		{"its data left out of the name", "\x1b]777;secret=hunter2\x07", "an unhandled OSC 777"},
+		{"a status of Claude Code's", "\x1b]7501;state=working\x07", "an unhandled OSC 7501"},
 		{"one, then RIS", "\x1bE\x1bc", "an unhandled ESC E"},
 		{"the first of two", "\x1b#8\x1bE", "an unhandled ESC # 8"},
 	} {
@@ -169,10 +170,10 @@ func TestReplayFailsOnASequenceItDoesntKnow(t *testing.T) {
 // x/vt drops, as the terminals named in xvtCSI do; those a handler here keeps
 // or decides, in a form it doesn't note; kitty's keyboard stack, which the
 // tracker keeps; restores whose save the ring doesn't hold; and those that
-// leave nothing, vim's probe as vim sends it as it starts among them, the
-// Linux console's cursor shape as its terminfo entry's cnorm sends it, the
-// visual bell tmux's and screen's entries send, and the prompt marks and
-// notifications shells and programs send.
+// leave nothing, vim's probe as vim sends it as it starts among them, and
+// Claude Code's, the Linux console's cursor shape as its terminfo entry's
+// cnorm sends it, the visual bell tmux's and screen's entries send, and the
+// prompt marks and notifications shells and programs send.
 func TestReplayRendersTheSequencesItAllows(t *testing.T) {
 	for _, tc := range []struct{ name, stream string }{
 		{"EL 3", "\x1b[3K"},
@@ -223,6 +224,8 @@ func TestReplayRendersTheSequencesItAllows(t *testing.T) {
 		{"a notification of kitty's", "\x1b]99;;hello\x1b\\"},
 		{"a notification of iTerm2's", "\x1b]9;hello\x07"},
 		{"kitty's colours popped", "\x1b]30101\x1b\\"},
+		{"Claude Code's probe of its status", "\x1b]7501;?\x07"},
+		{"Claude Code's probe of its status, ended by ST", "\x1b]7501;?\x1b\\"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			for _, term := range []string{"", "tmux-256color"} {
@@ -356,6 +359,8 @@ func TestDispatchCheckFollowsTheTables(t *testing.T) {
 	}
 	check(t, "\x1b]777;notify;title;body\x07", "")
 	check(t, "\x1b]777;notify\x07", "an unhandled OSC 777")
+	check(t, "\x1b]7501;?\x07", "")
+	check(t, "\x1b]7501;?;state=working\x07", "an unhandled OSC 7501")
 }
 
 // Every key of the CSIs, ESCs and OSCs no table holds fails the render, named
