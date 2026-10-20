@@ -1524,7 +1524,7 @@ func primingDiff(t testing.TB, stream []byte, sizes []uio.SizeEvent, ring int) s
 //
 // The stream is read as x/vt reads it, since both terminals are x/vt. That
 // is the tracker's reading but for two sequences: x/vt designates G0 only by
-// an SCS whose final is 0, A or B (vtCharsets94), and ignores any other,
+// an SCS whose final is 0, A or B (see xvtESC), and ignores any other,
 // where the tracker keeps whatever final it is given; and x/vt saves on a
 // CSI s with parameters too, where the tracker, as xterm, saves on a bare one
 // alone. A stream that tells the readings apart before the ring is primed
@@ -1563,7 +1563,7 @@ func lostG0(p []byte, start int) bool {
 	parser.SetHandler(ansi.Handler{
 		HandleEsc: func(cmd ansi.Cmd) {
 			switch {
-			case cmd.Intermediate() == '(' && strings.IndexByte(vtCharsets94, cmd.Final()) >= 0:
+			case cmd.Intermediate() == '(' && xvtESC[int(cmd)]:
 				each(func(c *charsets) { c.g0 = cmd.Final() })
 			case cmd == '7':
 				save()

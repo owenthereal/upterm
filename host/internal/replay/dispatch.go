@@ -176,7 +176,15 @@ func csiVerdict(key int) string {
 
 // escVerdict is csiVerdict's for an ESC. A designation into G0 to G3 of a set
 // x/vt doesn't take, by ESC ( to ESC + and a final, is of a 94-character set,
-// and one into G1 to G3 by ESC -, ESC . or ESC / of a 96-character set.
+// and one into G1 to G3 by ESC -, ESC . or ESC / of a 96-character set, of
+// which x/vt takes none. x/vt keeps the set designated before, where xterm
+// takes another, as ESC ( < for DEC's user-preferred supplemental set or
+// ESC - A for ISO Latin-1's supplement, or puts ASCII in the G-set for a final
+// it knows no set for, which another terminal may take; so the cells printed
+// under it may be other than the emulator's, and a live print shifted there
+// lands otherwise. Each stays noted whatever follows, as a DECSC saves the
+// set for a DECRC to put back. The snapshot designates G0 by the SCS the
+// tracker keeps for it, so one the ring has evicted counts too.
 func escVerdict(key int) string {
 	if rest, own := xvtESC[key]; own {
 		if rest {
@@ -396,7 +404,25 @@ var csiRules = map[int]string{
 	// stream set first is noted (see watchTitles).
 	ansi.Command('>', 0, 'T'): "",
 
-	// State no render restores, named.
+	// State no render restores, named, whatever the parameters, and noted
+	// whatever follows, RIS included, as the raw ring is exact whatever came
+	// after:
+	//   - DECSED and DECSEL (CSI ? Ps J, CSI ? Ps K) erase only the cells
+	//     DECSCA left unprotected, which the render can't tell, as x/vt keeps
+	//     no protection; x/vt ignores both, so the cells either erased are
+	//     still in the emulator;
+	//   - XTSAVE (CSI ? Pm s) saves DEC modes, XTPUSHSGR (CSI Pm # {, or its
+	//     alias CSI Pm # p) the rendition, and XTPUSHCOLORS (CSI Pm # P) the
+	//     colours, none of which x/vt keeps, so the render can't tell what a
+	//     restore on the session's terminal puts back, and a joiner's, which
+	//     the save never reached, would put back its own;
+	//   - DECSCL (CSI Pl ; Pc " p) sets the conformance level, and on xterm
+	//     soft-resets the terminal, where x/vt does nothing for it;
+	//   - DECLL (CSI Ps q) lights or puts out the keyboard's LEDs, a clear
+	//     too, as it puts out the joiner's, where x/vt keeps none;
+	//   - kitty's unscroll (CSI Ps + T) scrolls the screen down as SD does,
+	//     filling the lines it opens from the scrollback, where x/vt
+	//     scrolls nothing.
 	ansi.Command('?', 0, 'J'): "a selective erase",
 	ansi.Command('?', 0, 'K'): "a selective erase",
 	ansi.Command('?', 0, 's'): "saved DEC modes",
@@ -471,9 +497,21 @@ var escRules = map[int]string{
 	// DECSWL: a single-width line, as x/vt draws every line.
 	ansi.Command(0, '#', '5'): "",
 
-	// State no render restores, named. x/vt keys a handler by the last
-	// intermediate alone, so a designation of a 94-character set by two, as
-	// ESC ( % 5, is keyed by the second.
+	// State no render restores, named, and noted whatever follows:
+	//   - DECDHL and DECDWL (ESC # 3, ESC # 4, ESC # 6) make a line
+	//     double-height or double-width, where x/vt keeps no line size and
+	//     draws it single-width;
+	//   - ESC % @ leaves UTF-8 for ISO-8859-1, as xterm and the Linux console
+	//     read it, where x/vt reads UTF-8 alone, so the bytes after it, the
+	//     program's own among them, read otherwise on x/vt, and an ESC % G
+	//     after it leaves what was printed in between;
+	//   - a designation of a 94-character set by two intermediates that
+	//     xterm acts on, as ESC ( % 5, DEC's supplemental graphic set, which
+	//     x/vt keys by the second alone, where x/vt keeps the set designated
+	//     before (see escVerdict);
+	//   - ESC k, a screen title string, which x/vt dispatches only under a
+	//     TERM that isn't GNU screen's or tmux's, where the session's
+	//     terminal may draw the title or take it as one (see screenTitles).
 	ansi.Command(0, '#', '3'): "a double-size line",
 	ansi.Command(0, '#', '4'): "a double-size line",
 	ansi.Command(0, '#', '6'): "a double-size line",
@@ -536,7 +574,19 @@ var oscRules = map[int]string{
 	// kitty's pop of the colours, a restore (see csiRules).
 	30101: "",
 
-	// State no render restores, named.
+	// State no render restores, named, whatever the data, and noted
+	// whatever follows, RIS included:
+	//   - OSC 6, and its alias OSC 106, turn on or off whether xterm draws
+	//     bold, underlined, blinking, reversed or italic text in a special
+	//     colour, none of which x/vt keeps, and which xterm's RIS leaves;
+	//     iTerm2 reads OSC 6 as a tab's colour;
+	//   - kitty's OSC 30001 pushes the colours, as XTPUSHCOLORS does;
+	//   - OSC 46 sets the file xterm logs to, and OSC 3 sets or deletes an X
+	//     property of its window, neither of which x/vt keeps, and which
+	//     another build or terminal may take though xterm's defaults don't;
+	//   - OSC 66, kitty's text sizing, draws its text scaled, or in as many
+	//     cells as it says, and moves the cursor past it, where x/vt drops
+	//     the whole OSC, its text and the move with it.
 	6:     "a special colour mode",
 	106:   "a special colour mode",
 	30001: "a saved palette",
