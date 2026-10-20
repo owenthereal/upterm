@@ -220,6 +220,9 @@ type emulation struct {
 	// unscroll is set once the stream has scrolled the screen down filling
 	// it from the scrollback (see watchUnscroll).
 	unscroll bool
+	// kittyClipboard is set once the stream has begun a write to the
+	// clipboard by kitty's OSC 5522 (see watchKittyClipboard).
+	kittyClipboard bool
 	// altShown is set once the alternate screen has shown, the snapshot's
 	// switch to it included (see renderer.hiddenAlt).
 	altShown bool
@@ -324,10 +327,10 @@ func (r replayer) Start(ctx context.Context, deadline time.Time, c *uio.Capture,
 // 96-character set, a window operation, printer controller mode, a memory
 // lock, a key format, locator reporting, the locator's events, a change to
 // iTerm2's state, the keyboard's LEDs, a log file, a window property, a
-// coding other than UTF-8, sized text, extra cursors, an unscroll and a
-// switch to the alternate screen noted, auto print, 8-bit controls and the
-// tab stops past the screen's edge kept, and the meter stopped by ctx or the
-// deadline.
+// coding other than UTF-8, sized text, extra cursors, an unscroll, a write
+// to kitty's clipboard and a switch to the alternate screen noted, auto
+// print, 8-bit controls and the tab stops past the screen's edge kept, and
+// the meter stopped by ctx or the deadline.
 // Each callback and handler runs inside the emulator's Write and touches only
 // the emulation.
 func (e *emulation) setUp() {
@@ -391,6 +394,7 @@ func (e *emulation) setUp() {
 	e.watchSizedText()
 	e.watchExtraCursors()
 	e.watchUnscroll()
+	e.watchKittyClipboard()
 }
 
 // colours is the last change the stream made, by OSC, to each of the colours
@@ -720,7 +724,8 @@ func (e *emulation) syncByMode(m ansi.Mode) {
 // base64 clears the selections instead, which the joiner's terminal does as
 // well when it is sent the same write, so the two needn't be told apart. A Pd
 // of ? asks for a selection, which the query filter drops, and an OSC 52 with
-// no ';' after Pc does nothing.
+// no ';' after Pc does nothing. kitty's OSC 5522 writes the same clipboard on
+// kitty, and a render after one falls back (see watchKittyClipboard).
 type clipboard []clipWrite
 
 // clipWrite is a clipboard write still in force.
@@ -1960,6 +1965,58 @@ func (e *emulation) watchUnscroll() {
 		e.unscroll = true
 		return false
 	})
+}
+
+// watchKittyClipboard registers the handler that notes a write to the
+// clipboard, or to the primary selection, by kitty's OSC 5522, which x/vt
+// drops, where a raw replay hands it to the joiner's kitty, which takes it as
+// the session's did. A write is a run of packets: type=write begins it,
+// type=wdata packets bring its data, type=walias ones more names for a type
+// of it, and a type=wdata with no MIME type ends it, when kitty sets the
+// clipboard to what the write brought, or empties it of a write that brought
+// nothing. kitty takes the packets after the beginning only into a write
+// begun before them, so the beginning is what counts (see
+// kittyClipboardWrite): without one in the ring, a joiner's kitty, taken to
+// be at its defaults, ignores the rest, as the render does. Every beginning
+// counts, whatever follows it: one whose end the live bytes carry, one never
+// ended, and one kitty aborts too, as on data that isn't base64, which
+// leaves the clipboard as it was. The note stays, whatever follows, RIS
+// included: the raw ring is exact whatever came after.
+//
+// kitty keeps one clipboard and one primary selection for OSC 52 and OSC
+// 5522 alike, so an OSC 52 write the render replays (see clipboard) would
+// stand on a joiner's kitty where a later OSC 5522 write replaced it on the
+// session's; falling back covers that too, as the raw ring hands the joiner
+// every write in order. A read, type=read, which the query filter doesn't
+// drop, x/vt drops too, and the render sends none. x/vt has no handler of
+// its own for OSC 5522; this returns false all the same, as watchColours'
+// do.
+func (e *emulation) watchKittyClipboard() {
+	e.term.RegisterOscHandler(5522, func(data []byte) bool {
+		if kittyClipboardWrite(data) {
+			e.kittyClipboard = true
+		}
+		return false
+	})
+}
+
+// kittyClipboardWrite reports whether data, a whole OSC 5522, its number
+// first, begins a write, as kitty reads it: after the number, and the ';'
+// that follows it if one does, the metadata, up to the next ';', is a list of
+// key=value records split by ':', and the type is the value of the last
+// record whose key is type, write for a write. One kitty ignores counts too,
+// as one with a record that has no '=', or with a name, password or MIME type
+// that isn't base64.
+func kittyClipboardWrite(data []byte) bool {
+	meta := bytes.TrimPrefix(bytes.TrimLeft(data, "0123456789"), []byte{';'})
+	meta, _, _ = bytes.Cut(meta, []byte{';'})
+	write := false
+	for record := range bytes.SplitSeq(meta, []byte{':'}) {
+		if key, value, ok := bytes.Cut(record, []byte{'='}); ok && string(key) == "type" {
+			write = string(value) == "write"
+		}
+	}
+	return write
 }
 
 // sgrUndrawable reports whether params, an SGR's, hold a number x/vt's SGR

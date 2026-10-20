@@ -4539,6 +4539,79 @@ func TestReplayFailsOnAnUnscroll(t *testing.T) {
 	}
 }
 
+// A write to the clipboard by kitty's OSC 5522 fails the render, named: x/vt
+// drops every OSC 5522, so a joiner's kitty would keep its own clipboard,
+// where the session's took the stream's write, as a joiner's kitty given the
+// raw ring does too. A write begins with type=write, the type kitty reads
+// being the last in the metadata, and every one counts, whatever follows it:
+// an empty one, ended with no data, which empties kitty's clipboard; one not
+// yet ended, whose end the live bytes carry to a joiner's kitty given the raw
+// ring; and one kitty aborts, as on data that isn't base64, which leaves its
+// clipboard as it was. kitty takes data, aliases and an end only into a write
+// begun before them, so alone they render, a joiner's kitty, taken to be at
+// its defaults, ignoring them; and so do a read, a query the render doesn't
+// send, and a packet of a type kitty doesn't have, or of none. kitty writes
+// OSC 52 to the same clipboard, so an OSC 52 write before or after one falls
+// back on it too.
+func TestReplayFailsOnAKittyClipboardWrite(t *testing.T) {
+	join := func(t *testing.T, stream string) ([]byte, error) {
+		t.Helper()
+		return fanOut(t, New(), []byte("text\r\n"+stream+"more\r\n"), []uio.SizeEvent{event(1, 0, 80, 24)}, 4<<10)
+	}
+	const (
+		begin = "\x1b]5522;type=write\x1b\\"
+		text  = "\x1b]5522;type=wdata:mime=dGV4dC9wbGFpbg==;aGVsbG8=\x1b\\" // text/plain, hello
+		end   = "\x1b]5522;type=wdata\x1b\\"
+		write = begin + text + end
+	)
+	for _, tc := range []struct{ name, stream string }{
+		{"a write of text", write},
+		{"ended by BEL", "\x1b]5522;type=write\x07\x1b]5522;type=wdata:mime=dGV4dC9wbGFpbg==;aGVsbG8=\x07\x1b]5522;type=wdata\x07"},
+		{"two types, one aliased", begin + text + "\x1b]5522;type=wdata:mime=dGV4dC9odG1s;PGI+aGk8L2I+\x1b\\" +
+			"\x1b]5522;type=walias:mime=dGV4dC9wbGFpbg==;VVRGOF9TVFJJTkc=\x1b\\" + end},
+		{"to the primary selection", "\x1b]5522;type=write:loc=primary\x1b\\" + text + end},
+		{"with a password and a name", "\x1b]5522;type=write:pw=c2VjcmV0:name=dmlt\x1b\\" + text + end},
+		{"begun, not yet ended", begin + text},
+		{"begun alone", begin},
+		{"empty, which empties kitty's clipboard", begin + end},
+		{"aborted on data that isn't base64", begin + "\x1b]5522;type=wdata:mime=dGV4dC9wbGFpbg==;!!!!\x1b\\" + end},
+		{"its type given twice, the last a write", "\x1b]5522;type=read:type=write\x1b\\" + text + end},
+		{"its number with a leading 0", "\x1b]05522;type=write\x1b\\" + text + end},
+		{"its number with no ';' after it", "\x1b]5522type=write\x1b\\" + text + end},
+		{"one, then RIS", write + "\x1bc"},
+		{"one, then an OSC 52 write", write + "\x1b]52;c;QQ==\x07"},
+		{"an OSC 52 write, then one", "\x1b]52;c;QQ==\x07" + write},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := join(t, tc.stream)
+			requireIneligible(t, err, "a kitty clipboard write")
+		})
+	}
+	for _, tc := range []struct{ name, stream string }{
+		{"a read of text", "\x1b]5522;type=read;dGV4dC9wbGFpbg==\x1b\\"},
+		{"a read of the types on the clipboard", "\x1b]5522;type=read;Lg==\x1b\\"},
+		{"a read of the primary selection", "\x1b]5522;type=read:loc=primary;dGV4dC9wbGFpbg==\x1b\\"},
+		{"a read whose data reads as a type", "\x1b]5522;type=read;:type=write\x1b\\"},
+		{"data with no write begun", text},
+		{"an alias with no write begun", "\x1b]5522;type=walias:mime=dGV4dC9wbGFpbg==;VVRGOF9TVFJJTkc=\x1b\\"},
+		{"an end with no write begun", end},
+		{"its type given twice, the last a read", "\x1b]5522;type=write:type=read;dGV4dC9wbGFpbg==\x1b\\"},
+		{"a type kitty doesn't have", "\x1b]5522;type=writes\x1b\\" + text + end},
+		{"no type", "\x1b]5522;mime=dGV4dC9wbGFpbg==;aGVsbG8=\x1b\\"},
+		{"OSC 5523", "\x1b]5523;type=write\x1b\\\x1b]5523;type=wdata:mime=dGV4dC9wbGFpbg==;aGVsbG8=\x1b\\\x1b]5523;type=wdata\x1b\\"},
+		{"OSC 552", "\x1b]552;type=write\x1b\\\x1b]552;type=wdata:mime=dGV4dC9wbGFpbg==;aGVsbG8=\x1b\\\x1b]552;type=wdata\x1b\\"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			joined, err := join(t, tc.stream)
+			require.NoError(t, err)
+			require.True(t, bytes.HasPrefix(joined, []byte(endSync+preamble)), "the render, not the raw ring")
+			require.NotContains(t, string(joined), "\x1b]55", "x/vt drops it, and the render sends none")
+			_, err = renderAt(t, 80, 24, "text\r\n"+tc.stream+"more\r\n")
+			require.NoError(t, err, "given to the emulation")
+		})
+	}
+}
+
 // screenTitleString is a window title string of GNU screen's and tmux's, as
 // tmux reads one: ESC k after an ESC and any C0 controls tmux executes where
 // they stand but CAN and SUB, then the title, up to the ESC, CAN or SUB that

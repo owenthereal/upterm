@@ -1109,6 +1109,9 @@ func (e *emulation) eligible(parts uio.ReplayParts) (rep, error) {
 	if e.unscroll {
 		return rep{}, &IneligibleError{State: "an unscroll"}
 	}
+	if e.kittyClipboard {
+		return rep{}, &IneligibleError{State: "a kitty clipboard write"}
+	}
 	if splitWide(e.term.MainScreen()) || splitWide(e.term.AltScreen()) {
 		return rep{}, &IneligibleError{State: splitWideState}
 	}
