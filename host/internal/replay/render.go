@@ -1000,6 +1000,17 @@ var (
 		ansi.DECMode(9001): true,
 	}
 
+	// ignoredANSIModes are the ANSI modes left as the joiner's terminal has
+	// them, as ignoredModes are the DEC ones, and for the same reasons.
+	ignoredANSIModes = map[ansi.ANSIMode]bool{
+		// GNU screen's and tmux's very visible cursor, appearance only, as
+		// ?12 is: reset, they show the cursor very visible, which their
+		// terminfo entries' cvvis (\E[34l) asks for; set, as they start, the
+		// normal one, which cnorm (\E[34h\E[?25h) puts back, as nvim, htop
+		// and top send it as they start and exit. xterm has no ANSI mode 34.
+		ansi.ANSIMode(34): true,
+	}
+
 	// defaultModes are the DEC private modes a terminal starts with set, as
 	// xterm does with its default resources, that the render neither
 	// restores nor ignores. A set of one leaves it as it starts; a reset
@@ -1247,7 +1258,7 @@ func (e *emulation) unrestored(parts uio.ReplayParts) string {
 
 // unrestoredMode names the first mode, DEC modes first, then by number, that
 // is set otherwise than as it starts and that the render neither restores
-// nor ignores (see ignoredModes), or "".
+// nor ignores (see ignoredModes and ignoredANSIModes), or "".
 //
 // It restores the tracker's modes, which the emulator agrees on (see
 // consistent), the screen switch the tracker says entered the alternate
@@ -1269,11 +1280,13 @@ func (e *emulation) unrestoredMode(p uio.ReplayParts) string {
 		set := modes[m].IsSet()
 		dec, ok := m.(ansi.DECMode)
 		if !ok {
+			an, _ := m.(ansi.ANSIMode)
 			switch {
 			case m == ansi.ModeSendReceive:
 				if modes[m].IsReset() {
 					return "a default mode reset (12)"
 				}
+			case ignoredANSIModes[an]:
 			case set && m != ansi.ModeInsertReplace:
 				return fmt.Sprintf("mode %d", m.Mode())
 			}

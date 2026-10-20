@@ -3075,6 +3075,65 @@ func TestReplayIgnoresInputOnlyModes(t *testing.T) {
 	})
 }
 
+// ANSI mode 34 is GNU screen's and tmux's very visible cursor: reset, they
+// show the cursor very visible, as their terminfo entries' cvvis, \E[34l,
+// asks; set, as they start, the normal cursor, which cnorm, \E[34h\E[?25h,
+// puts back. nvim, htop and top send cnorm as they start and as they exit,
+// and ncurses whenever it shows the cursor again. It changes only how the
+// cursor shows, as ?12 does, and xterm has no ANSI mode 34, so it is neither
+// restored nor a reason to fall back, whichever way the stream left it and
+// whatever the session's TERM: the join renders without it. The ANSI modes
+// beside it are read as before, a set or a reset of 34 among them included:
+// insert mode is restored, LNM fails the render, any other set one fails it
+// by number, and SRM's reset fails it as a default mode reset.
+func TestReplayIgnoresTheVeryVisibleCursorMode(t *testing.T) {
+	join := func(t *testing.T, term, stream string) ([]byte, error) {
+		t.Helper()
+		return fanOut(t, NewForTerm(term), []byte("$ nvim\r\n"+stream+"$ "), []uio.SizeEvent{event(1, 0, 80, 24)}, 4<<10)
+	}
+	for _, term := range []string{"tmux-256color", "screen", "xterm-256color"} {
+		for _, tc := range []struct{ name, stream string }{
+			{"cnorm", "\x1b[34h\x1b[?25h"},
+			{"cvvis", "\x1b[34l"},
+			{"set alone", "\x1b[34h"},
+			{"nvim's start and exit", "\x1b[?1049h\x1b[34h\x1b[?25h~\x1b[?1049l\x1b[34h\x1b[?25h"},
+			{"cvvis, then cnorm", "\x1b[34l\x1b[?25l\x1b[34h\x1b[?25h"},
+		} {
+			t.Run(term+"/"+tc.name, func(t *testing.T) {
+				joined, err := join(t, term, tc.stream)
+				require.NoError(t, err)
+				require.True(t, bytes.HasPrefix(joined, []byte(endSync+preamble)), "the render, not the raw ring")
+				require.NotContains(t, string(joined), "\x1b[34", "neither restored nor reset")
+			})
+		}
+	}
+
+	t.Run("insert mode beside it", func(t *testing.T) {
+		const stream = "$ nvim\r\n\x1b[4;34h$ "
+		joined, err := join(t, "tmux-256color", "\x1b[4;34h")
+		require.NoError(t, err)
+		require.Contains(t, string(joined), "\x1b[4h")
+		a, aHist := newReference(80, 24)
+		_, _ = a.WriteString(stream)
+		b, bHist := newReference(80, 24)
+		_, _ = b.Write(joined)
+		require.True(t, b.Mode(ansi.ModeInsertReplace).IsSet())
+		require.Empty(t, sameState(a, b, *aHist, *bHist, names{}, names{}))
+	})
+	for _, tc := range []struct{ name, stream, state string }{
+		{"LNM", "\x1b[34h\x1b[20h", "LNM"},
+		{"mode 33", "\x1b[33;34h", "mode 33"},
+		{"mode 35", "\x1b[34;35h", "mode 35"},
+		{"mode 35, 34 reset", "\x1b[35h\x1b[34l", "mode 35"},
+		{"SRM reset", "\x1b[34h\x1b[12l", "a default mode reset (12)"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := join(t, "tmux-256color", tc.stream)
+			requireIneligible(t, err, tc.state)
+		})
+	}
+}
+
 // ConPTY starts every Windows session with a DA1, which the ring's query
 // filter takes out, then focus reporting and win32-input-mode: a join to it
 // renders, restores focus reporting, and leaves win32-input-mode, which only

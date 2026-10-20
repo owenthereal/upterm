@@ -545,6 +545,9 @@ func sameModes(a, b ansi.Modes) string {
 		if dec, ok := m.(ansi.DECMode); ok && ignoredModes[dec] && dec != ansi.ModeSynchronizedOutput {
 			continue
 		}
+		if an, ok := m.(ansi.ANSIMode); ok && ignoredANSIModes[an] {
+			continue
+		}
 		differ := a[m].IsSet() != b[m].IsSet()
 		if dec, ok := m.(ansi.DECMode); ok && defaultModes[dec] || m == ansi.ModeSendReceive {
 			// A terminal starts with these set, but x/vt starts them unset
