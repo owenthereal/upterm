@@ -1823,6 +1823,23 @@ func TestReplayReadsWhatFollowsACutCharacter(t *testing.T) {
 	}
 }
 
+// A ring that ends before the character it starts in does fails the join:
+// the emulation can't hand off inside the character, where the rest of it
+// would reach x/vt at ground, and the session's terminal completes the
+// character with it.
+func TestReplayFailsOnARingThatEndsInsideItsFirstCharacter(t *testing.T) {
+	for _, tc := range []struct{ head, ring string }{
+		{"text\r\nab\xe2", "\x96"},
+		{"text\r\nab\xf0", "\x9f\x98"},
+		{"text\r\nab\xf0\x9f", "\x98"},
+	} {
+		capt := &capturing{r: New()}
+		_, fellBack := fanOut(t, capt, []byte(tc.head+tc.ring), []uio.SizeEvent{event(1, 0, 80, 24)}, len(tc.ring))
+		require.Equal(t, uint64(len(tc.head)), capt.c.Start, "%q: the ring starts at the cut", tc.ring)
+		requireIneligible(t, fellBack, "a ring that ends inside the character it starts in")
+	}
+}
+
 // A lone C1 byte the ring no longer holds doesn't fail the join: the session's
 // terminal drew it, or acted on it, before the ring's first byte, which is as
 // far back as a raw replay reaches too.

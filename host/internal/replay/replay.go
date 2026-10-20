@@ -328,6 +328,12 @@ func (e *emulation) skipCut(chunks [][]byte, sizes []uio.SizeEvent, n int) ([][]
 		}
 		chunks = chunks[1:]
 	}
+	// The ring ends before the character does: the rest of it, offered
+	// later, would reach x/vt at ground, and no handoff point inside the
+	// character holds.
+	if len(chunks) == 0 && len(cut) < n {
+		return nil, nil, &IneligibleError{State: "a ring that ends inside the character it starts in"}
+	}
 	pos := 0
 	for len(sizes) > 0 && sizes[0].Offset < e.h+uint64(len(cut)) {
 		ev := sizes[0]
