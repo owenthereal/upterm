@@ -51,6 +51,15 @@ type pacedSink interface {
 // guest it displaced. Earliest protects whoever is already watching from
 // whoever joins next.
 //
+// While the pacing guest is still being attached, the command is held to it as
+// to a backlog: the join may be reconstructing its screen, and has to catch up
+// on whatever the command writes meanwhile before it can hand over, so what
+// passes on the guest's behalf counts as its backlog, and the command waits
+// once that reaches the low mark. A command that outran the reconstruction
+// would leave the join no handoff it could reach in time, or evict from the
+// ring the output the handoff needs, and the guest would be handed the raw
+// ring instead. A follower being attached holds nothing.
+//
 // It stands in front of MultiWriter.Write, so a write waits here, outside
 // writeMu: an attach or a detach never queues behind a slow guest, as it does
 // behind a parked primary.
@@ -63,13 +72,20 @@ type guestPacer struct {
 	// mutex, so that a guest waiting its turn stops waiting when it leaves:
 	// the Append can be a join reconstructing the screen, which holds the
 	// slot for as long as its budget allows. Nothing on the write path takes
-	// it, so pacing never waits on a join.
+	// it: a write waits on a join only through pending, and only on the
+	// pacing guest's own.
 	attachSlot chan struct{}
 
-	mu       sync.Mutex
-	guests   []pacedSink // registration order
-	primary  bool
-	released bool
+	mu     sync.Mutex
+	guests []pacedSink // registration order
+	// pending is the guest whose attach is running: registered, and not yet
+	// handed its replay. attachSlot keeps it to one. pendingBytes is what has
+	// passed on its behalf since, while it paced: what its join will hand it
+	// as the gap.
+	pending      pacedSink
+	pendingBytes int
+	primary      bool
+	released     bool
 	// changed is closed and replaced whenever any of the above changes, which
 	// is how a held write hears of it without polling.
 	changed chan struct{}
@@ -89,7 +105,7 @@ func newGuestPacer(ctx context.Context, w io.Writer) *guestPacer {
 // Write waits until the pacing guest's backlog is below the low mark, then
 // writes b through.
 func (p *guestPacer) Write(b []byte) (int, error) {
-	p.wait()
+	p.wait(len(b))
 	return p.w.Write(b)
 }
 
@@ -103,16 +119,37 @@ func (p *guestPacer) Write(b []byte) (int, error) {
 // leave a window, as long as the handler is descheduled, in which a session
 // with no other guest writes to it unpaced. Registered first, the only write
 // that can reach it unseen is one that had passed the gate already: one pty
-// write. A first guest registered but not yet appended is the pacer with an
-// empty queue, so a write can pass on its behalf; it either goes out ahead of
-// Append, and so into the replay, or waits on writeMu, which Append holds,
-// and lands after it.
+// write, which either goes out ahead of Append, and so into the replay, or
+// waits on writeMu, which Append holds, and lands after it.
 //
-// attachSlot is what keeps that true when guests join together. Without it,
-// a guest registered but descheduled before its Append would be the pacer
-// with an empty queue, holding the gate open while a later guest attached and
-// took output unpaced until it overflowed. With it, registration order is
-// attachment order, and no guest attaches ahead of an earlier registered one.
+// While appendFn runs, s is pending, and a pending guest that paces holds the
+// command although its queue is empty: appendFn may be reconstructing its
+// screen, which has to catch up on whatever the command writes meanwhile.
+// What the pacer lets through on s's behalf counts as s's backlog, and from
+// the low mark on every write waits, so what the command adds to the ring
+// while the join runs stays within the low mark and one write, far inside
+// the ring. However appendFn ends, attached, refused, failed or panicking, s
+// stops being pending, which wakes every held write to look again; it stays
+// registered only if attached. The count goes with the mark rather than
+// carrying over: once s is attached, what passed on its behalf is in its real
+// backlog, as the gap, and counting it again would count it twice.
+//
+// That hold can't deadlock the join it waits for. The join's capture and its
+// handoff take writeMu, which a held write doesn't hold. Its emulation waits
+// its turn behind other joins' emulations, each bounded by that join's
+// deadline. Its handoff waits for a resize's outcome, which the pty reports
+// as its ioctl returns, writing nothing. Only a resize inside a sequence or a
+// character the ring ends in the middle of has the handoff wait for more
+// output, and the low mark's worth the pacer lets through is what lets the
+// command finish it, so the join can hand over. A sequence whose end doesn't
+// come within that, one longer than the low mark or a command stalled in the
+// middle of one, has the join fall back to the raw ring at its deadline. So
+// the hold lasts until the join attaches or falls back, at the latest its
+// deadline.
+//
+// attachSlot keeps attaches one at a time, so that one guest at most is
+// pending, and registration order is attachment order: no guest attaches
+// ahead of one registered before it.
 func (p *guestPacer) attach(ctx context.Context, s pacedSink, appendFn func() error) error {
 	// Asked first: with the slot free, the select below would pick between
 	// the two at random, and attach a guest that has already left.
@@ -127,13 +164,45 @@ func (p *guestPacer) attach(ctx context.Context, s pacedSink, appendFn func() er
 	defer func() { <-p.attachSlot }()
 	p.mu.Lock()
 	p.guests = append(p.guests, s)
+	p.pending, p.pendingBytes = s, 0
 	p.changedLocked()
 	p.mu.Unlock()
+	attached := false
+	// Deferred, so that a panic in appendFn ends the hold too.
+	defer func() { p.settle(s, attached) }()
 	if err := appendFn(); err != nil {
-		p.remove(s)
 		return err
 	}
+	attached = true
 	return nil
+}
+
+// passPending lets a write of n bytes go on behalf of s, the pending pacer,
+// and counts it, while what has gone since s became pending is below the low
+// mark. Deciding and counting under one hold of mu keeps the bound one write
+// past the mark however many write at once. It reports false once the mark
+// is reached, or once s is no longer pending, which wakes the caller's wait
+// at once.
+func (p *guestPacer) passPending(s pacedSink, n int) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.pending != s || p.pendingBytes >= pacingLowWater {
+		return false
+	}
+	p.pendingBytes += n
+	return true
+}
+
+// settle ends s's attach: s is no longer pending, and unless it was attached
+// it is unregistered as well.
+func (p *guestPacer) settle(s pacedSink, attached bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.pending, p.pendingBytes = nil, 0
+	if i := slices.Index(p.guests, s); i >= 0 && !attached {
+		p.guests = slices.Delete(p.guests, i, i+1)
+	}
+	p.changedLocked()
 }
 
 // remove unregisters s. A sink not registered, or already removed, changes
@@ -178,24 +247,32 @@ func (p *guestPacer) changedLocked() {
 	p.changed = make(chan struct{})
 }
 
-// current returns the pacing guest and its backlog, or nil when writes pass
-// through, with the signal for the next change to any of it.
-func (p *guestPacer) current() (pacedSink, uio.Backlog, <-chan struct{}) {
+// current returns the pacing guest, its backlog and whether it is pending, or
+// nil when writes pass through, with the signal for the next change to any of
+// it.
+func (p *guestPacer) current() (pacedSink, uio.Backlog, bool, <-chan struct{}) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.primary || p.released || p.ctx.Err() != nil {
-		return nil, uio.Backlog{}, p.changed
+		return nil, uio.Backlog{}, false, p.changed
 	}
 	for _, g := range p.guests {
 		if b := g.Backlog(); b.Live {
-			return g, b, p.changed
+			return g, b, g == p.pending, p.changed
 		}
 	}
-	return nil, uio.Backlog{}, p.changed
+	return nil, uio.Backlog{}, false, p.changed
 }
 
-// wait returns once the write may go: the pacing guest's backlog is below the
-// low mark, or nothing paces.
+// wait returns once a write of n bytes may go: nothing paces, or the pacing
+// guest's backlog is below the low mark. A pending pacer's backlog is what has
+// passed on its behalf since it became pending, which the write, going, adds
+// to.
+//
+// A pending pacer is waited for without a deadline. The deadline judges a
+// guest by what it delivers, and one still being attached has been handed
+// nothing to deliver; its attach ends by the join's deadline, and the hold
+// with it.
 //
 // The deadline is armed against one sink and the Delivered it last showed,
 // and armed afresh whenever either changes, so it measures time without
@@ -206,7 +283,7 @@ func (p *guestPacer) current() (pacedSink, uio.Backlog, <-chan struct{}) {
 //
 // Reset needs no drain of the timer's channel: since Go 1.23 a stopped or
 // reset timer never delivers a stale expiry.
-func (p *guestPacer) wait() {
+func (p *guestPacer) wait(n int) {
 	var (
 		timer   *time.Timer
 		armed   pacedSink
@@ -222,14 +299,27 @@ func (p *guestPacer) wait() {
 		}
 	}()
 	for {
-		s, b, changed := p.current()
-		if s == nil || b.Bytes < pacingLowWater {
+		s, b, pending, changed := p.current()
+		if s == nil || (pending && p.passPending(s, n)) || (!pending && b.Bytes < pacingLowWater) {
 			return
 		}
 		if !counted {
 			counted = true
 			p.waiting.Add(1)
 			p.holds.Add(1)
+		}
+		if pending {
+			if timer != nil {
+				timer.Stop()
+			}
+			armed = nil // armed afresh once the guest is attached
+			select {
+			case <-b.Progress: // the sink failing or closing ends its turn
+			case <-changed:
+			case <-p.ctx.Done():
+				return
+			}
+			continue
 		}
 		if s != armed || b.Delivered != since {
 			armed, since = s, b.Delivered
@@ -248,7 +338,7 @@ func (p *guestPacer) wait() {
 			armed = nil // whatever follows, the deadline is armed afresh
 			// The deadline and a delivered piece can be ready together, and a
 			// primary can have arrived: look again before acting...
-			if s2, b2, _ := p.current(); s2 != s || b2.Delivered != since || b2.Bytes < pacingLowWater {
+			if s2, b2, _, _ := p.current(); s2 != s || b2.Delivered != since || b2.Bytes < pacingLowWater {
 				continue
 			}
 			// ...and decide against the recorded count under the sink's own

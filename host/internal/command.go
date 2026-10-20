@@ -8,6 +8,8 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"runtime"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -222,6 +224,40 @@ func setupCommand(name string, args []string) *exec.Cmd {
 	return exec.Command(name, args...)
 }
 
+// environ is the environment the command runs with: the host's own, then the
+// session's variables, then TERM, when the host names one.
+//
+// The session's own variables go last, and that is the whole rule for all
+// three of them. exec.Cmd keeps the last duplicate key, so appending is
+// what makes UPTERM_SESSION_NAME, UPTERM_ADMIN_SOCKET and TERM describe
+// *this* session rather than whatever the host inherited — and inheriting
+// them is the ordinary case, not an exotic one: a host started inside
+// another upterm session, or a multiplexer told to forward the variables,
+// hands us somebody else's session, and TERM comes from whichever terminal
+// launched the host. Prepended instead, --term would silently do nothing
+// and `upterm session info` inside the session would name the outer one.
+func (c *command) environ() []string {
+	env := append(os.Environ(), c.env...)
+	if c.term != "" {
+		env = append(env, fmt.Sprintf("TERM=%s", c.term))
+	}
+	return env
+}
+
+// termName is the TERM the command runs under: the last its environment
+// sets, which is the one exec.Cmd keeps, and conpty.Spawn on Windows, which
+// matches the name case-insensitively there; or "" for none.
+func (c *command) termName() string {
+	term := ""
+	for _, kv := range c.environ() {
+		name, value, _ := strings.Cut(kv, "=")
+		if name == "TERM" || runtime.GOOS == "windows" && strings.EqualFold(name, "TERM") {
+			term = value
+		}
+	}
+	return term
+}
+
 // Start opens the command's pty and starts it. initial is the geometry the
 // initial client arrived with, used when nothing was asked for explicitly.
 func (c *command) Start(ctx context.Context, initial termsize.Size) (PTY, error) {
@@ -231,19 +267,7 @@ func (c *command) Start(ctx context.Context, initial termsize.Size) (PTY, error)
 	// the wait actor below sends first. A forced command is torn down the
 	// same way, at a shorter grace (see forceCommandStopGrace).
 	c.cmd = exec.Command(c.name, c.args...)
-	// The session's own variables go last, and that is the whole rule for all
-	// three of them. exec.Cmd keeps the last duplicate key, so appending is
-	// what makes UPTERM_SESSION_NAME, UPTERM_ADMIN_SOCKET and TERM describe
-	// *this* session rather than whatever the host inherited — and inheriting
-	// them is the ordinary case, not an exotic one: a host started inside
-	// another upterm session, or a multiplexer told to forward the variables,
-	// hands us somebody else's session, and TERM comes from whichever terminal
-	// launched the host. Prepended instead, --term would silently do nothing
-	// and `upterm session info` inside the session would name the outer one.
-	c.cmd.Env = append(os.Environ(), c.env...)
-	if c.term != "" {
-		c.cmd.Env = append(c.cmd.Env, fmt.Sprintf("TERM=%s", c.term))
-	}
+	c.cmd.Env = c.environ()
 
 	want := c.ptySize
 	if !want.Valid() {

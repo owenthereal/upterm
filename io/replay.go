@@ -65,11 +65,27 @@ func (p *ReplayPanic) Error() string {
 }
 
 // Why a join that could have been emulated fell back to the raw ring, besides
-// ErrReplayCoverage and whatever the replayer itself reports.
+// ErrReplayCoverage and whatever the replayer itself reports. ErrReplayDeadline
+// is the emulation running out of time; a join that ran out of time waiting
+// for something else reports it wrapped, with what it waited for.
 var (
 	ErrReplayGapEvicted       = errors.New("multiwriter: the output since the handoff was evicted")
 	ErrReplayMarginsUncertain = errors.New("multiwriter: the tracker's margins are uncertain")
 	ErrReplayDeadline         = errors.New("multiwriter: the replay ran out of time")
+)
+
+// What a join that ran out of time was waiting for, when it wasn't the
+// emulation: an unresolved resize, which comes when the pty's ioctl returns;
+// output that ends the character or the sequence an offered resize fell
+// inside, which the emulation can't pass the resize before; or the permit,
+// which another join's emulation holds. A deadline that passes after the
+// permit came but before the emulation starts says only that, since the
+// permit may have come at once.
+var (
+	errDeadlineAtAResize   = fmt.Errorf("%w waiting for a resize's outcome", ErrReplayDeadline)
+	errDeadlineInASequence = fmt.Errorf("%w waiting for the rest of a character or a sequence a resize fell inside", ErrReplayDeadline)
+	errDeadlineAtThePermit = fmt.Errorf("%w waiting for another join's emulation", ErrReplayDeadline)
+	errDeadlineBeforeStart = fmt.Errorf("%w before its emulation started", ErrReplayDeadline)
 )
 
 // errRenderTooLong keeps one delivery bounded in io itself, whatever the
@@ -161,9 +177,11 @@ type join struct {
 	// it if not.
 	heldBack bool
 
-	em     Emulation
-	err    error  // why the replay failed, once it has
-	render []byte // the render as of h and lastSeq, the emulation's handoff
+	em  Emulation
+	err error // why the replay failed, once it has
+	// render is the render as of h and lastSeq, the emulation's handoff, or
+	// nil while the emulation has yet to pass a resize it was offered.
+	render []byte
 	h      uint64
 	// lastSeq is the last event the emulation has passed.
 	lastSeq uint64
@@ -228,11 +246,13 @@ func (j *join) capture() (c *Capture, done bool, err error) {
 	}, false, nil
 }
 
-// start runs the emulation's Start and its first render, outside every lock.
+// start runs the emulation's Start, outside every lock, and renders it if it
+// has passed every resize it was offered (see rerender).
 func (j *join) start(c *Capture) {
 	if !time.Now().Before(j.deadline) {
-		// The permit came as the deadline passed.
-		j.err = ErrReplayDeadline
+		// The deadline passed between the capture and here, whichever way
+		// the permit came.
+		j.err = errDeadlineBeforeStart
 		return
 	}
 	j.err = guard(func() (err error) {
@@ -244,8 +264,8 @@ func (j *join) start(c *Capture) {
 	}
 }
 
-// feed offers the emulation more of the stream and renders it again,
-// outside every lock.
+// feed offers the emulation more of the stream, outside every lock, and
+// renders it again once it has passed every resize offered so far.
 func (j *join) feed(chunks [][]byte, sizes []SizeEvent) {
 	j.err = guard(func() error { return j.em.Feed(chunks, sizes) })
 	if j.err == nil {
@@ -253,10 +273,26 @@ func (j *join) feed(chunks [][]byte, sizes []SizeEvent) {
 	}
 }
 
-// rerender renders the emulation, and reads the handoff point the render is
-// as of.
+// rerender reads the handoff point the emulation has reached, and renders
+// it once the emulation has passed every resize it was offered. Until then
+// the emulation is at a size older than the stream's, which the joiner, sized
+// to the newest, may not hold: a resize inside a character or a sequence the
+// stream so far ends in the middle of waits in the emulation's tail for the
+// rest of it. So there is no render yet, and the handoff waits for the output
+// that lets the emulation pass the resize, or falls back at the deadline.
 func (j *join) rerender() error {
 	return guard(func() error {
+		h, lastSeq := j.em.Handoff()
+		if h > j.offeredEnd || lastSeq > j.offeredSeq {
+			return errHandoffOutOfRange
+		}
+		j.h, j.lastSeq = h, lastSeq
+		if lastSeq < j.offeredSeq {
+			// Nor is an older render kept: one as of an earlier point is
+			// never to be handed over.
+			j.render = nil
+			return nil
+		}
 		render, err := j.em.Render()
 		if err != nil {
 			return err
@@ -265,10 +301,6 @@ func (j *join) rerender() error {
 			return errRenderTooLong
 		}
 		j.render = render
-		j.h, j.lastSeq = j.em.Handoff()
-		if j.h > j.offeredEnd || j.lastSeq > j.offeredSeq {
-			return errHandoffOutOfRange
-		}
 		return nil
 	})
 }
@@ -384,9 +416,24 @@ func (j *join) failed() error {
 		// → 45 → 80 at the handoff would lose the 45's truncation.
 		return ErrReplayGapEvicted
 	case !time.Now().Before(j.deadline):
-		return ErrReplayDeadline
+		return j.overtime()
 	}
 	return nil
+}
+
+// overtime says what held the handoff back when the join's deadline passed:
+// a resize whose outcome isn't known yet, or an offered resize the emulation
+// can't pass before the rest of the character or the sequence it fell inside;
+// or else nothing outside the emulation, which the time went into, catching
+// up included. Called with writeMu held.
+func (j *join) overtime() error {
+	if _, _, ok := j.t.sizes.firstUnresolved(); ok {
+		return errDeadlineAtAResize
+	}
+	if j.lastSeq < j.offeredSeq {
+		return errDeadlineInASequence
+	}
+	return ErrReplayDeadline
 }
 
 // unofferedAt reports a committed event at offset that the emulation hasn't
@@ -481,8 +528,8 @@ func upTo(sizes []SizeEvent, end, below uint64) []SizeEvent {
 }
 
 // acquire takes the emulation permit: ErrClosed once Shutdown runs, ctx's
-// error once ctx is done, or ErrReplayDeadline once the deadline passes,
-// while it waits.
+// error once ctx is done, or ErrReplayDeadline, wrapped, once the deadline
+// passes, while it waits.
 func (t *MultiWriter) acquire(ctx context.Context, deadline time.Time) error {
 	if err := t.take(ctx, deadline); err != nil {
 		return err
@@ -525,7 +572,7 @@ func (t *MultiWriter) take(ctx context.Context, deadline time.Time) error {
 	case <-ctx.Done():
 		return ctx.Err()
 	case <-timer.C:
-		return ErrReplayDeadline
+		return errDeadlineAtThePermit
 	}
 }
 

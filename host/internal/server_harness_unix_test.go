@@ -115,7 +115,10 @@ func startHostWith(t *testing.T, srv *Server, setAuthority bool, wrap func(net.L
 	}
 	srv.EventEmitter = emitter.New(1)
 	srv.KeepAliveDuration = time.Hour
-	srv.Logger = discardLogger()
+	// A test that reads the session's log sets Logger itself.
+	if srv.Logger == nil {
+		srv.Logger = discardLogger()
+	}
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)

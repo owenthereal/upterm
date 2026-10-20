@@ -154,11 +154,13 @@ func (e *doorEmulation) Render() ([]byte, error) {
 }
 
 // installReplayer has every session ServeWithContext builds from here on
-// use r. Called before startHost, as capturePacer is, for the same reason.
+// use r, in place of the session's own. Called before startHost, as
+// capturePacer is, for the same reason.
 func installReplayer(t *testing.T, r uio.Replayer) {
 	t.Helper()
-	sessionReplayer = func() uio.Replayer { return r }
-	t.Cleanup(func() { sessionReplayer = nil })
+	orig := sessionReplayer
+	sessionReplayer = func(string) uio.Replayer { return r }
+	t.Cleanup(func() { sessionReplayer = orig })
 }
 
 // The pty takes the minimum over the terminals attached, per dimension.
@@ -506,22 +508,38 @@ func TestTheDeadlineStartsBeforeThePacerGate(t *testing.T) {
 
 // A host-door viewer (no pty) still gets the raw ring.
 //
-// With a replayer at the seam, and a terminal on the same door handed its
+// With a replayer wired, and a terminal on the same door handed its
 // reconstruction of the same ring, so the viewer's raw ring is the viewer's
-// and not a replayer that is never consulted.
+// and not a replayer that is never consulted. Once with a test's replayer,
+// which says which joins reached it, and once with the session's own, whose
+// reconstruction of the ring's one plain line starts with sequences the line
+// doesn't have.
 func TestAViewerStillGetsTheRawRing(t *testing.T) {
-	r := newDoorReplayer()
-	installReplayer(t, r)
-	h := startHost(t, &Server{Command: printsTheRing})
-	_, first, _ := h.connectHost(t, nil)
-	readUntil(t, first, ringMark)
+	t.Run("a test's replayer", func(t *testing.T) {
+		r := newDoorReplayer()
+		installReplayer(t, r)
+		h := startHost(t, &Server{Command: printsTheRing})
+		_, first, _ := h.connectHost(t, nil)
+		readUntil(t, first, ringMark)
 
-	_, term, _ := h.connectHost(t, &hostPty{term: "xterm", cols: desktop.Cols, rows: desktop.Rows})
-	require.Contains(t, readUntil(t, term, ringMark), emulatedMark, "a terminal was handed the raw ring")
+		_, term, _ := h.connectHost(t, &hostPty{term: "xterm", cols: desktop.Cols, rows: desktop.Rows})
+		require.Contains(t, readUntil(t, term, ringMark), emulatedMark, "a terminal was handed the raw ring")
 
-	_, viewer, _ := h.connectHost(t, nil)
-	require.NotContains(t, readUntil(t, viewer, ringMark), emulatedMark, "a viewer was handed a reconstruction")
-	require.Len(t, r.seen(), 1, "a viewer's join reached the replayer")
+		_, viewer, _ := h.connectHost(t, nil)
+		require.NotContains(t, readUntil(t, viewer, ringMark), emulatedMark, "a viewer was handed a reconstruction")
+		require.Len(t, r.seen(), 1, "a viewer's join reached the replayer")
+	})
+	t.Run("the session's own", func(t *testing.T) {
+		h := startHost(t, &Server{Command: printsTheRing})
+		_, first, _ := h.connectHost(t, nil)
+		readUntil(t, first, ringMark+"\r\n")
+
+		_, term, _ := h.connectHost(t, &hostPty{term: "xterm", cols: desktop.Cols, rows: desktop.Rows})
+		require.False(t, strings.HasPrefix(readUntil(t, term, ringMark), ringMark), "a terminal was handed the raw ring")
+
+		_, viewer, _ := h.connectHost(t, nil)
+		require.Equal(t, ringMark+"\r\n", readUntil(t, viewer, ringMark+"\r\n"), "a viewer was handed a reconstruction")
+	})
 }
 
 // Host-door terminals that arrive before the command has started decide the

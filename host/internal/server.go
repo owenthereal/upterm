@@ -15,6 +15,7 @@ import (
 
 	gssh "charm.land/ssh"
 	"github.com/owenthereal/upterm/host/api"
+	"github.com/owenthereal/upterm/host/internal/replay"
 	"github.com/owenthereal/upterm/host/sftp"
 	"github.com/owenthereal/upterm/server"
 	"github.com/owenthereal/upterm/upterm"
@@ -168,11 +169,31 @@ func releaseSessions(cmdDone <-chan struct{}, timeout time.Duration, release fun
 // builds it, so a test can watch the gate hold. Nil in production.
 var onGuestPacer func(*guestPacer)
 
-// sessionReplayer, when set, builds the replayer each session's fan-out
-// reconstructs a joining terminal's screen with, rather than handing it the
-// raw ring. Nil for now: no replayer is wired yet, so every join gets the
-// raw ring, and a test installs its own here.
-var sessionReplayer func() uio.Replayer
+// sessionReplayer builds the replayer each session's fan-out reconstructs a
+// joining terminal's screen with, rather than handing it the raw ring, for
+// the TERM the session's command runs under, as the command's own
+// environment has it (see command.termName): Server.Term, or, with none, the
+// one the command inherits, CommandEnv's over the host's. A forced command
+// runs under its guest's own TERM, but its output goes to that guest alone,
+// never through the fan-out. A var so that a test can install its own; nil
+// hands every join the raw ring.
+var sessionReplayer = replay.NewForTerm
+
+// logReplayFallback is what a session's fan-out tells of each join it handed
+// the raw ring rather than a reconstruction of the screen, and why. A screen
+// holding state the reconstruction doesn't restore is expected, so that is
+// logged at Info; a panic in the replayer is a bug, logged at Error with its
+// stack. The fan-out calls it with none of its locks held.
+func logReplayFallback(logger *slog.Logger) func(error) {
+	return func(err error) {
+		var p *uio.ReplayPanic
+		if errors.As(err, &p) {
+			logger.Error("replay fell back to the raw ring", "reason", err, "stack", string(p.Stack))
+			return
+		}
+		logger.Info("replay fell back to the raw ring", "reason", err)
+	}
+}
 
 // ServeWithContext runs the session: the hosted command, the guest door on
 // guest, and — when host is not nil — the host door on host, for clients that
@@ -183,11 +204,6 @@ func (s *Server) ServeWithContext(ctx context.Context, guest, host net.Listener)
 	}
 
 	writers := uio.NewMultiWriter(uio.DefaultReplayBytes)
-	// Installed before anything can join: SetReplayer is once, before any
-	// join.
-	if sessionReplayer != nil {
-		writers.SetReplayer(sessionReplayer(), nil)
-	}
 	// The pty as the doors see it: the host door serves before the command
 	// starts, so a client can reach this handle before there is a pty behind
 	// it.
@@ -210,6 +226,11 @@ func (s *Server) ServeWithContext(ctx context.Context, guest, host net.Listener)
 		s.Logger,
 	)
 	cmd.stopGrace = s.StopGrace
+	// Installed before anything can join: SetReplayer is once, before any
+	// join.
+	if sessionReplayer != nil {
+		writers.SetReplayer(sessionReplayer(cmd.termName()), logReplayFallback(s.Logger))
+	}
 	// With no primary, the earliest guest paces the command, through this.
 	// It lives on the command's context, so stopping the session ends any
 	// hold at once rather than waiting on a slow guest.

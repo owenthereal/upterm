@@ -145,6 +145,7 @@ func testClientAttachHostWithSameCommand(t *testing.T, hostShareURL, hostNodeAdd
 	}
 	err = c.Join(session, clientJoinURL)
 	require.NoError(err)
+	awaitGuestsAttached(t, adminSocketFile, 1)
 
 	remoteInputCh, remoteOutputCh := c.InputOutput()
 	remoteScanner := scanner(remoteOutputCh)
@@ -524,6 +525,48 @@ func adminClientSession(socket string) (*api.GetSessionResponse, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), adminClientSessionTimeout)
 	defer cancel()
 	return adminClient.GetSession(ctx, &api.GetSessionRequest{})
+}
+
+// awaitGuestsAttached waits until the host at socket lists at least n guests,
+// and fails the test if it doesn't within callbackTimeout.
+//
+// A test that has the host produce output, and then expects a guest that has
+// just joined to see it as lines, waits here before producing it. Client.Join
+// returns once the host has accepted the guest's shell, and the host attaches
+// the guest's output only after that. Output produced in between is not lost:
+// it is in the session's ring when the guest attaches. But once the ring holds
+// output, a guest with a terminal is normally sent the screen rebuilt from it
+// rather than the raw bytes, its rows placed by cursor moves instead of ended
+// by newlines, so the lines the test scans for never come. The host lists a
+// guest only once its output is attached.
+//
+// It asks over one connection, closed when it returns, rather than through
+// adminClientSession, which opens a connection per question and never closes
+// it.
+func awaitGuestsAttached(t *testing.T, socket string, n int) {
+	t.Helper()
+	conn, err := host.AdminConn(socket)
+	require.NoError(t, err)
+	defer func() {
+		_ = conn.Close()
+	}()
+	adminClient := api.NewAdminServiceClient(conn)
+
+	require.Eventually(t, func() bool {
+		ctx, cancel := context.WithTimeout(context.Background(), adminClientSessionTimeout)
+		defer cancel()
+		sess, err := adminClient.GetSession(ctx, &api.GetSessionRequest{})
+		if err != nil {
+			return false
+		}
+		guests := 0
+		for _, c := range sess.ConnectedClients {
+			if c.Kind == api.Client_GUEST {
+				guests++
+			}
+		}
+		return guests >= n
+	}, callbackTimeout, 50*time.Millisecond, "the host never listed %d guests as attached", n)
 }
 
 func checkSessionPayload(t *testing.T, sess *api.GetSessionResponse, wantHostURL, wantNodeURL string) {

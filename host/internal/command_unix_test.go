@@ -23,15 +23,20 @@ const inheritedTerm = "upterm-inherited-term"
 // load-bearing and was untested: --term reaches the command, and it does so by
 // being appended to the environment rather than prepended. exec.Cmd keeps the
 // last duplicate key, so a prepended TERM would be silently overridden by the
-// inherited one and the flag would do nothing at all.
+// inherited one and the flag would do nothing at all. With none named, the
+// command keeps the TERM it inherits, the session's environment's over the
+// host's. termName is the TERM the command then runs under, which the
+// session's replayer is built for, so it is checked against the command's own.
 func Test_Command_TermIsAppendedSoItBeatsTheInheritedOne(t *testing.T) {
 	for _, tc := range []struct {
 		name string
+		env  []string
 		term string
 		want string
 	}{
 		{name: "the host names a term", term: "vt100", want: "TERM=vt100"},
 		{name: "the host names none", term: "", want: "TERM=" + inheritedTerm},
+		{name: "the session's environment names one", env: []string{"TERM=upterm-session-term"}, want: "TERM=upterm-session-term"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv("TERM", inheritedTerm)
@@ -42,7 +47,7 @@ func Test_Command_TermIsAppendedSoItBeatsTheInheritedOne(t *testing.T) {
 
 			cmd := newCommand(
 				"sh", []string{"-c", "echo TERM=$TERM"},
-				nil, termsize.Default, false, tc.term,
+				tc.env, termsize.Default, false, tc.term,
 				emitter.New(1), writers, testLogger(t),
 			)
 
@@ -54,6 +59,7 @@ func Test_Command_TermIsAppendedSoItBeatsTheInheritedOne(t *testing.T) {
 			require.NoError(t, cmd.Run())
 
 			require.Contains(t, string(out.bytes()), tc.want)
+			require.Equal(t, tc.want, "TERM="+cmd.termName(), "the TERM the command runs under")
 		})
 	}
 }
