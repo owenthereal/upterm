@@ -15,10 +15,11 @@ import (
 	uio "github.com/owenthereal/upterm/io"
 )
 
-// preamble starts every render, after what begins again a synchronized
-// update open at the handoff point (see synced). It makes the terminal what
-// the encoder takes it to be, whatever a program left it holding, with the
-// cursor kept on its row of the main screen, where the history starts:
+// preamble starts every render, after what ends a synchronized update the
+// joiner's terminal was left inside and begins again one open at the handoff
+// point (see synced). It makes the terminal what the encoder takes it to be,
+// whatever a program left it holding, with the cursor kept on its row of the
+// main screen, where the history starts:
 //   - the main screen showing, after a DECSC: ?1047l clears the alternate
 //     screen and leaves it, if it shows; ?1049l leaves it if it still shows,
 //     on a terminal that has ?1049 only, and either way restores the cursor
@@ -136,8 +137,9 @@ const eraseSavedLines = "\x1b[3J"
 // fails, named when what doesn't fit is a clipboard write, the working
 // directory or the pointer shape; the history then fills what is left, newest
 // lines first, cut at whole lines, between the preamble, with the ED 3 that
-// follows it, and the rest. A synchronized update open at the handoff point is
-// begun before all of it (see synced).
+// follows it, and the rest. Before all of it, a synchronized update the
+// joiner's terminal was left inside is ended, and one open at the handoff
+// point begun again (see synced).
 func (e *emulation) render() ([]byte, error) {
 	parts := e.modes.ReplayParts()
 	rep, err := e.eligible(parts)
@@ -222,28 +224,43 @@ func (e *emulation) render() ([]byte, error) {
 	return append(out, enc.buf...), nil
 }
 
-// The DCS form of synchronized output's beginning and end.
+// The DCS form of synchronized output's beginning and end, and the end of an
+// update by both forms, ?2026 and the DCS form, which every render starts
+// with (see synced).
 const (
 	beginSyncDCS = "\x1bP=1s\x1b\\"
 	endSyncDCS   = "\x1bP=2s\x1b\\"
+	endSync      = ansi.ResetModeSynchronizedOutput + endSyncDCS
 )
 
-// synced is what the render starts with: the beginning of a synchronized
-// update when the stream is inside one at the handoff point, a frame the
-// program began and has yet to end, and nothing otherwise. The session's
-// terminal holds its display until the program's own end, which the live
-// bytes carry, and a joiner's terminal begun the same way holds the render
-// and what follows it until then too.
+// synced is what the render starts with: the end of a synchronized update by
+// both forms, ?2026 and the DCS form (see syncForms), then the beginning of
+// one when the stream is inside one at the handoff point, a frame the program
+// began and has yet to end.
 //
-// That is the last the stream sent of each form, ?2026 and the DCS form (see
-// syncForms), in the stream's order, but for an end that comes first, which
-// closes nothing: a terminal that takes one form then follows that form's
-// last, and one that takes both the later of the two, as the session's does.
-// So an update both forms began begins by both again, of which a terminal
-// that takes both reads the second as inside the first, and either end then
-// closes it; and an update one form began and the other ended is begun and
-// ended again. An update ended leaves nothing to restore, which is why ?2026
-// is otherwise among the modes the render ignores.
+// The end comes first, whatever the session's terminal holds. A joiner's
+// terminal that a program of its own left inside an update, crashed or
+// killed before its end, holds its display until an end, which a session not
+// inside one never sends: the render and every live byte after it would stay
+// hidden. An end with no update open changes nothing, on a terminal that has
+// the form and on one that hasn't: kitty, iTerm2 and foot take both forms as
+// one update, and an end of either outside one leaves it as it is; WezTerm,
+// Windows Terminal and tmux take ?2026 alone, with the same end outside an
+// update, and ignore the DCS form as a string they don't know; xterm has
+// neither, and ignores both. None of them prints anything for either, or
+// moves the cursor.
+//
+// The session's terminal holds its display until the program's own end,
+// which the live bytes carry, and a joiner's terminal begun the same way
+// holds the render and what follows it until then too. The beginning is the
+// last the stream sent of each form, in the stream's order, but for an end
+// that comes first, which closes nothing: a terminal that takes one form then
+// follows that form's last, and one that takes both the later of the two, as
+// the session's does. So an update both forms began begins by both again, of
+// which a terminal that takes both reads the second as inside the first, and
+// either end then closes it; and an update one form began and the other ended
+// is begun and ended again. An update ended leaves nothing to restore, which
+// is why ?2026 is otherwise among the modes the render ignores.
 func (e *emulation) synced() string {
 	type form struct {
 		seq    string
@@ -261,9 +278,9 @@ func (e *emulation) synced() string {
 	if e.sync.dcsLast {
 		order = [2]form{mode, dcs}
 	}
-	lead := ""
+	lead, begun := endSync, false
 	for _, f := range order {
-		if f.begins || lead != "" {
+		if begun = begun || f.begins; begun {
 			lead += f.seq
 		}
 	}
@@ -892,7 +909,8 @@ var (
 		// with it set).
 		ansi.DECMode(67): true,
 		// A synchronized update, which only holds back the drawing. One open
-		// at the handoff point is begun again, before the rest (see synced).
+		// at the handoff point is begun again, before the rest, after the end
+		// of one the joiner's terminal was left inside (see synced).
 		ansi.ModeSynchronizedOutput: true,
 		// In-band resize reports: setting the mode makes a terminal report
 		// its size at once, and again on every change, in the input. From a

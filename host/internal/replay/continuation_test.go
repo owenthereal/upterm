@@ -1010,11 +1010,13 @@ func (c contCase) run(wait time.Duration) contRun {
 		}
 	}
 	write(r.a, prefix[pos:h])
-	// A render begun inside a synchronized update starts with what begins it
-	// again (see synced), which sameState checks of ?2026, as it compares that
-	// mode; x/vt keeps nothing of the DCS form. Once the stream has cleared
-	// history before the handoff point, as A's clears count, the render
-	// clears the joiner's scrollback, by ED 3, before the history it sends.
+	// A render starts with what ends a synchronized update the joiner's
+	// terminal was left inside, and one begun inside an update with what
+	// begins it again (see synced), which sameState checks of ?2026, as it
+	// compares that mode; x/vt keeps nothing of the DCS form. Once the
+	// stream has cleared history before the handoff point, as A's clears
+	// count, the render clears the joiner's scrollback, by ED 3, before the
+	// history it sends.
 	full := []byte(e.synced() + preamble)
 	if r.aOff.clears > 0 {
 		full = append(full, "\x1b[3J"...)

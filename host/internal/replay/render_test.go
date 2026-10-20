@@ -177,7 +177,7 @@ func TestReplayLeavesTheAlternateScreenWithAnEvictedMainG0(t *testing.T) {
 			capt := &capturing{r: New()}
 			joined, fellBack := fanOut(t, capt, stream, []uio.SizeEvent{event(1, 0, 80, 24)}, 4<<10)
 			require.NoError(t, fellBack)
-			require.True(t, bytes.HasPrefix(joined, []byte(preamble)), "the render, not the raw ring")
+			require.True(t, bytes.HasPrefix(joined, []byte(endSync+preamble)), "the render, not the raw ring")
 			require.Greater(t, capt.c.Start, uint64(len(head)), "the designations and the switch are still in the ring")
 
 			a := vt.NewEmulator(80, 24)
@@ -375,7 +375,7 @@ func TestReplayMarginsComeFromTheEmulator(t *testing.T) {
 		e := startFor(t, captureOf(stream, event(1, 0, 80, 24), event(2, len(stream), 80, 30)), tall)
 		render, err := e.Render()
 		require.NoError(t, err)
-		require.NotRegexp(t, decstbm, string(bytes.TrimPrefix(render, []byte(preamble))))
+		require.NotRegexp(t, decstbm, string(bytes.TrimPrefix(render, []byte(endSync+preamble))))
 
 		a, aHist := newReference(80, 24)
 		_, _ = a.WriteString(stream)
@@ -399,7 +399,7 @@ func TestReplayMarginsComeFromTheEmulator(t *testing.T) {
 		e := startFor(t, c, tall)
 		render, err := e.Render()
 		require.NoError(t, err)
-		require.NotRegexp(t, decstbm, string(bytes.TrimPrefix(render, []byte(preamble))))
+		require.NotRegexp(t, decstbm, string(bytes.TrimPrefix(render, []byte(endSync+preamble))))
 		require.Equal(t, uv.Rect(0, 0, 80, 30), e.term.ActiveScreen().ScrollRegion())
 	})
 }
@@ -659,7 +659,7 @@ func TestReplayInstallsTheOneRegionAfterBothBuffers(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			j := joinAt(t, 80, 24, tc.stream)
 			// The preamble's own resets the joiner's.
-			require.Len(t, regexp.MustCompile(`\x1b\[[0-9;]*r`).FindAll(bytes.TrimPrefix(j.render, []byte(preamble)), -1), 1)
+			require.Len(t, regexp.MustCompile(`\x1b\[[0-9;]*r`).FindAll(bytes.TrimPrefix(j.render, []byte(endSync+preamble)), -1), 1)
 			require.Contains(t, string(j.render), tc.lastSwitch)
 			require.Greater(t, bytes.Index(j.render, []byte("\x1b[2;10r")), bytes.LastIndex(j.render, []byte(tc.lastSwitch)))
 			require.Equal(t, uv.Rect(0, 1, 80, 9), j.b.ActiveScreen().ScrollRegion())
@@ -747,7 +747,7 @@ func TestReplayTitleAndCursorStyle(t *testing.T) {
 	render, err = renderAt(t, 80, 24, "\x1b[4 q\x1b[1 qtext\r\n")
 	require.NoError(t, err)
 	// The preamble's own DECSCUSR resets the joiner's.
-	require.NotContains(t, string(bytes.TrimPrefix(render, []byte(preamble))), " q")
+	require.NotContains(t, string(bytes.TrimPrefix(render, []byte(endSync+preamble))), " q")
 	require.NotContains(t, string(render), "\x1b]2;")
 }
 
@@ -760,7 +760,7 @@ func TestReplayClearsATitleTheSessionCleared(t *testing.T) {
 		t.Helper()
 		joined, fellBack := fanOut(t, New(), []byte(stream), []uio.SizeEvent{event(1, 0, 80, 24)}, 4<<10)
 		require.NoError(t, fellBack)
-		require.True(t, bytes.HasPrefix(joined, []byte(preamble)), "the render, not the raw ring")
+		require.True(t, bytes.HasPrefix(joined, []byte(endSync+preamble)), "the render, not the raw ring")
 		b, _ := newReference(80, 24)
 		got := watchTitle(b)
 		_, _ = b.WriteString("\x1b]2;the joiner's own\x07")
@@ -921,7 +921,7 @@ func TestReplayResetsTheColoursTheSessionReset(t *testing.T) {
 		t.Helper()
 		sent, fellBack := fanOut(t, New(), []byte(stream), []uio.SizeEvent{event(1, 0, 80, 24)}, 64<<10)
 		require.NoError(t, fellBack)
-		require.True(t, bytes.HasPrefix(sent, []byte(preamble)), "the render, not the raw ring")
+		require.True(t, bytes.HasPrefix(sent, []byte(endSync+preamble)), "the render, not the raw ring")
 		require.True(t, bytes.HasSuffix(sent, []byte(resets)), "%q", sent)
 		require.Equal(t, strings.Count(resets, "\x1b]1"), bytes.Count(sent, []byte("\x1b]1")), "%q", sent)
 		require.Equal(t, coloursOf([]byte(own+stream)), coloursOf([]byte(own+string(sent))), "the joiner's colours: %q", sent)
@@ -1367,7 +1367,7 @@ func TestReplayReplaysTheClipboard(t *testing.T) {
 		t.Helper()
 		joined, fellBack := fanOut(t, New(), []byte(stream), []uio.SizeEvent{event(1, 0, 80, 24)}, 64<<10)
 		require.NoError(t, fellBack)
-		require.True(t, bytes.HasPrefix(joined, []byte(preamble)), "the render, not the raw ring")
+		require.True(t, bytes.HasPrefix(joined, []byte(endSync+preamble)), "the render, not the raw ring")
 		require.Equal(t, selectionsOf([]byte(stream)), selectionsOf(joined), "the joiner's selections: %q", joined)
 		return joined
 	}
@@ -1409,7 +1409,7 @@ func TestReplayReplaysTheClipboard(t *testing.T) {
 		head := "text\r\n\x1b]52;c;" + data
 		joined, fellBack := fanOut(t, New(), []byte(head), []uio.SizeEvent{event(1, 0, 80, 24)}, 64<<10)
 		require.NoError(t, fellBack)
-		require.True(t, bytes.HasPrefix(joined, []byte(preamble)), "the render, not the raw ring")
+		require.True(t, bytes.HasPrefix(joined, []byte(endSync+preamble)), "the render, not the raw ring")
 		require.True(t, bytes.HasSuffix(joined, []byte("\x1b]52;c;"+data)), "%q", joined)
 		whole := append(joined, "\x07more\r\n"...)
 		require.Equal(t, 1, bytes.Count(whole, []byte("\x1b]52;")), "%q", whole)
@@ -1438,7 +1438,7 @@ func TestReplayReplaysTheWorkingDirectory(t *testing.T) {
 		t.Helper()
 		joined, fellBack := fanOut(t, New(), []byte(stream), []uio.SizeEvent{event(1, 0, 80, 24)}, 64<<10)
 		require.NoError(t, fellBack)
-		require.True(t, bytes.HasPrefix(joined, []byte(preamble)), "the render, not the raw ring")
+		require.True(t, bytes.HasPrefix(joined, []byte(endSync+preamble)), "the render, not the raw ring")
 		wantDir, wantTold := cwdOf([]byte(stream))
 		gotDir, gotTold := cwdOf(joined)
 		require.Equal(t, wantTold, gotTold, "told of one: %q", joined)
@@ -1511,7 +1511,7 @@ func TestReplayReplaysTheConEmuWorkingDirectory(t *testing.T) {
 		t.Helper()
 		joined, fellBack := fanOut(t, New(), []byte(stream), []uio.SizeEvent{event(1, 0, 80, 24)}, 64<<10)
 		require.NoError(t, fellBack)
-		require.True(t, bytes.HasPrefix(joined, []byte(preamble)), "the render, not the raw ring")
+		require.True(t, bytes.HasPrefix(joined, []byte(endSync+preamble)), "the render, not the raw ring")
 		return joined
 	}
 
@@ -1635,7 +1635,7 @@ func TestReplayReplaysThePointerShape(t *testing.T) {
 		t.Helper()
 		joined, fellBack := fanOut(t, New(), []byte(stream), []uio.SizeEvent{event(1, 0, 80, 24)}, 64<<10)
 		require.NoError(t, fellBack)
-		require.True(t, bytes.HasPrefix(joined, []byte(preamble)), "the render, not the raw ring")
+		require.True(t, bytes.HasPrefix(joined, []byte(endSync+preamble)), "the render, not the raw ring")
 		return joined
 	}
 
@@ -1720,7 +1720,7 @@ func TestReplayReplaysTheBellVolumes(t *testing.T) {
 		t.Helper()
 		joined, fellBack := fanOut(t, New(), []byte(stream), []uio.SizeEvent{event(1, 0, 80, 24)}, 64<<10)
 		require.NoError(t, fellBack)
-		require.True(t, bytes.HasPrefix(joined, []byte(preamble)), "the render, not the raw ring")
+		require.True(t, bytes.HasPrefix(joined, []byte(endSync+preamble)), "the render, not the raw ring")
 		return joined
 	}
 
@@ -1768,7 +1768,7 @@ func TestReplayReplaysTheProgress(t *testing.T) {
 		t.Helper()
 		joined, fellBack := fanOut(t, New(), []byte(stream), []uio.SizeEvent{event(1, 0, 80, 24)}, 64<<10)
 		require.NoError(t, fellBack)
-		require.True(t, bytes.HasPrefix(joined, []byte(preamble)), "the render, not the raw ring")
+		require.True(t, bytes.HasPrefix(joined, []byte(endSync+preamble)), "the render, not the raw ring")
 		return joined
 	}
 
@@ -1944,7 +1944,7 @@ func titlesJoin(t *testing.T, stream, joinerStack string) (joined []byte, then f
 	t.Helper()
 	joined, fellBack := fanOut(t, New(), []byte(stream), []uio.SizeEvent{event(1, 0, 80, 24)}, 64<<10)
 	require.NoError(t, fellBack)
-	require.True(t, bytes.HasPrefix(joined, []byte(preamble)), "the render, not the raw ring")
+	require.True(t, bytes.HasPrefix(joined, []byte(endSync+preamble)), "the render, not the raw ring")
 	sessionsOwn := names{"the session's own", "the session's own icon"}
 	joinersOwn := names{"the joiner's own", "the joiner's own icon"}
 	a, b := vt.NewEmulator(80, 24), vt.NewEmulator(80, 24)
@@ -2592,10 +2592,11 @@ func TestReplayFailsOnAStatusLine(t *testing.T) {
 // A synchronized update the session is inside at the handoff point, a frame
 // the program began with ?2026h and has yet to end, holds the session's
 // terminal's display until the program's own ?2026l, which the live bytes
-// carry: the render starts with ?2026h, so the joiner's terminal holds its
+// carry: the render begins it again with ?2026h, after the end of any the
+// joiner's terminal was left inside, so the joiner's terminal holds its
 // display, the render included, until then too. An update ended, or never
-// begun, sends no ?2026 at all. The ?2026h counts against the budget, as
-// everything the render sends does, the history included.
+// begun, sends that end alone. The end and the ?2026h count against the
+// budget, as everything the render sends does, the history included.
 func TestReplayStartsInsideAnOpenSynchronizedUpdate(t *testing.T) {
 	join := func(t *testing.T, stream string) []byte {
 		t.Helper()
@@ -2605,16 +2606,16 @@ func TestReplayStartsInsideAnOpenSynchronizedUpdate(t *testing.T) {
 	}
 
 	joined := join(t, "text\r\n\x1b[?2026h\x1b[Hframe")
-	require.True(t, bytes.HasPrefix(joined, []byte("\x1b[?2026h"+preamble)), "%q", joined)
-	require.Equal(t, 1, bytes.Count(joined, []byte("\x1b[?2026")), "%q", joined)
+	require.True(t, bytes.HasPrefix(joined, []byte(endSync+"\x1b[?2026h"+preamble)), "%q", joined)
+	require.Equal(t, 2, bytes.Count(joined, []byte("\x1b[?2026")), "%q", joined)
 	b, _ := newReference(80, 24)
 	_, _ = b.Write(joined)
 	require.True(t, b.Mode(ansi.ModeSynchronizedOutput).IsSet())
 
 	for _, stream := range []string{"text\r\n", "text\r\n\x1b[?2026h\x1b[Hframe\x1b[?2026l"} {
 		joined := join(t, stream)
-		require.True(t, bytes.HasPrefix(joined, []byte(preamble)), "%q", joined)
-		require.NotContains(t, string(joined), "\x1b[?2026", "%q", joined)
+		require.True(t, bytes.HasPrefix(joined, []byte(endSync+preamble)), "%q", joined)
+		require.Equal(t, 1, bytes.Count(joined, []byte("\x1b[?2026")), "%q", joined)
 	}
 
 	setBudget(t, 1<<10)
@@ -2631,9 +2632,9 @@ func TestReplayStartsInsideAnOpenSynchronizedUpdate(t *testing.T) {
 	requireIneligible(t, err, "a clipboard write too large to replay")
 
 	// Lines of history cost 3 bytes each, so the cut leaves less than the
-	// 8 bytes of the ?2026h over.
+	// 23 bytes of the end and the ?2026h over.
 	joined = join(t, strings.Repeat("x\r\n", budget)+"\x1b[?2026h")
-	require.True(t, bytes.HasPrefix(joined, []byte("\x1b[?2026h"+preamble)), "%q", joined[:min(len(joined), 32)])
+	require.True(t, bytes.HasPrefix(joined, []byte(endSync+"\x1b[?2026h"+preamble)), "%q", joined[:min(len(joined), 32)])
 	require.LessOrEqual(t, len(joined), budget)
 }
 
@@ -2641,11 +2642,12 @@ func TestReplayStartsInsideAnOpenSynchronizedUpdate(t *testing.T) {
 // DCS = 1 s begins one, as ?2026h does, DCS = 2 s ends it, as ?2026l does,
 // either end closes what either beginning opened, a second beginning leaves
 // it open, and an end with none open does nothing. A terminal that takes only
-// one form follows that form's last. So the render starts with the last of
-// each form the stream sent, in the stream's order, but for an end that
-// comes first, which closes nothing: on a terminal that takes either form or
-// both, the joiner's update then ends where the session's does. A full reset
-// ends it, as it resets ?2026.
+// one form follows that form's last. So the render starts, after the end by
+// both forms every render starts with, with the last of each form the stream
+// sent, in the stream's order, but for an end that comes first, which closes
+// nothing: on a terminal that takes either form or both, the joiner's update
+// then ends where the session's does. A full reset ends it, as it resets
+// ?2026.
 func TestReplayStartsInsideAnUpdateTheDCSFormBegan(t *testing.T) {
 	const bsu, esu, bsm, esm = "\x1bP=1s\x1b\\", "\x1bP=2s\x1b\\", "\x1b[?2026h", "\x1b[?2026l"
 	for _, tc := range []struct{ name, stream, lead string }{
@@ -2667,15 +2669,63 @@ func TestReplayStartsInsideAnUpdateTheDCSFormBegan(t *testing.T) {
 			stream := "text\r\n" + tc.stream
 			joined, fellBack := fanOut(t, New(), []byte(stream), []uio.SizeEvent{event(1, 0, 80, 24)}, 64<<10)
 			require.NoError(t, fellBack)
-			require.True(t, bytes.HasPrefix(joined, []byte(tc.lead+preamble)), "%q", joined)
+			require.True(t, bytes.HasPrefix(joined, []byte(endSync+tc.lead+preamble)), "%q", joined)
 			for _, seq := range []string{"\x1bP=", "\x1b[?2026"} {
-				require.Equal(t, strings.Count(tc.lead, seq), bytes.Count(joined, []byte(seq)), "%q in %q", seq, joined)
+				require.Equal(t, strings.Count(endSync+tc.lead, seq), bytes.Count(joined, []byte(seq)), "%q in %q", seq, joined)
 			}
 			// x/vt keeps ?2026 alone, which the joiner's then holds as the
 			// session's does.
 			a, _ := newReference(80, 24)
 			_, _ = a.WriteString(stream)
 			b, _ := newReference(80, 24)
+			_, _ = b.Write(joined)
+			require.Equal(t, a.Mode(ansi.ModeSynchronizedOutput).IsSet(), b.Mode(ansi.ModeSynchronizedOutput).IsSet())
+		})
+	}
+}
+
+// A joiner's terminal that a program of its own left inside a synchronized
+// update, by either form, crashed or killed before its end, holds its display
+// until an end, which a session not inside one never sends: the render and
+// every live byte after it would stay hidden. So every render starts by
+// ending an update by both forms, and only then begins again one the session
+// is inside. x/vt keeps ?2026, which the joiner's then holds as the session's
+// does; it keeps nothing of the DCS form, so the render's first bytes are
+// pinned.
+func TestReplayEndsAnUpdateTheJoinersOwnProgramLeftOpen(t *testing.T) {
+	const bsu, esu, bsm, esm = "\x1bP=1s\x1b\\", "\x1bP=2s\x1b\\", "\x1b[?2026h", "\x1b[?2026l"
+	const ends = "\x1b[?2026l\x1bP=2s\x1b\\"
+	for _, tc := range []struct{ name, own, stream string }{
+		{"left by ?2026", bsm, "text\r\n"},
+		{"left by the DCS form", bsu, "text\r\n"},
+		{"left by both", bsu + bsm, "text\r\n"},
+		{"left by ?2026, the session's begun and ended by ?2026", bsm, "text\r\n" + bsm + "frame" + esm},
+		{"left by ?2026, the session's begun and ended by the DCS form", bsm, "text\r\n" + bsu + "frame" + esu},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			j := joinOwn(t, 80, 24, tc.own+"own\r\n", tc.stream)
+			require.True(t, bytes.HasPrefix(j.render, []byte(ends+preamble)), "%q", j.render)
+			require.False(t, j.b.Mode(ansi.ModeSynchronizedOutput).IsSet())
+		})
+	}
+
+	// The session's update is begun again after the ends, so the joiner is
+	// inside it as the session's terminal is.
+	for _, tc := range []struct{ name, own, stream, lead string }{
+		{"left by ?2026, the session's begun by ?2026", bsm, bsm + "\x1b[Hframe", bsm},
+		{"left by the DCS form, the session's begun by ?2026", bsu, bsm + "\x1b[Hframe", bsm},
+		{"left by ?2026, the session's begun by the DCS form", bsm, bsu + "\x1b[Hframe", bsu},
+		{"left by the DCS form, the session's begun by the DCS form", bsu, bsu + "\x1b[Hframe", bsu},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stream := "text\r\n" + tc.stream
+			joined, fellBack := fanOut(t, New(), []byte(stream), []uio.SizeEvent{event(1, 0, 80, 24)}, 64<<10)
+			require.NoError(t, fellBack)
+			require.True(t, bytes.HasPrefix(joined, []byte(ends+tc.lead+preamble)), "%q", joined)
+			a, _ := newReference(80, 24)
+			_, _ = a.WriteString(stream)
+			b, _ := newReference(80, 24)
+			_, _ = b.WriteString(tc.own)
 			_, _ = b.Write(joined)
 			require.Equal(t, a.Mode(ansi.ModeSynchronizedOutput).IsSet(), b.Mode(ansi.ModeSynchronizedOutput).IsSet())
 		})
@@ -2769,7 +2819,7 @@ func TestReplaySetsTheTabStopsPastThePtysWidth(t *testing.T) {
 			stream := tc.stream + "text\r\n"
 			sent, fellBack := fanOutTo(t, New(), []byte(stream), tc.sizes, 4<<10, termsize.Size{Cols: 120, Rows: 24})
 			require.NoError(t, fellBack)
-			require.True(t, bytes.HasPrefix(sent, []byte(preamble)), "the render, not the raw ring")
+			require.True(t, bytes.HasPrefix(sent, []byte(endSync+preamble)), "the render, not the raw ring")
 
 			first := tc.sizes[0].Size
 			a, aHist := newReference(first.Cols, first.Rows)
@@ -2843,7 +2893,7 @@ func TestReplayClearsTheAlternateScreenTheSessionLeftBlank(t *testing.T) {
 		t.Helper()
 		sent, fellBack := fanOut(t, New(), []byte(stream), []uio.SizeEvent{event(1, 0, 80, 24)}, 64<<10)
 		require.NoError(t, fellBack)
-		require.True(t, bytes.HasPrefix(sent, []byte(preamble)), "the render, not the raw ring")
+		require.True(t, bytes.HasPrefix(sent, []byte(endSync+preamble)), "the render, not the raw ring")
 		return sent
 	}
 	const own = "\x1b[?1049h\x1b[H" + "the joiner's own vim" + "\x1b[?1049l\x1b[H"
@@ -2872,7 +2922,7 @@ func TestReplayClearsTheAlternateScreenTheSessionLeftBlank(t *testing.T) {
 		stream := "\x1b[?1049h" + strings.Repeat("vim\r\n", 2<<10) + "\x1b[2J\x1b[?1049lmore\r\n"
 		sent, fellBack := fanOut(t, New(), []byte(stream), []uio.SizeEvent{event(1, 0, 80, 24)}, 4<<10)
 		require.NoError(t, fellBack)
-		require.True(t, bytes.HasPrefix(sent, []byte(preamble)), "the render, not the raw ring")
+		require.True(t, bytes.HasPrefix(sent, []byte(endSync+preamble)), "the render, not the raw ring")
 		a, aHist := newReference(80, 24)
 		_, _ = a.WriteString(stream + "\x1b[?47h")
 		b, bHist := newReference(80, 24)
@@ -2888,7 +2938,7 @@ func TestReplayClearsTheAlternateScreenTheSessionLeftBlank(t *testing.T) {
 		require.NotContains(t, string(sent), "\x1b[?1049h", "no trip to the alternate screen")
 		sent, fellBack := fanOut(t, New(), []byte("text\r\nmore\r\n"), []uio.SizeEvent{event(1, 0, 10, 3)}, 64<<10)
 		require.NoError(t, fellBack)
-		require.Equal(t, preamble+"\r\n\r\n\x1b[?6l\x1b[1;1Htext\x1b[2;1Hmore\x1b[1;1H\x1b7"+
+		require.Equal(t, endSync+preamble+"\r\n\r\n\x1b[?6l\x1b[1;1Htext\x1b[2;1Hmore\x1b[1;1H\x1b7"+
 			"\x1b[3g\r\x1bH\x1b[8C\x1bH\x1b[2;4He\x1b[3;1H", string(sent))
 	})
 	t.Run("left, never shown", func(t *testing.T) {
@@ -2985,7 +3035,7 @@ func TestReplayJoinsAConPTYSession(t *testing.T) {
 	var got bytes.Buffer
 	require.NoError(t, w.AppendSized(t.Context(), time.Now().Add(time.Minute), joiner, &got))
 	require.Empty(t, fellBack)
-	require.True(t, strings.HasPrefix(got.String(), preamble), "the render, not the raw ring: %q", got.String())
+	require.True(t, strings.HasPrefix(got.String(), endSync+preamble), "the render, not the raw ring: %q", got.String())
 	require.Contains(t, got.String(), "\x1b[?1004h")
 	require.NotContains(t, got.String(), "9001")
 	require.True(t, strings.HasSuffix(got.String(), "C:\\Users\\guest>"), "%q", got.String())
@@ -3055,7 +3105,7 @@ func TestReplayRestoresTheCursorSCORCReturnsTo(t *testing.T) {
 	const stream = "\x1b[5;10H\x1b[s\x1b[1;1Hstatus\x1b[u"
 	joined, fellBack := fanOut(t, New(), []byte(stream), []uio.SizeEvent{event(1, 0, 80, 24)}, 4<<10)
 	require.NoError(t, fellBack)
-	require.True(t, bytes.HasPrefix(joined, []byte(preamble)), "the render, not the raw ring")
+	require.True(t, bytes.HasPrefix(joined, []byte(endSync+preamble)), "the render, not the raw ring")
 
 	a, aHist := newReference(80, 24)
 	_, _ = a.WriteString(stream)
@@ -3085,7 +3135,7 @@ func joinOwn(t *testing.T, cols, rows int, own, stream string) *joined {
 	t.Helper()
 	sent, fellBack := fanOut(t, New(), []byte(stream), []uio.SizeEvent{event(1, 0, cols, rows)}, 64<<10)
 	require.NoError(t, fellBack)
-	require.True(t, bytes.HasPrefix(sent, []byte(preamble)), "the render, not the raw ring")
+	require.True(t, bytes.HasPrefix(sent, []byte(endSync+preamble)), "the render, not the raw ring")
 
 	j := &joined{render: sent}
 	j.a, j.aHist = newReference(cols, rows)
@@ -3982,7 +4032,7 @@ func TestReplayFailsOnAKeyFormat(t *testing.T) {
 			joined, err := join(t, tc.stream)
 			require.NoError(t, err)
 			if tc.carries != "" {
-				require.True(t, bytes.HasPrefix(joined, []byte(preamble)), "the render: %q", joined)
+				require.True(t, bytes.HasPrefix(joined, []byte(endSync+preamble)), "the render: %q", joined)
 				require.Contains(t, string(joined), tc.carries)
 			}
 			_, err = renderAt(t, 80, 24, "text\r\n"+tc.stream+"more\r\n")
@@ -4572,7 +4622,7 @@ func TestReplayConsumesAScreenTitleString(t *testing.T) {
 				stream := "text\r\n" + tc.stream
 				joined, fellBack := fanOut(t, NewForTerm(term), []byte(stream), []uio.SizeEvent{event(1, 0, 80, 24)}, 64<<10)
 				require.NoError(t, fellBack)
-				require.True(t, bytes.HasPrefix(joined, []byte(preamble)), "the render, not the raw ring")
+				require.True(t, bytes.HasPrefix(joined, []byte(endSync+preamble)), "the render, not the raw ring")
 				require.NotContains(t, string(joined), "\x1b^", "the stream's raw bytes, which the emulation's reading leaves as they are")
 				a, aHist := newReference(80, 24)
 				aNames := watchTitle(a)
@@ -4614,7 +4664,7 @@ func TestReplayFailsOnAScreenTitleStringUnderAnotherTERM(t *testing.T) {
 					return
 				}
 				require.NoError(t, fellBack)
-				require.True(t, bytes.HasPrefix(joined, []byte(preamble)), "the render, not the raw ring")
+				require.True(t, bytes.HasPrefix(joined, []byte(endSync+preamble)), "the render, not the raw ring")
 				a, aHist := newReference(80, 24)
 				aNames := watchTitle(a)
 				_, _ = a.WriteString(stream)
