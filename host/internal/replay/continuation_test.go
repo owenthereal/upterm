@@ -1749,6 +1749,73 @@ func TestEvictedRegionPrimesAFreshEmulator(t *testing.T) {
 	}
 }
 
+// A ring that starts inside a character, its lead byte evicted, renders as
+// the session's terminal holds it. The character's remaining continuation
+// bytes complete one the ring doesn't hold, and x/vt, reading them at
+// ground, would take those from 0x80 to 0x9F for C1 controls, failing the
+// render on one or acting on it, so the emulation skips them. For a cut after
+// each byte but the last of a 2-, 3- and 4-byte character whose continuation
+// bytes hold C1's range, and of one whose don't, the join renders, and a
+// joiner given it holds the session's screen once the ring's lines have
+// scrolled the cut line off it; so too with a resize between the bytes
+// skipped. A cut inside a window title's character keeps the title whole:
+// the tracker primes the title as a string, whose data the bytes are.
+func TestReplayRendersARingThatStartsInsideACharacter(t *testing.T) {
+	var lines strings.Builder
+	for i := range 40 {
+		fmt.Fprintf(&lines, "line %d ┌──┐ █ Ņ 中文 😀\r\n", i)
+	}
+	join := func(t *testing.T, head, ring string, sizes []uio.SizeEvent) {
+		t.Helper()
+		stream := []byte(head + ring)
+		capt := &capturing{r: New()}
+		joined, fellBack := fanOut(t, capt, stream, sizes, len(ring))
+		require.NoError(t, fellBack)
+		require.Equal(t, uint64(len(head)), capt.c.Start, "the ring starts at the cut")
+		first, last := sizes[0].Size, sizes[len(sizes)-1].Size
+		a, _ := newReference(first.Cols, first.Rows)
+		aNames := watchTitle(a)
+		feedSized(a, stream, 0, first, sizes[1:])
+		b, _ := newReference(last.Cols, last.Rows)
+		bNames := watchTitle(b)
+		_, _ = b.Write(joined)
+		require.Empty(t, sameState(a, b, nil, nil, *aNames, *bNames))
+	}
+	for _, char := range []string{"\xc5\x85", "\xe2\x96\x88", "\xf0\x9f\x98\x80", "\xe4\xb8\xad"} {
+		for cut := 1; cut < len(char); cut++ {
+			t.Run(fmt.Sprintf("%s after %d of its bytes", char, cut), func(t *testing.T) {
+				join(t, "text\r\nab"+char[:cut], char[cut:]+"cd\r\n"+lines.String(), []uio.SizeEvent{event(1, 0, 80, 24)})
+			})
+		}
+	}
+	t.Run("a resize between the bytes skipped", func(t *testing.T) {
+		head := "text\r\nab\xf0"
+		join(t, head, "\x9f\x98\x80cd\r\n"+lines.String(), []uio.SizeEvent{event(1, 0, 80, 24), event(2, len(head)+1, 100, 24)})
+	})
+	t.Run("a window title's", func(t *testing.T) {
+		join(t, "\x1b]2;the title \xe2\x96", "\x88 more\x07"+lines.String(), []uio.SizeEvent{event(1, 0, 80, 24)})
+	})
+}
+
+// The bytes skipped at a ring that starts inside a character end where the
+// character does: at a byte that isn't a continuation byte, which ends it
+// early, or after as many as its lead byte said. What follows is read as the
+// stream has it, so a sequence there that the render doesn't rebuild still
+// fails it.
+func TestReplayReadsWhatFollowsACutCharacter(t *testing.T) {
+	for _, tc := range []struct{ name, head, ring, state string }{
+		{"a byte that ends it early", "text\r\nab\xe2", "\x96\x1b#8more\r\n", "an unhandled ESC # 8"},
+		{"a byte past it", "text\r\nab\xc5", "\x85\x85more\r\n", "an unhandled C1 control 0x85"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			capt := &capturing{r: New()}
+			_, fellBack := fanOut(t, capt, []byte(tc.head+tc.ring), []uio.SizeEvent{event(1, 0, 80, 24)}, len(tc.ring))
+			require.Equal(t, uint64(len(tc.head)), capt.c.Start, "the ring starts at the cut")
+			requireIneligible(t, fellBack, tc.state)
+		})
+	}
+}
+
 // shellOutput is about n bytes of a shell session at 80 columns, none of its
 // lines wrapping: commands at a prompt, listings with names in colour as ls
 // colours them, numbered lines of output, so that a line lost or out of

@@ -637,6 +637,11 @@ func (m *ModeTracker) InSequence() bool {
 	return m.state != msNormal || m.escFinal || m.csiPending || m.unended != skNone || m.utf8Pending > 0 || m.singleShift
 }
 
+// UTF8Pending reports how many continuation bytes the last UTF-8 lead byte
+// still waits for: the rest of a character the output so far has begun,
+// which a terminal reads as that character's.
+func (m *ModeTracker) UTF8Pending() int { return m.utf8Pending }
+
 // NonASCIICharset reports whether text written now would be drawn in a
 // character set other than ASCII: G0 designated as anything but ESC ( B as
 // written (ESC ( 0, DEC Special Graphics, draws letters as line pieces, and a

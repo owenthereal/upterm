@@ -83,7 +83,7 @@ func screenTerm(term string) bool {
 // events among them, waits unconsumed in the tail.
 type emulation struct {
 	term  *vt.Emulator
-	modes *uio.ModeTracker // the tracker clone, fed exactly what term is
+	modes *uio.ModeTracker // the tracker clone, fed what term is and the bytes skipCut skips
 	join  termsize.Size    // the joiner's terminal, which must contain the render's
 	size  termsize.Size    // term's, the size of the last event passed
 	stop  func() bool      // ctx or the deadline, for the meter and the encoder
@@ -285,10 +285,67 @@ func (r replayer) Start(ctx context.Context, deadline time.Time, c *uio.Capture,
 	case inEmulator && !inTracker:
 		return nil, fmt.Errorf("%w: at the ring's first byte", ErrTrackerDisagrees)
 	}
-	if err := e.offer(c.Chunks, c.Sizes[1:]); err != nil {
+	// A ring the eviction cut inside a character, outside every sequence,
+	// starts with the rest of the character's continuation bytes: the
+	// tracker counts them, but its snapshot doesn't prime the lead byte,
+	// which the ring no longer holds. x/vt at ground would read those from
+	// 0x80 to 0x9F as C1 controls, which act, begin a sequence or fail the
+	// render, where they complete a character the session's terminal has
+	// already drawn; so they are skipped (see skipCut). Inside a sequence,
+	// they are its data, which the snapshot primes.
+	chunks, sizes := c.Chunks, c.Sizes[1:]
+	if pending := e.modes.UTF8Pending(); e.modes.AtGround() && pending > 0 {
+		var err error
+		if chunks, sizes, err = e.skipCut(chunks, sizes, pending); err != nil {
+			return nil, err
+		}
+	}
+	if err := e.offer(chunks, sizes); err != nil {
 		return nil, err
 	}
 	return e, nil
+}
+
+// skipCut skips the continuation bytes chunks start with, at most n of them,
+// the rest of a character whose lead byte the ring's start cut off; a byte
+// that isn't one ends the character early, and the skip with it. The bytes
+// go to the tracker clone alone, which reads them as the stream's tracker
+// did, and count as consumed: h moves past them, so every offset stays the
+// stream's. Each event among them is passed where it falls, as consume
+// passes one. It returns what is left of chunks and of sizes.
+func (e *emulation) skipCut(chunks [][]byte, sizes []uio.SizeEvent, n int) ([][]byte, []uio.SizeEvent, error) {
+	var cut []byte
+	for len(chunks) > 0 && len(cut) < n {
+		chunk := chunks[0]
+		k := 0
+		for k < len(chunk) && len(cut) < n && chunk[k] >= 0x80 && chunk[k] <= 0xbf {
+			cut = append(cut, chunk[k])
+			k++
+		}
+		if k < len(chunk) {
+			chunks = append([][]byte{chunk[k:]}, chunks[1:]...)
+			break
+		}
+		chunks = chunks[1:]
+	}
+	pos := 0
+	for len(sizes) > 0 && sizes[0].Offset < e.h+uint64(len(cut)) {
+		ev := sizes[0]
+		k := int(ev.Offset - e.h)
+		_, _ = e.modes.Write(cut[pos:k])
+		pos = k
+		if ev.Size != e.size {
+			if err := e.resize(ev.Size); err != nil {
+				return nil, nil, err
+			}
+			e.size = ev.Size
+		}
+		e.lastSeq, e.offeredSeq = ev.Seq, ev.Seq
+		sizes = sizes[1:]
+	}
+	_, _ = e.modes.Write(cut[pos:])
+	e.h += uint64(len(cut))
+	return chunks, sizes, nil
 }
 
 // setUp makes the emulator a replay's: no scrollback on either screen, the

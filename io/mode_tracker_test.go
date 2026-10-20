@@ -1802,17 +1802,25 @@ func TestInSequenceKnowsEveryPendingFinalByte(t *testing.T) {
 
 // A character split at a chunk's end is a sequence of its own: text written
 // before its continuation bytes would land inside it, and the terminal would
-// draw a replacement character where both were meant.
+// draw a replacement character where both were meant. UTF8Pending says how
+// many of them are still to come.
 func TestInSequenceWaitsOutAPartialCharacter(t *testing.T) {
-	for _, partial := range []string{"\xc3", "\xe2", "\xe2\x94", "\xf0\x9f\x98", "ok \xe2\x94"} {
+	for _, tc := range []struct {
+		partial string
+		pending int
+	}{
+		{"\xc3", 1}, {"\xe2", 2}, {"\xe2\x94", 1}, {"\xf0", 3}, {"\xf0\x9f", 2}, {"\xf0\x9f\x98", 1}, {"ok \xe2\x94", 1},
+	} {
 		m := NewModeTracker()
-		_, _ = m.Write([]byte(partial))
-		require.True(t, m.InSequence(), "%q", partial)
+		_, _ = m.Write([]byte(tc.partial))
+		require.True(t, m.InSequence(), "%q", tc.partial)
+		require.Equal(t, tc.pending, m.UTF8Pending(), "%q", tc.partial)
 	}
 	for _, whole := range []string{"\xc3\xa9", "\xe2\x94\x80", "\xf0\x9f\x98\x80", "\xe2\x94x", "\x80", "\xc0\x80", "\xff"} {
 		m := NewModeTracker()
 		_, _ = m.Write([]byte(whole))
 		require.False(t, m.InSequence(), "%q", whole)
+		require.Zero(t, m.UTF8Pending(), "%q", whole)
 	}
 }
 

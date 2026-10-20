@@ -256,17 +256,18 @@ func oscVerdict(n int, data []byte) string {
 // guard the cells printed between them from erasure, and one that reads
 // UTF-8 prints a replacement character for the lone byte, where x/vt prints
 // nothing: either way, the render isn't the session's screen. A byte of the
-// range that continues a UTF-8 character is the character's, and one inside
-// an OSC's or a DCS's data the string's, and neither reaches here.
+// range that continues a UTF-8 character is the character's, one whose lead
+// byte the ring's start cut off included (see skipCut), and one inside an
+// OSC's or a DCS's data is the string's; neither reaches here.
 //
 // ST renders. The parser dispatches the OSC, DCS, APC, SOS or PM an 8-bit ST
 // ends, which the check decides as that string, and x/vt logs nothing of the
 // ST itself. It executes one only where no string has begun: alone, or after
-// an ESC, a CSI or a DCS's header, which it abandons, dispatching nothing. An
-// ST that ends no string does nothing on a terminal that reads 8-bit
-// controls, as ESC \ alone does nothing (see escRules), and x/vt reads the C1
-// controls as such a terminal does, the ones it follows too; one that reads
-// UTF-8 prints a replacement character for it, as for those.
+// an ESC, a CSI or a DCS's header, which it abandons, dispatching nothing.
+// There, on a terminal that reads 8-bit controls, the ST does nothing, as
+// ESC \ alone does nothing (see escRules). x/vt follows that reading for every
+// C1 control it handles. A terminal that reads UTF-8 prints a replacement
+// character for a lone ST instead, as it does for each of those controls.
 func controlVerdict(b byte) string {
 	switch {
 	case b <= ansi.US, b == ansi.DEL, b == ansi.ST:
