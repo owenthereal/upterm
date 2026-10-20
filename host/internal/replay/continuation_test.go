@@ -1926,17 +1926,23 @@ func TestReplayContinuesAcrossASplitCluster(t *testing.T) {
 // A screen title string the stream sends, which a session's terminal that is
 // GNU screen or tmux consumes, continues alike, wherever io's offers split
 // it, its ESC and its k apart included: the replay, under tmux's TERM,
-// reads it as the terminals do (see screenTitlesRead). The first case is one
-// the fuzzer found, a title an ESC 0 ends.
+// reads it as the terminals do (see screenTitlesRead). The first case is
+// shaped as one the fuzzer found, a title an ESC 0 ends, ended here by ST; the
+// fuzzer's own, whose ESC that ends the title then makes an ESC 0, fails the
+// render as an ESC it doesn't know.
 func TestReplayContinuesAfterAScreenTitleString(t *testing.T) {
 	for _, c := range []contCase{
-		{prefix: []byte("000\x1bk0000000000\x1b0"), suffix: []byte("00000"), offers: []int{5, 17}},
+		{prefix: []byte("000\x1bk0000000000\x1b\\"), suffix: []byte("00000"), offers: []int{5, 17}},
 		{prefix: []byte("text\r\n\x1b"), suffix: []byte("kzsh\x1b\\$ ls\r\n")},
 		{prefix: []byte("text\r\n\x1bkzsh\x1b\\$ ls\r\n"), suffix: []byte("\x1bkls\x1b\\file\r\n"), offers: []int{7, 8, 19}},
 	} {
 		c.sizes = []uio.SizeEvent{event(1, 0, 80, 24)}
 		requireContinues(t, c, c.run(time.Minute))
 	}
+	c := contCase{prefix: []byte("000\x1bk0000000000\x1b0"), suffix: []byte("00000"), offers: []int{5, 17}, sizes: []uio.SizeEvent{event(1, 0, 80, 24)}}
+	r := c.run(time.Minute)
+	require.Empty(t, r.failure())
+	require.Equal(t, "ineligible: an unhandled ESC 0", r.skip)
 }
 
 // A set of a mode a terminal starts with set (see defaultModes), or of ANSI's
@@ -2121,7 +2127,7 @@ func TestReplayFailsOnAWideCharacterSplitInTwo(t *testing.T) {
 			sizes:  []uio.SizeEvent{event(1, 0, 72, 29)},
 		}},
 		{"in a line of history the render sends", contCase{
-			prefix: []byte("\x1b[7d#mf``tn\x1b[?69h\x1b[2s\x1b[9G😀\x1b[56HO(b+Mv ;uzP y|]W[?7h%<sH -nn*\n\x1b[!p\x1b[15b\x1be"),
+			prefix: []byte("\x1b[7d#mf``tn\x1b[?69h\x1b[2s\x1b[9G😀\x1b[56HO(b+Mv ;uzP y|]W[?7h%<sH -nn*\n\x1b[!p\x1b[15b"),
 			sizes:  []uio.SizeEvent{event(1, 0, 40, 34), event(2, 0, 7, 19)},
 		}},
 	} {

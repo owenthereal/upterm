@@ -1751,7 +1751,9 @@ var bellVolumes = regexp.MustCompile(`\x1b\[[0-9;:]* [tu]`)
 // alone, an omitted one as 0, and every value sets a volume, those it doesn't
 // list off; it ignores one with a sub-parameter, and its RIS keeps both. A
 // session that set neither sends neither, and neither kitty's keyboard forms
-// of CSI u, which carry a prefix, nor DECSCUSR (CSI Ps SP q) is one.
+// of CSI u, which carry a prefix, nor DECSCUSR (CSI Ps SP q) is one. One under
+// a private prefix, which isn't a volume, fails the render as a CSI it
+// doesn't know.
 func TestReplayReplaysTheBellVolumes(t *testing.T) {
 	join := func(t *testing.T, stream string) []byte {
 		t.Helper()
@@ -1779,7 +1781,6 @@ func TestReplayReplaysTheBellVolumes(t *testing.T) {
 		{"the warning bell alone", "\x1b[4 t", "\x1b[4 t"},
 		{"the margin bell alone", "\x1b[4 u", "\x1b[4 u"},
 		{"then RIS", "\x1b[6 t\x1b[7 u\x1bc", "\x1b[6 t\x1b[7 u"},
-		{"a private prefix", "\x1b[?5 t\x1b[>5 u", ""},
 		{"kitty's keyboard forms and DECSCUSR", "\x1b[>1u\x1b[<u\x1b[=1;1u\x1b[?u\x1b[4 q", ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1788,6 +1789,10 @@ func TestReplayReplaysTheBellVolumes(t *testing.T) {
 			require.True(t, bytes.HasSuffix(joined, []byte(tc.sent)), "%q", joined)
 		})
 	}
+	t.Run("a private prefix", func(t *testing.T) {
+		_, fellBack := fanOut(t, New(), []byte("\x1b[?5 ttext\r\n"), []uio.SizeEvent{event(1, 0, 80, 24)}, 64<<10)
+		requireIneligible(t, fellBack, "an unhandled CSI ? Ps SP t")
+	})
 }
 
 // The progress indicator the session last set, by ConEmu's
@@ -3877,9 +3882,9 @@ func TestReplayFailsOnARectangularAttributeExtent(t *testing.T) {
 // stream has sent one, whatever its parameters, and still after a DECSTR:
 // x/vt does nothing for it, where xterm's soft-resets the terminal as well.
 // DECSTR (CSI ! p) and DECRQM (CSI Ps $ p, CSI ? Ps $ p), the same final
-// with another intermediate, aren't DECSCL, nor is a CSI p with none; DECRQM,
-// which the filter drops, doesn't count given to the emulation directly
-// either.
+// with another intermediate, aren't DECSCL; DECRQM, which the filter drops,
+// doesn't count given to the emulation directly either. Nor is a CSI p with
+// none, which fails the render as a CSI it doesn't know.
 func TestReplayFailsOnAConformanceLevel(t *testing.T) {
 	join := func(t *testing.T, stream string) error {
 		t.Helper()
@@ -3902,7 +3907,6 @@ func TestReplayFailsOnAConformanceLevel(t *testing.T) {
 		{"a soft reset", "\x1b[!p"},
 		{"a DEC mode asked for", "\x1b[?2026$p"},
 		{"an ANSI mode asked for", "\x1b[4$p"},
-		{"no intermediate", "\x1b[61;1p"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			require.NoError(t, join(t, tc.stream))
@@ -3910,6 +3914,9 @@ func TestReplayFailsOnAConformanceLevel(t *testing.T) {
 			require.NoError(t, err, "given to the emulation")
 		})
 	}
+	t.Run("no intermediate", func(t *testing.T) {
+		requireIneligible(t, join(t, "\x1b[61;1p"), "an unhandled CSI Ps p")
+	})
 }
 
 // A terminal starts with some DEC private modes set. A reset of one that the
@@ -4044,9 +4051,10 @@ func TestReplayFailsOnA96CharacterSet(t *testing.T) {
 // which a terminal in NRCS mode takes. One with " or & ahead of its final is
 // a VT510's. Neither ASCII designated after it nor RIS clears the note, and
 // one the ring has evicted, which the snapshot primes the emulator with, is
-// noted too. ASCII, the UK set and line drawing render, as does a final
-// xterm ignores, which leaves the set before on both, and the live text
-// printed under each lands as on the session's terminal.
+// noted too. So does a final xterm ignores, which leaves the set before on
+// both, as another terminal may take it. ASCII, the UK set and line drawing
+// render, and the live text printed under each lands as on the session's
+// terminal.
 func TestReplayFailsOnAnother94CharacterSet(t *testing.T) {
 	join := func(t *testing.T, stream string) error {
 		t.Helper()
@@ -4077,6 +4085,7 @@ func TestReplayFailsOnAnother94CharacterSet(t *testing.T) {
 		{"shifted in and printed", "\x1b)>\x0eab\x0f"},
 		{"then ASCII into the same G-set", "\x1b(<\x1b(B"},
 		{"then RIS", "\x1b(<\x1bc"},
+		{"a final xterm ignores", "\x1b(3\x1b)U"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			requireIneligible(t, join(t, tc.stream), state)
@@ -4106,7 +4115,6 @@ func TestReplayFailsOnAnother94CharacterSet(t *testing.T) {
 		{"line drawing into G1", "\x1b)0"},
 		{"the UK set into G2", "\x1b*A"},
 		{"ASCII into G3", "\x1b+B"},
-		{"a final xterm ignores", "\x1b(3\x1b)U"},
 		{"a final xterm ignores after %", "\x1b(%G"},
 		{"UTF-8 selected", "\x1b%G"},
 	} {
@@ -4528,7 +4536,8 @@ func TestReplayFailsOnKeyboardLEDs(t *testing.T) {
 // OSC 46, which sets the file xterm logs to once logging starts, fails the
 // render, named: x/vt keeps no log file, where a raw replay sets the
 // joiner's. Every one counts, one xterm ignores too, and the note stays
-// through RIS. An OSC of another number renders.
+// through RIS. An OSC of another number fails it as one the render doesn't
+// know.
 func TestReplayFailsOnALogFile(t *testing.T) {
 	join := func(t *testing.T, stream string) error {
 		t.Helper()
@@ -4548,14 +4557,19 @@ func TestReplayFailsOnALogFile(t *testing.T) {
 			requireIneligible(t, join(t, tc.stream), "a log file")
 		})
 	}
-	for _, tc := range []struct{ name, stream string }{
-		{"OSC 45", "\x1b]45;/tmp/xterm.log\x07"},
-		{"OSC 460", "\x1b]460;/tmp/xterm.log\x07"},
-	} {
+	for _, tc := range []struct{ name, stream string }{} {
 		t.Run(tc.name, func(t *testing.T) {
 			require.NoError(t, join(t, tc.stream))
 			_, err := renderAt(t, 80, 24, "text\r\n"+tc.stream+"more\r\n")
 			require.NoError(t, err, "given to the emulation")
+		})
+	}
+	for _, tc := range []struct{ name, stream, state string }{
+		{"OSC 45", "\x1b]45;/tmp/xterm.log\x07", "an unhandled OSC 45"},
+		{"OSC 460", "\x1b]460;/tmp/xterm.log\x07", "an unhandled OSC 460"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			requireIneligible(t, join(t, tc.stream), tc.state)
 		})
 	}
 }
@@ -4565,7 +4579,7 @@ func TestReplayFailsOnALogFile(t *testing.T) {
 // where a raw replay sets or deletes the joiner's. Every one counts, one
 // xterm ignores too, and the note stays once another deletes the property,
 // or RIS comes. The query filter drops none, as OSC 3 asks for nothing. An
-// OSC of another number renders.
+// OSC of another number fails it as one the render doesn't know.
 func TestReplayFailsOnAWindowProperty(t *testing.T) {
 	join := func(t *testing.T, stream string) error {
 		t.Helper()
@@ -4587,14 +4601,19 @@ func TestReplayFailsOnAWindowProperty(t *testing.T) {
 			requireIneligible(t, join(t, tc.stream), "a window property")
 		})
 	}
-	for _, tc := range []struct{ name, stream string }{
-		{"OSC 33", "\x1b]33;WM_ROLE=editor\x07"},
-		{"OSC 300", "\x1b]300;WM_ROLE=editor\x07"},
-	} {
+	for _, tc := range []struct{ name, stream string }{} {
 		t.Run(tc.name, func(t *testing.T) {
 			require.NoError(t, join(t, tc.stream))
 			_, err := renderAt(t, 80, 24, "text\r\n"+tc.stream+"more\r\n")
 			require.NoError(t, err, "given to the emulation")
+		})
+	}
+	for _, tc := range []struct{ name, stream, state string }{
+		{"OSC 33", "\x1b]33;WM_ROLE=editor\x07", "an unhandled OSC 33"},
+		{"OSC 300", "\x1b]300;WM_ROLE=editor\x07", "an unhandled OSC 300"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			requireIneligible(t, join(t, tc.stream), tc.state)
 		})
 	}
 }
@@ -4607,8 +4626,9 @@ func TestReplayFailsOnAWindowProperty(t *testing.T) {
 // between may be other characters to x/vt. x/vt keys the sequence by its
 // last intermediate, so ESC ( % @, which xterm ignores, is noted too.
 //
-// ESC % G, which selects UTF-8, as x/vt reads, renders, and so do ESC % 8,
-// the Linux console's old UTF-8 selection, which xterm ignores, and ESC @.
+// ESC % G, which selects UTF-8, as x/vt reads, renders, and so does ESC % 8,
+// the Linux console's old UTF-8 selection, which xterm ignores. ESC @, an ESC
+// the render doesn't know, fails it as one.
 func TestReplayFailsOnANonUTF8Coding(t *testing.T) {
 	join := func(t *testing.T, stream string) error {
 		t.Helper()
@@ -4631,7 +4651,6 @@ func TestReplayFailsOnANonUTF8Coding(t *testing.T) {
 		{"UTF-8 selected", "\x1b%G"},
 		{"UTF-8 selected, then printed", "\x1b%Gcafé\r\n"},
 		{"the Linux console's old UTF-8 selection", "\x1b%8"},
-		{"ESC @", "\x1b@"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			require.NoError(t, join(t, tc.stream))
@@ -4639,6 +4658,9 @@ func TestReplayFailsOnANonUTF8Coding(t *testing.T) {
 			require.NoError(t, err, "given to the emulation")
 		})
 	}
+	t.Run("ESC @", func(t *testing.T) {
+		requireIneligible(t, join(t, "\x1b@"), "an unhandled ESC @")
+	})
 }
 
 // S8C1T (ESC SP G), which makes the terminal send the program its keys and
@@ -4647,7 +4669,8 @@ func TestReplayFailsOnANonUTF8Coding(t *testing.T) {
 // replay selects it on the joiner's terminal, whose keys would then reach the
 // program as the session's terminal's do. DECSTR keeps it. S7C1T (ESC SP F)
 // puts back the 7-bit controls a terminal starts with, and so does RIS, after
-// which the join renders, as it does for ESC G, which has no intermediate.
+// which the join renders. ESC G, which has no intermediate, fails it as an ESC
+// the render doesn't know.
 func TestReplayFailsOn8BitControls(t *testing.T) {
 	join := func(t *testing.T, stream string) error {
 		t.Helper()
@@ -4668,7 +4691,6 @@ func TestReplayFailsOn8BitControls(t *testing.T) {
 		{"7-bit controls selected", "\x1b F"},
 		{"8-bit, then 7-bit", "\x1b G\x1b F"},
 		{"8-bit, then RIS", "\x1b G\x1bc"},
-		{"ESC G", "\x1bG"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			require.NoError(t, join(t, tc.stream))
@@ -4676,6 +4698,9 @@ func TestReplayFailsOn8BitControls(t *testing.T) {
 			require.NoError(t, err, "given to the emulation")
 		})
 	}
+	t.Run("ESC G", func(t *testing.T) {
+		requireIneligible(t, join(t, "\x1bG"), "an unhandled ESC G")
+	})
 }
 
 // OSC 66, kitty's text sizing, which draws its text scaled or in as many
@@ -4685,7 +4710,8 @@ func TestReplayFailsOn8BitControls(t *testing.T) {
 // did. Every one counts, one kitty ignores too, and the note stays once the
 // text is erased, or RIS comes. The query filter drops none, as OSC 66 asks
 // for nothing: kitty's probe for it asks by the CPRs around one, which the
-// filter drops. An OSC of another number renders.
+// filter drops. An OSC of another number fails it as one the render doesn't
+// know.
 func TestReplayFailsOnSizedText(t *testing.T) {
 	join := func(t *testing.T, stream string) error {
 		t.Helper()
@@ -4710,14 +4736,19 @@ func TestReplayFailsOnSizedText(t *testing.T) {
 			requireIneligible(t, join(t, tc.stream), "sized text")
 		})
 	}
-	for _, tc := range []struct{ name, stream string }{
-		{"OSC 67", "\x1b]67;s=2;big\x07"},
-		{"OSC 660", "\x1b]660;s=2;big\x07"},
-	} {
+	for _, tc := range []struct{ name, stream string }{} {
 		t.Run(tc.name, func(t *testing.T) {
 			require.NoError(t, join(t, tc.stream))
 			_, err := renderAt(t, 80, 24, "text\r\n"+tc.stream+"more\r\n")
 			require.NoError(t, err, "given to the emulation")
+		})
+	}
+	for _, tc := range []struct{ name, stream, state string }{
+		{"OSC 67", "\x1b]67;s=2;big\x07", "an unhandled OSC 67"},
+		{"OSC 660", "\x1b]660;s=2;big\x07", "an unhandled OSC 660"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			requireIneligible(t, join(t, tc.stream), tc.state)
 		})
 	}
 }
@@ -4794,9 +4825,9 @@ func TestReplayFailsOnExtraCursors(t *testing.T) {
 // the render, named: x/vt drops it, scrolling nothing, where a raw replay
 // hands it to the joiner's kitty, which scrolls as the session's did. Every
 // one counts, one kitty ignores too, and the note stays once the screen
-// scrolls back up, or RIS comes. SD (CSI Ps T), which x/vt follows,
-// XTRMTITLE (CSI > Pm T), a + after a prefix and a + on SU (CSI Ps S), which
-// kitty ignores, render.
+// scrolls back up, or RIS comes. SD (CSI Ps T), which x/vt follows, and
+// XTRMTITLE (CSI > Pm T) render; a + after a prefix and a + on SU (CSI Ps S),
+// which kitty ignores, fail it as CSIs the render doesn't know.
 func TestReplayFailsOnAnUnscroll(t *testing.T) {
 	join := func(t *testing.T, stream string) error {
 		t.Helper()
@@ -4820,13 +4851,19 @@ func TestReplayFailsOnAnUnscroll(t *testing.T) {
 	for _, tc := range []struct{ name, stream string }{
 		{"SD", "\x1b[2T"},
 		{"XTRMTITLE", "\x1b[>1T"},
-		{"a + after a prefix", "\x1b[>3+T"},
-		{"a + on SU", "\x1b[2+S"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			require.NoError(t, join(t, tc.stream))
 			_, err := renderAt(t, 80, 24, "text\r\n"+tc.stream+"more\r\n")
 			require.NoError(t, err, "given to the emulation")
+		})
+	}
+	for _, tc := range []struct{ name, stream, state string }{
+		{"a + after a prefix", "\x1b[>3+T", "an unhandled CSI > Ps + T"},
+		{"a + on SU", "\x1b[2+S", "an unhandled CSI Ps + S"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			requireIneligible(t, join(t, tc.stream), tc.state)
 		})
 	}
 }
@@ -4844,7 +4881,8 @@ func TestReplayFailsOnAnUnscroll(t *testing.T) {
 // its defaults, ignoring them; and so do a read, a query the render doesn't
 // send, and a packet of a type kitty doesn't have, or of none. kitty writes
 // OSC 52 to the same clipboard, so an OSC 52 write before or after one falls
-// back on it too.
+// back on it too. An OSC of another number fails it as one the render doesn't
+// know.
 func TestReplayFailsOnAKittyClipboardWrite(t *testing.T) {
 	join := func(t *testing.T, stream string) ([]byte, error) {
 		t.Helper()
@@ -4890,8 +4928,6 @@ func TestReplayFailsOnAKittyClipboardWrite(t *testing.T) {
 		{"its type given twice, the last a read", "\x1b]5522;type=write:type=read;dGV4dC9wbGFpbg==\x1b\\"},
 		{"a type kitty doesn't have", "\x1b]5522;type=writes\x1b\\" + text + end},
 		{"no type", "\x1b]5522;mime=dGV4dC9wbGFpbg==;aGVsbG8=\x1b\\"},
-		{"OSC 5523", "\x1b]5523;type=write\x1b\\\x1b]5523;type=wdata:mime=dGV4dC9wbGFpbg==;aGVsbG8=\x1b\\\x1b]5523;type=wdata\x1b\\"},
-		{"OSC 552", "\x1b]552;type=write\x1b\\\x1b]552;type=wdata:mime=dGV4dC9wbGFpbg==;aGVsbG8=\x1b\\\x1b]552;type=wdata\x1b\\"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			joined, err := join(t, tc.stream)
@@ -4900,6 +4936,15 @@ func TestReplayFailsOnAKittyClipboardWrite(t *testing.T) {
 			require.NotContains(t, string(joined), "\x1b]55", "x/vt drops it, and the render sends none")
 			_, err = renderAt(t, 80, 24, "text\r\n"+tc.stream+"more\r\n")
 			require.NoError(t, err, "given to the emulation")
+		})
+	}
+	for _, tc := range []struct{ name, stream, state string }{
+		{"OSC 5523", "\x1b]5523;type=write\x1b\\\x1b]5523;type=wdata:mime=dGV4dC9wbGFpbg==;aGVsbG8=\x1b\\\x1b]5523;type=wdata\x1b\\", "an unhandled OSC 5523"},
+		{"OSC 552", "\x1b]552;type=write\x1b\\\x1b]552;type=wdata:mime=dGV4dC9wbGFpbg==;aGVsbG8=\x1b\\\x1b]552;type=wdata\x1b\\", "an unhandled OSC 552"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := join(t, tc.stream)
+			requireIneligible(t, err, tc.state)
 		})
 	}
 }
@@ -4943,8 +4988,9 @@ type screenTitleRow struct {
 // screenTitleRows are the ways a stream sends a screen title string, at
 // every prompt as oh-my-zsh does, ended in each way tmux ends one, a name
 // in each form, a control inside its ESC, a second ESC before it, and RIS
-// after it; and the ways a stream comes close: an ESC k with an
-// intermediate, an ESC cancelled before the k, and a title by OSC 2 alone.
+// after it; and the ways a stream comes close: an ESC cancelled before the k,
+// and a title by OSC 2 alone. An ESC k with an intermediate comes close too,
+// but fails every render (see TestReplayFailsOnAnESCkWithAnIntermediate).
 func screenTitleRows() []screenTitleRow {
 	var prompts strings.Builder
 	for i := range 3 {
@@ -4962,7 +5008,6 @@ func screenTitleRows() []screenTitleRow {
 		{"a control inside its ESC", "\x1b\rkzsh\x1b\\$ ", true},
 		{"an ESC before the k's ESC", "\x1b\x1bkzsh\x1b\\$ ", true},
 		{"then RIS", "\x1bkzsh\x1b\\\x1bc$ ls\r\n", true},
-		{"an ESC k with an intermediate", "\x1b kzsh$ ", false},
 		{"an ESC cancelled before the k", "\x1b\x18kzsh$ ", false},
 		{"none, a title by OSC 2", "\x1b]2;owen@host: ~\x07~/src $ ", false},
 	}
@@ -4977,9 +5022,8 @@ func screenTitleRows() []screenTitleRow {
 // raw bytes after it, is left as the session's tmux is, none of the title
 // drawn. tmux ends the title only at an ESC, CAN or SUB, not at BEL; an ESC
 // with controls inside it before the k is one, as tmux executes them there;
-// and neither one with an intermediate nor one an ESC, CAN or SUB cancelled
-// before the k is one. A title that starts with G, as kitty's graphics
-// commands do, is no image.
+// and one an ESC, CAN or SUB cancelled before the k isn't one. A title that
+// starts with G, as kitty's graphics commands do, is no image.
 func TestReplayConsumesAScreenTitleString(t *testing.T) {
 	for _, term := range screenTERMs {
 		for _, tc := range screenTitleRows() {
@@ -5007,6 +5051,19 @@ func TestReplayConsumesAScreenTitleString(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// An ESC k with an intermediate, ESC SP k, is no screen title string under
+// any TERM, as neither tmux nor xterm reads it as one: x/vt's parser reads an
+// ESC of its own, which nothing takes, and the render fails on it as an ESC it
+// doesn't know.
+func TestReplayFailsOnAnESCkWithAnIntermediate(t *testing.T) {
+	for _, term := range slices.Concat(screenTERMs, otherTERMs) {
+		t.Run(fmt.Sprintf("%q", term), func(t *testing.T) {
+			_, fellBack := fanOut(t, NewForTerm(term), []byte("text\r\n\x1b kzsh$ "), []uio.SizeEvent{event(1, 0, 80, 24)}, 64<<10)
+			requireIneligible(t, fellBack, "an unhandled ESC SP k")
+		})
 	}
 }
 
@@ -5049,7 +5106,8 @@ func TestReplayFailsOnAScreenTitleStringUnderAnotherTERM(t *testing.T) {
 // control x/vt executes inside it and the k. A second ESC begins the escape
 // anew; one a CAN cancels before the k, or one with an intermediate, makes
 // no title string of the k, which x/vt then prints or reads as the final of
-// another sequence. (io's query filter leaves the ring a lone ESC for two,
+// another sequence: ESC SP k, which fails the render as an ESC it doesn't
+// know. (io's query filter leaves the ring a lone ESC for two,
 // and the control before the ESC, but what reaches the emulation is read as
 // x/vt would read it whatever the filter leaves.) Under tmux's TERM, x/vt
 // consumes each one it finds; under xterm's, each fails the render instead,
@@ -5059,14 +5117,18 @@ func TestReplayReadsAScreenTitleStringInPieces(t *testing.T) {
 	// The render, under term, of a stream in which title says a k began a
 	// title string, and in which x/vt then draws row on the row after text,
 	// or on the first row for no text.
-	rendered := func(t *testing.T, term string, e *emulation, title bool, text, row string) {
+	rendered := func(t *testing.T, term string, e *emulation, title bool, unknown, text, row string) {
 		t.Helper()
 		_, err := e.Render()
-		if term == xterm && title {
+		switch {
+		case term == xterm && title:
 			requireIneligible(t, err, "a screen title string")
 			return
+		case unknown != "":
+			requireIneligible(t, err, unknown)
+		default:
+			require.NoError(t, err)
 		}
-		require.NoError(t, err)
 		y := 0
 		if text != "" {
 			require.Equal(t, text, e.term.MainScreen().Line(0).String())
@@ -5080,19 +5142,22 @@ func TestReplayReadsAScreenTitleStringInPieces(t *testing.T) {
 			modes := uio.NewModeTracker()
 			_, _ = modes.Write([]byte("before\r\n\x1b"))
 			c := &uio.Capture{Modes: modes, Chunks: [][]byte{[]byte(ring)}, Sizes: []uio.SizeEvent{event(1, 9, 80, 24)}, Start: 9, End: 9 + uint64(len(ring))}
-			rendered(t, term, startForTerm(t, term, c, termsize.Size{Cols: 80, Rows: 24}), true, "", "$ ls")
+			rendered(t, term, startForTerm(t, term, c, termsize.Size{Cols: 80, Rows: 24}), true, "", "", "$ ls")
 		})
 		for _, tc := range []struct {
 			name   string
 			pieces []string
 			title  bool
-			row    string // what x/vt then draws on the row after "text"
+			// unknown is what the render fails by for a sequence it doesn't
+			// know, if the pieces send one.
+			unknown string
+			row     string // what x/vt then draws on the row after "text"
 		}{
-			{"split after the ESC", []string{"text\r\n\x1b", "kzsh\x1b\\$ ls\r\n"}, true, "$ ls"},
-			{"a control inside the ESC, in three pieces", []string{"text\r\n\x1b", "\r", "kzsh\x1b\\$ ls\r\n"}, true, "$ ls"},
-			{"a second ESC before the k", []string{"text\r\n\x1b", "\x1bkzsh\x1b\\$ ls\r\n"}, true, "$ ls"},
-			{"an ESC a CAN cancels before the k", []string{"text\r\n\x1b", "\x18kzsh\x1b\\$ ls\r\n"}, false, "kzsh$ ls"},
-			{"an ESC with an intermediate", []string{"text\r\n\x1b", " kzsh$ ls\r\n"}, false, "zsh$ ls"},
+			{"split after the ESC", []string{"text\r\n\x1b", "kzsh\x1b\\$ ls\r\n"}, true, "", "$ ls"},
+			{"a control inside the ESC, in three pieces", []string{"text\r\n\x1b", "\r", "kzsh\x1b\\$ ls\r\n"}, true, "", "$ ls"},
+			{"a second ESC before the k", []string{"text\r\n\x1b", "\x1bkzsh\x1b\\$ ls\r\n"}, true, "", "$ ls"},
+			{"an ESC a CAN cancels before the k", []string{"text\r\n\x1b", "\x18kzsh\x1b\\$ ls\r\n"}, false, "", "kzsh$ ls"},
+			{"an ESC with an intermediate", []string{"text\r\n\x1b", " kzsh$ ls\r\n"}, false, "an unhandled ESC SP k", "zsh$ ls"},
 		} {
 			t.Run(term+"/"+tc.name+", at Start", func(t *testing.T) {
 				c := captureOf("", event(1, 0, 80, 24))
@@ -5101,14 +5166,14 @@ func TestReplayReadsAScreenTitleStringInPieces(t *testing.T) {
 					c.Chunks = append(c.Chunks, []byte(p))
 					c.End += uint64(len(p))
 				}
-				rendered(t, term, startForTerm(t, term, c, termsize.Size{Cols: 80, Rows: 24}), tc.title, "text", tc.row)
+				rendered(t, term, startForTerm(t, term, c, termsize.Size{Cols: 80, Rows: 24}), tc.title, tc.unknown, "text", tc.row)
 			})
 			t.Run(term+"/"+tc.name+", fed after Start, then more", func(t *testing.T) {
 				e := startForTerm(t, term, captureOf(tc.pieces[0], event(1, 0, 80, 24)), termsize.Size{Cols: 80, Rows: 24})
 				for _, p := range slices.Concat(tc.pieces[1:], []string{"more\r\n"}) {
 					require.NoError(t, e.Feed([][]byte{[]byte(p)}, nil))
 				}
-				rendered(t, term, e, tc.title, "text", tc.row)
+				rendered(t, term, e, tc.title, tc.unknown, "text", tc.row)
 			})
 		}
 	}

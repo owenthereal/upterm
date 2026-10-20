@@ -229,6 +229,10 @@ type emulation struct {
 	// kittyClipboard is set once the stream has begun a write to the
 	// clipboard by kitty's OSC 5522 (see watchKittyClipboard).
 	kittyClipboard bool
+	// unhandled names the first CSI, ESC or OSC the stream sent that no
+	// handler took and the render doesn't rebuild (see dispatchCheck), or is
+	// "".
+	unhandled string
 	// altShown is set once the alternate screen has shown, the snapshot's
 	// switch to it included (see renderer.hiddenAlt).
 	altShown bool
@@ -336,7 +340,9 @@ func (r replayer) Start(ctx context.Context, deadline time.Time, c *uio.Capture,
 // log file, a window property, a coding other than UTF-8, sized text, extra
 // cursors, an unscroll, a write to kitty's clipboard and a switch to the
 // alternate screen noted, auto print, 8-bit controls and the tab stops past
-// the screen's edge kept, and the meter stopped by ctx or the deadline.
+// the screen's edge kept, every CSI, ESC and OSC no handler takes checked
+// against those the render rebuilds (see dispatchCheck), and the meter
+// stopped by ctx or the deadline.
 // Each callback and handler runs inside the emulator's Write and touches only
 // the emulation.
 func (e *emulation) setUp() {
@@ -402,6 +408,7 @@ func (e *emulation) setUp() {
 	e.watchExtraCursors()
 	e.watchUnscroll()
 	e.watchKittyClipboard()
+	e.watchDispatch()
 }
 
 // colours is the last change the stream made, by OSC, to each of the colours
