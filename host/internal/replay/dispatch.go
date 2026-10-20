@@ -245,7 +245,7 @@ func oscVerdict(n int, data []byte) string {
 // x/vt's handlers take NUL, BEL, BS, HT, LF, VT, FF, CR, SO and SI, and of
 // C1, IND, HTS, RI, SS2 and SS3, as they take ESC D, ESC H, ESC M, ESC N and
 // ESC O (see xvtESC). x/vt logs every other control the parser executes, by
-// its byte, and none it handles, which the check doesn't see.
+// its byte.
 //
 // A C0 control x/vt has no handler for, and DEL, render: xterm ignores them,
 // and ENQ's answerback is a reply, which changes nothing.
@@ -256,25 +256,33 @@ func oscVerdict(n int, data []byte) string {
 // controls acts on it, as xterm's NEL moves the cursor to the next line's
 // start, and its SPA and EPA guard the cells printed between them from
 // erasure. x/vt's reading, which draws nothing for the byte, matches neither
-// in every case. ST is no exception: the parser executes it, and x/vt logs
-// it, only where it ends no string, alone or after an ESC, a CSI or a DCS's
-// header, which the parser abandons; a terminal that reads UTF-8 draws it
-// there too. The OSC, DCS, APC, SOS or PM an 8-bit ST ends the parser
-// dispatches, logging nothing of the ST, so the check decides it as that
-// string.
+// in every case. ST is no exception where the parser executes it: alone, or
+// after an ESC, a CSI or a DCS's header, which it abandons.
+//
+// The lone C1 bytes x/vt doesn't log fail the render by the same name, as
+// the tracker clone notes each one it reads (see eligible): a C1 control
+// x/vt handles; an 8-bit introducer, which x/vt reads as its 7-bit form; an
+// 8-bit ST that ends a string, which the parser dispatches with the string;
+// and one inside an OSC's or a DCS's data, which x/vt keeps as data. Their
+// 7-bit forms hold no such byte, and render. This check names a C1 control
+// x/vt logs where it falls among the sequences checked here, the first of
+// which names the fallback.
 //
 // A C1 byte that continues a UTF-8 character is part of the character, one
-// whose lead byte the ring's start cut off included (see skipCut), and one
-// inside an OSC's or a DCS's data is the string's; neither reaches here.
+// whose lead byte the ring's start cut off included (see skipCut): it
+// neither reaches here nor is noted.
 func controlVerdict(b byte) string {
 	switch {
 	case b <= ansi.US, b == ansi.DEL:
 		return ""
 	case b >= ansi.PAD && b <= ansi.APC:
-		return fmt.Sprintf("a C1 control 0x%02X", b)
+		return c1Name(b)
 	}
 	return "an unhandled control"
 }
+
+// c1Name is what a render fails by for a lone C1 byte, b: its byte alone.
+func c1Name(b byte) string { return fmt.Sprintf("a C1 control 0x%02X", b) }
 
 // csiName is a CSI of key as a fallback names it: CSI, its prefix, if any,
 // Ps for its parameters, whichever they were, its intermediate, if any, and

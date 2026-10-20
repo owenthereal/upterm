@@ -118,7 +118,10 @@ func logging(t *testing.T, replays bool) (*vt.Emulator, *unhandledLog) {
 // the sequence's key alone, never its data, and the first such sequence names
 // it, whatever follows, RIS included. Every kind counts: a CSI by its 7-bit or
 // its 8-bit introducer, an ESC, an OSC, and a C1 control x/vt has no handler
-// for, ST alone included, named by its byte alone.
+// for, ST alone included, named by its byte alone. So does any other lone C1
+// byte, by the same name, the first of them naming it: a C1 control x/vt
+// handles, an 8-bit introducer, and an 8-bit ST that ends a string, none of
+// which a terminal that reads UTF-8 takes for a control.
 func TestReplayFailsOnASequenceItDoesntKnow(t *testing.T) {
 	join := func(t *testing.T, stream string) error {
 		t.Helper()
@@ -150,6 +153,15 @@ func TestReplayFailsOnASequenceItDoesntKnow(t *testing.T) {
 		{"a C1 control, the first of two", "\x85\x1b#8", "a C1 control 0x85"},
 		{"a C1 control, the second of two", "\x1b#8\x85", "an unhandled ESC # 8"},
 		{"ST alone, by its C1 control", "\x9c", "a C1 control 0x9C"},
+		{"IND by its C1 control", "\x84", "a C1 control 0x84"},
+		{"HTS by its C1 control", "\x88", "a C1 control 0x88"},
+		{"RI by its C1 control", "\x8d", "a C1 control 0x8D"},
+		{"SS2 by its C1 control", "\x8e", "a C1 control 0x8E"},
+		{"SS3 by its C1 control", "\x8f", "a C1 control 0x8F"},
+		{"SGR by the 8-bit CSI", "\x9b1m", "a C1 control 0x9B"},
+		{"a title by the 8-bit OSC", "\x9d2;t\x07", "a C1 control 0x9D"},
+		{"a prompt mark ended by the 8-bit ST", "\x1b]133;A\x9cdrawn by x/vt\x1b\\", "a C1 control 0x9C"},
+		{"the first of two handled C1 controls", "\x84\x8d", "a C1 control 0x84"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			requireIneligible(t, join(t, tc.stream), tc.state)
@@ -182,10 +194,9 @@ func TestReplayFailsOnASequenceItDoesntKnow(t *testing.T) {
 // leave nothing, vim's probe as vim sends it as it starts among them, and
 // Claude Code's, the Linux console's cursor shape as its terminfo entry's
 // cnorm sends it, the visual bell tmux's and screen's entries send, and the
-// prompt marks and notifications shells and programs send. So do the controls
-// x/vt follows or that leave nothing: the C1 controls x/vt handles; an OSC
-// the 8-bit ST ends, which the parser dispatches without executing the ST; a
-// character whose UTF-8 holds a byte of the C1 range; and C0 controls x/vt
+// prompt marks and notifications shells and programs send. So do the 7-bit
+// forms of the C1 controls x/vt handles, IND, HTS, RI, SS2 and SS3; the
+// characters whose UTF-8 holds bytes of the C1 range; and C0 controls x/vt
 // has no handler for, as xterm ignores them.
 func TestReplayRendersTheSequencesItAllows(t *testing.T) {
 	for _, tc := range []struct{ name, stream string }{
@@ -239,13 +250,14 @@ func TestReplayRendersTheSequencesItAllows(t *testing.T) {
 		{"kitty's colours popped", "\x1b]30101\x1b\\"},
 		{"Claude Code's probe of its status", "\x1b]7501;?\x07"},
 		{"Claude Code's probe of its status, ended by ST", "\x1b]7501;?\x1b\\"},
-		{"IND by its C1 control", "\x84"},
-		{"HTS by its C1 control", "\x88"},
-		{"RI by its C1 control", "\x8d"},
-		{"SS2 by its C1 control", "\x8e"},
-		{"SS3 by its C1 control", "\x8f"},
-		{"a prompt mark ended by the 8-bit ST", "\x1b]133;A\x9c"},
+		{"IND", "\x1bD"},
+		{"HTS", "\x1bH"},
+		{"RI", "\x1bM"},
+		{"SS2", "\x1bN"},
+		{"SS3", "\x1bO"},
 		{"Ņ, whose UTF-8 holds 0x85", "\xc5\x85"},
+		{"█, whose UTF-8 holds 0x96 and 0x88", "\xe2\x96\x88"},
+		{"😀, whose UTF-8 holds 0x9F, 0x98 and 0x80", "\xf0\x9f\x98\x80"},
 		{"SOH", "\x01"},
 		{"ENQ", "\x05"},
 		{"FS", "\x1c"},

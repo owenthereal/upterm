@@ -1146,6 +1146,11 @@ func (e *emulation) eligible(parts uio.ReplayParts) (rep, error) {
 	if e.unhandled != "" {
 		return rep{}, &IneligibleError{State: e.unhandled}
 	}
+	// A lone C1 byte in the ring, which the tracker clone notes as it reads
+	// it, whatever x/vt made of it (see controlVerdict).
+	if b := e.modes.RawC1(); b != 0 {
+		return rep{}, &IneligibleError{State: c1Name(b)}
+	}
 	if splitWide(e.term.MainScreen()) || splitWide(e.term.AltScreen()) {
 		return rep{}, &IneligibleError{State: splitWideState}
 	}

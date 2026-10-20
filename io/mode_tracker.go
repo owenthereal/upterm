@@ -350,12 +350,16 @@ type ModeTracker struct {
 	// utf8Pending: the continuation bytes the last UTF-8 lead byte still
 	// waits for. A character is a sequence too: text written in the middle of
 	// one is drawn as a replacement character where both were meant.
+	//
+	// rawC1: the first byte from 0x80 to 0x9F written to this tracker, since
+	// it was made or cloned, that continues no character (see RawC1), or 0.
 	escFinal    bool
 	escAs       escKind
 	csiPending  bool
 	unended     stringKind
 	afterESC    bool
 	utf8Pending int
+	rawC1       byte
 
 	// The character sets as NonASCIICharset sees them, cautiously: what the
 	// terminal may be drawing text in, on any terminal's reading of the
@@ -471,7 +475,8 @@ func NewModeTracker() *ModeTracker {
 }
 
 // Clone returns an independent copy: writing to either leaves the other's
-// Snapshot and Restore unchanged.
+// Snapshot and Restore unchanged. What RawC1 reports starts afresh: it is of
+// the bytes written to the clone.
 //
 // A caller that needs the snapshot as of a later point in the ring than its
 // first byte gets it by feeding a clone the ring's bytes up to there. The
@@ -495,6 +500,7 @@ func (m *ModeTracker) Clone() *ModeTracker {
 	c.modifyOtherKeys = slices.Clone(m.modifyOtherKeys)
 	c.partial = slices.Clone(m.partial)
 	c.seq = slices.Clone(m.seq)
+	c.rawC1 = 0
 	return &c
 }
 
@@ -641,6 +647,14 @@ func (m *ModeTracker) InSequence() bool {
 // still waits for: the rest of a character the output so far has begun,
 // which a terminal reads as that character's.
 func (m *ModeTracker) UTF8Pending() int { return m.utf8Pending }
+
+// RawC1 reports the first byte from 0x80 to 0x9F written to this tracker,
+// since it was made or cloned, that doesn't continue a UTF-8 character, in
+// any state, or 0 for none. A terminal that reads UTF-8 draws such a byte as
+// a replacement character, and one that reads 8-bit controls takes it for a
+// C1 control, an 8-bit introducer or ST among them; the tracker follows
+// neither, and only notes it.
+func (m *ModeTracker) RawC1() byte { return m.rawC1 }
 
 // NonASCIICharset reports whether text written now would be drawn in a
 // character set other than ASCII: G0 designated as anything but ESC ( B as
@@ -826,6 +840,8 @@ func (m *ModeTracker) watchSequence(b byte) {
 	case b >= 0x80 && b <= 0xbf:
 		if m.utf8Pending > 0 {
 			m.utf8Pending--
+		} else if b <= 0x9f && m.rawC1 == 0 {
+			m.rawC1 = b
 		}
 	default:
 		m.utf8Pending = 0

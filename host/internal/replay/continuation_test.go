@@ -1823,6 +1823,19 @@ func TestReplayReadsWhatFollowsACutCharacter(t *testing.T) {
 	}
 }
 
+// A lone C1 byte the ring no longer holds doesn't fail the join: the session's
+// terminal drew it, or acted on it, before the ring's first byte, which is as
+// far back as a raw replay reaches too.
+func TestReplayRendersPastAnEvictedC1Byte(t *testing.T) {
+	for _, c1 := range []string{"\x84", "\x85", "\x9b", "\x9c"} {
+		head := "text" + c1
+		capt := &capturing{r: New()}
+		_, fellBack := fanOut(t, capt, []byte(head+strings.Repeat("line\r\n", 1000)), []uio.SizeEvent{event(1, 0, 80, 24)}, 4<<10)
+		require.Greater(t, capt.c.Start, uint64(len(head)), "%q is still in the ring", c1)
+		require.NoError(t, fellBack, "%q", c1)
+	}
+}
+
 // shellOutput is about n bytes of a shell session at 80 columns, none of its
 // lines wrapping: commands at a prompt, listings with names in colour as ls
 // colours them, numbered lines of output, so that a line lost or out of

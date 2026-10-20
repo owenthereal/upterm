@@ -1824,6 +1824,51 @@ func TestInSequenceWaitsOutAPartialCharacter(t *testing.T) {
 	}
 }
 
+// RawC1 reports the first byte from 0x80 to 0x9F the output held that
+// doesn't continue a UTF-8 character, in any state: alone, as an 8-bit
+// introducer, an 8-bit ST ending a string, or inside a string's data, after a
+// character ended early or a byte no character begins with. A byte that
+// continues a character, split across writes or not, is the character's, and
+// the 7-bit forms hold none. A clone reports only what was written to it,
+// with the character the original was inside still to finish.
+func TestRawC1NotesAC1ByteOutsideACharacter(t *testing.T) {
+	for _, tc := range []struct {
+		out  []string
+		want byte
+	}{
+		{[]string{"\x84"}, 0x84},
+		{[]string{"text\x9b1m"}, 0x9b},
+		{[]string{"\x1b]0;t\x9c"}, 0x9c},
+		{[]string{"\x1b]0;a\x85b\x07"}, 0x85},
+		{[]string{"a\x8db\x8e"}, 0x8d},
+		{[]string{"\xe2A\x85"}, 0x85},
+		{[]string{"\xc0\x80"}, 0x80},
+		{[]string{"\xc5\x85\x85"}, 0x85},
+		{[]string{"\xc5\x85"}, 0},
+		{[]string{"\xe2\x96\x88"}, 0},
+		{[]string{"\xe2", "\x96", "\x88"}, 0},
+		{[]string{"\xf0\x9f\x98\x80"}, 0},
+		{[]string{"\xa0\xbf"}, 0},
+		{[]string{"\x1bD\x1bH\x1bM\x1bN\x1bO\x1b[1m\x1b]0;t\x1b\\"}, 0},
+	} {
+		m := NewModeTracker()
+		for _, p := range tc.out {
+			_, _ = m.Write([]byte(p))
+		}
+		require.Equal(t, tc.want, m.RawC1(), "%q", tc.out)
+	}
+
+	m := NewModeTracker()
+	_, _ = m.Write([]byte("\x84\xe2"))
+	c := m.Clone()
+	require.Zero(t, c.RawC1(), "the original's, written before the clone")
+	_, _ = c.Write([]byte("\x96\x88"))
+	require.Zero(t, c.RawC1(), "the rest of the original's character")
+	_, _ = c.Write([]byte("\x8d"))
+	require.Equal(t, byte(0x8d), c.RawC1())
+	require.Equal(t, byte(0x84), m.RawC1())
+}
+
 // A control character inside an ESC sequence is executed where it stands,
 // and the sequence goes on waiting for its final byte, as a DEC parser has
 // it. The tracker's own bookkeeping drops the sequence there, but the
