@@ -227,20 +227,35 @@ func TestReplayRendersTheSequencesItAllows(t *testing.T) {
 	}
 }
 
-// droppedForms are a parameter string of each of x/vt's own CSI keys whose
-// handler drops some, of one it drops, but CSI s, which drops one only while
-// DECLRMM is set, and has a case of its own.
-var droppedForms = map[int]string{
-	ansi.Command(0, 0, 'J'):   "22",
-	ansi.Command(0, 0, 'K'):   "3",
-	ansi.Command('?', 0, 'W'): "1",
-	ansi.Command(0, 0, 'g'):   "1",
-	ansi.Command(0, 0, 'c'):   "1",
-	ansi.Command('>', 0, 'c'): "1",
-	ansi.Command(0, 0, 'n'):   "0",
-	ansi.Command('?', 0, 'n'): "1",
-	ansi.Command(0, 0, 'r'):   "5;2",
-	ansi.Command(0, 0, 'u'):   "1",
+// csiForms are the parameters the round trip writes each CSI key with: none,
+// one of several values, two, a sub-parameter, two left out, and a control
+// inside them, which the parser runs where it is and reads past.
+var csiForms = []string{"", "0", "1", "5", "6", "1;1", "1;2", "1:2", ";", "1\x0b2"}
+
+// droppedForms are, for each of x/vt's own CSI keys whose handler drops some
+// of csiForms, those it drops, in csiForms' order, on the round trip's
+// terminal, of 8x2: x/vt logs each, and takes the rest. DECSTBM drops more of
+// them there than on a taller terminal. CSI s drops a form only while DECLRMM
+// is set, which none of these sets, and has a case of its own.
+var droppedForms = map[int][]string{
+	// ED but 0 to 3, and EL but 0 to 2: the form with a control inside it
+	// reads as 12.
+	ansi.Command(0, 0, 'J'): {"5", "6", "1\x0b2"},
+	ansi.Command(0, 0, 'K'): {"5", "6", "1\x0b2"},
+	// DECST8C but 5 alone.
+	ansi.Command('?', 0, 'W'): {"", "0", "1", "6", "1;1", "1;2", "1:2", ";", "1\x0b2"},
+	// TBC but 0 and 3.
+	ansi.Command(0, 0, 'g'): {"1", "5", "6", "1;1", "1;2", "1:2", "1\x0b2"},
+	// DA1 and DA2 but 0.
+	ansi.Command(0, 0, 'c'):   {"1", "5", "6", "1;1", "1;2", "1:2", "1\x0b2"},
+	ansi.Command('>', 0, 'c'): {"1", "5", "6", "1;1", "1;2", "1:2", "1\x0b2"},
+	// DSR but 5 and 6, and DECXCPR but 6.
+	ansi.Command(0, 0, 'n'):   {"", "0", "1", "1;1", "1;2", "1:2", ";", "1\x0b2"},
+	ansi.Command('?', 0, 'n'): {"", "0", "1", "5", "1;1", "1;2", "1:2", ";", "1\x0b2"},
+	// DECSTBM whose top isn't above its bottom.
+	ansi.Command(0, 0, 'r'): {"5", "6", "1;1", "1\x0b2"},
+	// SCORC with a parameter.
+	ansi.Command(0, 0, 'u'): {"0", "1", "5", "6", "1;1", "1;2", "1:2", ";", "1\x0b2"},
 }
 
 // Each key of the tables, given to the emulation, is decided as its row says:
@@ -269,8 +284,10 @@ func TestDispatchCheckFollowsTheTables(t *testing.T) {
 		}
 		return "an unhandled " + csiName(key)
 	}
-	for key, params := range droppedForms {
-		check(t, csiOf("\x1b[", key, params), dropped(key))
+	for key, forms := range droppedForms {
+		for _, params := range forms {
+			check(t, csiOf("\x1b[", key, params), dropped(key))
+		}
 	}
 	// DECSLRM's, a left margin not left of the right, which x/vt drops only
 	// while DECLRMM makes CSI s one: DECLRMM is reset after it, so the check,
@@ -350,13 +367,14 @@ func TestDispatchCheckFailsOnEveryOtherKey(t *testing.T) {
 // it by, and x/vt is silent on exactly its own keys, for the forms its
 // handlers take, with the replay's handlers as without them, which all return
 // false: so the tables' x/vt keys are x/vt's, and every other dispatch reaches
-// the check. Each CSI goes in several forms, by both introducers, a control
-// inside it too, and each OSC by its number as the parser reads it: with
-// leading zeros, a control the OSC state ignores inside it, past an int's
-// range, where it wraps, as large as parser.MissingCommand, which the parser
-// reads as no number, or with none.
+// the check. Each CSI goes in each of csiForms, by both introducers: every
+// form of a key not x/vt's logs, and of x/vt's own keys, exactly the forms
+// droppedForms holds, so a form x/vt starts or stops dropping shows here
+// rather than being decided unseen as xvtCSI says. Each OSC goes by its
+// number as the parser reads it: with leading zeros, a control the OSC state
+// ignores inside it, past an int's range, where it wraps, as large as
+// parser.MissingCommand, which the parser reads as no number, or with none.
 func TestDispatchCheckReadsTheKeyXVTDispatched(t *testing.T) {
-	forms := []string{"", "0", "1", "5", "6", "1;1", "1;2", "1:2", ";", "1\x0b2"}
 	for _, replays := range []bool{false, true} {
 		t.Run(fmt.Sprintf("replay's handlers %v", replays), func(t *testing.T) {
 			term, l := logging(t, replays)
@@ -366,14 +384,18 @@ func TestDispatchCheckReadsTheKeyXVTDispatched(t *testing.T) {
 				return l.lines
 			}
 			for _, key := range csiKeys() {
-				silent := false
-				for _, form := range forms {
-					for _, intro := range []string{"\x1b[", "\x9b"} {
+				want := csiForms
+				if _, own := xvtCSI[key]; own {
+					want = droppedForms[key]
+				}
+				for _, intro := range []string{"\x1b[", "\x9b"} {
+					var logged []string
+					for _, form := range csiForms {
 						lines := write(csiOf(intro, key, form))
 						if len(lines) == 0 {
-							silent = true
 							continue
 						}
+						logged = append(logged, form)
 						require.Len(t, lines, 1)
 						require.Equal(t, unhandledCSI, lines[0].format)
 						s, _ := lines[0].args[0].(string)
@@ -381,9 +403,8 @@ func TestDispatchCheckReadsTheKeyXVTDispatched(t *testing.T) {
 						require.True(t, ok, "%q", s)
 						require.Equal(t, csiName(key), csiName(got), "%q", s)
 					}
+					require.Equal(t, want, logged, "%s by %q", csiName(key), intro)
 				}
-				_, own := xvtCSI[key]
-				require.Equal(t, own, silent, "%s", csiName(key))
 			}
 			for _, key := range escKeys() {
 				lines := write(escOf(key))
