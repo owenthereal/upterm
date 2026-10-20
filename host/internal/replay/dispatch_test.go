@@ -218,6 +218,7 @@ func TestReplayRendersTheSequencesItAllows(t *testing.T) {
 		{"a prompt mark", "\x1b]133;A\x07"},
 		{"VS Code's prompt mark and directory", "\x1b]633;A\x07\x1b]633;P;Cwd=/tmp\x07"},
 		{"systemd's context marker", "\x1b]3008;start=1;user=u\x1b\\"},
+		{"Fig's shell integration", "\x1b]697;StartPrompt\x07\x1b]697;EndPrompt\x07\x1b]697;Dir=/tmp\x07"},
 		{"a notification by OSC 777", "\x1b]777;notify;title;body\x07"},
 		{"a notification of kitty's", "\x1b]99;;hello\x1b\\"},
 		{"a notification of iTerm2's", "\x1b]9;hello\x07"},

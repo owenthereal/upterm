@@ -572,12 +572,13 @@ var oscRules = map[int]string{
 	1337:                  "",
 	5522:                  "",
 	parser.MissingCommand: "",
-	// Prompt marks, FinalTerm's and VS Code's, and systemd's context
-	// markers, which a shell sends at every prompt, and which a fallback
-	// would fail every join to it on: none is rebuilt, and the next prompt
-	// sends them again.
+	// Prompt marks, FinalTerm's and VS Code's, systemd's context markers,
+	// and Fig's shell integration, which Amazon Q's is too, each of which a
+	// shell sends at every prompt, and which a fallback would fail every join
+	// to it on: none is rebuilt, and the next prompt sends them again.
 	133:  "",
 	633:  "",
+	697:  "",
 	3008: "",
 	// kitty's notifications, shown once, as OSC 9's are.
 	99: "",
