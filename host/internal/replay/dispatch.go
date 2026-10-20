@@ -1,6 +1,7 @@
 package replay
 
 import (
+	"bytes"
 	"strconv"
 	"strings"
 
@@ -215,7 +216,7 @@ func oscVerdict(n int, data []byte) string {
 			return ""
 		}
 	} else if n == 777 {
-		if strings.HasPrefix(string(data), "777;notify;") {
+		if bytes.HasPrefix(data, []byte("777;notify;")) {
 			return ""
 		}
 	} else if name, ok := oscRules[n]; ok {
