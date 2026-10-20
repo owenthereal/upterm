@@ -17,12 +17,13 @@ import (
 // tmux's and Ghostty's TERMs, Neovim, zsh with oh-my-zsh, as under xterm's
 // TERM and as under tmux's, where it sends a screen title string at every
 // prompt, bash, less, man under tmux's TERM, as in a session hosted inside
-// tmux, and tmux run inside the session. A join at every 97th byte of each
-// renders, once one has, and one does: the joins before it, made as the
-// program starts, before its screen holds a cell the render could print REP's
-// character on, may fall back on that alone. A joiner given the render and
-// the rest of the stream ends as the session's terminal does, both reading
-// the screen title strings as tmux does under tmux's TERM.
+// tmux, htop 3.5, by xterm's and tmux's TERMs, and tmux run inside the
+// session. A join at every 97th byte of each renders, once one has, and one
+// does: the joins before it, made as the program starts, before its screen
+// holds a cell the render could print REP's character on, may fall back on
+// that alone. A joiner given the render and the rest of the stream ends as
+// the session's terminal does, both reading the screen title strings as tmux
+// does under tmux's TERM.
 func TestReplayRendersRecordedSessions(t *testing.T) {
 	files, err := filepath.Glob(filepath.Join("testdata", "sessions", "*.raw"))
 	require.NoError(t, err)
