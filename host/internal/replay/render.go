@@ -164,17 +164,18 @@ func (e *emulation) render() ([]byte, error) {
 		iconed: e.iconed,
 		titles: e.titles,
 		// A name a pop put back too long to keep can't be sent.
-		titleOver: e.titled && e.titleOver,
-		iconOver:  e.iconed && e.iconOver,
-		rows:      e.join.Rows,
-		cols:      e.join.Cols,
-		fits:      e.join.Cols == e.term.Width(),
-		stops:     append(e.term.TabStops(), e.pastEdge.between(e.term.Width(), e.join.Cols)...),
-		rep:       rep,
-		altShown:  e.altShown,
-		colours:   &e.colours,
-		cwd:       e.cwd,
-		cwdTold:   e.cwdTold,
+		titleOver:    e.titled && e.titleOver,
+		iconOver:     e.iconed && e.iconOver,
+		rows:         e.join.Rows,
+		cols:         e.join.Cols,
+		fits:         e.join.Cols == e.term.Width(),
+		stops:        append(e.term.TabStops(), e.pastEdge.between(e.term.Width(), e.join.Cols)...),
+		stopsCleared: e.pastEdge.cleared,
+		rep:          rep,
+		altShown:     e.altShown,
+		colours:      &e.colours,
+		cwd:          e.cwd,
+		cwdTold:      e.cwdTold,
 		// ConEmu's working directory, if told, whether it was too long to
 		// keep, and whether it came after OSC 7's.
 		conEmuCwd:     e.conEmuCwd,
@@ -315,8 +316,10 @@ type renderer struct {
 	fits bool
 	// stops are the tab stops to set across the joiner's width: the
 	// emulator's, then past its width those it keeps there (see pastEdge).
-	stops []int
-	rep   rep
+	// stopsCleared says the stream has cleared every stop (see tabStops).
+	stops        []int
+	stopsCleared bool
+	rep          rep
 	// altShown is set once the stream has shown the alternate screen (see
 	// hiddenAlt).
 	altShown bool
@@ -523,23 +526,60 @@ func (r *renderer) alt() {
 	_ = enc.bytes(r.parts.AltKeys)
 }
 
-// tabStops sets the tab stops in every render, as the session's terminal
-// holds them, since a program can leave a joiner's with any: every stop
-// cleared, then one set at each column, reached from the row's start (CR) by
+// tabStops sets the tab stops across the joiner's width in every render, as
+// the session's terminal holds them, since a program can leave a joiner's
+// with any. A joiner wider than the render gets, past the render's width, the
+// stops the session's terminal keeps there, which a widening of the pty would
+// bring onto its screen. From the row's start (CR), each column is reached by
 // CUF, the shortest move that lands exactly, as no left margin is set here
-// (see unrestored). A joiner wider than the render gets, past the render's
-// width, the stops the session's terminal keeps there, which a widening of
-// the pty would bring onto its screen. Neither CR nor CUF writes a cell, but
-// both move the cursor, so they come before it is placed.
+// (see unrestored), and gets an HTS where the session's terminal has a stop
+// and a TBC 0, which clears the stop of that column alone, where it has none.
+// None of CR, CUF, HTS and TBC writes a cell, but CR and CUF move the cursor,
+// so they come before it is placed.
+//
+// The stops past the joiner's width are left as they are. xterm keeps 1,024
+// columns of them, iTerm2 1,000 and Windows Terminal those of every column it
+// has had, and none of them changes one on a resize, so a joiner that widens
+// later, the pty following it, finds there the stops it held before the join,
+// its defaults unless a program of its own changed them, as the session's
+// terminal finds its own there and as a raw replay leaves the joiner's. The
+// render can't set them, as CUF stops at the right margin, and TBC 3, which
+// clears every stop, would leave the joiner none there (Windows Terminal none
+// in any column it adds after it). TBC 0 at a column with no stop changes
+// nothing, on those three and on kitty, VTE and tmux, which give a widening's
+// new columns their default stops anyway.
+//
+// Once the stream has cleared every stop, by TBC 3 or DECST8C (see pastEdge),
+// the session's terminal has none past its edge but those a narrowing left
+// there, as the emulator holds it, and a raw replay's TBC 3 clears the
+// joiner's there as well: so the render clears every stop by TBC 3 first,
+// then sets the session's.
 func (r *renderer) tabStops() {
-	_ = r.enc.put("\x1b[3g\r")
-	at := 0
-	for _, x := range r.stops {
-		if x > at {
-			_ = r.enc.cuf(x - at)
-			at = x
+	enc := r.enc
+	if r.stopsCleared {
+		_ = enc.put("\x1b[3g\r")
+		at := 0
+		for _, x := range r.stops {
+			if x > at {
+				_ = enc.cuf(x - at)
+				at = x
+			}
+			_ = enc.put("\x1bH")
 		}
-		_ = r.enc.put("\x1bH")
+		return
+	}
+	_ = enc.put("\r")
+	stops := r.stops
+	for x := range r.cols {
+		if x > 0 {
+			_ = enc.put("\x1b[C")
+		}
+		if len(stops) > 0 && stops[0] == x {
+			_ = enc.put("\x1bH")
+			stops = stops[1:]
+		} else {
+			_ = enc.put("\x1b[g")
+		}
 	}
 }
 

@@ -2847,6 +2847,61 @@ func TestReplaySetsTheTabStopsPastThePtysWidth(t *testing.T) {
 	}
 }
 
+// The render sets the tab stops within the joiner's width and leaves those
+// past it as they are, which xterm, iTerm2 and Windows Terminal keep across a
+// resize, as x/vt does: a joiner that widens later, the pty following it,
+// finds its own stops in the columns it brings onto its screen, one every 8
+// columns as it starts, as the session's terminal finds its own there and as
+// a joiner given the raw ring does, so a live tab there lands as on the
+// session's. A stream that cleared every stop, by TBC 3 or DECST8C, left none
+// past the edge on the session's terminal, nor on a joiner given the raw
+// ring, and the render clears the joiner's there too; a RIS after it sets
+// them every 8 columns again.
+func TestReplayKeepsTheJoinersTabStopsPastItsWidth(t *testing.T) {
+	every8 := func(from, to int) []int {
+		var stops []int
+		for x := from; x < to; x += 8 {
+			stops = append(stops, x)
+		}
+		return stops
+	}
+	for _, tc := range []struct {
+		name, stream string
+		want         []int // both terminals', once widened
+	}{
+		{"the default stops", "", every8(0, 100)},
+		{"an HTS", "\x1b[6G\x1bH\r", append([]int{0, 5}, every8(8, 100)...)},
+		{"a TBC", "\x1b[9G\x1b[g\r", append([]int{0}, every8(16, 100)...)},
+		{"TBC 3, then an HTS", "\x1b[3g\x1b[6G\x1bH\r", []int{5}},
+		{"DECST8C", "\x1b[6G\x1bH\x1b[?5W\r", every8(0, 60)},
+		{"TBC 3, then RIS", "\x1b[3g\x1bc", every8(0, 100)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stream := tc.stream + "$ ls\r\nfile\r\n$ "
+			sent, fellBack := fanOut(t, New(), []byte(stream), []uio.SizeEvent{event(1, 0, 60, 20)}, 4<<10)
+			require.NoError(t, fellBack)
+			require.True(t, bytes.HasPrefix(sent, []byte(endSync+preamble)), "the render, not the raw ring")
+
+			a, aHist := newReference(60, 20)
+			_, _ = a.WriteString(stream)
+			b, bHist := newReference(60, 20)
+			_, _ = b.Write(sent)
+			// The guest widens its window, and the pty follows it, the
+			// session's terminal with it.
+			for _, term := range []*vt.Emulator{a, b} {
+				term.Resize(100, 20)
+			}
+			require.Equal(t, tc.want, a.TabStops(), "the session's")
+			require.Equal(t, tc.want, b.TabStops(), "the joiner's")
+			// ls aligns its columns with tabs.
+			for _, term := range []*vt.Emulator{a, b} {
+				_, _ = term.WriteString("\x1b[5;1Hcolumn-one\t\t\t\t\t\t\t\tcolumn-two")
+			}
+			require.Empty(t, sameState(a, b, *aHist, *bHist, names{}, names{}))
+		})
+	}
+}
+
 // Each screen's kitty keyboard stack is pushed while that screen shows: the
 // main one's before the alternate screen is entered, the alternate one's
 // after.
@@ -2939,7 +2994,8 @@ func TestReplayClearsTheAlternateScreenTheSessionLeftBlank(t *testing.T) {
 		sent, fellBack := fanOut(t, New(), []byte("text\r\nmore\r\n"), []uio.SizeEvent{event(1, 0, 10, 3)}, 64<<10)
 		require.NoError(t, fellBack)
 		require.Equal(t, endSync+preamble+"\r\n\r\n\x1b[?6l\x1b[1;1Htext\x1b[2;1Hmore\x1b[1;1H\x1b7"+
-			"\x1b[3g\r\x1bH\x1b[8C\x1bH\x1b[2;4He\x1b[3;1H", string(sent))
+			"\r\x1bH"+strings.Repeat("\x1b[C\x1b[g", 7)+"\x1b[C\x1bH\x1b[C\x1b[g"+
+			"\x1b[2;4He\x1b[3;1H", string(sent))
 	})
 	t.Run("left, never shown", func(t *testing.T) {
 		for _, leave := range []string{"\x1b[?1049l", "\x1b[?1047l", "\x1b[?47l"} {
