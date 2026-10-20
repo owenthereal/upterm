@@ -3,6 +3,7 @@ package replay
 import (
 	"fmt"
 	"math/big"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -116,7 +117,8 @@ func logging(t *testing.T, replays bool) (*vt.Emulator, *unhandledLog) {
 // handler drops where a terminal acts on it, kitty's ED 22. The name holds
 // the sequence's key alone, never its data, and the first such sequence names
 // it, whatever follows, RIS included. Every kind counts: a CSI by its 7-bit or
-// its 8-bit introducer, an ESC, an OSC.
+// its 8-bit introducer, an ESC, an OSC, and a C1 control x/vt has no handler
+// for, named by its byte alone.
 func TestReplayFailsOnASequenceItDoesntKnow(t *testing.T) {
 	join := func(t *testing.T, stream string) error {
 		t.Helper()
@@ -139,8 +141,14 @@ func TestReplayFailsOnASequenceItDoesntKnow(t *testing.T) {
 		{"an OSC 777 of urxvt's", "\x1b]777;preexec\x07", "an unhandled OSC 777"},
 		{"its data left out of the name", "\x1b]777;secret=hunter2\x07", "an unhandled OSC 777"},
 		{"a status of Claude Code's", "\x1b]7501;state=working\x07", "an unhandled OSC 7501"},
+		{"NEL by its C1 control", "\x85", "an unhandled C1 control 0x85"},
+		{"SSA", "\x86", "an unhandled C1 control 0x86"},
+		{"SPA", "\x96", "an unhandled C1 control 0x96"},
+		{"the bytes around a C1 control left out of the name", "hunter2\x85hunter2", "an unhandled C1 control 0x85"},
 		{"one, then RIS", "\x1bE\x1bc", "an unhandled ESC E"},
 		{"the first of two", "\x1b#8\x1bE", "an unhandled ESC # 8"},
+		{"a C1 control, the first of two", "\x85\x1b#8", "an unhandled C1 control 0x85"},
+		{"a C1 control, the second of two", "\x1b#8\x85", "an unhandled ESC # 8"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			requireIneligible(t, join(t, tc.stream), tc.state)
@@ -173,7 +181,10 @@ func TestReplayFailsOnASequenceItDoesntKnow(t *testing.T) {
 // leave nothing, vim's probe as vim sends it as it starts among them, and
 // Claude Code's, the Linux console's cursor shape as its terminfo entry's
 // cnorm sends it, the visual bell tmux's and screen's entries send, and the
-// prompt marks and notifications shells and programs send.
+// prompt marks and notifications shells and programs send. So do the controls
+// x/vt follows or that leave nothing: the C1 controls x/vt handles; the 8-bit
+// ST, ending an OSC or alone; a character whose UTF-8 holds a byte of the C1
+// range; and C0 controls x/vt has no handler for, as xterm ignores them.
 func TestReplayRendersTheSequencesItAllows(t *testing.T) {
 	for _, tc := range []struct{ name, stream string }{
 		{"EL 3", "\x1b[3K"},
@@ -226,6 +237,18 @@ func TestReplayRendersTheSequencesItAllows(t *testing.T) {
 		{"kitty's colours popped", "\x1b]30101\x1b\\"},
 		{"Claude Code's probe of its status", "\x1b]7501;?\x07"},
 		{"Claude Code's probe of its status, ended by ST", "\x1b]7501;?\x1b\\"},
+		{"IND by its C1 control", "\x84"},
+		{"HTS by its C1 control", "\x88"},
+		{"RI by its C1 control", "\x8d"},
+		{"SS2 by its C1 control", "\x8e"},
+		{"SS3 by its C1 control", "\x8f"},
+		{"a prompt mark ended by the 8-bit ST", "\x1b]133;A\x9c"},
+		{"the 8-bit ST alone", "\x9c"},
+		{"Ņ, whose UTF-8 holds 0x85", "\xc5\x85"},
+		{"SOH", "\x01"},
+		{"ENQ", "\x05"},
+		{"FS", "\x1c"},
+		{"DEL", "\x7f"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			for _, term := range []string{"", "tmux-256color"} {
@@ -408,6 +431,17 @@ func TestDispatchCheckFailsOnEveryOtherKey(t *testing.T) {
 	}
 }
 
+// xvtControls are the controls x/vt's own handlers take: NUL, BEL, BS, HT,
+// LF, VT, FF, CR, SO and SI, and of C1, IND, HTS, RI, SS2 and SS3.
+var xvtControls = []byte{
+	ansi.NUL, ansi.BEL, ansi.BS, ansi.HT, ansi.LF, ansi.VT, ansi.FF, ansi.CR, ansi.SO, ansi.SI,
+	ansi.IND, ansi.HTS, ansi.RI, ansi.SS2, ansi.SS3,
+}
+
+// introducers are the controls x/ansi's parser starts a sequence on rather
+// than executing: ESC, and of C1, DCS, SOS, CSI, OSC, PM and APC.
+var introducers = []byte{ansi.ESC, ansi.DCS, ansi.SOS, ansi.CSI, ansi.OSC, ansi.PM, ansi.APC}
+
 // What the check reads of each sequence x/vt logs is the key x/vt dispatched
 // it by, and x/vt is silent on exactly its own keys, for the forms its
 // handlers take, with the replay's handlers as without them, which all return
@@ -419,6 +453,9 @@ func TestDispatchCheckFailsOnEveryOtherKey(t *testing.T) {
 // number as the parser reads it: with leading zeros, a control the OSC state
 // ignores inside it, past an int's range, where it wraps, as large as
 // parser.MissingCommand, which the parser reads as no number, or with none.
+// Each control of C0 and C1, and DEL, goes alone: x/vt is silent on exactly
+// xvtControls and the introducers, and logs every other by its byte, which
+// the check reads, so a control handler x/vt adds, or drops, shows.
 func TestDispatchCheckReadsTheKeyXVTDispatched(t *testing.T) {
 	for _, replays := range []bool{false, true} {
 		t.Run(fmt.Sprintf("replay's handlers %v", replays), func(t *testing.T) {
@@ -477,6 +514,27 @@ func TestDispatchCheckReadsTheKeyXVTDispatched(t *testing.T) {
 				data, _ := lines[0].args[0].([]byte)
 				require.Equal(t, n, oscNumber(data))
 			}
+			for c := range byte(0xa0) {
+				if c >= 0x20 && c < 0x7f {
+					continue
+				}
+				// On a terminal of its own, as the sequence an introducer
+				// starts doesn't end.
+				term, l := logging(t, replays)
+				_, _ = term.Write([]byte{c})
+				if slices.Contains(xvtControls, c) || slices.Contains(introducers, c) {
+					require.Empty(t, l.lines, "0x%02X", c)
+					continue
+				}
+				require.Len(t, l.lines, 1, "0x%02X", c)
+				require.Equal(t, unhandledControl, l.lines[0].format)
+				require.Equal(t, []any{c}, l.lines[0].args)
+				want := ""
+				if c >= 0x80 && c != ansi.ST {
+					want = fmt.Sprintf("an unhandled C1 control 0x%02X", c)
+				}
+				require.Equal(t, want, unhandledName(l.lines[0].format, l.lines[0].args), "0x%02X", c)
+			}
 		})
 	}
 	t.Run("an OSC's number as the parser reads it", func(t *testing.T) {
@@ -518,9 +576,11 @@ func TestDispatchCheckReadsTheKeyXVTDispatched(t *testing.T) {
 
 // What x/vt logs that the check can't read fails the render, by the kind of
 // sequence, as x/vt's logging has changed: a CSI or an ESC whose argument
-// isn't one, an OSC whose data isn't bytes, a kind it didn't log before. The
-// kinds with rules of their own render, and so does a line that isn't a
-// sequence's. The first sequence noted names it.
+// isn't one, an OSC whose data isn't bytes, a control whose argument isn't a
+// byte of C0 or C1 or DEL, a kind it didn't log before. The kinds with rules
+// of their own render, and so does a line that isn't a sequence's. A control
+// read is decided as the check decides it: C1's, but for ST, fail, named by
+// the byte, and C0's and DEL render. The first sequence noted names it.
 func TestDispatchCheckFailsClosed(t *testing.T) {
 	for _, tc := range []struct {
 		name, format string
@@ -540,7 +600,14 @@ func TestDispatchCheckFailsClosed(t *testing.T) {
 		{"an APC", unhandled + "APC %q", []any{[]byte("x")}, ""},
 		{"an SOS", unhandled + "SOS %q", []any{[]byte("x")}, ""},
 		{"a PM", unhandled + "PM %q", []any{[]byte("x")}, ""},
-		{"a control code", unhandled + "ControlCode %q", []any{byte(5)}, ""},
+		{"a C0 control", unhandledControl, []any{byte(ansi.ENQ)}, ""},
+		{"DEL", unhandledControl, []any{byte(ansi.DEL)}, ""},
+		{"a C1 control", unhandledControl, []any{byte(ansi.NEL)}, "an unhandled C1 control 0x85"},
+		{"ST", unhandledControl, []any{byte(ansi.ST)}, ""},
+		{"a control not a byte", unhandledControl, []any{"\x85"}, "an unhandled control"},
+		{"a control as a rune", unhandledControl, []any{rune(ansi.NEL)}, "an unhandled control"},
+		{"a control with nothing", unhandledControl, nil, "an unhandled control"},
+		{"a control outside C0 and C1", unhandledControl, []any{byte('A')}, "an unhandled control"},
 		{"a mode's change", "setting mode %T(%v) to %v", []any{ansi.DECMode(1), ansi.DECMode(1), ansi.ModeSet}, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

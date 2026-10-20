@@ -2,6 +2,7 @@ package replay
 
 import (
 	"bytes"
+	"fmt"
 	"strconv"
 	"strings"
 
@@ -9,15 +10,17 @@ import (
 	"github.com/owenthereal/x/ansi/parser"
 )
 
-// The check of every CSI, ESC and OSC the emulator's parser dispatches: one
-// the render doesn't rebuild, and that may leave the session's terminal in a
-// state the joiner's wouldn't share, fails the render, named, whatever it is,
-// as a raw replay hands the joiner's terminal the sequence itself. Only what
-// the tables below allow renders.
+// The check of every CSI, ESC and OSC the emulator's parser dispatches, and
+// every control it executes: one the render doesn't rebuild, and that may
+// leave the session's terminal in a state the joiner's wouldn't share, fails
+// the render, named, whatever it is, as a raw replay hands the joiner's
+// terminal the sequence itself. Only what the tables below allow renders, and
+// of the controls, what controlVerdict does.
 //
 // x/vt says, through its logger, which sequences none of its handlers took:
-// for each CSI, ESC and OSC whose every handler returned false, its handle
-// function logs the format below, once, from inside the parser's dispatch.
+// for each CSI, ESC and OSC whose every handler returned false, and each
+// control none took, its handle function logs the format below, once, from
+// inside the parser's dispatch.
 // So the check sees the sequences as x/vt's parser read them, the snapshot's
 // and every batch's, with screen title strings already read for x/vt (see
 // screenTitles), and nothing of the handoff point's lookahead, which runs a
@@ -25,9 +28,10 @@ import (
 // here returns false, so none hides a sequence from it.
 //
 // What x/vt's own handlers take, the check doesn't see. Those are its keys in
-// xvtCSI, xvtESC and xvtOSC, each a sequence x/vt keeps the effect of in
-// state the render rebuilds, or one that leaves nothing, and a test holds
-// them to the keys x/vt is silent on, so a handler x/vt adds, or drops, shows.
+// xvtCSI, xvtESC and xvtOSC, and the controls controlVerdict names, each a
+// sequence x/vt keeps the effect of in state the render rebuilds, or one that
+// leaves nothing, and a test holds them to the keys and controls x/vt is
+// silent on, so a handler x/vt adds, or drops, shows.
 const (
 	unhandled = "unhandled sequence: "
 	// The CSI's parameters as x/vt writes them: its prefix, if any, each
@@ -38,20 +42,19 @@ const (
 	unhandledESC = unhandled + "ESC %q"
 	// The OSC's data, all of it, its number first.
 	unhandledOSC = unhandled + "OSC %q"
+	// The control's byte, which x/vt logs for each control the parser
+	// executes that none of its handlers took (see controlVerdict).
+	unhandledControl = unhandled + "ControlCode %q"
 )
 
 // otherUnhandled are the other formats x/vt logs a sequence none of its
 // handlers took by, which the check leaves alone: device control strings
-// have rules of their own (see watchDCS), and so do APC, SOS and PM. The
-// check covers CSI, ESC and OSC, and leaves controls out: x/vt logs each it
-// doesn't handle, C1's NEL (0x85), which a terminal acts on, among them, and
-// they are left as they are.
+// have rules of their own (see watchDCS), and so do APC, SOS and PM.
 var otherUnhandled = []string{
 	unhandled + "DCS %q %q",
 	unhandled + "APC %q",
 	unhandled + "SOS %q",
 	unhandled + "PM %q",
-	unhandled + "ControlCode %q",
 }
 
 // dispatchCheck is the emulator's logger, which notes the first sequence the
@@ -70,10 +73,9 @@ func (d dispatchCheck) Printf(format string, v ...any) {
 }
 
 // unhandledName is what a render fails by for the sequence x/vt logged by
-// format, with v, or "" for one it renders. A sequence of the three kinds
-// checked that can't be read, or a kind x/vt didn't log before, fails it,
-// named only by its kind: x/vt's logging changed, and the check can't tell
-// what it was.
+// format, with v, or "" for one it renders. A sequence of the kinds checked
+// that can't be read, or a kind x/vt didn't log before, fails it, named only
+// by its kind: x/vt's logging changed, and the check can't tell what it was.
 func unhandledName(format string, v []any) string {
 	var arg any
 	if len(v) > 0 {
@@ -100,6 +102,12 @@ func unhandledName(format string, v []any) string {
 			return "an unhandled OSC"
 		}
 		return oscVerdict(oscNumber(data), data)
+	case unhandledControl:
+		b, ok := arg.(byte)
+		if !ok {
+			return "an unhandled control"
+		}
+		return controlVerdict(b)
 	}
 	for _, f := range otherUnhandled {
 		if format == f {
@@ -231,6 +239,42 @@ func oscVerdict(n int, data []byte) string {
 		return name
 	}
 	return "an unhandled OSC " + strconv.Itoa(n)
+}
+
+// controlVerdict is csiVerdict's for a control, b, no x/vt handler took.
+// x/vt's handlers take NUL, BEL, BS, HT, LF, VT, FF, CR, SO and SI, and of
+// C1, IND, HTS, RI, SS2 and SS3, as they take ESC D, ESC H, ESC M, ESC N and
+// ESC O (see xvtESC): each leaves nothing, or state the render rebuilds.
+// x/vt logs every other control the parser executes, by its byte.
+//
+// A C0 control x/vt has no handler for, and DEL, render: xterm ignores them,
+// and ENQ's answerback is a reply, which changes nothing.
+//
+// Any other C1 control but ST fails the render, named by its byte alone. A
+// terminal that reads 8-bit controls may act on it where x/vt doesn't, as
+// xterm's NEL moves the cursor to the next line's start, and its SPA and EPA
+// guard the cells printed between them from erasure, and one that reads
+// UTF-8 prints a replacement character for the lone byte, where x/vt prints
+// nothing: either way, the render isn't the session's screen. A byte of the
+// range that continues a UTF-8 character is the character's, and one inside
+// an OSC's or a DCS's data the string's, and neither reaches here.
+//
+// ST renders. The parser dispatches the OSC, DCS, APC, SOS or PM an 8-bit ST
+// ends, which the check decides as that string, and x/vt logs nothing of the
+// ST itself. It executes one only where no string has begun: alone, or after
+// an ESC, a CSI or a DCS's header, which it abandons, dispatching nothing. An
+// ST that ends no string does nothing on a terminal that reads 8-bit
+// controls, as ESC \ alone does nothing (see escRules), and x/vt reads the C1
+// controls as such a terminal does, the ones it follows too; one that reads
+// UTF-8 prints a replacement character for it, as for those.
+func controlVerdict(b byte) string {
+	switch {
+	case b <= ansi.US, b == ansi.DEL, b == ansi.ST:
+		return ""
+	case b >= ansi.PAD && b <= ansi.APC:
+		return fmt.Sprintf("an unhandled C1 control 0x%02X", b)
+	}
+	return "an unhandled control"
 }
 
 // csiName is a CSI of key as a fallback names it: CSI, its prefix, if any,
