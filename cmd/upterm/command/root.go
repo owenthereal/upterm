@@ -319,7 +319,7 @@ func bindFlagsToEnv(cmd *cobra.Command) (supplied map[string]bool, deps []deprec
 		}
 	})
 
-	v := viper.New()
+	v, literalKeys := configViper()
 
 	configPath := utils.UptermConfigFilePath()
 	v.SetConfigFile(configPath)
@@ -341,7 +341,7 @@ func bindFlagsToEnv(cmd *cobra.Command) (supplied map[string]bool, deps []deprec
 	// report every bound flag as present in the config file — and every
 	// ordinary run would then fail with "config key has no value".
 	configKeys := make(map[string]bool)
-	for _, k := range configKeysForCommand(v, cmd) {
+	for _, k := range configKeysForCommand(v, cmd, literalKeys) {
 		configKeys[k] = true
 	}
 
@@ -498,13 +498,55 @@ func bindSetError(name, display, origin string, err error) error {
 	return fmt.Errorf("%s: cannot use value %q (from %s): %w", name, display, origin, err)
 }
 
+// configViper records literal keys during Viper's own decode, before its
+// flattened inventory loses the distinction between dots and mapping children.
+func configViper() (*viper.Viper, map[string]bool) {
+	keys := make(map[string]bool)
+	decoders := configKeyDecoders{DecoderRegistry: viper.NewCodecRegistry(), keys: keys}
+	return viper.NewWithOptions(viper.WithDecoderRegistry(decoders)), keys
+}
+
+type configKeyDecoders struct {
+	viper.DecoderRegistry
+	keys map[string]bool
+}
+
+func (d configKeyDecoders) Decoder(format string) (viper.Decoder, error) {
+	decoder, err := d.DecoderRegistry.Decoder(format)
+	if err != nil {
+		return nil, err
+	}
+	return configKeyDecoder{Decoder: decoder, keys: d.keys}, nil
+}
+
+type configKeyDecoder struct {
+	viper.Decoder
+	keys map[string]bool
+}
+
+func (d configKeyDecoder) Decode(b []byte, values map[string]any) error {
+	if err := d.Decoder.Decode(b, values); err != nil {
+		return err
+	}
+	for key := range values {
+		d.keys[strings.ToLower(key)] = true
+	}
+	return nil
+}
+
 // configKeysForCommand keeps ignored values whole rather than inspecting their
 // flattened children. InConfig also sees empty maps, which AllKeys omits.
 // Ordinary keys retain their flattened children for unknown-key validation.
-func configKeysForCommand(v *viper.Viper, cmd *cobra.Command) []string {
+func configKeysForCommand(v *viper.Viper, cmd *cobra.Command, literalKeys map[string]bool) []string {
 	keys := make(map[string]bool)
 	for _, key := range v.AllKeys() {
 		keys[key] = true
+	}
+	// A dotted literal may itself hold an empty map and be absent from AllKeys.
+	for key := range literalKeys {
+		if strings.Contains(key, ".") {
+			keys[key] = true
+		}
 	}
 	visitTreeFlags(cmd, func(f *pflag.Flag) {
 		if !v.InConfig(f.Name) {
@@ -518,7 +560,7 @@ func configKeysForCommand(v *viper.Viper, cmd *cobra.Command) []string {
 		for key := range keys {
 			if strings.HasPrefix(key, f.Name+".") {
 				children = true
-				if ignored {
+				if ignored && !literalKeys[key] {
 					delete(keys, key)
 				}
 			}

@@ -797,3 +797,36 @@ func TestDottedIgnoredKeyNamesRemainUnknown(t *testing.T) {
 	require.Len(t, errs, 1)
 	require.Contains(t, errs[0].Error(), `unknown key "output.format"`)
 }
+
+func TestLiteralDottedKeysCoexistingWithIgnoredValuesRemainUnknown(t *testing.T) {
+	for _, body := range []string{
+		"output: {}\noutput.format: json\n",
+		"output: text\noutput.format: json\n",
+		"output: {format: text}\noutput.format: json\n",
+		"output.format: json\noutput: {format: text}\n",
+		"output: {format: {nested: text}}\noutput.format.nested: json\n",
+		"OUTPUT: {}\nOUTPUT.FORMAT: json\n",
+		"output: {}\noutput.format: {}\n",
+		"output: {format: text}\noutput.format: {nested: json}\n",
+	} {
+		t.Run(body, func(t *testing.T) {
+			restoreFlags(t)
+			setupSessionRoots(t)
+			withConfig(t, body)
+			t.Run("binding", func(t *testing.T) {
+				cmd := bindingCommand(t, "session", "info")
+				_, _, err := bindFlagsToEnv(cmd)
+				require.ErrorContains(t, err, `unknown config key "output.format`)
+				require.NoError(t, cmd.ParseFlags([]string{"--output=json"}))
+				_, _, err = bindFlagsToEnv(cmd)
+				require.ErrorContains(t, err, `unknown config key "output.format`)
+			})
+			t.Run("config edit", func(t *testing.T) {
+				t.Setenv("VISUAL", "true")
+				_, stderr, code := runCLI(t, "config", "edit")
+				require.Equal(t, 1, code, stderr)
+				require.Contains(t, stderr, `unknown key "output.format`)
+			})
+		})
+	}
+}

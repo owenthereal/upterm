@@ -287,7 +287,7 @@ func validateConfigFile(root *cobra.Command, path string) []error {
 
 // checkConfigFile also returns notices for config values commands ignore.
 func checkConfigFile(root *cobra.Command, path string) ([]error, []deprecation) {
-	v := viper.New()
+	v, literalKeys := configViper()
 	v.SetConfigFile(path)
 	if err := v.ReadInConfig(); err != nil {
 		var parseErr viper.ConfigParseError
@@ -316,7 +316,7 @@ func checkConfigFile(root *cobra.Command, path string) ([]error, []deprecation) 
 		failed[key] = true
 	}
 
-	keys := configKeysForCommand(v, root)
+	keys := configKeysForCommand(v, root, literalKeys)
 	slices.Sort(keys)
 	for _, key := range keys {
 		switch {
