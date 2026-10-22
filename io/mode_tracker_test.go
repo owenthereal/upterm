@@ -1661,7 +1661,11 @@ func requireNothingShared(t *testing.T, path string, a, b reflect.Value, seen ma
 			require.NotEqual(t, a.Pointer(), b.Pointer(), "%s is shared with the clone", path)
 		}
 		require.True(t, a.Type().Elem().Kind() <= reflect.Complex128, "%s: the walk doesn't look inside a map of %s", path, a.Type().Elem())
-	case reflect.Pointer, reflect.Interface, reflect.Chan, reflect.Func, reflect.UnsafePointer, reflect.Array:
+	case reflect.Array:
+		for i := range a.Len() {
+			requireNothingShared(t, path+"[]", a.Index(i), b.Index(i), seen)
+		}
+	case reflect.Pointer, reflect.Interface, reflect.Chan, reflect.Func, reflect.UnsafePointer:
 		t.Fatalf("%s: the walk doesn't know how to check a %s", path, a.Kind())
 	}
 }
@@ -1821,6 +1825,29 @@ func TestInSequenceWaitsOutAPartialCharacter(t *testing.T) {
 		_, _ = m.Write([]byte(whole))
 		require.False(t, m.InSequence(), "%q", whole)
 		require.Zero(t, m.UTF8Pending(), "%q", whole)
+	}
+}
+
+// The pending prefix belongs to the tracker at its current offset. Completing
+// it on a clone must neither change the original nor retain a completed or
+// interrupted character as the prefix of the next one.
+func TestUTF8PrefixFollowsTheTrackersOffset(t *testing.T) {
+	for _, prefix := range []string{"\xc3", "\xe2\x96", "\xf0\x9f\x98", "\xe0\x80", "\xf4\x90\x80"} {
+		m := NewModeTracker()
+		_, _ = m.Write([]byte("é" + prefix))
+		require.Equal(t, prefix, m.UTF8Prefix())
+		c := m.Clone()
+		require.Equal(t, prefix, c.UTF8Prefix())
+		_, _ = c.Write([]byte{0x80})
+		require.Empty(t, c.UTF8Prefix())
+		require.Equal(t, prefix, m.UTF8Prefix())
+		_, _ = m.Write([]byte("X\xe0\xa0"))
+		require.Equal(t, "\xe0\xa0", m.UTF8Prefix())
+		require.Empty(t, c.UTF8Prefix())
+		_, _ = m.Write([]byte("\xf0\x9f"))
+		require.Equal(t, "\xf0\x9f", m.UTF8Prefix())
+		_, _ = m.Write([]byte("X"))
+		require.Empty(t, m.UTF8Prefix())
 	}
 }
 

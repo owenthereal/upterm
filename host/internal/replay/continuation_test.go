@@ -1783,7 +1783,7 @@ func TestReplayRendersARingThatStartsInsideACharacter(t *testing.T) {
 		_, _ = b.Write(joined)
 		require.Empty(t, sameState(a, b, nil, nil, *aNames, *bNames))
 	}
-	for _, char := range []string{"\xc5\x85", "\xe2\x96\x88", "\xf0\x9f\x98\x80", "\xe4\xb8\xad"} {
+	for _, char := range []string{"\xc5\x85", "\xe2\x96\x88", "\xf0\x9f\x98\x80", "\xe4\xb8\xad", "\xe0\xa0\x80", "\xed\x9f\xbf", "\xf0\x90\x80\x80", "\xf4\x8f\xbf\xbf"} {
 		for cut := 1; cut < len(char); cut++ {
 			t.Run(fmt.Sprintf("%s after %d of its bytes", char, cut), func(t *testing.T) {
 				join(t, "text\r\nab"+char[:cut], char[cut:]+"cd\r\n"+lines.String(), []uio.SizeEvent{event(1, 0, 80, 24)})
@@ -1841,6 +1841,60 @@ func TestReplayFailsOnARingThatStartsInsideACharacterCutShort(t *testing.T) {
 			require.Equal(t, uint64(len(tc.head)), capt.c.Start, "the ring starts at the cut")
 			requireIneligible(t, fellBack, "a ring that starts inside a character cut short")
 			require.True(t, bytes.HasSuffix(joined, []byte(tc.ring)), "the join keeps the raw ring")
+		})
+	}
+}
+
+// Continuation-shaped bytes do not necessarily complete a valid scalar.
+// Skipping them would lose the replacement cells the terminal prints.
+func TestReplayFailsOnAnInvalidCutCharacter(t *testing.T) {
+	for _, char := range []string{"\xe0\x80\x80", "\xed\xa0\x80", "\xf0\x80\x80\x80", "\xf4\x90\x80\x80"} {
+		for cut := 1; cut < len(char); cut++ {
+			t.Run(fmt.Sprintf("%x after %d bytes", char, cut), func(t *testing.T) {
+				head, ring := "text\r\n"+char[:cut], char[cut:]+"X\r\n"
+				capt := &capturing{r: New()}
+				joined, fellBack := fanOut(t, capt, []byte(head+ring), []uio.SizeEvent{event(1, 0, 80, 24)}, len(ring))
+				require.Equal(t, uint64(len(head)), capt.c.Start, "the ring starts at the cut")
+				requireIneligible(t, fellBack, "a ring that starts inside an invalid UTF-8 character")
+				require.True(t, bytes.HasSuffix(joined, []byte(ring)), "the join keeps the raw ring")
+			})
+		}
+	}
+}
+
+// REP can read a character from before the cut even after moving onto an
+// intact line. A later print must not make a divergent emulation eligible.
+// A print before REP supplies its character, and a hard reset clears it;
+// neither a multibyte character nor a soft reset does either in x/vt.
+func TestReplayKeepsREPsCharacterAcrossARingCut(t *testing.T) {
+	for _, tc := range []struct {
+		name, before, after, line string
+		fallback                  bool
+	}{
+		{"evicted character", "", "", "XXXB", true},
+		{"multibyte print", "é", "", "éXXXB", true},
+		{"soft reset", "\x1b[!p", "", "XXXB", true},
+		{"later reset", "", "\x1bcB\r\n", "", true},
+		{"new character", "A", "", "AAAAB", false},
+		{"hard reset", "\x1bc\r\n", "", "B", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			head, ring := "X\xc3", "\xa9\r\n"+tc.before+"\x1b[3bB\r\n"+tc.after
+			capt := &capturing{r: New()}
+			joined, fellBack := fanOut(t, capt, []byte(head+ring), []uio.SizeEvent{event(1, 0, 80, 24)}, len(ring))
+			require.Equal(t, uint64(len(head)), capt.c.Start, "the ring starts at the cut")
+			ref := vt.NewEmulator(80, 24)
+			_, _ = ref.WriteString(head + ring)
+			require.Equal(t, tc.line, strings.TrimRight(ref.ActiveScreen().Line(1).String(), " "))
+			if tc.fallback {
+				requireIneligible(t, fellBack, "REP uses a character from before the ring's cut")
+				require.True(t, bytes.HasSuffix(joined, []byte(ring)), "the join keeps the raw ring")
+			} else {
+				require.NoError(t, fellBack)
+				guest := vt.NewEmulator(80, 24)
+				_, _ = guest.Write(joined)
+				require.Equal(t, ref.ActiveScreen().Line(1).String(), guest.ActiveScreen().Line(1).String())
+			}
 		})
 	}
 }

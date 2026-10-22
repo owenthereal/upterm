@@ -8,6 +8,7 @@ import (
 	"slices"
 	"sort"
 	"strconv"
+	"unicode/utf8"
 
 	"github.com/owenthereal/upterm/internal/termsize"
 )
@@ -350,6 +351,9 @@ type ModeTracker struct {
 	// utf8Pending: the continuation bytes the last UTF-8 lead byte still
 	// waits for. A character is a sequence too: text written in the middle of
 	// one is drawn as a replacement character where both were meant.
+	// utf8Prefix holds the bytes already read, utf8Len of them, so a reader
+	// resuming the character can validate it, including an invalid second
+	// byte that has already left the ring.
 	//
 	// rawC1: the first byte from 0x80 to 0x9F written to this tracker, since
 	// it was made or cloned, that continues no character (see RawC1), or 0.
@@ -359,6 +363,8 @@ type ModeTracker struct {
 	unended     stringKind
 	afterESC    bool
 	utf8Pending int
+	utf8Prefix  [utf8.UTFMax]byte
+	utf8Len     int
 	rawC1       byte
 
 	// The character sets as NonASCIICharset sees them, cautiously: what the
@@ -648,6 +654,11 @@ func (m *ModeTracker) InSequence() bool {
 // which a terminal reads as that character's.
 func (m *ModeTracker) UTF8Pending() int { return m.utf8Pending }
 
+// UTF8Prefix returns the bytes already read of the unfinished character,
+// or an empty string if none is pending. These bytes may be invalid UTF-8:
+// UTF8Pending counts continuation-shaped bytes, without validating them.
+func (m *ModeTracker) UTF8Prefix() string { return string(m.utf8Prefix[:m.utf8Len]) }
+
 // RawC1 reports the first byte from 0x80 to 0x9F written to this tracker,
 // since it was made or cloned, that doesn't continue a UTF-8 character, in
 // any state, or 0 for none. A terminal that reads UTF-8 draws such a byte as
@@ -831,20 +842,27 @@ func (m *ModeTracker) watchSequence(b byte) {
 	// A lead byte says how many continuation bytes follow it; anything but a
 	// continuation byte ends the character, complete or not.
 	switch {
-	case b >= 0xc2 && b <= 0xdf:
+	case b >= 0xc2 && b <= 0xf4:
 		m.utf8Pending = 1
-	case b >= 0xe0 && b <= 0xef:
-		m.utf8Pending = 2
-	case b >= 0xf0 && b <= 0xf4:
-		m.utf8Pending = 3
+		if b >= 0xf0 {
+			m.utf8Pending = 3
+		} else if b >= 0xe0 {
+			m.utf8Pending = 2
+		}
+		m.utf8Prefix[0], m.utf8Len = b, 1
 	case b >= 0x80 && b <= 0xbf:
 		if m.utf8Pending > 0 {
+			m.utf8Prefix[m.utf8Len] = b
+			m.utf8Len++
 			m.utf8Pending--
 		} else if b <= 0x9f && m.rawC1 == 0 {
 			m.rawC1 = b
 		}
 	default:
 		m.utf8Pending = 0
+	}
+	if m.utf8Pending == 0 {
+		m.utf8Len = 0
 	}
 }
 

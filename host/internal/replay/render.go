@@ -1143,6 +1143,9 @@ func (e *emulation) eligible(parts uio.ReplayParts) (rep, error) {
 	if e.kittyClipboard {
 		return rep{}, &IneligibleError{State: "a kitty clipboard write"}
 	}
+	if e.lostREP {
+		return rep{}, &IneligibleError{State: "REP uses a character from before the ring's cut"}
+	}
 	if e.unhandled != "" {
 		return rep{}, &IneligibleError{State: e.unhandled}
 	}

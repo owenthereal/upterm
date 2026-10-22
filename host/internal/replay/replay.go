@@ -13,6 +13,7 @@ import (
 	"slices"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/owenthereal/x/ansi"
 	"github.com/owenthereal/x/ansi/parser"
@@ -197,6 +198,9 @@ type emulation struct {
 	// kittyClipboard is set once the stream has begun a write to the
 	// clipboard by kitty's OSC 5522 (see watchKittyClipboard).
 	kittyClipboard bool
+	// lostREP is set once REP after a cut character could have used a
+	// character from before the ring, whose value the emulator never saw.
+	lostREP bool
 	// unhandled names the first CSI, ESC or OSC the stream sent that no
 	// handler took and the render doesn't rebuild (see dispatchCheck), or is
 	// "".
@@ -307,10 +311,11 @@ func (r replayer) Start(ctx context.Context, deadline time.Time, c *uio.Capture,
 }
 
 // skipCut skips the continuation bytes chunks start with, at most n of them,
-// the rest of a character whose lead byte the ring's start cut off. A complete
-// character belongs to the oldest line, already truncated by the ring's cut,
+// the rest of a character whose lead byte the ring's start cut off. A valid
+// complete character belongs to the oldest line, already truncated by the ring's cut,
 // so leaving it out loses no intact line. A byte that ends the character early
-// draws a replacement character in the ring, which the render would lose.
+// draws a replacement character in the ring, which the render would lose,
+// as does an invalid encoding even with the expected number of bytes.
 // The skipped bytes go to the tracker clone alone, which reads them as the
 // stream's tracker did, and count as consumed: h moves past them, so every
 // offset stays the stream's. Each event among them is passed where it falls,
@@ -339,6 +344,9 @@ func (e *emulation) skipCut(chunks [][]byte, sizes []uio.SizeEvent, n int) ([][]
 	if len(chunks) == 0 && len(cut) < n {
 		return nil, nil, &IneligibleError{State: "a ring that ends inside the character it starts in"}
 	}
+	if !utf8.Valid(append([]byte(e.modes.UTF8Prefix()), cut...)) {
+		return nil, nil, &IneligibleError{State: "a ring that starts inside an invalid UTF-8 character"}
+	}
 	pos := 0
 	for len(sizes) > 0 && sizes[0].Offset < e.h+uint64(len(cut)) {
 		ev := sizes[0]
@@ -356,7 +364,29 @@ func (e *emulation) skipCut(chunks [][]byte, sizes []uio.SizeEvent, n int) ([][]
 	}
 	_, _ = e.modes.Write(cut[pos:])
 	e.h += uint64(len(cut))
+	e.watchCutREP()
 	return chunks, sizes, nil
+}
+
+// watchCutREP rejects REP that reads an unknown character from before the
+// cut. Multibyte input doesn't set x/vt's last character, so skipping the
+// cut character leaves that value unknown until a print supplies it or a
+// hard reset clears it. Once REP has used an unknown value, keep the
+// fallback even if a later print supplies a last character the render can
+// prime: that print alone does not repair cells REP should have drawn.
+func (e *emulation) watchCutREP() {
+	known := false
+	e.term.RegisterCsiHandler('b', func(ansi.Params) bool {
+		known = known || e.term.LastChar() != 0
+		if !known {
+			e.lostREP = true
+		}
+		return false
+	})
+	e.term.RegisterEscHandler('c', func() bool {
+		known = true
+		return false
+	})
 }
 
 // setUp makes the emulator a replay's: no scrollback on either screen, the
