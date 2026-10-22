@@ -289,7 +289,7 @@ func unknownCommand(c *cobra.Command, args []string) (at *cobra.Command, word st
 // bindFlagsToEnv binds cmd's flags to the config file and environment
 // variables, and reports which flags were supplied from any origin
 // (command line, environment, or config file) in the returned map, and the
-// per-run values it applied from env or config in deps. A CLI-only
+// per-run values it ignored from env or config in deps. A CLI-only
 // flag is never bound.
 //
 // Configuration priority (highest to lowest):
@@ -304,8 +304,8 @@ func unknownCommand(c *cobra.Command, args []string) (at *cobra.Command, word st
 //	--read-only flag -> UPTERM_READ_ONLY env var -> read-only in config.yaml
 //
 // The returned error is fatal: a malformed config file, a config key with no
-// known flag, a config key with no value, or a value that a flag rejects all
-// abort the command rather than silently ignoring the problem. Callers
+// known flag, or a non-ignored key with no value or a value its flag rejects
+// all abort the command rather than silently ignoring the problem. Callers
 // should let every command fail this way except `upterm config ...`, which
 // must stay reachable to repair the file (see isConfigCommand), and those
 // that read no config (see readsConfig).
@@ -341,7 +341,7 @@ func bindFlagsToEnv(cmd *cobra.Command) (supplied map[string]bool, deps []deprec
 	// report every bound flag as present in the config file — and every
 	// ordinary run would then fail with "config key has no value".
 	configKeys := make(map[string]bool)
-	for _, k := range v.AllKeys() {
+	for _, k := range configKeysForCommand(v, cmd) {
 		configKeys[k] = true
 	}
 
@@ -496,6 +496,42 @@ func valueOrigin(name, configPath string, inConfig bool) string {
 // came from.
 func bindSetError(name, display, origin string, err error) error {
 	return fmt.Errorf("%s: cannot use value %q (from %s): %w", name, display, origin, err)
+}
+
+// configKeysForCommand keeps ignored values whole rather than inspecting their
+// flattened children. InConfig also sees empty maps, which AllKeys omits.
+// Ordinary keys retain their flattened children for unknown-key validation.
+func configKeysForCommand(v *viper.Viper, cmd *cobra.Command) []string {
+	keys := make(map[string]bool)
+	for _, key := range v.AllKeys() {
+		keys[key] = true
+	}
+	visitTreeFlags(cmd, func(f *pflag.Flag) {
+		if !v.InConfig(f.Name) {
+			return
+		}
+		ignored := !boundElsewhere(cmd, f.Name)
+		if local := cmd.Flags().Lookup(f.Name); local != nil {
+			ignored = ignored || hasAnnotation(local, annotationPerRun) || hasAnnotation(local, annotationCLIOnly)
+		}
+		children := false
+		for key := range keys {
+			if strings.HasPrefix(key, f.Name+".") {
+				children = true
+				if ignored {
+					delete(keys, key)
+				}
+			}
+		}
+		if ignored || !children {
+			keys[f.Name] = true
+		}
+	})
+	result := make([]string, 0, len(keys))
+	for key := range keys {
+		result = append(result, key)
+	}
+	return result
 }
 
 // knownFlagNames returns the union of flag names across the whole command

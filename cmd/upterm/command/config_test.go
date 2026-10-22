@@ -408,3 +408,38 @@ func TestTheExampleConfigSaysWhatHideClientIPDoes(t *testing.T) {
 	require.Contains(t, exampleConfig(), "# Hide guests' IP addresses from upterm's output (default: hidden in CI only; false shows them there too)\n# hide-client-ip: true\n")
 	require.NotContains(t, exampleConfig(), "# hide-client-ip: false")
 }
+
+func TestConfigEditIgnoresMappingsForUnboundKeys(t *testing.T) {
+	for _, mapping := range []string{"{nested: invalid}", "{}"} {
+		t.Run(mapping, func(t *testing.T) {
+			restoreFlags(t)
+			setupSessionRoots(t)
+			withConfig(t, "detach: "+mapping+"\nname: "+mapping+"\noutput: "+mapping+"\nwait: "+mapping+"\n")
+			t.Setenv("VISUAL", "true")
+			_, stderr, code := runCLI(t, "config", "edit")
+			require.Equal(t, 0, code, stderr)
+			path := utils.UptermConfigFilePath()
+			require.Equal(t, "upterm: ignoring the detach key in "+path+"; pass --detach\n"+
+				"upterm: ignoring the name key in "+path+"; pass --name\n"+
+				"upterm: ignoring the output key in "+path+"; pass --output\n"+
+				"upterm: ignoring the wait key in "+path+"; pass --wait\n", stderr)
+		})
+	}
+}
+
+func TestConfigEditMappingsDoNotBypassBoundKeyValidation(t *testing.T) {
+	for _, key := range []string{"authorized-user", "join-timeout", "unknown"} {
+		t.Run(key, func(t *testing.T) {
+			restoreFlags(t)
+			root := Root()
+			path := writeConfig(t, "output: {format: json}\n"+key+": {nested: invalid}\n")
+			errs, deps := checkConfigFile(root, path)
+			require.Len(t, errs, 1)
+			require.Contains(t, errs[0].Error(), `unknown key "`+key+`.nested"`)
+			if key == "join-timeout" {
+				require.Len(t, deps, 2)
+				require.Equal(t, "upterm: ignoring the join-timeout key in "+path+" for upterm session set; pass --join-timeout", deps[0].ignoredLine())
+			}
+		})
+	}
+}

@@ -316,7 +316,7 @@ func checkConfigFile(root *cobra.Command, path string) ([]error, []deprecation) 
 		failed[key] = true
 	}
 
-	keys := v.AllKeys()
+	keys := configKeysForCommand(v, root)
 	slices.Sort(keys)
 	for _, key := range keys {
 		switch {
@@ -391,7 +391,14 @@ func checkConfigFile(root *cobra.Command, path string) ([]error, []deprecation) 
 		errs = append(errs, fmt.Errorf("%s: %s; %s", path, p.what, fixConfig))
 	}
 	var deps []deprecation
-	for _, key := range keys {
+	noticeKeys := append([]string(nil), keys...)
+	for key := range known {
+		if v.InConfig(key) && !slices.Contains(noticeKeys, key) {
+			noticeKeys = append(noticeKeys, key)
+		}
+	}
+	slices.Sort(noticeKeys)
+	for _, key := range noticeKeys {
 		var collect func(*cobra.Command)
 		seen := make(map[string]bool)
 		collect = func(cmd *cobra.Command) {

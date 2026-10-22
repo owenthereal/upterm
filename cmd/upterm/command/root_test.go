@@ -717,3 +717,83 @@ func TestCLIOnlyFlagsIgnoreEnvAndConfig(t *testing.T) {
 	require.False(t, supplied["output"])
 	require.Empty(t, deps)
 }
+
+func TestPerRunConfigMappingsAreIgnored(t *testing.T) {
+	for _, tc := range []struct {
+		path        []string
+		flag, value string
+	}{
+		{[]string{"host"}, "detach", "true"},
+		{[]string{"host"}, "name", "build"},
+		{[]string{"host"}, "output", "json"},
+		{[]string{"join"}, "wait", "true"},
+		{[]string{"session", "info"}, "output", "json"},
+		{[]string{"session", "current"}, "output", "json"},
+		{[]string{"session", "set"}, "join-timeout", "10m"},
+	} {
+		for _, mapping := range []string{"{nested: invalid}", "{}"} {
+			t.Run(strings.Join(tc.path, " ")+"/"+tc.flag+"/"+mapping, func(t *testing.T) {
+				restoreFlags(t)
+				withConfig(t, tc.flag+": "+mapping+"\n")
+				t.Setenv(envVarName(tc.flag), "")
+				cmd := bindingCommand(t, tc.path...)
+				before := cmd.Flags().Lookup(tc.flag).Value.String()
+				supplied, deps, err := bindFlagsToEnv(cmd)
+				require.NoError(t, err)
+				require.Equal(t, before, cmd.Flags().Lookup(tc.flag).Value.String())
+				require.False(t, cmd.Flags().Changed(tc.flag))
+				require.False(t, supplied[tc.flag])
+				require.Len(t, deps, 1)
+				require.Equal(t, tc.flag, deps[0].Flag)
+				require.True(t, deps[0].InConfig)
+				require.NoError(t, cmd.ParseFlags([]string{"--" + tc.flag + "=" + tc.value}))
+				supplied, deps, err = bindFlagsToEnv(cmd)
+				require.NoError(t, err)
+				require.True(t, supplied[tc.flag])
+				require.True(t, cmd.Flags().Changed(tc.flag))
+				require.Empty(t, deps)
+				want := tc.value
+				if tc.flag == "join-timeout" {
+					want = "10m0s"
+				}
+				require.Equal(t, want, cmd.Flags().Lookup(tc.flag).Value.String())
+			})
+		}
+	}
+}
+
+func TestConfigMappingsDoNotBypassOrdinaryBindingValidation(t *testing.T) {
+	for _, key := range []string{"authorized-user", "join-timeout", "unknown"} {
+		t.Run(key, func(t *testing.T) {
+			restoreFlags(t)
+			withConfig(t, "output: {format: json}\n"+key+": {nested: invalid}\n")
+			cmd := bindingCommand(t, "host")
+			_, _, err := bindFlagsToEnv(cmd)
+			require.ErrorContains(t, err, `unknown config key "`+key+`.nested"`)
+		})
+	}
+}
+
+func TestEmptyConfigMappingsForBoundKeysAreRejected(t *testing.T) {
+	for _, key := range []string{"authorized-user", "join-timeout"} {
+		t.Run(key, func(t *testing.T) {
+			restoreFlags(t)
+			withConfig(t, key+": {}\n")
+			_, _, err := bindFlagsToEnv(bindingCommand(t, "host"))
+			require.ErrorContains(t, err, key)
+			errs := validateConfigFile(Root(), utils.UptermConfigFilePath())
+			require.Len(t, errs, 1)
+			require.Contains(t, errs[0].Error(), key)
+		})
+	}
+}
+
+func TestDottedIgnoredKeyNamesRemainUnknown(t *testing.T) {
+	restoreFlags(t)
+	withConfig(t, "output.format: json\n")
+	_, _, err := bindFlagsToEnv(bindingCommand(t, "session", "info"))
+	require.ErrorContains(t, err, `unknown config key "output.format"`)
+	errs := validateConfigFile(Root(), utils.UptermConfigFilePath())
+	require.Len(t, errs, 1)
+	require.Contains(t, errs[0].Error(), `unknown key "output.format"`)
+}
