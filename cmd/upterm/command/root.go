@@ -370,18 +370,16 @@ func bindFlagsToEnv(cmd *cobra.Command) (supplied map[string]bool, deps []deprec
 	v.SetEnvKeyReplacer(strings.NewReplacer("-", "_"))
 	v.SetEnvPrefix("UPTERM")
 
-	// applied records a value env or config gave flag, and for a per-run
-	// flag, the values it still takes from them until v0.40.
-	applied := func(flag *pflag.Flag, inConfig bool) {
-		supplied[flag.Name] = true
-		if hasAnnotation(flag, annotationPerRun) {
-			deps = append(deps, perRunDeprecations(cmd, flag.Name, configPath, inConfig)...)
-		}
-	}
-
 	var bindErr error
 	cmd.Flags().VisitAll(func(flag *pflag.Flag) {
 		if bindErr != nil || flag.Name == "help" || hasAnnotation(flag, annotationCLIOnly) {
+			return
+		}
+
+		if hasAnnotation(flag, annotationPerRun) {
+			if !flag.Changed {
+				deps = append(deps, perRunDeprecations(cmd, flag.Name, configPath, configKeys[flag.Name])...)
+			}
 			return
 		}
 
@@ -443,7 +441,7 @@ func bindFlagsToEnv(cmd *cobra.Command) (supplied map[string]bool, deps []deprec
 				bindErr = bindSetError(flag.Name, strings.Join(elems, ","), valueOrigin(flag.Name, configPath, inConfig), err)
 				return
 			}
-			applied(flag, inConfig)
+			supplied[flag.Name] = true
 			return
 		}
 
@@ -457,7 +455,7 @@ func bindFlagsToEnv(cmd *cobra.Command) (supplied map[string]bool, deps []deprec
 			bindErr = bindSetError(flag.Name, scalar, valueOrigin(flag.Name, configPath, inConfig), err)
 			return
 		}
-		applied(flag, inConfig)
+		supplied[flag.Name] = true
 	})
 
 	return supplied, deps, bindErr

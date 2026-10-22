@@ -21,6 +21,13 @@ A flag's value comes from the first of these that sets it:
   3. The config file
   4. The flag's default
 
+These flags take values only from the command line:
+  --output on host, session info, session current, session list and version
+  --name and --detach on host
+  --join-timeout on session set
+  --wait on join
+Host's --join-timeout still reads env and config.
+
 ### Options
 
 ```

@@ -122,9 +122,6 @@ func TestValuesHostingRefusesAtStartupAreProblems(t *testing.T) {
 		{"escape-char", "ab", "must be a single ASCII character or 'none'", []string{"none", `"~"`, "^"}},
 		{"pty-size", "big", `invalid size "big"`, []string{"132x43"}},
 		{"force-command", "\"'unclosed\"", "error parsing command", []string{"tmux attach -t pair-programming"}},
-		{"name", "a/b", "use letters, digits, '.', '_' and '-'", []string{"build-shell"}},
-		{"output", "yaml", `invalid output format "yaml"`, []string{"json", "go-template={{.SessionID}}"}},
-		{"detach", "true", "--detach requires --accept", []string{"false"}},
 		{"server", "ssh://:2222", "missing host in address", []string{"ssh://uptermd.example.com:2222", "ssh://[::1]:2222"}},
 	} {
 		t.Run(tc.key+"="+tc.bad, func(t *testing.T) {
@@ -164,24 +161,37 @@ func TestEachBadUserIsAProblem(t *testing.T) {
 	require.Contains(t, errs[2].Error(), path+": github-user: github:a/b: invalid username")
 }
 
-// output is valid for the commands that print a session, and only host needs
-// detach with it.
+// An ignored output value does not require detach.
 func TestOutputWithoutDetachIsNotAProblem(t *testing.T) {
 	restoreFlags(t)
 	require.Empty(t, validateConfigFile(Root(), writeConfig(t, "output: json\n")))
 }
 
-// detach needs accept; it is accept's value that counts, wherever it is.
-func TestDetachWithAcceptIsNotAProblem(t *testing.T) {
+func TestIgnoredConfigKeysAreNotValidatedOrApplied(t *testing.T) {
 	restoreFlags(t)
-	require.Empty(t, validateConfigFile(Root(), writeConfig(t, "detach: true\naccept: true\n")))
-	errs := validateConfigFile(Root(), writeConfig(t, "detach: true\naccept: false\n"))
-	require.Len(t, errs, 1)
-	require.Contains(t, errs[0].Error(), "--detach requires --accept")
-	// An accept that is itself refused leaves detach unjudged.
-	errs = validateConfigFile(Root(), writeConfig(t, "detach: true\naccept: maybe\n"))
-	require.Len(t, errs, 1)
-	require.Contains(t, errs[0].Error(), "accept: cannot use value")
+	for _, value := range []string{"", "[invalid]", "true"} {
+		root := Root()
+		before := flagValues(root)
+		require.Empty(t, validateConfigFile(root, writeConfig(t, "detach: "+value+"\nname: "+value+"\noutput: "+value+"\nwait: "+value+"\n")))
+		after := flagValues(root)
+		for name, value := range before {
+			require.Equal(t, value, after[name], name)
+		}
+	}
+}
+
+func TestConfigEditReportsIgnoredValues(t *testing.T) {
+	restoreFlags(t)
+	setupSessionRoots(t)
+	withConfig(t, "detach: [invalid]\nname:\noutput: yaml\nwait: invalid\njoin-timeout: 5m\n")
+	t.Setenv("VISUAL", "true")
+	_, stderr, code := runCLI(t, "config", "edit")
+	require.Equal(t, 0, code, stderr)
+	require.Equal(t, "upterm: ignoring the detach key in "+utils.UptermConfigFilePath()+"; pass --detach\n"+
+		"upterm: ignoring the join-timeout key in "+utils.UptermConfigFilePath()+" for upterm session set; pass --join-timeout\n"+
+		"upterm: ignoring the name key in "+utils.UptermConfigFilePath()+"; pass --name\n"+
+		"upterm: ignoring the output key in "+utils.UptermConfigFilePath()+"; pass --output\n"+
+		"upterm: ignoring the wait key in "+utils.UptermConfigFilePath()+"; pass --wait\n", stderr)
 }
 
 // Problems come out in key order whichever check finds them.
