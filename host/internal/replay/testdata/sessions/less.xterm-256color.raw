@@ -1,0 +1,98 @@
+[?1049h[22;0;0t[24;1H[?1h=// Command greet prints a greeting for each name it is given.
+package main
+
+import (
+        "fmt"
+        "os"
+        "strings"
+)
+
+// greeting is the line greet prints for name.
+func greeting(name string) string {
+        if name == "" {
+                return "Hello, world!"
+        }
+        return fmt.Sprintf("Hello, %s!", strings.TrimSpace(name))
+}
+
+func main() {
+        names := os.Args[1:]
+        if len(names) == 0 {
+                fmt.Println(greeting(""))
+                return
+        }
+[7mmain.go[27m[K[K        for _, name := range names {
+                fmt.Println(greeting(name))
+        }
+}
+
+// count is how many of names are not empty.
+func count(names []string) int {
+        n := 0
+        for _, name := range names {
+                if name != "" {
+                        n++
+                }
+        }
+        return n
+}
+[7m(END)[27m[K[K/[Kcc[Koo[Kuu[Knn[Ktt[K[1;1H[K}
+[2;1H[K
+[3;1H[Kfunc main() {
+[4;1H[K        names := os.Args[1:]
+[5;1H[K        if len(names) == 0 {
+[6;1H[K                fmt.Println(greeting(""))
+[7;1H[K                return
+[8;1H[K        }
+[9;1H[K        for _, name := range names {
+[10;1H[K                fmt.Println(greeting(name))
+[11;1H[K        }
+[12;1H[K}
+[13;1H[K
+[14;1H[K// count is how many of names are not empty.
+[15;1H[Kfunc count(names []string) int {
+[16;1H[K        n := 0
+[17;1H[K        for _, name := range names {
+[18;1H[K                if name != "" {
+[19;1H[K                        n++
+[20;1H[K                }
+[21;1H[K        }
+[22;1H[K        return n
+[23;1H[K}
+[24;1H[1;1H[K}
+[2;1H[K
+[3;1H[Kfunc main() {
+[4;1H[K        names := os.Args[1:]
+[5;1H[K        if len(names) == 0 {
+[6;1H[K                fmt.Println(greeting(""))
+[7;1H[K                return
+[8;1H[K        }
+[9;1H[K        for _, name := range names {
+[10;1H[K                fmt.Println(greeting(name))
+[11;1H[K        }
+[12;1H[K}
+[13;1H[K
+[14;1H[K// [7mcount[27m is how many of names are not empty.
+[15;1H[Kfunc [7mcount[27m(names []string) int {
+[16;1H[K        n := 0
+[17;1H[K        for _, name := range names {
+[18;1H[K                if name != "" {
+[19;1H[K                        n++
+[20;1H[K                }
+[21;1H[K        }
+[22;1H[K        return n
+[23;1H[K}
+[24;1H[1m~(B[m
+[1m~(B[m
+[1m~(B[m
+[1m~(B[m
+[1m~(B[m
+[1m~(B[m
+[1m~(B[m
+[1m~(B[m
+[1m~(B[m
+[1m~(B[m
+[1m~(B[m
+[1m~(B[m
+[1m~(B[m
+[7m(END)[27m[K[K[K[?1l>[?1049l[23;0;0t

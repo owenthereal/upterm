@@ -712,3 +712,17 @@ func TestReplayChecksItsStopBeforeEachNarrowing(t *testing.T) {
 	require.Equal(t, 3, resizes, "a narrowing scanned after the stop function said stop")
 	requireHandoff(t, e, 3, 1)
 }
+
+// A capture can split the cut character across chunks, and REP can arrive
+// only in a later Feed. The lost predecessor still makes that render fail.
+func TestReplayKeepsTheCutAcrossChunksAndFeeds(t *testing.T) {
+	c := captureOf("\x9f\x98\x80\r\n", event(1, 2, 80, 24))
+	_, _ = c.Modes.Write([]byte("X\xf0"))
+	c.Start, c.End = 2, 7
+	c.Chunks = [][]byte{{0x9f}, {}, {0x98}, {0x80, '\r', '\n'}}
+	e := start(t, c)
+	requireHandoff(t, e, 7, 1)
+	feed(t, e, "\x1b[3bB\r\n")
+	_, err := e.Render()
+	requireIneligible(t, err, "REP uses a character from before the ring's cut")
+}

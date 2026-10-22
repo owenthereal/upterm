@@ -13,6 +13,7 @@ import (
 	"slices"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/owenthereal/x/ansi"
 	"github.com/owenthereal/x/ansi/parser"
@@ -83,7 +84,7 @@ func screenTerm(term string) bool {
 // events among them, waits unconsumed in the tail.
 type emulation struct {
 	term  *vt.Emulator
-	modes *uio.ModeTracker // the tracker clone, fed exactly what term is
+	modes *uio.ModeTracker // the tracker clone, fed what term is and the bytes skipCut skips
 	join  termsize.Size    // the joiner's terminal, which must contain the render's
 	size  termsize.Size    // term's, the size of the last event passed
 	stop  func() bool      // ctx or the deadline, for the meter and the encoder
@@ -138,10 +139,8 @@ type emulation struct {
 	// watchProgress).
 	progress progress
 	// colours is the last change the stream made to each of the terminal's
-	// colours, and colourModes is set once it has turned the use of a special
-	// colour on or off (see watchColourModes).
-	colours     colours
-	colourModes bool
+	// colours.
+	colours colours
 	// graphics is set once the stream has drawn an image (see watchGraphics).
 	graphics bool
 	// dcs is set once the stream has sent a device control string that
@@ -151,20 +150,15 @@ type emulation struct {
 	sync syncForms
 	// clips are the stream's clipboard writes still in force.
 	clips clipboard
-	// protected is set once the stream has turned character protection on,
-	// and selective once it has erased selectively (see watchProtection).
-	protected, selective bool
-	// savedModes is set once the stream has saved DEC modes, savedRendition
-	// once it has pushed a rendition, and savedPalette once it has pushed
-	// its colours (see watchSaves).
-	savedModes, savedRendition, savedPalette bool
+	// protected is set once the stream has turned character protection on
+	// (see watchProtection).
+	protected bool
 	// defaultReset is the first mode of those a terminal starts with set
 	// that the stream has reset (see watchDefaultModes), or 0.
 	defaultReset int
 	// undrawable is set once the stream has set an attribute a cell doesn't
-	// keep, and doubleSize once it has made a line double-width or
-	// double-height (see watchRendition).
-	undrawable, doubleSize bool
+	// keep (see watchRendition).
+	undrawable bool
 	// statusLine is set once the stream has made a status line it can write
 	// to, or made it active (see watchStatusLine).
 	statusLine bool
@@ -174,13 +168,6 @@ type emulation struct {
 	// rectExtent is set once the stream has made DECCARA and DECRARA change
 	// a rectangle (see watchAttributeExtent).
 	rectExtent bool
-	// conformance is set once the stream has set the terminal's conformance
-	// level (see watchConformanceLevel).
-	conformance bool
-	// charset94 is set once the stream has designated a 94-character set
-	// that x/vt drops and xterm acts on (see watchCharsets94), and charset96
-	// once it has designated a 96-character set (see watchCharsets96).
-	charset94, charset96 bool
 	// windowOp is set once the stream has changed the terminal's window (see
 	// watchWindowOps).
 	windowOp bool
@@ -202,33 +189,22 @@ type emulation struct {
 	// iTerm2 is the key of the first command the stream has sent that changes
 	// iTerm2's state for as long as it lasts (see watchITerm2), or "".
 	iTerm2 string
-	// leds is set once the stream has lit or put out the keyboard's LEDs (see
-	// watchLEDs).
-	leds bool
-	// logFile is set once the stream has set the file the terminal logs to
-	// (see watchLogFile).
-	logFile bool
-	// windowProperty is set once the stream has set or deleted a property of
-	// the terminal's window (see watchWindowProperty).
-	windowProperty bool
-	// nonUTF8 is set once the stream has left UTF-8 for another coding (see
-	// watchCoding).
-	nonUTF8 bool
 	// eightBit is whether the stream left the terminal sending the program
 	// 8-bit controls (see watchControls).
 	eightBit bool
-	// sizedText is set once the stream has drawn text in kitty's sizes (see
-	// watchSizedText).
-	sizedText bool
 	// extraCursors is set once the stream has shown an extra cursor of
 	// kitty's, or coloured them (see watchExtraCursors).
 	extraCursors bool
-	// unscroll is set once the stream has scrolled the screen down filling
-	// it from the scrollback (see watchUnscroll).
-	unscroll bool
 	// kittyClipboard is set once the stream has begun a write to the
 	// clipboard by kitty's OSC 5522 (see watchKittyClipboard).
 	kittyClipboard bool
+	// lostREP is set once REP after a cut character could have used a
+	// character from before the ring, whose value the emulator never saw.
+	lostREP bool
+	// unhandled names the first CSI, ESC or OSC the stream sent that no
+	// handler took and the render doesn't rebuild (see dispatchCheck), or is
+	// "".
+	unhandled string
 	// altShown is set once the alternate screen has shown, the snapshot's
 	// switch to it included (see renderer.hiddenAlt).
 	altShown bool
@@ -313,10 +289,104 @@ func (r replayer) Start(ctx context.Context, deadline time.Time, c *uio.Capture,
 	case inEmulator && !inTracker:
 		return nil, fmt.Errorf("%w: at the ring's first byte", ErrTrackerDisagrees)
 	}
-	if err := e.offer(c.Chunks, c.Sizes[1:]); err != nil {
+	// A ring the eviction cut inside a character, outside every sequence,
+	// starts with the rest of the character's continuation bytes: the
+	// tracker counts them, but its snapshot doesn't prime the lead byte,
+	// which the ring no longer holds. x/vt at ground would read those from
+	// 0x80 to 0x9F as C1 controls, which act, begin a sequence or fail the
+	// render, where they complete a character the session's terminal has
+	// already drawn; so they are skipped (see skipCut). Inside a sequence,
+	// they are its data, which the snapshot primes.
+	chunks, sizes := c.Chunks, c.Sizes[1:]
+	if pending := e.modes.UTF8Pending(); e.modes.AtGround() && pending > 0 {
+		var err error
+		if chunks, sizes, err = e.skipCut(chunks, sizes, pending); err != nil {
+			return nil, err
+		}
+	}
+	if err := e.offer(chunks, sizes); err != nil {
 		return nil, err
 	}
 	return e, nil
+}
+
+// skipCut skips the continuation bytes chunks start with, at most n of them,
+// the rest of a character whose lead byte the ring's start cut off. A valid
+// complete character belongs to the oldest line, already truncated by the ring's cut,
+// so leaving it out loses no intact line. A byte that ends the character early
+// draws a replacement character in the ring, which the render would lose,
+// as does an invalid encoding even with the expected number of bytes.
+// The skipped bytes go to the tracker clone alone, which reads them as the
+// stream's tracker did, and count as consumed: h moves past them, so every
+// offset stays the stream's. Each event among them is passed where it falls,
+// as consume passes one. It returns what is left of chunks and of sizes.
+func (e *emulation) skipCut(chunks [][]byte, sizes []uio.SizeEvent, n int) ([][]byte, []uio.SizeEvent, error) {
+	var cut []byte
+	for len(chunks) > 0 && len(cut) < n {
+		chunk := chunks[0]
+		k := 0
+		for k < len(chunk) && len(cut) < n && chunk[k] >= 0x80 && chunk[k] <= 0xbf {
+			cut = append(cut, chunk[k])
+			k++
+		}
+		if k < len(chunk) {
+			if len(cut) < n {
+				return nil, nil, &IneligibleError{State: "a ring that starts inside a character cut short"}
+			}
+			chunks = append([][]byte{chunk[k:]}, chunks[1:]...)
+			break
+		}
+		chunks = chunks[1:]
+	}
+	// The ring ends before the character does: the rest of it, offered
+	// later, would reach x/vt at ground, and no handoff point inside the
+	// character holds.
+	if len(chunks) == 0 && len(cut) < n {
+		return nil, nil, &IneligibleError{State: "a ring that ends inside the character it starts in"}
+	}
+	if !utf8.Valid(append([]byte(e.modes.UTF8Prefix()), cut...)) {
+		return nil, nil, &IneligibleError{State: "a ring that starts inside an invalid UTF-8 character"}
+	}
+	pos := 0
+	for len(sizes) > 0 && sizes[0].Offset < e.h+uint64(len(cut)) {
+		ev := sizes[0]
+		k := int(ev.Offset - e.h)
+		_, _ = e.modes.Write(cut[pos:k])
+		pos = k
+		if ev.Size != e.size {
+			if err := e.resize(ev.Size); err != nil {
+				return nil, nil, err
+			}
+			e.size = ev.Size
+		}
+		e.lastSeq, e.offeredSeq = ev.Seq, ev.Seq
+		sizes = sizes[1:]
+	}
+	_, _ = e.modes.Write(cut[pos:])
+	e.h += uint64(len(cut))
+	e.watchCutREP()
+	return chunks, sizes, nil
+}
+
+// watchCutREP rejects REP that reads an unknown character from before the
+// cut. Multibyte input doesn't set x/vt's last character, so skipping the
+// cut character leaves that value unknown until a print supplies it or a
+// hard reset clears it. Once REP has used an unknown value, keep the
+// fallback even if a later print supplies a last character the render can
+// prime: that print alone does not repair cells REP should have drawn.
+func (e *emulation) watchCutREP() {
+	known := false
+	e.term.RegisterCsiHandler('b', func(ansi.Params) bool {
+		known = known || e.term.LastChar() != 0
+		if !known {
+			e.lostREP = true
+		}
+		return false
+	})
+	e.term.RegisterEscHandler('c', func() bool {
+		known = true
+		return false
+	})
 }
 
 // setUp makes the emulator a replay's: no scrollback on either screen, the
@@ -325,18 +395,16 @@ func (r replayer) Start(ctx context.Context, deadline time.Time, c *uio.Capture,
 // icon name and the title stack, the working directory, by OSC 7 and by
 // ConEmu's OSC 9 ; 9, the pointer shape, the bell's volumes, the progress
 // indicator, the colours, the clipboard and synchronized output's DCS form
-// kept, images, special colour modes, device control strings that change the
-// terminal's state, title modes, the OSCs with no number xterm acts on,
-// character protection, selective erases, saves, renditions and line sizes
-// the cells can't hold, a status line, a font, a rectangular attribute
-// extent, a conformance level, a reset of a mode a terminal starts with set,
-// a 94-character set x/vt drops, a 96-character set, a window operation,
-// printer controller mode, a memory lock, a key format, locator reporting,
-// the locator's events, a change to iTerm2's state, the keyboard's LEDs, a
-// log file, a window property, a coding other than UTF-8, sized text, extra
-// cursors, an unscroll, a write to kitty's clipboard and a switch to the
-// alternate screen noted, auto print, 8-bit controls and the tab stops past
-// the screen's edge kept, and the meter stopped by ctx or the deadline.
+// kept, images, device control strings that change the terminal's state,
+// title modes, the OSCs with no number xterm acts on, character protection,
+// renditions the cells can't hold, a status line, a font, a rectangular
+// attribute extent, a reset of a mode a terminal starts with set, a window
+// operation, printer controller mode, a memory lock, a key format, locator
+// reporting, the locator's events, a change to iTerm2's state, extra cursors,
+// a write to kitty's clipboard and a switch to the alternate screen noted,
+// auto print, 8-bit controls and the tab stops past the screen's edge kept,
+// every CSI, ESC and OSC no handler takes checked against those the render
+// rebuilds (see dispatchCheck), and the meter stopped by ctx or the deadline.
 // Each callback and handler runs inside the emulator's Write and touches only
 // the emulation.
 func (e *emulation) setUp() {
@@ -366,7 +434,6 @@ func (e *emulation) setUp() {
 	})
 	t.SetStopFunc(func() bool { return e.stop() })
 	e.watchColours()
-	e.watchColourModes()
 	e.watchGraphics()
 	e.watchDCS()
 	e.watchClipboard()
@@ -377,31 +444,22 @@ func (e *emulation) setUp() {
 	e.watchProtection()
 	e.watchTitles()
 	e.watchNumberlessOSCs()
-	e.watchSaves()
 	e.watchRendition()
 	e.watchStatusLine()
 	e.watchFont()
 	e.watchAttributeExtent()
-	e.watchConformanceLevel()
 	e.watchTabStops()
 	e.watchDefaultModes()
-	e.watchCharsets94()
-	e.watchCharsets96()
 	e.watchWindowOps()
 	e.watchPrinter()
 	e.watchMemoryLock()
 	e.watchKeyFormats()
 	e.watchLocator()
 	e.watchITerm2()
-	e.watchLEDs()
-	e.watchLogFile()
-	e.watchWindowProperty()
-	e.watchCoding()
 	e.watchControls()
-	e.watchSizedText()
 	e.watchExtraCursors()
-	e.watchUnscroll()
 	e.watchKittyClipboard()
+	e.watchDispatch()
 }
 
 // colours is the last change the stream made, by OSC, to each of the colours
@@ -555,26 +613,6 @@ func (e *emulation) watchColours() {
 		})
 		t.RegisterOscHandler(osc.reset, func(data []byte) bool {
 			c.resetEntries(data, osc.first)
-			return false
-		})
-	}
-}
-
-// watchColourModes registers the handlers that note an OSC 6, or its alias
-// OSC 106, with which xterm turns on or off, for each pair of a special
-// colour (see tableSize) and a flag, whether it draws bold, underlined,
-// blinking, reversed or italic text in that colour. x/vt keeps none of it,
-// where a raw replay sets each on the joiner's terminal, and xterm's RIS
-// leaves them. The note stays, whatever follows: which way each starts is a
-// terminal's own setting, so turning one off needn't leave it as the joiner's
-// started. Every one counts, one xterm ignores too: iTerm2 reads OSC 6 as a
-// tab's colour. xterm has no query of them, and the query filter drops none.
-// x/vt has no handler of its own for either; these return false all the
-// same, as watchColours' do.
-func (e *emulation) watchColourModes() {
-	for _, osc := range []int{6, 106} {
-		e.term.RegisterOscHandler(osc, func([]byte) bool {
-			e.colourModes = true
 			return false
 		})
 	}
@@ -986,31 +1024,23 @@ func (e *emulation) watchConEmuCwd() {
 	})
 }
 
-// watchProtection registers the handlers that note DECSCA (CSI Ps " q)
-// turning character protection on, and a selective erase, DECSED (CSI ? Ps J)
-// or DECSEL (CSI ? Ps K). The cells printed under protection are protected
-// from DECSED and DECSEL on the session's terminal, and on a joiner given the
-// raw ring, but the render's rows don't carry protection, and x/vt keeps none,
-// of a cell or of the pen, so once it is on the render can't tell which cells
-// it covers. DECSCA reads only its first parameter, as xterm's does, and 1 is
-// the value that protects. x/vt ignores DECSED and DECSEL altogether, so the
-// cells either erased, protected or not, are still in the emulator. x/vt has
-// no handler of its own for any of the three; these return false all the
-// same, as watchColours' do.
+// watchProtection registers the handler that notes DECSCA (CSI Ps " q)
+// turning character protection on. The cells printed under protection are
+// protected from a selective erase, DECSED (CSI ? Ps J) or DECSEL
+// (CSI ? Ps K), on the session's terminal, and on a joiner given the raw
+// ring, but the render's rows don't carry protection, and x/vt keeps none, of
+// a cell or of the pen, so once it is on the render can't tell which cells it
+// covers. DECSCA reads only its first parameter, as xterm's does, and 1 is the
+// value that protects. A selective erase fails the render by itself (see
+// csiRules). x/vt has no handler of its own for DECSCA; this returns false
+// all the same, as watchColours' do.
 func (e *emulation) watchProtection() {
-	t := e.term
-	t.RegisterCsiHandler(ansi.Command(0, '"', 'q'), func(params ansi.Params) bool {
+	e.term.RegisterCsiHandler(ansi.Command(0, '"', 'q'), func(params ansi.Params) bool {
 		if n, _, _ := params.Param(0, 0); n == 1 {
 			e.protected = true
 		}
 		return false
 	})
-	for _, final := range []byte{'J', 'K'} {
-		t.RegisterCsiHandler(ansi.Command('?', 0, final), func(ansi.Params) bool {
-			e.selective = true
-			return false
-		})
-	}
 }
 
 // maxTitles is how many entries xterm's title stack holds.
@@ -1227,71 +1257,17 @@ func (e *emulation) watchNumberlessOSCs() {
 	})
 }
 
-// watchSaves registers the handlers that note the stream saving state the
-// terminal keeps aside for a later sequence to put back: DEC private modes
-// saved by XTSAVE (CSI ? Pm s), whichever modes Pm names; a rendition pushed
-// by XTPUSHSGR (CSI Pm # {, or its alias CSI Pm # p), the whole pen or the
-// attributes Pm names; and the dynamic and ANSI colours saved by
-// XTPUSHCOLORS (CSI Pm # P), pushed on xterm's stack of palettes or, by a
-// parameter, stored in a place on it, or by kitty's OSC 30001, which pushes
-// them on the stack kitty's own XTPUSHCOLORS pushes on, as one with no
-// parameter does: every one counts, whatever follows its number, of which
-// kitty reads nothing. x/vt keeps none of them and ignores what restores each,
-// XTRESTORE (CSI ? Pm r), XTPOPSGR (CSI # }, or CSI # q), XTPOPCOLORS
-// (CSI Pm # Q) and kitty's OSC 30101, so once one is saved the render can't
-// tell what a restore on the session's terminal puts back, and a joiner's
-// terminal, which the save never reached, would put back its own. x/vt keys a
-// CSI handler by its prefix and intermediate too, so XTSAVE's handler sees
-// neither SCOSC nor DECSLRM, both the bare CSI s, the alias's sees no CSI p
-// without the #, such as DECSTR's CSI ! p, and XTPUSHCOLORS's no DCH, the
-// bare CSI P. x/vt has no handler of its own for any of them; these return
-// false all the same, as watchColours' do.
-func (e *emulation) watchSaves() {
-	t := e.term
-	t.RegisterCsiHandler(ansi.Command('?', 0, 's'), func(ansi.Params) bool {
-		e.savedModes = true
-		return false
-	})
-	for _, final := range []byte{'{', 'p'} {
-		t.RegisterCsiHandler(ansi.Command(0, '#', final), func(ansi.Params) bool {
-			e.savedRendition = true
-			return false
-		})
-	}
-	t.RegisterCsiHandler(ansi.Command(0, '#', 'P'), func(ansi.Params) bool {
-		e.savedPalette = true
-		return false
-	})
-	t.RegisterOscHandler(30001, func([]byte) bool {
-		e.savedPalette = true
-		return false
-	})
-}
-
-// watchRendition registers the handlers that note the stream drawing what
-// the render's cells can't: the SGR handler, for an attribute a cell doesn't
-// keep (see sgrUndrawable), which x/vt's SGR, keeping the rest in the pen,
-// runs after, as it returns false; and those for a line made double-width,
-// by DECDWL (ESC # 6), or double-height, by DECDHL (ESC # 3 and ESC # 4).
-// x/vt keeps no line size, so it draws such a line single-width, where the
-// session's terminal draws each character twice as wide and shows half the
-// line. DECSWL (ESC # 5) makes a line single-width, as every line starts.
-// x/vt has no ESC # handler of its own; these return false all the same, as
-// watchColours' do.
+// watchRendition registers the SGR handler that notes the stream drawing an
+// attribute a cell doesn't keep (see sgrUndrawable), which x/vt's SGR,
+// keeping the rest in the pen, runs after, as it returns false. A line made
+// double-width or double-height fails the render by itself (see escRules).
 func (e *emulation) watchRendition() {
-	t := e.term
-	t.RegisterCsiHandler('m', func(params ansi.Params) bool {
+	e.term.RegisterCsiHandler('m', func(params ansi.Params) bool {
 		if sgrUndrawable(params) {
 			e.undrawable = true
 		}
 		return false
 	})
-	for _, final := range []byte{'3', '4', '6'} {
-		t.RegisterEscHandler(ansi.Command(0, '#', final), func() bool {
-			e.doubleSize = true
-			return false
-		})
-	}
 }
 
 // watchStatusLine registers the handlers that note the stream making a status
@@ -1350,26 +1326,6 @@ func (e *emulation) watchAttributeExtent() {
 		if n, _, _ := params.Param(0, 0); n == 2 {
 			e.rectExtent = true
 		}
-		return false
-	})
-}
-
-// watchConformanceLevel registers the handler that notes DECSCL
-// (CSI Pl ; Pc " p), which sets the terminal's conformance level, a VT100's
-// to a VT500's, and whether it sends its controls as 7-bit or 8-bit bytes.
-// xterm's soft-resets the terminal too, as DECSTR does, and at a lower level
-// ignores what a higher one added, SS2 and SS3 at a VT100's among them. x/vt
-// does nothing for it, where a raw replay does all of that on the joiner's
-// terminal, so the render would restore what the session's had reset and
-// leave the joiner at its own level. Every one counts, whatever its
-// parameters: xterm ignores a level it doesn't have, which another terminal
-// may not. x/vt keys a CSI handler by its intermediate too, so this one sees
-// neither DECSTR (CSI ! p) nor DECRQM (CSI Ps $ p and CSI ? Ps $ p), which
-// the query filter drops. x/vt has no handler of its own for it; this returns
-// false all the same, as watchColours' do.
-func (e *emulation) watchConformanceLevel() {
-	e.term.RegisterCsiHandler(ansi.Command(0, '"', 'p'), func(ansi.Params) bool {
-		e.conformance = true
 		return false
 	})
 }
@@ -1476,84 +1432,6 @@ func (e *emulation) watchDefaultModes() {
 		}
 		return false
 	})
-}
-
-// vtCharsets94 are the finals x/vt designates a 94-character set by, with
-// ESC ( to ESC +: 0 (DEC's line drawing), A (the UK set) and B (ASCII).
-const vtCharsets94 = "0AB"
-
-// xtermCharsets94 are the finals xterm acts on in a 94-character set
-// designation, ESC ( to ESC + and the final: those its scstable passes on to
-// be decoded. xtermCharsets94After are those it acts on with %, " or & between
-// the two, by that intermediate, which it decodes at a VT320's level and up
-// for %, its default VT420 among them, and at a VT510's for " and &.
-const xtermCharsets94 = "0124567<=ABCEHIJKQRYZf9>`"
-
-var xtermCharsets94After = map[byte]string{'%': "02356=", '"': "4>?", '&': "45"}
-
-// watchCharsets94 registers the handlers that note a 94-character set
-// designated into G0 to G3 that x/vt drops and xterm acts on (see
-// xtermCharsets94). x/vt takes only the finals in vtCharsets94 and keeps the
-// set designated before for the rest, where xterm takes ESC ( < as DEC's
-// user-preferred supplemental set, ESC ( > as DEC Technical and ESC ( % 5 as
-// DEC's supplemental graphic set, and sets the G-set to ASCII for each final
-// it knows of no set for at its level: the national sets, which it takes only
-// in NRCS mode, among them. So the cells printed under one may be other than
-// the emulator's, and a live print shifted there lands otherwise on a joiner
-// given the render than on the session's terminal. The note stays, whatever
-// follows, as watchCharsets96's does. The snapshot designates G0 by the SCS
-// the tracker keeps for it, through these handlers too, so one the ring has
-// evicted is noted. A final xterm ignores leaves the set before on both, and
-// isn't noted. x/vt keys a handler by the last intermediate alone, so
-// ESC % 5 and ESC $ ( C, which xterm ignores, are noted too, as ESC ( % 5 and
-// ESC ( C are. x/vt has no handler of its own for any of these; these return
-// false all the same, as watchColours' do.
-func (e *emulation) watchCharsets94() {
-	note := func() bool {
-		e.charset94 = true
-		return false
-	}
-	for _, final := range []byte(xtermCharsets94) {
-		if strings.IndexByte(vtCharsets94, final) >= 0 {
-			continue
-		}
-		for _, inter := range []byte("()*+") {
-			e.term.RegisterEscHandler(ansi.Command(0, inter, final), note)
-		}
-	}
-	// x/vt keys a handler by the last intermediate alone, the %, " or &.
-	for inter, finals := range xtermCharsets94After {
-		for _, final := range []byte(finals) {
-			e.term.RegisterEscHandler(ansi.Command(0, inter, final), note)
-		}
-	}
-}
-
-// watchCharsets96 registers the handlers that note a 96-character set
-// designated into G1, G2 or G3, by ESC - F, ESC . F or ESC / F. x/vt takes
-// only 94-character sets, by ESC ( to ESC + with A, B or 0, and drops these,
-// keeping the set designated before, where xterm takes ESC - A, at its
-// default VT420 level, as ISO Latin-1's supplemental set, whose characters a
-// print shifted there draws in place of ASCII's, and more finals at a
-// VT510's (B, F, H, L and M). So the cells printed under one may be other
-// than the emulator's, and a live print shifted there lands otherwise on a
-// joiner given the render than on the session's terminal. The note stays,
-// whatever follows: a later designation or RIS sets the G-set again on both,
-// but leaves the cells printed before it, and a DECSC saves the set for a
-// DECRC to put back. x/vt keys an ESC handler by its last intermediate and
-// its final byte, so each final, 0x30 to 0x7E, gets a handler: one xterm
-// ignores, another terminal may take. x/vt has no handler of its own for any
-// of them; these return false all the same, as watchColours' do.
-func (e *emulation) watchCharsets96() {
-	note := func() bool {
-		e.charset96 = true
-		return false
-	}
-	for _, inter := range []byte{'-', '.', '/'} {
-		for final := byte(0x30); final <= 0x7e; final++ {
-			e.term.RegisterEscHandler(ansi.Command(0, inter, final), note)
-		}
-	}
 }
 
 // watchWindowOps registers the handlers that note XTWINOPS (CSI Ps ; Ps ;
@@ -1835,88 +1713,6 @@ func (e *emulation) watchITerm2() {
 	})
 }
 
-// watchLEDs registers the handler that notes DECLL (CSI Ps q), which lights
-// or puts out the keyboard's LEDs, each parameter in turn as xterm reads
-// them: 0 or none puts every one out, 1 to 3 light Num Lock, Caps Lock and
-// Scroll Lock, and 21 to 23 are documented as putting each out. x/vt keeps
-// no LEDs, where a raw replay sets those of the joiner's keyboard, as xterm
-// does through the X server's keyboard control. Every one counts, whatever
-// its parameters, a clear too, as it puts out LEDs the joiner's keyboard had
-// lit, and the note stays, whatever follows, though xterm's RIS puts every
-// LED out. x/vt keys a CSI handler by its prefix and intermediate too, so
-// this one sees neither DECSCUSR (CSI Ps SP q), DECSCA (CSI Ps " q) nor
-// XTVERSION (CSI > Ps q), and no other sequence has a bare q, nor does the
-// query filter drop any DECLL. A prefix byte after a parameter, which makes
-// xterm ignore the sequence, x/vt's parser skips, so CSI 1 > q is noted too.
-// x/vt has no handler of its own for it; this returns false all the same, as
-// watchColours' do.
-func (e *emulation) watchLEDs() {
-	e.term.RegisterCsiHandler('q', func(ansi.Params) bool {
-		e.leds = true
-		return false
-	})
-}
-
-// watchLogFile registers the handler that notes OSC 46, which sets the file
-// xterm logs what it receives to once logging starts, by DECSET 46 or its
-// menu. x/vt keeps no log file, where a raw replay sets the joiner's, and so
-// where its logging writes. xterm takes it only when built to allow logging
-// and a change of its file, neither of which it is by default: built with
-// logging alone it rings the bell instead, as it does for a ?, and it ignores
-// one with no file. Every one counts all the same, as another build or
-// terminal may take it, and the note stays, whatever follows, RIS included,
-// which leaves xterm's file as it is. The query filter drops no OSC 46. x/vt
-// has no handler of its own for it; this returns false all the same, as
-// watchColours' do.
-func (e *emulation) watchLogFile() {
-	e.term.RegisterOscHandler(46, func([]byte) bool {
-		e.logFile = true
-		return false
-	})
-}
-
-// watchWindowProperty registers the handler that notes OSC 3, which sets an X
-// property on xterm's window, OSC 3 ; prop = value, for other X clients, a
-// window manager among them, to read, or deletes one, OSC 3 ; prop. x/vt
-// keeps no window, where a raw replay sets or deletes the joiner's property.
-// xterm takes it only once its allowed window operations include SetXprop,
-// which they don't by default, and ignores one with no property. Every one
-// counts all the same, as another configuration or terminal may take it, and
-// the note stays, whatever follows: RIS leaves the window's properties as
-// they are, and a deletion can't be told to put back what the joiner's window
-// held before, which isn't known. OSC 3 asks for nothing, so the query filter
-// drops none. x/vt has no handler of its own for it; this returns false all
-// the same, as watchColours' do.
-func (e *emulation) watchWindowProperty() {
-	e.term.RegisterOscHandler(3, func([]byte) bool {
-		e.windowProperty = true
-		return false
-	})
-}
-
-// watchCoding registers the handler that notes ESC % @, which xterm and the
-// Linux console read as leaving UTF-8 for their default coding, ISO-8859-1.
-// x/vt reads UTF-8 alone, where a raw replay hands the joiner's terminal the
-// selection, after which it reads each byte past ASCII as a character of its
-// own, as the session's terminal does, where x/vt reads a UTF-8 sequence:
-// the bytes printed after the handoff, the program's own, among them. The
-// note stays, whatever follows: an ESC % G that selects UTF-8 again leaves
-// what was printed in between, which x/vt may have read as other characters,
-// and xterm puts back at ESC % @ the character sets it saved at the ESC % G
-// before it, and resets them at the next, which x/vt doesn't; and RIS leaves
-// the coding as it is. ESC % G itself, UTF-8 as x/vt reads, isn't noted.
-// Every one counts, though an xterm whose resources make UTF-8 its only
-// coding ignores it. x/vt keys a handler by the last intermediate alone, so
-// ESC ( % @, which xterm ignores, is noted too; watchCharsets94 notes other
-// finals after %. x/vt has no handler of its own for it; this returns false
-// all the same, as watchColours' do.
-func (e *emulation) watchCoding() {
-	e.term.RegisterEscHandler(ansi.Command(0, '%', '@'), func() bool {
-		e.nonUTF8 = true
-		return false
-	})
-}
-
 // watchControls registers the handlers that keep whether the stream left the
 // terminal sending the program 8-bit controls: S8C1T (ESC SP G) selects them,
 // and S7C1T (ESC SP F) puts back the 7-bit controls a terminal starts with, as
@@ -1927,10 +1723,10 @@ func (e *emulation) watchCoding() {
 // no such setting, where a raw replay selects it on the joiner's terminal,
 // whose keys would then reach the program as the session's terminal's do. It
 // changes nothing the terminal draws, so it fails the render only when selected
-// at the handoff. A DECSCL, which selects either form too, is noted as a
-// conformance level (see watchConformanceLevel). x/vt has no handler of its own
-// for either, nor for any other ESC with SP before its final; these return
-// false all the same, as watchColours' do.
+// at the handoff. A DECSCL, which selects either form too, fails the render
+// as a conformance level (see csiRules). x/vt has no handler of its own for
+// either, nor for any other ESC with SP before its final; these return false
+// all the same, as watchColours' do.
 func (e *emulation) watchControls() {
 	t := e.term
 	t.RegisterEscHandler(ansi.Command(0, ' ', 'G'), func() bool {
@@ -1943,25 +1739,6 @@ func (e *emulation) watchControls() {
 	})
 	t.RegisterEscHandler('c', func() bool {
 		e.eightBit = false
-		return false
-	})
-}
-
-// watchSizedText registers the handler that notes OSC 66, kitty's text
-// sizing, OSC 66 ; metadata ; text, which draws the text scaled, each
-// character over a block of cells up to seven rows high, or in as many cells
-// as the metadata says, and moves the cursor past them on its row. x/vt drops
-// the whole OSC, the text and the cursor's move with it, where a raw replay
-// hands it to the joiner's kitty, which draws it as the session's did, and
-// what follows it on that row lands where kitty's cursor went. Every one
-// counts, one kitty ignores too, as one with metadata it can't read or with
-// no text, and the note stays, whatever follows, RIS included: the raw ring
-// is exact whatever came after. OSC 66 asks for nothing, so the query filter
-// drops none. x/vt has no handler of its own for it; this returns false all
-// the same, as watchColours' do.
-func (e *emulation) watchSizedText() {
-	e.term.RegisterOscHandler(66, func([]byte) bool {
-		e.sizedText = true
 		return false
 	})
 }
@@ -2013,26 +1790,6 @@ func extraCursorsSet(params ansi.Params) bool {
 		return false
 	}
 	return true
-}
-
-// watchUnscroll registers the handler that notes kitty's unscroll, CSI Ps +
-// T, which scrolls the screen down Ps lines, as SD does, but fills the lines
-// it opens at the top from the scrollback, taking each line out of it, as
-// mintty does too. x/vt drops it, scrolling nothing, where a raw replay hands
-// it to the joiner's kitty, which scrolls its screen and its scrollback as
-// the session's did. Every one counts, one kitty ignores too, as one with
-// more than one parameter, or one of 0 lines, which moves nothing, and the
-// note stays, whatever follows, RIS included: the raw ring is exact whatever
-// came after. x/vt keys a CSI handler by its prefix and intermediate too, so
-// this one sees neither SD (CSI Ps T), which x/vt follows, nor XTRMTITLE
-// (CSI > Pm T), nor one with a prefix as well, which kitty ignores. The query
-// filter drops none. x/vt has no handler of its own for it; this returns
-// false all the same, as watchColours' do.
-func (e *emulation) watchUnscroll() {
-	e.term.RegisterCsiHandler(ansi.Command(0, '+', 'T'), func(ansi.Params) bool {
-		e.unscroll = true
-		return false
-	})
 }
 
 // watchKittyClipboard registers the handler that notes a write to the
@@ -2163,36 +1920,31 @@ func (e *emulation) Feed(chunks [][]byte, sizes []uio.SizeEvent) error {
 // the stream's. A ring that starts inside a title, after its k, starts it as
 // text, as a raw replay does on a joiner's tmux.
 //
-// Under any other TERM, x/vt is handed the stream as it is, and sent notes
-// the first ESC k, which fails the render, whatever follows, as a raw replay
-// hands each joiner its own terminal's reading of it. The batch run on the
-// bytes an ESC k arrives in ends no earlier than its k, as the parser is at
-// a handoff point after an ESC dispatch, so x/vt has consumed every one
-// noted, and the note is of what the render holds.
+// Under any other TERM, x/vt is handed the stream as it is, and dispatches
+// each ESC k, which fails the render, whatever follows (see escRules), as a
+// raw replay hands each joiner its own terminal's reading of it.
 //
 // esc is that x/vt's parser is in its escape state with no intermediate,
 // where a k completes an ESC k: after an ESC, which enters that state from
 // every state, ending a string too, and through any C0 control but CAN and
 // SUB, which it executes there, and DEL, which it ignores. It carries from
 // the tracker's snapshot into the ring, and across every piece of the stream
-// offered, so an ESC and its k split between them are read as one, under
-// either TERM.
-type screenTitles struct{ screen, esc, sent bool }
+// offered, so an ESC and its k split between them are read as one.
+type screenTitles struct{ screen, esc bool }
 
 // read replaces in p, the next bytes x/vt's parser reads, the k of each
-// ESC k with ^, under screen's or tmux's TERM, or notes it, under any other.
+// ESC k with ^, under screen's or tmux's TERM.
 func (s *screenTitles) read(p []byte) {
+	if !s.screen {
+		return
+	}
 	for i, b := range p {
 		switch {
 		case b == 0x1b:
 			s.esc = true
 		case !s.esc:
 		case b == 'k':
-			if s.screen {
-				p[i] = '^'
-			} else {
-				s.sent = true
-			}
+			p[i] = '^'
 			s.esc = false
 		case b < 0x18 || b == 0x19 || b >= 0x1c && b <= 0x1f || b == 0x7f:
 			// Executed or ignored where it stands, in the escape state.

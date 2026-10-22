@@ -1067,9 +1067,6 @@ func (e *emulation) eligible(parts uio.ReplayParts) (rep, error) {
 	if e.colours.changed() {
 		return rep{}, &IneligibleError{State: "a changed palette or dynamic colour"}
 	}
-	if e.colourModes {
-		return rep{}, &IneligibleError{State: "a special colour mode"}
-	}
 	// An image in a tmux passthrough is both, named as what it draws.
 	if e.graphics {
 		return rep{}, &IneligibleError{State: "terminal graphics"}
@@ -1079,9 +1076,6 @@ func (e *emulation) eligible(parts uio.ReplayParts) (rep, error) {
 	}
 	if e.protected {
 		return rep{}, &IneligibleError{State: "character protection"}
-	}
-	if e.selective {
-		return rep{}, &IneligibleError{State: "a selective erase"}
 	}
 	if e.titleIndexed {
 		return rep{}, &IneligibleError{State: "a title stack entry by index"}
@@ -1101,26 +1095,11 @@ func (e *emulation) eligible(parts uio.ReplayParts) (rep, error) {
 	if e.linuxPalette {
 		return rep{}, &IneligibleError{State: "a Linux console palette"}
 	}
-	if e.screenTitles.sent {
-		return rep{}, &IneligibleError{State: "a screen title string"}
-	}
-	if e.savedModes {
-		return rep{}, &IneligibleError{State: "saved DEC modes"}
-	}
 	if e.defaultReset != 0 {
 		return rep{}, &IneligibleError{State: fmt.Sprintf("a default mode reset (?%d)", e.defaultReset)}
 	}
-	if e.savedRendition {
-		return rep{}, &IneligibleError{State: "a saved rendition"}
-	}
-	if e.savedPalette {
-		return rep{}, &IneligibleError{State: "a saved palette"}
-	}
 	if e.undrawable {
 		return rep{}, &IneligibleError{State: "a rendition the render can't draw"}
-	}
-	if e.doubleSize {
-		return rep{}, &IneligibleError{State: "a double-size line"}
 	}
 	if e.statusLine {
 		return rep{}, &IneligibleError{State: "a status line"}
@@ -1130,15 +1109,6 @@ func (e *emulation) eligible(parts uio.ReplayParts) (rep, error) {
 	}
 	if e.rectExtent {
 		return rep{}, &IneligibleError{State: "a rectangular attribute extent"}
-	}
-	if e.conformance {
-		return rep{}, &IneligibleError{State: "a conformance level"}
-	}
-	if e.charset94 {
-		return rep{}, &IneligibleError{State: "a 94-character set other than ASCII, British or line drawing"}
-	}
-	if e.charset96 {
-		return rep{}, &IneligibleError{State: "a 96-character set"}
 	}
 	if e.windowOp {
 		return rep{}, &IneligibleError{State: "a window operation"}
@@ -1164,32 +1134,25 @@ func (e *emulation) eligible(parts uio.ReplayParts) (rep, error) {
 	if e.iTerm2 != "" {
 		return rep{}, &IneligibleError{State: "iTerm2 state (" + e.iTerm2 + ")"}
 	}
-	if e.leds {
-		return rep{}, &IneligibleError{State: "keyboard LEDs"}
-	}
-	if e.logFile {
-		return rep{}, &IneligibleError{State: "a log file"}
-	}
-	if e.windowProperty {
-		return rep{}, &IneligibleError{State: "a window property"}
-	}
-	if e.nonUTF8 {
-		return rep{}, &IneligibleError{State: "a non-UTF-8 coding"}
-	}
 	if e.eightBit {
 		return rep{}, &IneligibleError{State: "8-bit controls"}
-	}
-	if e.sizedText {
-		return rep{}, &IneligibleError{State: "sized text"}
 	}
 	if e.extraCursors {
 		return rep{}, &IneligibleError{State: "extra cursors"}
 	}
-	if e.unscroll {
-		return rep{}, &IneligibleError{State: "an unscroll"}
-	}
 	if e.kittyClipboard {
 		return rep{}, &IneligibleError{State: "a kitty clipboard write"}
+	}
+	if e.lostREP {
+		return rep{}, &IneligibleError{State: "REP uses a character from before the ring's cut"}
+	}
+	if e.unhandled != "" {
+		return rep{}, &IneligibleError{State: e.unhandled}
+	}
+	// A lone C1 byte in the ring, which the tracker clone notes as it reads
+	// it, whatever x/vt made of it (see controlVerdict).
+	if b := e.modes.RawC1(); b != 0 {
+		return rep{}, &IneligibleError{State: c1Name(b)}
 	}
 	if splitWide(e.term.MainScreen()) || splitWide(e.term.AltScreen()) {
 		return rep{}, &IneligibleError{State: splitWideState}

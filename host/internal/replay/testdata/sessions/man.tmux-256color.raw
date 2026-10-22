@@ -1,0 +1,47 @@
+[?1049h[24;1H[?1h=LS(1)                       General Commands Manual                      LS(1)
+
+[1mNAME[m
+     [1mls[m – list directory contents
+
+[1mSYNOPSIS[m
+     [1mls[m [[1m-@ABCFGHILOPRSTUWabcdefghiklmnopqrstuvwxy1%,[m] [[1m--color[m=[4mwhen[24m]
+        [[1m-D[m [4mformat[24m] [[4mfile[24m [4m...[24m]
+
+[1mDESCRIPTION[m
+     For each operand that names a [4mfile[24m of a type other than directory, [1mls[m
+     displays its name as well as any requested, associated information.  For
+     each operand that names a [4mfile[24m of type directory, [1mls[m displays the names
+     of files contained within that directory, as well as any requested,
+     associated information.
+
+     If no operands are given, the contents of the current directory are
+     displayed.  If more than one operand is given, non-directory operands are
+     displayed first; directory and non-directory operands are sorted
+     separately and in lexicographical order.
+
+     The following options are available:
+
+:[K[K     [1m-@[m      Display extended attribute keys and sizes in long ([1m-l[m) output.
+
+     [1m-A[m      Include directory entries whose names begin with a dot (‘[4m.[24m’)
+             except for [4m.[24m and [4m..[24m.  Automatically set for the super-user unless
+             [1m-I[m is specified.
+
+     [1m-B[m      Force printing of non-printable characters (as defined by
+             ctype(3) and current locale settings) in file names as \[4mxxx[24m,
+             where [4mxxx[24m is the numeric value of the character in octal.  This
+             option is not defined in IEEE Std 1003.1-2008 (“POSIX.1”).
+
+     [1m-C[m      Force multi-column output; this is the default when output is to
+             a terminal.
+
+     [1m-D[m [4mformat[24m
+             When printing in the long ([1m-l[m) format, use [4mformat[24m to format the
+             date and time output.  The argument [4mformat[24m is a string used by
+             strftime(3).  Depending on the choice of format string, this may
+             result in a different number of columns in the output.  This
+             option overrides the [1m-T[m option.  This option is not defined in
+             IEEE Std 1003.1-2008 (“POSIX.1”).
+
+     [1m-F[m      Display a slash (‘/’) immediately after each pathname that is a
+:[K[K[K[?1l>[?1049l

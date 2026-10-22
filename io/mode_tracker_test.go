@@ -1661,7 +1661,11 @@ func requireNothingShared(t *testing.T, path string, a, b reflect.Value, seen ma
 			require.NotEqual(t, a.Pointer(), b.Pointer(), "%s is shared with the clone", path)
 		}
 		require.True(t, a.Type().Elem().Kind() <= reflect.Complex128, "%s: the walk doesn't look inside a map of %s", path, a.Type().Elem())
-	case reflect.Pointer, reflect.Interface, reflect.Chan, reflect.Func, reflect.UnsafePointer, reflect.Array:
+	case reflect.Array:
+		for i := range a.Len() {
+			requireNothingShared(t, path+"[]", a.Index(i), b.Index(i), seen)
+		}
+	case reflect.Pointer, reflect.Interface, reflect.Chan, reflect.Func, reflect.UnsafePointer:
 		t.Fatalf("%s: the walk doesn't know how to check a %s", path, a.Kind())
 	}
 }
@@ -1802,18 +1806,94 @@ func TestInSequenceKnowsEveryPendingFinalByte(t *testing.T) {
 
 // A character split at a chunk's end is a sequence of its own: text written
 // before its continuation bytes would land inside it, and the terminal would
-// draw a replacement character where both were meant.
+// draw a replacement character where both were meant. UTF8Pending says how
+// many of them are still to come.
 func TestInSequenceWaitsOutAPartialCharacter(t *testing.T) {
-	for _, partial := range []string{"\xc3", "\xe2", "\xe2\x94", "\xf0\x9f\x98", "ok \xe2\x94"} {
+	for _, tc := range []struct {
+		partial string
+		pending int
+	}{
+		{"\xc3", 1}, {"\xe2", 2}, {"\xe2\x94", 1}, {"\xf0", 3}, {"\xf0\x9f", 2}, {"\xf0\x9f\x98", 1}, {"ok \xe2\x94", 1},
+	} {
 		m := NewModeTracker()
-		_, _ = m.Write([]byte(partial))
-		require.True(t, m.InSequence(), "%q", partial)
+		_, _ = m.Write([]byte(tc.partial))
+		require.True(t, m.InSequence(), "%q", tc.partial)
+		require.Equal(t, tc.pending, m.UTF8Pending(), "%q", tc.partial)
 	}
 	for _, whole := range []string{"\xc3\xa9", "\xe2\x94\x80", "\xf0\x9f\x98\x80", "\xe2\x94x", "\x80", "\xc0\x80", "\xff"} {
 		m := NewModeTracker()
 		_, _ = m.Write([]byte(whole))
 		require.False(t, m.InSequence(), "%q", whole)
+		require.Zero(t, m.UTF8Pending(), "%q", whole)
 	}
+}
+
+// The pending prefix belongs to the tracker at its current offset. Completing
+// it on a clone must neither change the original nor retain a completed or
+// interrupted character as the prefix of the next one.
+func TestUTF8PrefixFollowsTheTrackersOffset(t *testing.T) {
+	for _, prefix := range []string{"\xc3", "\xe2\x96", "\xf0\x9f\x98", "\xe0\x80", "\xf4\x90\x80"} {
+		m := NewModeTracker()
+		_, _ = m.Write([]byte("é" + prefix))
+		require.Equal(t, prefix, m.UTF8Prefix())
+		c := m.Clone()
+		require.Equal(t, prefix, c.UTF8Prefix())
+		_, _ = c.Write([]byte{0x80})
+		require.Empty(t, c.UTF8Prefix())
+		require.Equal(t, prefix, m.UTF8Prefix())
+		_, _ = m.Write([]byte("X\xe0\xa0"))
+		require.Equal(t, "\xe0\xa0", m.UTF8Prefix())
+		require.Empty(t, c.UTF8Prefix())
+		_, _ = m.Write([]byte("\xf0\x9f"))
+		require.Equal(t, "\xf0\x9f", m.UTF8Prefix())
+		_, _ = m.Write([]byte("X"))
+		require.Empty(t, m.UTF8Prefix())
+	}
+}
+
+// RawC1 reports the first byte from 0x80 to 0x9F the output held that
+// doesn't continue a UTF-8 character, in any state: alone, as an 8-bit
+// introducer, an 8-bit ST ending a string, or inside a string's data, after a
+// character ended early or a byte no character begins with. A byte that
+// continues a character, split across writes or not, is the character's, and
+// the 7-bit forms hold none. A clone reports only what was written to it,
+// with the character the original was inside still to finish.
+func TestRawC1NotesAC1ByteOutsideACharacter(t *testing.T) {
+	for _, tc := range []struct {
+		out  []string
+		want byte
+	}{
+		{[]string{"\x84"}, 0x84},
+		{[]string{"text\x9b1m"}, 0x9b},
+		{[]string{"\x1b]0;t\x9c"}, 0x9c},
+		{[]string{"\x1b]0;a\x85b\x07"}, 0x85},
+		{[]string{"a\x8db\x8e"}, 0x8d},
+		{[]string{"\xe2A\x85"}, 0x85},
+		{[]string{"\xc0\x80"}, 0x80},
+		{[]string{"\xc5\x85\x85"}, 0x85},
+		{[]string{"\xc5\x85"}, 0},
+		{[]string{"\xe2\x96\x88"}, 0},
+		{[]string{"\xe2", "\x96", "\x88"}, 0},
+		{[]string{"\xf0\x9f\x98\x80"}, 0},
+		{[]string{"\xa0\xbf"}, 0},
+		{[]string{"\x1bD\x1bH\x1bM\x1bN\x1bO\x1b[1m\x1b]0;t\x1b\\"}, 0},
+	} {
+		m := NewModeTracker()
+		for _, p := range tc.out {
+			_, _ = m.Write([]byte(p))
+		}
+		require.Equal(t, tc.want, m.RawC1(), "%q", tc.out)
+	}
+
+	m := NewModeTracker()
+	_, _ = m.Write([]byte("\x84\xe2"))
+	c := m.Clone()
+	require.Zero(t, c.RawC1(), "the original's, written before the clone")
+	_, _ = c.Write([]byte("\x96\x88"))
+	require.Zero(t, c.RawC1(), "the rest of the original's character")
+	_, _ = c.Write([]byte("\x8d"))
+	require.Equal(t, byte(0x8d), c.RawC1())
+	require.Equal(t, byte(0x84), m.RawC1())
 }
 
 // A control character inside an ESC sequence is executed where it stands,
