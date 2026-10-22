@@ -307,12 +307,14 @@ func (r replayer) Start(ctx context.Context, deadline time.Time, c *uio.Capture,
 }
 
 // skipCut skips the continuation bytes chunks start with, at most n of them,
-// the rest of a character whose lead byte the ring's start cut off; a byte
-// that isn't one ends the character early, and the skip with it. The bytes
-// go to the tracker clone alone, which reads them as the stream's tracker
-// did, and count as consumed: h moves past them, so every offset stays the
-// stream's. Each event among them is passed where it falls, as consume
-// passes one. It returns what is left of chunks and of sizes.
+// the rest of a character whose lead byte the ring's start cut off. A complete
+// character belongs to the oldest line, already truncated by the ring's cut,
+// so leaving it out loses no intact line. A byte that ends the character early
+// draws a replacement character in the ring, which the render would lose.
+// The skipped bytes go to the tracker clone alone, which reads them as the
+// stream's tracker did, and count as consumed: h moves past them, so every
+// offset stays the stream's. Each event among them is passed where it falls,
+// as consume passes one. It returns what is left of chunks and of sizes.
 func (e *emulation) skipCut(chunks [][]byte, sizes []uio.SizeEvent, n int) ([][]byte, []uio.SizeEvent, error) {
 	var cut []byte
 	for len(chunks) > 0 && len(cut) < n {
@@ -323,6 +325,9 @@ func (e *emulation) skipCut(chunks [][]byte, sizes []uio.SizeEvent, n int) ([][]
 			k++
 		}
 		if k < len(chunk) {
+			if len(cut) < n {
+				return nil, nil, &IneligibleError{State: "a ring that starts inside a character cut short"}
+			}
 			chunks = append([][]byte{chunk[k:]}, chunks[1:]...)
 			break
 		}

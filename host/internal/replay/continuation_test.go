@@ -1804,14 +1804,12 @@ func TestReplayRendersARingThatStartsInsideACharacter(t *testing.T) {
 	})
 }
 
-// The bytes skipped at a ring that starts inside a character end where the
-// character does: at a byte that isn't a continuation byte, which ends it
-// early, or after as many as its lead byte said. What follows is read as the
-// stream has it, so a sequence there that the render doesn't rebuild still
-// fails it.
+// The bytes skipped at a ring that starts inside a character end after as
+// many as its lead byte said. What follows is read as the stream has it, so
+// a sequence there that the render doesn't rebuild still fails it.
 func TestReplayReadsWhatFollowsACutCharacter(t *testing.T) {
 	for _, tc := range []struct{ name, head, ring, state string }{
-		{"a byte that ends it early", "text\r\nab\xe2", "\x96\x1b#8more\r\n", "an unhandled ESC # 8"},
+		{"a sequence past it", "text\r\nab\xe2", "\x96\x88\x1b#8more\r\n", "an unhandled ESC # 8"},
 		{"a byte past it", "text\r\nab\xc5", "\x85\x85more\r\n", "a C1 control 0x85"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1819,6 +1817,30 @@ func TestReplayReadsWhatFollowsACutCharacter(t *testing.T) {
 			_, fellBack := fanOut(t, capt, []byte(tc.head+tc.ring), []uio.SizeEvent{event(1, 0, 80, 24)}, len(tc.ring))
 			require.Equal(t, uint64(len(tc.head)), capt.c.Start, "the ring starts at the cut")
 			requireIneligible(t, fellBack, tc.state)
+		})
+	}
+}
+
+// A byte that ends the cut character early makes the session's terminal
+// draw a replacement character. Skipping the incomplete character would
+// lose that cell, so the join falls back to the raw ring.
+func TestReplayFailsOnARingThatStartsInsideACharacterCutShort(t *testing.T) {
+	for _, tc := range []struct{ name, head, ring string }{
+		{"two-byte character", "text\r\nab\xc5", "Xmore\r\n"},
+		{"no continuation bytes", "text\r\nab\xe2", "Xmore\r\n"},
+		{"three-byte character", "text\r\nab\xe2", "\x96Xmore\r\n"},
+		{"four-byte character after one byte", "text\r\nab\xf0", "\x9fAmore\r\n"},
+		{"four-byte character after two bytes", "text\r\nab\xf0\x9f", "\x98Amore\r\n"},
+		{"four-byte character missing its last byte", "text\r\nab\xf0", "\x9f\x98Amore\r\n"},
+		{"another character", "text\r\nab\xe2", "\x96\xc5\x85more\r\n"},
+		{"an escape sequence", "text\r\nab\xe2", "\x96\x1b#8more\r\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			capt := &capturing{r: New()}
+			joined, fellBack := fanOut(t, capt, []byte(tc.head+tc.ring), []uio.SizeEvent{event(1, 0, 80, 24)}, len(tc.ring))
+			require.Equal(t, uint64(len(tc.head)), capt.c.Start, "the ring starts at the cut")
+			requireIneligible(t, fellBack, "a ring that starts inside a character cut short")
+			require.True(t, bytes.HasSuffix(joined, []byte(tc.ring)), "the join keeps the raw ring")
 		})
 	}
 }
