@@ -286,6 +286,10 @@ type hostClients struct {
 	// the truth. It must not block.
 	onPrimary func(has bool)
 
+	// onPrimaryChanged wakes observers after a primary assignment or removal,
+	// outside both elector locks. Observers re-read primaryID after waking.
+	onPrimaryChanged func()
+
 	// electMu serialises elections, which block for up to
 	// promoteFlushTimeout per candidate and must not run concurrently.
 	electMu             sync.Mutex
@@ -322,11 +326,15 @@ func (h *hostClients) remove(c *hostClient) {
 	if i := slices.Index(h.order, c); i >= 0 {
 		h.order = slices.Delete(h.order, i, i+1)
 	}
-	if h.primary == c {
+	changed := h.primary == c
+	if changed {
 		h.primary = nil
 		h.reportPrimary(false)
 	}
 	h.mu.Unlock()
+	if changed && h.onPrimaryChanged != nil {
+		h.onPrimaryChanged()
+	}
 	h.elect()
 }
 
@@ -363,6 +371,9 @@ func (h *hostClients) primaryID() string {
 // path, nothing here is about to end the process, so the line still lands.
 func (h *hostClients) elect() {
 	if elected := h.electOne(); elected != "" {
+		if h.onPrimaryChanged != nil {
+			h.onPrimaryChanged()
+		}
 		go h.logger.Info("primary client elected", "client", elected)
 	}
 }

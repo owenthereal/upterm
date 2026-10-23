@@ -350,8 +350,10 @@ func TestSlowPrimaryPacesTheCommandAndLosesNothing(t *testing.T) {
 // drain before the first query can confuse slow throughput with failed election.
 func TestAStalledPrimaryWithParkedInputIsReplaced(t *testing.T) {
 	startOutput := filepath.Join(t.TempDir(), "start-output")
-	h := startHost(t, &Server{timing: serverTiming{primaryStall: 300 * time.Millisecond}, AwaitInitialClient: true, Command: []string{"sh", "-c",
-		`stty -echo -opost -icanon; printf 'READY\n'; while [ ! -f "$1" ]; do sleep 0.01; done; while :; do yes | head -c 65536; printf '\033[6nQ\n'; done`, "sh", startOutput}})
+	srv := &Server{timing: serverTiming{primaryStall: 300 * time.Millisecond}, AwaitInitialClient: true, Command: []string{"sh", "-c",
+		`stty -echo -opost -icanon; printf 'READY\n'; while [ ! -f "$1" ]; do sleep 0.01; done; while :; do yes | head -c 65536; printf '\033[6nQ\n'; done`, "sh", startOutput}}
+	changes := watchPrimaryChanges(srv)
+	h := startHost(t, srv)
 	joined := h.srv.EventEmitter.On(upterm.EventClientJoined)
 	defer h.srv.EventEmitter.Off(upterm.EventClientJoined, joined)
 
@@ -368,6 +370,8 @@ func TestAStalledPrimaryWithParkedInputIsReplaced(t *testing.T) {
 		_, err := aIn.Write(bytes.Repeat([]byte("x"), 4<<20))
 		floodErr <- err
 	}()
+	// Real PTY boundary: without an input-write entry seam, observe that
+	// the oversized input remains parked before changing the transport.
 	select {
 	case err := <-floodErr:
 		t.Fatalf("the flood write completed: the pty is not parking the input actor: %v", err)
@@ -378,9 +382,7 @@ func TestAStalledPrimaryWithParkedInputIsReplaced(t *testing.T) {
 
 	// The watchdog must remove A while its input actor is still parked. Do
 	// not close A ourselves: that would exercise the hang-up test instead.
-	require.Eventually(t, func() bool {
-		return h.srv.hostClients.primaryID() == ""
-	}, harnessTimeout, 10*time.Millisecond, "the stalled primary was never removed from the elector")
+	awaitPrimaryID(t, srv, changes, "", "the stalled primary was never removed from the elector")
 
 	_, bOut, _, bGate := h.connectHostGated(t, &hostPty{term: "xterm", cols: 80, rows: 24},
 		withDialDeadline(60*time.Second))
@@ -448,6 +450,7 @@ func TestTeardownIsNotHeldByParkedInputAndQueuedOutput(t *testing.T) {
 	t.Logf("teardown took %s", elapsed)
 	require.Less(t, elapsed, hangupGrace+DefaultStopGrace,
 		"teardown walked past the close step: the close did not release the leader")
+	// OS process-disappearance boundary: election readiness cannot observe it.
 	require.Eventually(t, func() bool { return syscall.Kill(-pid, 0) == syscall.ESRCH },
 		2*time.Second, 20*time.Millisecond, "the command's process group is still there: terminate gave up on it")
 }
@@ -477,8 +480,10 @@ func TestAPrimaryThatHangsUpWithParkedInputIsReplaced(t *testing.T) {
 	// Gated, so READY is live output that follows A's election rather than a
 	// replay that can reach A before its handler has registered it: the
 	// assertion below reads the elector as soon as READY arrives.
-	h := startHost(t, &Server{AwaitInitialClient: true,
-		Command: []string{"sh", "-c", `stty raw -echo; printf 'READY\n'; exec sleep 60`}})
+	srv := &Server{AwaitInitialClient: true,
+		Command: []string{"sh", "-c", `stty raw -echo; printf 'READY\n'; exec sleep 60`}}
+	changes := watchPrimaryChanges(srv)
+	h := startHost(t, srv)
 	joined := h.srv.EventEmitter.On(upterm.EventClientJoined)
 	defer h.srv.EventEmitter.Off(upterm.EventClientJoined, joined)
 
@@ -494,6 +499,8 @@ func TestAPrimaryThatHangsUpWithParkedInputIsReplaced(t *testing.T) {
 		_, err := aIn.Write(bytes.Repeat([]byte("x"), 4<<20))
 		floodErr <- err
 	}()
+	// Real PTY boundary: without an input-write entry seam, observe that
+	// the oversized input remains parked before changing the transport.
 	select {
 	case err := <-floodErr:
 		t.Fatalf("the flood write completed: the pty is not parking the input actor, so this test would pass for the wrong reason: %v", err)
@@ -515,9 +522,7 @@ func TestAPrimaryThatHangsUpWithParkedInputIsReplaced(t *testing.T) {
 	require.NotEqual(t, aID, bID)
 	readUntil(t, bOut, "READY") // the replay; proves B is served
 
-	require.Eventually(t, func() bool {
-		return h.srv.hostClients.primaryID() == bGate.transportID
-	}, harnessTimeout, 10*time.Millisecond, "the elector still holds the client that hung up")
+	awaitPrimaryID(t, srv, changes, bGate.transportID, "the elector still holds the client that hung up")
 }
 
 // This is TestAPrimaryThatHangsUpWithParkedInputIsReplaced's twin for the
@@ -534,9 +539,11 @@ func TestAHungUpPrimaryStopsConstrainingTheSize(t *testing.T) {
 	// long sleep: a shell only runs a trap between foreground commands, not
 	// by interrupting one already running, so a single long sleep could defer
 	// the trap for its whole duration instead of running it promptly.
-	h := startHost(t, &Server{AwaitInitialClient: true,
-		Command: []string{"sh", "-c", `stty raw -echo; trap 'stty size' WINCH; printf 'READY\n'; while :; do sleep 0.1; done`}})
+	srv := &Server{AwaitInitialClient: true,
+		Command: []string{"sh", "-c", `stty raw -echo; trap 'stty size' WINCH; printf 'READY\n'; while :; do sleep 0.1; done`}}
 
+	changes := watchPrimaryChanges(srv)
+	h := startHost(t, srv)
 	aIn, aOut, _, aGate := h.connectHostGated(t, &hostPty{term: "xterm", cols: 80, rows: 24})
 	readUntil(t, aOut, "READY")
 
@@ -547,6 +554,8 @@ func TestAHungUpPrimaryStopsConstrainingTheSize(t *testing.T) {
 		_, err := aIn.Write(bytes.Repeat([]byte("x"), 4<<20))
 		floodErr <- err
 	}()
+	// Real PTY boundary: without an input-write entry seam, observe that
+	// the oversized input remains parked before changing the transport.
 	select {
 	case err := <-floodErr:
 		t.Fatalf("the flood write completed: the pty is not parking the input actor, so this test would pass for the wrong reason: %v", err)
@@ -567,9 +576,7 @@ func TestAHungUpPrimaryStopsConstrainingTheSize(t *testing.T) {
 	// has the same actor take A out of the size tracking, on the next line,
 	// so waiting for this is as good as waiting for A to be out of
 	// resizeWindow's minimum.
-	require.Eventually(t, func() bool {
-		return h.srv.hostClients.primaryID() == ""
-	}, harnessTimeout, 10*time.Millisecond, "A was never removed from the elector")
+	awaitPrimaryID(t, srv, changes, "", "A was never removed from the elector")
 
 	_, bOut, _ := h.connectHost(t, &hostPty{term: "xterm", cols: 100, rows: 30})
 	readUntil(t, bOut, "30 100")
@@ -606,6 +613,36 @@ func TestInputAcceptedBeforeAHangUpIsDeliveredWhenTheCommandReads(t *testing.T) 
 	// after the hang-up; matching the digits rather than the whole line
 	// dodges the padding difference between BSD and GNU wc.
 	readUntil(t, bOut, "262144")
+}
+
+// watchPrimaryChanges subscribes before the action that may change election.
+// A wakeup is a hint: the waiter reads the current ID, since changes can merge.
+func watchPrimaryChanges(srv *Server) <-chan struct{} {
+	changed := make(chan struct{}, 1)
+	srv.hostClients.onPrimaryChanged = func() {
+		select {
+		case changed <- struct{}{}:
+		default:
+		}
+	}
+	return changed
+}
+
+func awaitPrimaryID(t *testing.T, srv *Server, changed <-chan struct{}, want, reason string) {
+	t.Helper()
+	guard := time.NewTimer(harnessTimeout)
+	defer guard.Stop()
+	for {
+		if srv.hostClients.primaryID() == want {
+			return
+		}
+		select {
+		case <-changed:
+		case <-guard.C:
+			require.Equal(t, want, srv.hostClients.primaryID(), reason)
+			return
+		}
+	}
 }
 
 // nextClientID is the lifecycle event ID of the next client to join. It is
