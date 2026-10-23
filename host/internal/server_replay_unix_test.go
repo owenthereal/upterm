@@ -360,14 +360,11 @@ func (r *slowReplayer) Start(ctx context.Context, deadline time.Time, c *uio.Cap
 func TestAGuestJoiningAFloodGetsItsScreenReconstructed(t *testing.T) {
 	// The budget covers the slowed emulation either way, so a join that
 	// falls back does so for the output it lost, not for time.
-	budget := uio.ReplayBudget
-	uio.ReplayBudget = 10 * time.Second
-	t.Cleanup(func() { uio.ReplayBudget = budget })
 	r := &slowReplayer{Replayer: replay.New()}
-	onGuestPacer = func(p *guestPacer) { r.pacer = p }
-	t.Cleanup(func() { onGuestPacer = nil })
-	installReplayer(t, r)
-	h := startHost(t, &Server{Command: []string{"yes"}})
+	srv := &Server{Command: []string{"yes"}, replayBudget: 10 * time.Second}
+	srv.onGuestPacer = func(p *guestPacer) { r.pacer = p }
+	installReplayer(srv, r)
+	h := startHost(t, srv)
 	// A viewer, which counts towards no size and paces nothing, sees the
 	// flood under way, so the ring holds output by the time the guest joins:
 	// a join to an empty ring has nothing to reconstruct. Then it drains the
@@ -381,4 +378,71 @@ func TestAGuestJoiningAFloodGetsItsScreenReconstructed(t *testing.T) {
 	_, err := io.ReadFull(out, first)
 	require.NoError(t, err)
 	require.Contains(t, string(first), "\x1b[", "the guest was handed the raw ring")
+}
+
+// Each Serve owns its replayer and takes one replay budget at startup. A nil
+// factory selects the shipped emulator; a factory returning nil selects raw.
+func TestReplayConfigurationBelongsToItsServer(t *testing.T) {
+	a, b := newDoorReplayer(), newDoorReplayer()
+	srvA := &Server{Command: printsTheRing, replayBudget: 3 * time.Second, replayerFactory: func(string) uio.Replayer { return a }}
+	srvB := &Server{Command: printsTheRing, replayBudget: 7 * time.Second, replayerFactory: func(string) uio.Replayer { return b }}
+	hA, hB := startHost(t, srvA), startHost(t, srvB)
+	for _, h := range []*hostHarness{hA, hB} {
+		_, out, _ := h.connectHost(t, nil)
+		readUntil(t, out, ringMark)
+	}
+	_, outA := hA.connectGuest(t, withWindow(phone))
+	gotA := readUntil(t, outA, ringMark)
+	require.Contains(t, gotA, emulatedMark)
+	require.Len(t, a.seen(), 1)
+	require.Empty(t, b.seen(), "A's join must not use B's factory")
+	_, outB := hB.connectGuest(t, withWindow(phone))
+	require.Contains(t, readUntil(t, outB, ringMark), emulatedMark)
+	require.Len(t, a.seen(), 1)
+	require.Len(t, b.seen(), 1)
+	require.InDelta(t, float64(3*time.Second), float64(a.seen()[0].left), float64(time.Second))
+	require.InDelta(t, float64(7*time.Second), float64(b.seen()[0].left), float64(time.Second))
+	for _, tc := range []struct {
+		name    string
+		budget  time.Duration
+		raw     bool
+		factory func(string) uio.Replayer
+	}{
+		{name: "zero inherits startup budget", factory: func(string) uio.Replayer { return newDoorReplayer() }},
+		{name: "nil factory uses emulator"},
+		{name: "negative falls back immediately", budget: -time.Nanosecond, raw: true, factory: func(string) uio.Replayer { return newDoorReplayer() }},
+		{name: "nil replayer uses raw", raw: true, factory: func(string) uio.Replayer { return nil }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var r *doorReplayer
+			factory := tc.factory
+			if factory != nil {
+				result := factory("xterm")
+				r, _ = result.(*doorReplayer)
+				factory = func(string) uio.Replayer { return result }
+			}
+			srv := &Server{Command: printsTheRing, replayBudget: tc.budget, replayerFactory: factory}
+			h := startHost(t, srv)
+			_, viewer, _ := h.connectHost(t, nil)
+			readUntil(t, viewer, ringMark)
+			_, out := h.connectGuest(t, withWindow(phone))
+			got := readUntil(t, out, ringMark)
+			if tc.raw {
+				require.NotContains(t, got, emulatedMark)
+				require.NotContains(t, got, "\x1b[")
+				if r != nil {
+					require.Empty(t, r.seen(), "negative budget must bypass the emulator")
+				}
+				return
+			}
+			if r != nil {
+				require.Contains(t, got, emulatedMark)
+				require.Len(t, r.seen(), 1)
+				require.Greater(t, r.seen()[0].left, time.Duration(0))
+				require.LessOrEqual(t, r.seen()[0].left, uio.ReplayBudget)
+			} else {
+				require.Contains(t, got, "\x1b[", "nil factory must retain the shipped emulator")
+			}
+		})
+	}
 }

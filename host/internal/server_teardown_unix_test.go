@@ -27,14 +27,6 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
-// withForceCommandStopGrace sets forceCommandStopGrace for the duration of t.
-func withForceCommandStopGrace(t *testing.T, d time.Duration) {
-	t.Helper()
-	orig := forceCommandStopGrace
-	forceCommandStopGrace = d
-	t.Cleanup(func() { forceCommandStopGrace = orig })
-}
-
 // A forced command whose guest leaves is hung up, as a terminal going away
 // would hang it up, not killed outright: a full-screen program -- Herdr, say,
 // as a door -- gets to clean up after itself.
@@ -123,9 +115,8 @@ func TestAForcedCommandIsHungUpWhenItsGuestLeavesAfterItsInputEnds(t *testing.T)
 func TestSessionEndHangsUpAForcedCommandAndWaitsForIt(t *testing.T) {
 	// Long enough that the hangup handler below finishes inside the first
 	// step, so nothing escalates past it.
-	withHangupGrace(t, 3*time.Second)
-	withForceCommandStopGrace(t, 3*time.Second)
-	h := startHost(t, &Server{
+
+	h := startHost(t, &Server{timing: serverTiming{hangup: 3 * time.Second, forceCommandStop: 3 * time.Second},
 		Command:      []string{"sh", "-c", "sleep 30"},
 		ForceCommand: []string{"sh", "-c", `trap 'sleep 1; printf HUNGUP; exit 3' HUP; printf READY; while :; do sleep 0.05; done`},
 	})
@@ -268,9 +259,8 @@ func TestAForcedCommandThatEndsOnItsOwnKeepsItsStatus(t *testing.T) {
 // while it is being torn down: the session was ending already, and nothing it
 // did was the stop's doing.
 func TestAForcedCommandTornDownByTheSessionsOwnEndKeepsItsStatus(t *testing.T) {
-	withHangupGrace(t, 5*time.Second)
 	marker := filepath.Join(t.TempDir(), "end")
-	srv := &Server{
+	srv := &Server{timing: serverTiming{hangup: 5 * time.Second},
 		Command:      []string{"sh", "-c", `while [ ! -e "$0" ]; do sleep 0.01; done`, marker},
 		ForceCommand: []string{"sh", "-c", `trap 'sleep 0.5; exit 3' HUP; printf READY; while :; do sleep 0.05; done`},
 	}
@@ -307,11 +297,10 @@ type orderHarness struct {
 // input, output and session once the command is running.
 func startExitOnInput(t *testing.T, forced bool) (*orderHarness, io.Writer, io.Reader, *ssh.Session) {
 	t.Helper()
-	withHangupGrace(t, 5*time.Second)
-	withForceCommandStopGrace(t, 5*time.Second)
-	srv := &Server{Command: []string{"sh", "-c", exitsOnInput}, StopGrace: 5 * time.Second}
+
+	srv := &Server{timing: serverTiming{hangup: 5 * time.Second, forceCommandStop: 5 * time.Second}, Command: []string{"sh", "-c", exitsOnInput}, StopGrace: 5 * time.Second}
 	if forced {
-		srv = &Server{
+		srv = &Server{timing: serverTiming{hangup: 5 * time.Second, forceCommandStop: 5 * time.Second},
 			Command:      []string{"sh", "-c", "sleep 60"},
 			ForceCommand: []string{"sh", "-c", exitsOnInput},
 		}
@@ -379,9 +368,7 @@ func requireExitStatus(t *testing.T, err error, code int) {
 // A forced command that ignores the hangup and SIGTERM is still gone once the
 // teardown has run its course, and the session's end is bounded by it.
 func TestAForcedCommandThatIgnoresTheHangupIsKilled(t *testing.T) {
-	withHangupGrace(t, 100*time.Millisecond)
-	withForceCommandStopGrace(t, 100*time.Millisecond)
-	h := startHost(t, &Server{
+	h := startHost(t, &Server{timing: serverTiming{hangup: 100 * time.Millisecond, forceCommandStop: 100 * time.Millisecond},
 		Command:      []string{"sh", "-c", "sleep 30"},
 		ForceCommand: []string{"sh", "-c", `trap '' HUP TERM; printf 'PID=%s;' $$; while :; do sleep 0.05; done`},
 	})
@@ -497,9 +484,7 @@ func TestSessionEndPutsItsGuestsBack(t *testing.T) {
 // but the connection's end releases, so a wait for its handler is a wait for
 // that; the session ends at the bound instead.
 func TestSessionEndStopsWaitingForAGuestThatStoppedReading(t *testing.T) {
-	withHangupGrace(t, 100*time.Millisecond)
-	withForceCommandStopGrace(t, 100*time.Millisecond)
-	h := startHost(t, &Server{
+	h := startHost(t, &Server{timing: serverTiming{hangup: 100 * time.Millisecond, forceCommandStop: 100 * time.Millisecond},
 		Command:      []string{"sh", "-c", "sleep 30"},
 		ForceCommand: []string{"yes"},
 	})
@@ -511,7 +496,7 @@ func TestSessionEndStopsWaitingForAGuestThatStoppedReading(t *testing.T) {
 
 	took := h.stop(t)
 
-	assert.Less(t, took, forceCommandStopBound(hangupGrace, forceCommandStopGrace)+2*time.Second)
+	assert.Less(t, took, forceCommandStopBound(100*time.Millisecond, 100*time.Millisecond)+2*time.Second)
 }
 
 // stallingGuest is a guest that took everything its forced command wrote and

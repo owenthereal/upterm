@@ -46,6 +46,13 @@ var ErrJoinTimeout = errors.New("no guest joined within the join timeout")
 var ErrSessionStopped = fmt.Errorf("session stopped: %w", context.Canceled)
 
 type Server struct {
+	timing serverTiming
+	// onGuestPacer runs during setup, before the command or any join starts.
+	onGuestPacer func(*guestPacer)
+	// A nil factory uses the terminal's emulator; a nil result uses the raw ring.
+	replayerFactory func(string) uio.Replayer
+	// Zero inherits io.ReplayBudget at Serve startup; negative disables emulation.
+	replayBudget time.Duration
 	Command      []string
 	CommandEnv   []string
 	ForceCommand []string
@@ -165,20 +172,6 @@ func releaseSessions(cmdDone <-chan struct{}, timeout time.Duration, release fun
 	release()
 }
 
-// onGuestPacer, when set, is handed each session's pacer as ServeWithContext
-// builds it, so a test can watch the gate hold. Nil in production.
-var onGuestPacer func(*guestPacer)
-
-// sessionReplayer builds the replayer each session's fan-out reconstructs a
-// joining terminal's screen with, rather than handing it the raw ring, for
-// the TERM the session's command runs under, as the command's own
-// environment has it (see command.termName): Server.Term, or, with none, the
-// one the command inherits, CommandEnv's over the host's. A forced command
-// runs under its guest's own TERM, but its output goes to that guest alone,
-// never through the fan-out. A var so that a test can install its own; nil
-// hands every join the raw ring.
-var sessionReplayer = replay.NewForTerm
-
 // logReplayFallback is what a session's fan-out tells of each join it handed
 // the raw ring rather than a reconstruction of the screen, and why. A screen
 // holding state the reconstruction doesn't restore is expected, so that is
@@ -199,6 +192,15 @@ func logReplayFallback(logger *slog.Logger) func(error) {
 // guest, and — when host is not nil — the host door on host, for clients that
 // are already on this machine.
 func (s *Server) ServeWithContext(ctx context.Context, guest, host net.Listener) error {
+	timing := s.timing.orDefault()
+	replayBudget := s.replayBudget
+	if replayBudget == 0 {
+		replayBudget = uio.ReplayBudget
+	}
+	replayerFactory := s.replayerFactory
+	if replayerFactory == nil {
+		replayerFactory = replay.NewForTerm
+	}
 	if s.HostKey == nil {
 		return errors.New("host server: HostKey is required")
 	}
@@ -226,17 +228,16 @@ func (s *Server) ServeWithContext(ctx context.Context, guest, host net.Listener)
 		s.Logger,
 	)
 	cmd.stopGrace = s.StopGrace
+	cmd.timing = timing
 	// Installed before anything can join: SetReplayer is once, before any
 	// join.
-	if sessionReplayer != nil {
-		writers.SetReplayer(sessionReplayer(cmd.termName()), logReplayFallback(s.Logger))
-	}
+	writers.SetReplayer(replayerFactory(cmd.termName()), logReplayFallback(s.Logger))
 	// With no primary, the earliest guest paces the command, through this.
 	// It lives on the command's context, so stopping the session ends any
 	// hold at once rather than waiting on a slow guest.
-	pacer := newGuestPacer(cmdCtx, writers)
-	if onGuestPacer != nil {
-		onGuestPacer(pacer)
+	pacer := newGuestPacer(cmdCtx, writers, timing.pacingStall)
+	if s.onGuestPacer != nil {
+		s.onGuestPacer(pacer)
 	}
 	cmd.pacer = pacer
 	cmd.order = &s.order
@@ -293,8 +294,8 @@ func (s *Server) ServeWithContext(ctx context.Context, guest, host net.Listener)
 		forceCommands:         &guestHandlers{},
 		sharedGuests:          &guestHandlers{},
 		hostHandlers:          &guestHandlers{},
-		forceCommandHangup:    hangupGrace,
-		forceCommandGrace:     forceCommandStopGrace,
+		timing:                timing,
+		replayBudget:          replayBudget,
 		commandEnv:            s.CommandEnv,
 		hideClientIP:          s.HideClientIP,
 		ptmx:                  shared,
@@ -428,13 +429,13 @@ func (s *Server) ServeWithContext(ctx context.Context, guest, host net.Listener)
 			// the sessions are released, so waiting here holds up only that
 			// door's listener's close. A command-led exit has already closed
 			// cmdDone by the time this runs.
-			releaseSessions(cmdDone, outputDrainTimeout+guestFlushTimeout, cancel)
+			releaseSessions(cmdDone, timing.outputDrain+guestFlushTimeout, cancel)
 
 			// That cancel hangs up every forced command, and each one's guest is
 			// sent what it says on the way out and a reset once it has gone.
 			// Wait for them, bounded, before the session ends and its tunnel
 			// closes under them.
-			if bound := forceCommandStopBound(sh.forceCommandHangup, sh.forceCommandGrace); !sh.forceCommands.wait(bound) {
+			if bound := forceCommandStopBound(sh.timing.hangup, sh.timing.forceCommandStop); !sh.forceCommands.wait(bound) {
 				s.Logger.Warn("gave up waiting for forced commands to end", "bound", bound)
 			}
 			// And the shared command's guests are each sent the session's
@@ -484,6 +485,7 @@ func (s *Server) ServeWithContext(ctx context.Context, guest, host net.Listener)
 		// And the elector: exactly one of the clients on this door paces the
 		// command and is sent its live terminal queries.
 		s.hostClients.logger = s.Logger
+		s.hostClients.promoteFlushTimeout = timing.promoteFlush
 		// The pacer stands aside while there is a primary, which paces the
 		// command itself, so it is told of every change.
 		s.hostClients.onPrimary = pacer.setPrimary
@@ -548,8 +550,8 @@ func (s *Server) ServeWithContext(ctx context.Context, guest, host net.Listener)
 // rather than the session command's DefaultStopGrace, because a forced command
 // is torn down every time its guest leaves, not once per session, and because
 // the session's end waits for it: something that ignores everything is gone in
-// about four seconds rather than sixteen. A var so a test can change it.
-var forceCommandStopGrace = time.Second
+// about four seconds rather than sixteen.
+const forceCommandStopGrace = time.Second
 
 // forceCommandStopBound is how long a session that is ending waits for its
 // forced commands' teardowns, given their hangup and later grace: terminate's
@@ -967,13 +969,8 @@ type sessionHandler struct {
 	// hostHandlers is the same for the host door's clients, each of which is
 	// sent the session's end and then its status. Nil in a test's handler.
 	hostHandlers *guestHandlers
-	// forceCommandHangup and forceCommandGrace bound a forced command's
-	// teardown: hangupGrace and forceCommandStopGrace, read once when the
-	// session starts. A handler can outlive its session -- one whose guest
-	// stopped reading is parked in a write -- so it must not read the package
-	// vars, which a test restores when it ends.
-	forceCommandHangup time.Duration
-	forceCommandGrace  time.Duration
+	timing       serverTiming
+	replayBudget time.Duration
 
 	// SFTP configuration
 	sftpPermissionChecker sftp.PermissionChecker // Optional: prompts user for SFTP permissions
@@ -1209,7 +1206,7 @@ func (h *sessionHandler) HandleSession(sess gssh.Session) {
 					// away would, and escalate only if it stays. Killing it
 					// outright left a full-screen program no chance to put the
 					// guest's terminal back.
-					terminateWith(ptmx, exited, h.forceCommandHangup, h.forceCommandGrace, h.logger, h.forceCommand[0])
+					terminateWith(ptmx, exited, h.timing.hangup, h.timing.forceCommandStop, h.logger, h.forceCommand[0])
 				}
 				// terminate's own waits are bounded, so the command may not be
 				// confirmed gone; waitErr is only safe to read once it is.
@@ -1243,7 +1240,7 @@ func (h *sessionHandler) HandleSession(sess gssh.Session) {
 		// screen reconstructed: time it spends waiting its turn,
 		// behind another join's emulation at the pacer, is its own, so the
 		// deadline is taken before anything it can wait on.
-		deadline := time.Now().Add(uio.ReplayBudget)
+		deadline := time.Now().Add(h.replayBudget)
 
 		// The pty's geometry follows the terminals watching it, and this
 		// one is counted before it attaches, not after: the
@@ -1312,7 +1309,7 @@ func (h *sessionHandler) HandleSession(sess gssh.Session) {
 					_ = conn.Close()
 				}
 			}
-			sink := newHostSink(sess, disconnect, sessionID, h.logger)
+			sink := newHostSink(sess, disconnect, sessionID, h.logger, h.timing.primaryStall)
 			if err := attachGuestOutput(sess.Context(), deadline, h.writers, sink, size); err != nil {
 				switch {
 				case errors.Is(err, uio.ErrClosed):
@@ -1452,7 +1449,7 @@ func (h *sessionHandler) HandleSession(sess gssh.Session) {
 			// is not resumable, so dropping bytes out of the middle would leave a
 			// corrupted screen it could not detect, while a closed session it can
 			// simply rejoin. See owenthereal/upterm#524.
-			onDrop := guestDropHandler(sess.Close, h.logger, sessionID, pacingStallTimeout)
+			onDrop := guestDropHandler(sess.Close, h.logger, sessionID, h.timing.pacingStall)
 
 			sink := uio.NewAsyncWriter(filtered, uio.DefaultGuestBufferSize, onDrop)
 			if err := h.attachGuest(sess.Context(), deadline, sink, size); err != nil {
@@ -1825,9 +1822,8 @@ func (guestSink) WantsReset() bool { return true }
 // before the line, as it does in hostSink's callbacks: a logger blocked on a
 // stopped terminal must not keep a dropped guest attached.
 //
-// stall is the bound to report for a stalled pacer, passed in rather than read
-// from pacingStallTimeout when the drop happens: this runs on a goroutine of
-// its own, where reading the package var would race a test that restores it.
+// stall is the bound the session's pacer was constructed with, passed in so
+// the asynchronous diagnostic describes that pacer's actual deadline.
 func guestDropHandler(closeSession func() error, logger *slog.Logger, sessionID string, stall time.Duration) func(error) {
 	return func(err error) {
 		_ = closeSession()

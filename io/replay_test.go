@@ -253,15 +253,14 @@ func parkedStart(entered chan<- *Capture, gate <-chan struct{}) func(int, contex
 }
 
 // joinWaits has every join report each wait it begins, until the test ends.
-func joinWaits(t *testing.T) <-chan joinWait {
+func joinWaits(t *testing.T, writer *MultiWriter) <-chan joinWait {
 	waits := make(chan joinWait, 16)
-	testHookJoinWaits = func(w joinWait) {
+	writer.onJoinWait = func(w joinWait) {
 		select {
 		case waits <- w:
 		default:
 		}
 	}
-	t.Cleanup(func() { testHookJoinWaits = nil })
 	return waits
 }
 
@@ -428,10 +427,10 @@ func TestCaptureStopsAtADeletedResizeToo(t *testing.T) { captureStopsAtATentativ
 
 // A tentative event at the handoff: no attach until its ResizeEnd.
 func TestHandoffWaitsForATentativeResize(t *testing.T) {
-	waits := joinWaits(t)
 	entered, gate := make(chan *Capture, 1), make(chan struct{})
 	r := &fakeReplayer{start: parkedStart(entered, gate)}
 	w, fallbacks := joinable(DefaultReplayBytes, r)
+	waits := joinWaits(t, w)
 	resize(w, at80x24)
 	writeString(w, "A")
 
@@ -617,7 +616,7 @@ func TestAppendSizedAttachesNothingOnceTheJoinerLeft(t *testing.T) {
 			return func() { within(t, entered, "Start") }
 		}},
 		{"waiting on a resize", func(t *testing.T, r *fakeReplayer, w *MultiWriter) func() {
-			waits := joinWaits(t)
+			waits := joinWaits(t, w)
 			r.start = func(int, context.Context, time.Time, *Capture) error {
 				w.ResizeBegin(at45x30) // never ended
 				return nil
@@ -725,8 +724,7 @@ func TestAcquireRefusesOnceShutdown(t *testing.T) {
 			w := NewMultiWriter(DefaultReplayBytes)
 			require.NoError(t, w.Shutdown(t.Context()))
 			if tc.held {
-				testHookJoinWaits = func(joinWait) { <-w.permit }
-				t.Cleanup(func() { testHookJoinWaits = nil })
+				w.onJoinWait = func(joinWait) { <-w.permit }
 			}
 			for i := range attempts {
 				if tc.held {
@@ -756,8 +754,7 @@ func TestAcquireRefusesAJoinerThatHasLeft(t *testing.T) {
 			ctx, cancel := context.WithCancel(t.Context())
 			cancel()
 			if tc.held {
-				testHookJoinWaits = func(joinWait) { <-w.permit }
-				t.Cleanup(func() { testHookJoinWaits = nil })
+				w.onJoinWait = func(joinWait) { <-w.permit }
 			}
 			for i := range attempts {
 				if tc.held {
@@ -785,13 +782,11 @@ func TestAppendSizedStartsNoEmulationOnceShutdown(t *testing.T) {
 			writeString(w, "A")
 
 			var a, b recordingWriter
-			doneA := joinAsync(w, t.Context(), far(), &a)
-			within(t, entered, "A's Start")
-
-			// Once B is about to wait for the permit A holds: end the session
-			// and A's emulation, and let A return, which frees the permit.
+			var doneA <-chan error
+			// Installed before either join starts. Only B waits for A's permit.
+			// Once it does, end the session and A's emulation, and let A return.
 			var errA error
-			testHookJoinWaits = func(what joinWait) {
+			w.onJoinWait = func(what joinWait) {
 				if what != waitPermit {
 					return
 				}
@@ -799,7 +794,8 @@ func TestAppendSizedStartsNoEmulationOnceShutdown(t *testing.T) {
 				close(gate)
 				errA = <-doneA
 			}
-			defer func() { testHookJoinWaits = nil }()
+			doneA = joinAsync(w, t.Context(), far(), &a)
+			within(t, entered, "A's Start")
 			doneB := joinAsync(w, t.Context(), far(), &b)
 
 			require.ErrorIs(t, within(t, doneB, "B"), ErrClosed, "attempt %d", i)
@@ -861,7 +857,6 @@ func TestAppendSizedTakesTheFastPath(t *testing.T) {
 // Two joins: the second's Start begins only after the first's semaphore is
 // released; a second join whose ctx ends while waiting returns at once.
 func TestAppendSizedEmulatesOneAtATime(t *testing.T) {
-	waits := joinWaits(t)
 	entered, gate := make(chan *Capture, 1), make(chan struct{})
 	started := make(chan int, 4)
 	var a recordingWriter
@@ -876,6 +871,7 @@ func TestAppendSizedEmulatesOneAtATime(t *testing.T) {
 		return nil
 	}}
 	w, fallbacks := joinable(DefaultReplayBytes, r)
+	waits := joinWaits(t, w)
 	resize(w, at80x24)
 	writeString(w, "A")
 	doneA := joinAsync(w, t.Context(), far(), &a)
@@ -1043,13 +1039,13 @@ func TestAppendSizedFallsBackOnAnUnknownSizeAfterTheCapture(t *testing.T) {
 // The permit is held through the catch-up: join A's catch-up Feed is gated;
 // join B arrives: B's Start does not begin until A has attached; then it runs.
 func TestAppendSizedHoldsThePermitThroughCatchUp(t *testing.T) {
-	waits := joinWaits(t)
 	fedA, gate := make(chan struct{}), make(chan struct{})
 	started := make(chan int, 4)
 	var a, b recordingWriter
 	var early atomic.Bool
 	r := &fakeReplayer{}
 	w, fallbacks := joinable(DefaultReplayBytes, r)
+	waits := joinWaits(t, w)
 	r.start = func(n int, _ context.Context, _ time.Time, _ *Capture) error {
 		if n == 0 {
 			// Something for A's handoff to catch up on.
@@ -1157,10 +1153,10 @@ func TestCatchUpNeverOffersAnEventTwice(t *testing.T) {
 // renders once, at Start, before handing off or falling back. The catch-up
 // that leaves the event in the tail renders nothing.
 func TestCatchUpWaitsWhenThereIsNothingNewToOffer(t *testing.T) {
-	waits := joinWaits(t)
 	entered, gate := make(chan *Capture, 1), make(chan struct{})
 	r := &fakeReplayer{start: parkedStart(entered, gate)}
 	w, fallbacks := joinable(DefaultReplayBytes, r)
+	waits := joinWaits(t, w)
 	resize(w, at80x24)
 	writeString(w, "A")
 
@@ -1283,7 +1279,6 @@ func firstByte(p []byte) byte {
 // for output, and the output that lets the emulation pass the resize brings
 // the one render, which the join hands over.
 func TestAppendSizedRendersNothingBeforeTheNewestOfferedResize(t *testing.T) {
-	waits := joinWaits(t)
 	r := &fakeReplayer{}
 	var seq uint64
 	var early atomic.Bool // a render made with the resize in the tail
@@ -1302,6 +1297,7 @@ func TestAppendSizedRendersNothingBeforeTheNewestOfferedResize(t *testing.T) {
 		return nil
 	}
 	w, fallbacks := joinable(DefaultReplayBytes, r)
+	waits := joinWaits(t, w)
 	resize(w, at80x24)
 	writeString(w, "A")
 	seq = w.ResizeBegin(at45x30)
@@ -1429,9 +1425,9 @@ func TestShutdownWakesAParkedJoin(t *testing.T) {
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			waits := joinWaits(t)
 			r := &fakeReplayer{}
 			w, fallbacks := joinable(DefaultReplayBytes, r)
+			waits := joinWaits(t, w)
 			tc.steer(r, w)
 			resize(w, at80x24)
 			writeString(w, "A")
@@ -1449,10 +1445,10 @@ func TestShutdownWakesAParkedJoin(t *testing.T) {
 	}
 
 	t.Run("waiting for the permit", func(t *testing.T) {
-		waits := joinWaits(t)
 		entered, gate := make(chan *Capture, 1), make(chan struct{})
 		r := &fakeReplayer{start: parkedStart(entered, gate)}
 		w, fallbacks := joinable(DefaultReplayBytes, r)
+		waits := joinWaits(t, w)
 		resize(w, at80x24)
 		writeString(w, "A")
 
@@ -1832,4 +1828,41 @@ func TestRawFallbackAfterAnOverflow(t *testing.T) {
 	defer cancel()
 	require.NoError(t, w.Shutdown(ctx))
 	require.Contains(t, guest.String()[before:], "\x1b[r")
+}
+
+// Both wait sites must dispatch to the writer whose join is waiting. A hook
+// installed on a different writer must never receive its permit/resize/output.
+func TestJoinWaitHookBelongsToItsWriter(t *testing.T) {
+	for _, what := range []joinWait{waitPermit, waitResize, waitOutput} {
+		t.Run(fmt.Sprint(what), func(t *testing.T) {
+			a, b := NewMultiWriter(1), NewMultiWriter(1)
+			aWaits, bWaits := joinWaits(t, a), joinWaits(t, b)
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			done := make(chan struct{})
+			t.Cleanup(func() { cancel(); <-done })
+			if what == waitPermit {
+				a.permit <- struct{}{}
+			}
+			go func() {
+				defer close(done)
+				if what == waitPermit {
+					_ = a.take(ctx, time.Now().Add(time.Second))
+					return
+				}
+				j := join{t: a, ctx: ctx, deadline: time.Now().Add(time.Second)}
+				j.wait(what, make(chan struct{}))
+			}()
+			select {
+			case got := <-aWaits:
+				require.Equal(t, what, got)
+			case got := <-bWaits:
+				t.Fatalf("writer B received writer A's wait: %v", got)
+			case <-time.After(time.Second):
+				t.Fatal("writer A did not receive its wait")
+			}
+			require.Empty(t, bWaits, "writer B must not observe writer A's wait")
+			cancel()
+		})
+	}
 }

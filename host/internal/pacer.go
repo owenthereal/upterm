@@ -11,9 +11,8 @@ import (
 	uio "github.com/owenthereal/upterm/io"
 )
 
-// The pacing guest's low mark and its stall bound; vars so a test can shorten
-// the bound.
-var (
+// The pacing guest's low mark and default stall bound.
+const (
 	// pacingLowWater keeps the pacer's host-side queue to about one drain
 	// chunk plus one pty write, so how far the command runs ahead of the
 	// guest is set by the SSH windows between them, as it is over plain ssh.
@@ -64,8 +63,9 @@ type pacedSink interface {
 // writeMu: an attach or a detach never queues behind a slow guest, as it does
 // behind a parked primary.
 type guestPacer struct {
-	w   io.Writer
-	ctx context.Context
+	w            io.Writer
+	ctx          context.Context
+	stallTimeout time.Duration
 
 	// attachSlot makes a guest's registration and its Append one transaction,
 	// serialised across guests; see attach. A one-slot channel rather than a
@@ -98,8 +98,11 @@ type guestPacer struct {
 
 // newGuestPacer returns a pacer writing to w. Pacing stops for good once ctx
 // ends: a session being stopped must not wait on a slow guest.
-func newGuestPacer(ctx context.Context, w io.Writer) *guestPacer {
-	return &guestPacer{w: w, ctx: ctx, attachSlot: make(chan struct{}, 1), changed: make(chan struct{})}
+func newGuestPacer(ctx context.Context, w io.Writer, stall time.Duration) *guestPacer {
+	if stall <= 0 {
+		stall = pacingStallTimeout
+	}
+	return &guestPacer{w: w, ctx: ctx, stallTimeout: stall, attachSlot: make(chan struct{}, 1), changed: make(chan struct{})}
 }
 
 // Write waits until the pacing guest's backlog is below the low mark, then
@@ -324,9 +327,9 @@ func (p *guestPacer) wait(n int) {
 		if s != armed || b.Delivered != since {
 			armed, since = s, b.Delivered
 			if timer == nil {
-				timer = time.NewTimer(pacingStallTimeout)
+				timer = time.NewTimer(p.stallTimeout)
 			} else {
-				timer.Reset(pacingStallTimeout)
+				timer.Reset(p.stallTimeout)
 			}
 		}
 		select {

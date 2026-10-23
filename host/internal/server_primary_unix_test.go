@@ -24,13 +24,6 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
-func shortenStallTimeout(t *testing.T, d time.Duration) {
-	t.Helper()
-	orig := primaryStallTimeout
-	primaryStallTimeout = d
-	t.Cleanup(func() { primaryStallTimeout = orig })
-}
-
 // queryOnDemand prints a marker, then on each input line prints a cursor
 // position query followed by a marker.
 var queryOnDemand = []string{"sh", "-c", `stty -echo -opost; printf 'READY\n'; while IFS= read -r line; do printf '\033[6nQ_%s\n' "$line"; done`}
@@ -131,8 +124,7 @@ func TestAReattachingPrimaryDoesNotAnswerAReplayedQuery(t *testing.T) {
 // SSH, yet a client still running its mux answers the close and looks exactly
 // the same.
 func TestStalledPrimaryIsDisconnectedAndTheFanOutRecovers(t *testing.T) {
-	shortenStallTimeout(t, 500*time.Millisecond)
-	h := startHost(t, &Server{Command: []string{"sh", "-c",
+	h := startHost(t, &Server{timing: serverTiming{primaryStall: 500 * time.Millisecond}, Command: []string{"sh", "-c",
 		`stty -echo -opost; printf 'READY\n'; IFS= read -r line; yes | head -c 6000000; printf 'STREAM_DONE\n'; IFS= read -r line`}})
 
 	// A healthy guest, reading continuously from the start. Six megabytes
@@ -210,8 +202,7 @@ func TestStalledPrimaryIsDisconnectedAndTheFanOutRecovers(t *testing.T) {
 // first output races the election and goes out through the async sink, leaving
 // the watchdog never armed and this test asserting nothing.
 func TestIdlePrimaryIsNeverDisconnected(t *testing.T) {
-	shortenStallTimeout(t, 200*time.Millisecond)
-	h := startHost(t, &Server{Command: readsALine("PROMPT", 0), AwaitInitialClient: true})
+	h := startHost(t, &Server{timing: serverTiming{primaryStall: 200 * time.Millisecond}, Command: readsALine("PROMPT", 0), AwaitInitialClient: true})
 	aIn, aOut, _ := h.connectHost(t, &hostPty{term: "xterm", cols: 80, rows: 24})
 	readUntil(t, aOut, "PROMPT")
 	time.Sleep(time.Second) // five timeouts of nothing outstanding
@@ -252,11 +243,10 @@ func TestIdlePrimaryIsNeverDisconnected(t *testing.T) {
 // keeps chunks completing, so a primary that is slow but progressing is never
 // disconnected and loses nothing.
 func TestSlowPrimaryPacesTheCommandAndLosesNothing(t *testing.T) {
-	shortenStallTimeout(t, 300*time.Millisecond)
 	const payload = 6_000_000
 	const pacedSlack = 2560 << 10 // 2.5 MiB
 	mark := filepath.Join(t.TempDir(), "finished")
-	h := startHost(t, &Server{
+	h := startHost(t, &Server{timing: serverTiming{primaryStall: 300 * time.Millisecond},
 		Command: []string{"sh", "-c",
 			`stty -echo -opost; printf 'READY\n'; IFS= read -r line; yes | head -c ` + strconv.Itoa(payload) + `; : > "$UPTERM_TEST_MARK"; printf 'END\n'; IFS= read -r line`},
 		CommandEnv: []string{"UPTERM_TEST_MARK=" + mark},
@@ -359,9 +349,8 @@ func TestSlowPrimaryPacesTheCommandAndLosesNothing(t *testing.T) {
 // parked. Queries accompany each output chunk: requiring all six megabytes to
 // drain before the first query can confuse slow throughput with failed election.
 func TestAStalledPrimaryWithParkedInputIsReplaced(t *testing.T) {
-	shortenStallTimeout(t, 300*time.Millisecond)
 	startOutput := filepath.Join(t.TempDir(), "start-output")
-	h := startHost(t, &Server{AwaitInitialClient: true, Command: []string{"sh", "-c",
+	h := startHost(t, &Server{timing: serverTiming{primaryStall: 300 * time.Millisecond}, AwaitInitialClient: true, Command: []string{"sh", "-c",
 		`stty -echo -opost -icanon; printf 'READY\n'; while [ ! -f "$1" ]; do sleep 0.01; done; while :; do yes | head -c 65536; printf '\033[6nQ\n'; done`, "sh", startOutput}})
 	joined := h.srv.EventEmitter.On(upterm.EventClientJoined)
 	defer h.srv.EventEmitter.Off(upterm.EventClientJoined, joined)

@@ -30,7 +30,7 @@ func TestServerPreservesPTYOutput(t *testing.T) {
 				// viewer and to every join that falls back. A terminal's join
 				// is otherwise handed a reconstruction of the screen, which
 				// is other bytes by design.
-				installReplayer(t, nil)
+				installReplayer(srv, nil)
 			}
 			h := startHost(t, srv)
 

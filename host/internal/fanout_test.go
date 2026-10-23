@@ -92,7 +92,6 @@ func (d *delayedWriter) Write(p []byte) (int, error) {
 // it a barrier — and asserting *immediately after Run returns*, rather than
 // eventually, is what makes this test notice if it moves back.
 func TestCommandRunFlushesAcceptedOutputBeforeReturning(t *testing.T) {
-	patientExitDrain(t)
 	const lastLine = "written just before exit"
 
 	var guestOut recordingWriter
@@ -115,6 +114,7 @@ func TestCommandRunFlushesAcceptedOutputBeforeReturning(t *testing.T) {
 		},
 	}
 
+	patientExitDrain(cmd)
 	require.NoError(t, cmd.Run())
 
 	// No Eventually: the guarantee is that this has already happened.
@@ -130,7 +130,6 @@ func TestCommandRunFlushesAcceptedOutputBeforeReturning(t *testing.T) {
 // whose last screenful never arrived looks from the outside like output the
 // command never produced.
 func TestCommandRunLogsAGuestThatNeverReceivedItsTail(t *testing.T) {
-	patientExitDrain(t)
 	// Never released, so the flush can only end at its deadline.
 	gate := make(chan struct{})
 	defer close(gate)
@@ -158,6 +157,7 @@ func TestCommandRunLogsAGuestThatNeverReceivedItsTail(t *testing.T) {
 		flushLogTimeoutForTesting: 30 * time.Second,
 	}
 
+	patientExitDrain(cmd)
 	require.NoError(t, cmd.Run())
 
 	// No Eventually, deliberately. The line is written off the actor's return
@@ -226,10 +226,6 @@ func TestCommandRunDoesNotHangOnABlockedLogger(t *testing.T) {
 // it. The comparison is against a synchronous writer attached to the same
 // fan-out, which by definition has everything the fan-out accepted.
 func TestCommandRunLosesNothingWhenTheProducerOutlivesWaitIdle(t *testing.T) {
-	idle := outputIdleTimeout
-	t.Cleanup(func() { outputIdleTimeout = idle })
-	outputIdleTimeout = 5 * time.Second
-
 	var accepted recordingWriter // synchronous: the reference for what got in
 	var guestOut recordingWriter
 	guest := uio.NewAsyncWriter(&delayedWriter{delay: 200 * time.Millisecond, rec: &guestOut},
@@ -244,7 +240,7 @@ func TestCommandRunLosesNothingWhenTheProducerOutlivesWaitIdle(t *testing.T) {
 	for i := range 75 {
 		pending = append(pending, []byte{byte('a' + i%26)})
 	}
-	cmd := &command{
+	cmd := &command{timing: serverTiming{outputIdle: 5 * time.Second},
 		logger:  discardLogger(),
 		writers: writers,
 		ctx:     t.Context(),
@@ -281,7 +277,6 @@ func TestCommandRunLosesNothingWhenTheProducerOutlivesWaitIdle(t *testing.T) {
 // The synchronous recorder on the fan-out is the reference for what got past
 // the pacer.
 func TestCommandRunReleasesPacingBeforeWaitingForIdle(t *testing.T) {
-	patientExitDrain(t)
 	p, writers := newTestPacer(t, time.Minute)
 	var accepted recordingWriter
 	require.NoError(t, writers.Append(&accepted))
@@ -304,6 +299,7 @@ func TestCommandRunReleasesPacingBeforeWaitingForIdle(t *testing.T) {
 	}
 
 	var runErr error
+	patientExitDrain(cmd)
 	done := goWrite(t, p, func() { runErr = cmd.Run() })
 	requireReturns(t, done, 10*time.Second)
 	require.NoError(t, runErr)

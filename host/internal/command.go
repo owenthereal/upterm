@@ -21,8 +21,7 @@ import (
 	uio "github.com/owenthereal/upterm/io"
 )
 
-// Vars so a test whose subject is not the drain window can widen it.
-var (
+const (
 	// outputIdleTimeout is how long output may stay quiet after the process
 	// exits before the pty is considered drained.
 	outputIdleTimeout = 100 * time.Millisecond
@@ -63,9 +62,8 @@ const DefaultStopGrace = 5 * time.Second
 // act on it, forwarding it to its jobs, does so in tens of milliseconds.
 // A full stopGrace here would buy the idle case nothing and would cost
 // every freshly started, untouched session -- the common case for a
-// `--detach`ed one -- several extra seconds on every stop. A var so a test
-// can shrink it.
-var hangupGrace = time.Second
+// `--detach`ed one -- several extra seconds on every stop.
+const hangupGrace = time.Second
 
 // activityWriter records when it last wrote, so a drain can stop once output
 // has gone idle.
@@ -132,9 +130,10 @@ func newCommand(
 }
 
 type command struct {
-	name string
-	args []string
-	env  []string
+	timing serverTiming
+	name   string
+	args   []string
+	env    []string
 
 	ptySize    termsize.Size
 	pinPtySize bool
@@ -294,6 +293,7 @@ func (c *command) Start(ctx context.Context, initial termsize.Size) (PTY, error)
 }
 
 func (c *command) Run() error {
+	timing := c.timing.orDefault()
 	var g run.Group
 	{
 		// output: the pty into the fan-out. Every consumer — the local
@@ -376,7 +376,7 @@ func (c *command) Run() error {
 			if c.pacer != nil {
 				c.pacer.release()
 			}
-			output.waitIdle(done, outputIdleTimeout, outputDrainTimeout)
+			output.waitIdle(done, timing.outputIdle, timing.outputDrain)
 			cancel()
 		})
 	}
@@ -409,7 +409,7 @@ func (c *command) Run() error {
 				// The session is ending and the command is not: hang it up
 				// the way a terminal going away would, and escalate only if
 				// it stays.
-				terminate(c.ptmx, exited, c.grace(), c.logger, c.name)
+				terminateWith(c.ptmx, exited, timing.hangup, c.grace(), c.logger, c.name)
 				// terminate's own final wait is bounded -- it may return
 				// with the process still not confirmed exited, however
 				// unlikely -- so waitErr may still be being written by the
@@ -536,15 +536,8 @@ type outputFlusher interface {
 // parked -- is not rescued, and the teardown walks the rest of the
 // escalation as it would without the flush. A failed flush is logged and
 // changes nothing that follows it.
-func terminate(ptmx PTY, exited <-chan struct{}, grace time.Duration, logger *slog.Logger, name string) {
-	terminateWith(ptmx, exited, hangupGrace, grace, logger, name)
-}
-
-// terminateWith is terminate with the first step's bound given rather than
-// read from hangupGrace: a guest's forced command is torn down on its
-// handler's goroutine, which can outlive the session, so the handler is given
-// the bounds the session read when it started rather than reading package
-// vars a test may be restoring.
+// terminateWith uses the bounds copied when the command or session started.
+// A forced command's handler may outlive the session.
 func terminateWith(ptmx PTY, exited <-chan struct{}, hangup, grace time.Duration, logger *slog.Logger, name string) {
 	// gone reports whether exited has already closed, without blocking:
 	// sending a signal after that would reach whatever pid the kernel has
