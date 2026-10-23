@@ -51,7 +51,8 @@ type Capture struct {
 
 // ReplayBudget is how long a join may spend reconstructing the screen before
 // it falls back to the raw ring: the doors take a join's deadline this far
-// from when it begins. A var for tests.
+// from when it begins. This is startup configuration: set it before serving
+// sessions; each server copies it once. Non-positive values allow no emulation.
 var ReplayBudget = time.Second
 
 // ReplayPanic is a panic recovered from a Replayer, reported as an error.
@@ -503,8 +504,8 @@ func (j *join) attach(gap [][]byte) error {
 // wait waits outside writeMu for ch, the join's ctx, Shutdown or its
 // deadline, whichever comes first; the next hold decides what it means.
 func (j *join) wait(what joinWait, ch <-chan struct{}) {
-	if testHookJoinWaits != nil {
-		testHookJoinWaits(what)
+	if j.t.onJoinWait != nil {
+		j.t.onJoinWait(what)
 	}
 	timer := time.NewTimer(time.Until(j.deadline))
 	defer timer.Stop()
@@ -559,8 +560,8 @@ func (t *MultiWriter) take(ctx context.Context, deadline time.Time) error {
 		return nil
 	default:
 	}
-	if testHookJoinWaits != nil {
-		testHookJoinWaits(waitPermit)
+	if t.onJoinWait != nil {
+		t.onJoinWait(waitPermit)
 	}
 	timer := time.NewTimer(time.Until(deadline))
 	defer timer.Stop()
@@ -619,8 +620,3 @@ const (
 	waitResize                 // an unresolved resize's outcome
 	waitOutput                 // more output or a resize, with nothing new to offer
 )
-
-// testHookJoinWaits, when a test sets it, is called each time a join is about
-// to wait, with what for, so that the test can act once the join is parked
-// rather than guess when it is. Nil outside tests.
-var testHookJoinWaits func(joinWait)

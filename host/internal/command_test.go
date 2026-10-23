@@ -128,11 +128,8 @@ func (p *exitedPTY) Read(b []byte) (int, error) {
 // goroutine woken from one has arrived more than 100ms late (Windows, under
 // -race): the drain took that for quiet and cancelled the copy before the
 // tail.
-func patientExitDrain(t *testing.T) {
-	t.Helper()
-	idle, deadline := outputIdleTimeout, outputDrainTimeout
-	t.Cleanup(func() { outputIdleTimeout, outputDrainTimeout = idle, deadline })
-	outputIdleTimeout, outputDrainTimeout = 5*time.Second, 5*time.Second
+func patientExitDrain(cmd *command) {
+	cmd.timing.outputIdle, cmd.timing.outputDrain = 5*time.Second, 5*time.Second
 }
 
 func (p *exitedPTY) Write(b []byte) (int, error) { return len(b), nil }
@@ -178,7 +175,6 @@ func (p *exitedPTY) Signal(syscall.Signal) error { return nil }
 // just before exiting is delivered rather than dropped when Run notices the
 // exit.
 func TestCommand_DrainsOutputAfterExit(t *testing.T) {
-	patientExitDrain(t)
 	require := require.New(t)
 
 	const lastLine = "written just before exit"
@@ -196,6 +192,7 @@ func TestCommand_DrainsOutputAfterExit(t *testing.T) {
 		},
 	}
 
+	patientExitDrain(cmd)
 	require.NoError(cmd.Run())
 
 	require.Contains(string(out.bytes()), lastLine, "output buffered in the pty at exit was dropped")
@@ -282,33 +279,20 @@ func (p *signalPTY) Wait() error {
 
 func TestTerminateHangsUpBeforeItKills(t *testing.T) {
 	p := newSignalPTY(syscall.SIGHUP)
-	terminate(p, p.exited, time.Second, discardLogger(), "test")
+	terminateWith(p, p.exited, hangupGrace, time.Second, discardLogger(), "test")
 	require.Equal(t, []syscall.Signal{syscall.SIGHUP}, p.signals, "a command that hangs up is never sent anything else")
 	require.False(t, p.killed)
 }
 
 func TestTerminateEscalatesThroughTermToKill(t *testing.T) {
-	withHangupGrace(t, 20*time.Millisecond)
-
 	p := newSignalPTY(0)
 	start := time.Now()
-	terminate(p, p.exited, 20*time.Millisecond, discardLogger(), "test")
+	terminateWith(p, p.exited, 20*time.Millisecond, 20*time.Millisecond, discardLogger(), "test")
 	require.Equal(t, []syscall.Signal{syscall.SIGHUP, syscall.SIGTERM, syscall.SIGKILL}, p.signals,
 		"the final step signals the group before killing the leader")
 	require.True(t, p.killed, "a command that ignores both is killed")
 	require.GreaterOrEqual(t, time.Since(start), 60*time.Millisecond,
 		"a grace after the hangup, after the master closes, and after the term")
-}
-
-// withHangupGrace shrinks the package-level hangupGrace for the duration of
-// t, restoring it after. Every terminate test that expects to run fast
-// needs this: hangupGrace defaults to a full second, independent of
-// whatever grace the test itself passes for the later steps.
-func withHangupGrace(t *testing.T, d time.Duration) {
-	t.Helper()
-	orig := hangupGrace
-	hangupGrace = d
-	t.Cleanup(func() { hangupGrace = orig })
 }
 
 // TestTerminateClosesTheMasterBetweenHangupAndTerm pins the step order for a
@@ -320,10 +304,8 @@ func withHangupGrace(t *testing.T, d time.Duration) {
 // inside exit() waiting for its controlling terminal's output to drain, and
 // only closing the master does.
 func TestTerminateClosesTheMasterBetweenHangupAndTerm(t *testing.T) {
-	withHangupGrace(t, 20*time.Millisecond)
-
 	p := newSignalPTY(0)
-	terminate(p, p.exited, 20*time.Millisecond, discardLogger(), "test")
+	terminateWith(p, p.exited, 20*time.Millisecond, 20*time.Millisecond, discardLogger(), "test")
 	require.Equal(t, []string{syscall.SIGHUP.String(), "close", syscall.SIGTERM.String(), syscall.SIGKILL.String()}, p.sequence)
 	require.True(t, p.killed, "a command that ignores everything, including the close, is still killed")
 }
@@ -332,7 +314,7 @@ func TestTerminateKillsAtOnceWhereSignalsAreUnsupported(t *testing.T) {
 	p := newSignalPTY(0)
 	p.unsupported = true
 	start := time.Now()
-	terminate(p, p.exited, time.Second, discardLogger(), "test")
+	terminateWith(p, p.exited, hangupGrace, time.Second, discardLogger(), "test")
 	require.Empty(t, p.signals)
 	require.True(t, p.killed)
 	require.Less(t, time.Since(start), 500*time.Millisecond, "no grace is spent on a step the platform cannot take")
@@ -346,12 +328,10 @@ func TestTerminateKillsAtOnceWhereSignalsAreUnsupported(t *testing.T) {
 // SIGKILL on it skipped the hangup a job-control shell needs to collect its
 // jobs and the close that frees a leader stuck in exit().
 func TestTerminateKeepsEscalatingWhenASignalFailsForItsOwnReasons(t *testing.T) {
-	withHangupGrace(t, 20*time.Millisecond)
-
 	p := newSignalPTY(0)
 	p.signalErr = syscall.ESRCH
 	p.signalErrOn = syscall.SIGHUP
-	terminate(p, p.exited, 20*time.Millisecond, discardLogger(), "test")
+	terminateWith(p, p.exited, 20*time.Millisecond, 20*time.Millisecond, discardLogger(), "test")
 	require.Equal(t,
 		[]string{syscall.SIGHUP.String(), "close", syscall.SIGTERM.String(), syscall.SIGKILL.String()},
 		p.sequence,
@@ -460,7 +440,6 @@ func (p *closeThenExitPTY) Wait() error {
 func TestCommandRunClosesTheMasterBeforeTheProcessCanExit(t *testing.T) {
 	const grace = 200 * time.Millisecond
 	const bound = 600 * time.Millisecond
-	withHangupGrace(t, grace)
 
 	p := newCloseThenExitPTY()
 	ctx, cancel := context.WithCancel(context.Background())
@@ -472,6 +451,7 @@ func TestCommandRunClosesTheMasterBeforeTheProcessCanExit(t *testing.T) {
 		ctx:       ctx,
 		ptmx:      p,
 		stopGrace: grace,
+		timing:    serverTiming{hangup: grace},
 	}
 
 	done := make(chan error, 1)
@@ -551,12 +531,12 @@ func TestCommandRunSurvivesAParkedReaderDuringClose(t *testing.T) {
 // to reach.
 func runCommandWithParkedReader(t *testing.T, sh, script string, grace, bound time.Duration, after func(t *testing.T)) {
 	t.Helper()
-	withHangupGrace(t, grace)
 
 	ee := &emitter.Emitter{}
 	writers := uio.NewMultiWriter(uio.DefaultReplayBytes)
 	cmd := newCommand(sh, []string{"-c", script}, nil, termsize.Size{}, false, "", ee, writers, discardLogger())
 	cmd.stopGrace = grace
+	cmd.timing.hangup = grace
 
 	ctx, cancel := context.WithCancel(context.Background())
 	_, err := cmd.Start(ctx, termsize.Size{})

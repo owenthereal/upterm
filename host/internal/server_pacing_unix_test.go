@@ -6,9 +6,12 @@ import (
 	"bytes"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -16,14 +19,11 @@ import (
 )
 
 // capturePacer has the session startHost builds hand its pacer to the returned
-// channel. Called before startHost: the seam is read on the serving goroutine,
-// and its reset, registered first, runs after startHost's cleanup has waited
-// for that goroutine to stop.
-func capturePacer(t *testing.T) <-chan *guestPacer {
+// channel. Configure it before startHost launches the serving goroutine.
+func capturePacer(t *testing.T, srv *Server) <-chan *guestPacer {
 	t.Helper()
 	pacers := make(chan *guestPacer, 1)
-	onGuestPacer = func(p *guestPacer) { pacers <- p }
-	t.Cleanup(func() { onGuestPacer = nil })
+	srv.onGuestPacer = func(p *guestPacer) { pacers <- p }
 	return pacers
 }
 
@@ -37,15 +37,6 @@ func awaitPacer(t *testing.T, pacers <-chan *guestPacer) *guestPacer {
 		t.Fatal("the session never built its pacer")
 		return nil
 	}
-}
-
-// setPacingStall sets the pacing guest's stall bound for one test. Called
-// before startHost, for the same reason as capturePacer.
-func setPacingStall(t *testing.T, d time.Duration) {
-	t.Helper()
-	orig := pacingStallTimeout
-	pacingStallTimeout = d
-	t.Cleanup(func() { pacingStallTimeout = orig })
 }
 
 // readWhileHeld reads r 32 KiB at a time, and only while p is holding a write,
@@ -142,10 +133,12 @@ func TestServerPacesAGuestWhenNoTerminalIsAttached(t *testing.T) {
 	const heldFor = 12 << 20
 	for _, readOnly := range []bool{false, true} {
 		t.Run(fmt.Sprintf("read-only=%v", readOnly), func(t *testing.T) {
-			pacers := capturePacer(t)
+
 			goAhead := filepath.Join(t.TempDir(), "go")
-			h := startHost(t, &Server{ReadOnly: readOnly, Command: waitsFor(goAhead,
-				`head -c `+strconv.Itoa(payload)+` /dev/zero | tr '\000' x; printf 'DONE\n'; IFS= read -r line`)})
+			srv := &Server{ReadOnly: readOnly, Command: waitsFor(goAhead,
+				`head -c `+strconv.Itoa(payload)+` /dev/zero | tr '\000' x; printf 'DONE\n'; IFS= read -r line`)}
+			pacers := capturePacer(t, srv)
+			h := startHost(t, srv)
 			pacer := awaitPacer(t, pacers)
 
 			_, gOut := h.connectGuest(t, withDialDeadline(time.Minute))
@@ -167,10 +160,10 @@ func TestServerPacesAGuestWhenNoTerminalIsAttached(t *testing.T) {
 // guest gets a minute's connection for the same reason, since its deadline
 // ending the connection would take it out of the gate too.
 func TestServerAttachedTerminalTakesOverFromAStalledGuest(t *testing.T) {
-	setPacingStall(t, time.Minute)
-	pacers := capturePacer(t)
 	goAhead := filepath.Join(t.TempDir(), "go")
-	h := startHost(t, &Server{Command: waitsFor(goAhead, `yes`)})
+	srv := &Server{timing: serverTiming{pacingStall: time.Minute}, Command: waitsFor(goAhead, `yes`)}
+	pacers := capturePacer(t, srv)
+	h := startHost(t, srv)
 	pacer := awaitPacer(t, pacers)
 
 	// The guest reads its replay and nothing more.
@@ -198,11 +191,11 @@ func TestServerAttachedTerminalTakesOverFromAStalledGuest(t *testing.T) {
 // which opens the gate as well: with neither mechanism, stop still finishes
 // inside the bound. So once stop has returned, the pacer is asked directly.
 func TestServerStopIsNotHeldByAStalledPacer(t *testing.T) {
-	setPacingStall(t, time.Minute)
-	pacers := capturePacer(t)
 	goAhead := filepath.Join(t.TempDir(), "go")
-	h := startHost(t, &Server{Command: []string{"sh", "-c",
-		`trap '' HUP; stty -echo -opost; printf 'READY\n'; while [ ! -f "$1" ]; do sleep 0.01; done; yes`, "sh", goAhead}})
+	srv := &Server{timing: serverTiming{pacingStall: time.Minute}, Command: []string{"sh", "-c",
+		`trap '' HUP; stty -echo -opost; printf 'READY\n'; while [ ! -f "$1" ]; do sleep 0.01; done; yes`, "sh", goAhead}}
+	pacers := capturePacer(t, srv)
+	h := startHost(t, srv)
 	pacer := awaitPacer(t, pacers)
 
 	_, gOut := h.connectGuest(t, withDialDeadline(time.Minute))
@@ -220,4 +213,88 @@ func TestServerStopIsNotHeldByAStalledPacer(t *testing.T) {
 	released := pacer.released
 	pacer.mu.Unlock()
 	require.True(t, released, "the command's exit never released pacing")
+}
+
+// Replacing any Server copy with defaults must change an actual consumer's
+// deadline for each of two independently configured servers.
+func TestServerTimingIsCopiedToEachConsumer(t *testing.T) {
+	for _, forced := range []bool{false, true} {
+		t.Run(fmt.Sprintf("exit fixture forced=%v", forced), func(t *testing.T) {
+			h, in, _, sess := startExitOnInput(t, forced)
+			defer func() { _, _ = io.WriteString(in, "0\n") }()
+			checkCommandHangup(t, h.srv.cmd.timing, 5*time.Second)
+			_, err := io.WriteString(in, "0\n")
+			require.NoError(t, err)
+			require.NoError(t, sess.Wait())
+		})
+	}
+
+	for _, d := range []time.Duration{40 * time.Millisecond, 80 * time.Millisecond} {
+		t.Run(d.String(), func(t *testing.T) {
+			timing := serverTiming{pacingStall: d, primaryStall: d, promoteFlush: d, outputIdle: d, outputDrain: 4 * d, hangup: d, forceCommandStop: 2 * d}
+			srv := &Server{Command: printsTheRing, timing: timing}
+			pacers := capturePacer(t, srv)
+			copied := make(chan serverTiming, 1)
+			srv.OnCommandStarted = func() { copied <- srv.cmd.timing }
+			h := startHost(t, srv)
+			p := awaitPacer(t, pacers)
+			var commandTiming serverTiming
+			select {
+			case commandTiming = <-copied:
+			case <-time.After(harnessTimeout):
+				t.Fatal("command did not start")
+			}
+			_, out, _ := h.connectHost(t, nil)
+			readUntil(t, out, ringMark)
+			checkCommandTiming(t, commandTiming, timing)
+			t.Run("pacer", func(t *testing.T) { checkPacerTiming(t, p.stallTimeout, d) })
+			t.Run("sink", func(t *testing.T) { checkSinkTiming(t, timing.primaryStall) })
+			t.Run("server sink", func(t *testing.T) { checkServerSinkTiming(t, timing) })
+			t.Run("guest drop diagnostic", func(t *testing.T) { checkServerPacerDiagnostic(t, timing) })
+			t.Run("hangup", func(t *testing.T) { checkCommandHangup(t, commandTiming, d) })
+			t.Run("forced teardown", func(t *testing.T) { checkForcedTiming(t, timing) })
+			t.Run("release sessions", func(t *testing.T) { checkReleaseTiming(t, commandTiming.outputDrain, timing.outputDrain) })
+			t.Run("promotion", func(t *testing.T) { checkPromotionTiming(t, srv.hostClients.promoteFlushTimeout, d) })
+		})
+	}
+}
+
+func checkServerSinkTiming(t *testing.T, timing serverTiming) {
+	log := newSessionLog()
+	srv := &Server{timing: timing, Logger: slog.New(slog.NewTextHandler(log, nil)), AwaitInitialClient: true, Command: []string{"sh", "-c", `stty -echo -opost; printf READY; IFS= read -r line; exec yes`}}
+	h := startHost(t, srv)
+	in, out, _, gate := h.connectHostGated(t, &hostPty{term: "xterm", cols: 80, rows: 24})
+	readUntil(t, out, "READY")
+	gate.pauseReads()
+	_, err := io.WriteString(in, "go\n")
+	require.NoError(t, err)
+	got := log.await(t, "disconnected primary client: no output delivered within the stall timeout")
+	require.Contains(t, got, "timeout="+timing.primaryStall.String(), "the session's sink must report the watchdog bound it was constructed with")
+	gate.resumeReads()
+}
+
+func checkForcedTiming(t *testing.T, timing serverTiming) {
+	srv := &Server{timing: timing, Command: []string{"sh", "-c", "sleep 30"}, ForceCommand: []string{"sh", "-c", `trap '' HUP TERM; printf 'PID=%s;' $$; while :; do sleep 0.05; done`}}
+	h := startHost(t, srv)
+	_, out, _ := h.connectGuestSession(t)
+	seen := readUntil(t, out, ";")
+	pid, err := strconv.Atoi(strings.TrimSuffix(seen[strings.Index(seen, "PID=")+4:], ";"))
+	require.NoError(t, err)
+	elapsed := h.stop(t)
+	require.Less(t, elapsed, timing.hangup+2*timing.forceCommandStop+500*time.Millisecond, "forced teardown must use this session's short hangup and escalation bounds")
+	require.ErrorIs(t, syscall.Kill(pid, 0), syscall.ESRCH, "forced process outlived its completed teardown")
+}
+
+// The diagnostic must describe the same stall bound as the session's pacer.
+// The log itself acknowledges the drop; no polling guesses when it happened.
+func checkServerPacerDiagnostic(t *testing.T, timing serverTiming) {
+	log := newSessionLog()
+	srv := &Server{timing: timing, Logger: slog.New(slog.NewTextHandler(log, nil)), Command: []string{"sh", "-c", `stty -echo -opost; printf READY; IFS= read -r line; exec yes`}}
+	h := startHost(t, srv)
+	in, out := h.connectGuest(t, withDialDeadline(time.Minute))
+	readUntil(t, out, "READY")
+	_, err := io.WriteString(in, "go\n")
+	require.NoError(t, err)
+	got := log.await(t, "dropping guest: no output delivered within the stall timeout")
+	require.Contains(t, got, "timeout="+timing.pacingStall.String(), "guest drop must report this session's actual pacer stall bound")
 }

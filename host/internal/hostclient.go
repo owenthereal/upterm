@@ -12,10 +12,10 @@ import (
 	uio "github.com/owenthereal/upterm/io"
 )
 
-// The stall bound and the chunk it measures progress in. Provisional; vars so
-// a test can shorten them. 4 KiB is one ring chunk and about a screenful, so a
+// The default stall bound and the chunk it measures progress in.
+// 4 KiB is one ring chunk and about a screenful, so a
 // healthy terminal completes one in milliseconds.
-var (
+const (
 	primaryStallTimeout = 5 * time.Second
 	primaryChunkSize    = 4096
 	// promoteFlushTimeout bounds how long promotion waits for a candidate's
@@ -71,7 +71,10 @@ type hostSink struct {
 // newHostSink builds a secondary sink for a session channel. disconnect is
 // what the watchdog and the overflow path call — in production it closes the
 // *ssh.ServerConn — and may be nil in tests.
-func newHostSink(ch io.Writer, disconnect func(), sessionID string, logger *slog.Logger) *hostSink {
+func newHostSink(ch io.Writer, disconnect func(), sessionID string, logger *slog.Logger, stall time.Duration) *hostSink {
+	if stall <= 0 {
+		stall = primaryStallTimeout
+	}
 	s := &hostSink{disconnect: disconnect}
 	s.filter = uio.NewTerminalQueryFilter(ch)
 	s.async = uio.NewAsyncWriter(s.filter, uio.DefaultGuestBufferSize, func(err error) {
@@ -87,11 +90,7 @@ func newHostSink(ch io.Writer, disconnect func(), sessionID string, logger *slog
 		logger.Warn("disconnected local client: too far behind to keep up with output",
 			"session-id", sessionID, "buffer-bytes", uio.DefaultGuestBufferSize, "error", err)
 	})
-	// The bound this watchdog is armed with, read once here rather than again
-	// when it fires: the callback runs on the watchdog's own goroutine, where
-	// reading the package var would race the test that restores it — and the
-	// value worth reporting is the one the writer was actually built with.
-	stall := primaryStallTimeout
+	// The watchdog and its diagnostic use the same construction-time bound.
 	s.direct = uio.NewStallWriter(ch, primaryChunkSize, stall, func() {
 		// Never under writeMu: the lock is held by the write this releases.
 		// And the close before the log: with a blocked logger the other
@@ -289,8 +288,9 @@ type hostClients struct {
 
 	// electMu serialises elections, which block for up to
 	// promoteFlushTimeout per candidate and must not run concurrently.
-	electMu sync.Mutex
-	logger  *slog.Logger
+	electMu             sync.Mutex
+	logger              *slog.Logger
+	promoteFlushTimeout time.Duration
 }
 
 // reportPrimary tells onPrimary whether there is a primary. Callers must hold
@@ -370,6 +370,10 @@ func (h *hostClients) elect() {
 // electOne is elect's body, returning the id of whoever it promoted so that
 // the logging happens outside the lock.
 func (h *hostClients) electOne() string {
+	flush := h.promoteFlushTimeout
+	if flush <= 0 {
+		flush = promoteFlushTimeout
+	}
 	h.electMu.Lock()
 	defer h.electMu.Unlock()
 
@@ -393,7 +397,7 @@ func (h *hostClients) electOne() string {
 			// is ready now waiting for output that may never come.
 			drained, watchable := c.sink.drained()
 
-			ctx, cancel := context.WithTimeout(context.Background(), promoteFlushTimeout)
+			ctx, cancel := context.WithTimeout(context.Background(), flush)
 			ok := c.sink.promote(ctx)
 			cancel()
 			if !ok {

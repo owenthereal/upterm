@@ -34,7 +34,7 @@ func newBlockingHandler(gate <-chan struct{}) slog.Handler {
 
 func TestHostSinkPromoteFlushesQueuedBytesBeforeFlipping(t *testing.T) {
 	ch := &slowChannel{delay: 20 * time.Millisecond}
-	sink := newHostSink(ch, nil, "s", discardLogger())
+	sink := newHostSink(ch, nil, "s", discardLogger(), 0)
 	defer func() { _ = sink.Close() }()
 
 	for _, s := range []string{"one ", "two ", "three "} {
@@ -54,7 +54,7 @@ func TestHostSinkPromoteFlushesQueuedBytesBeforeFlipping(t *testing.T) {
 
 func TestHostSinkPromoteHandsOverThePendingPartialRaw(t *testing.T) {
 	ch := &slowChannel{}
-	sink := newHostSink(ch, nil, "s", discardLogger())
+	sink := newHostSink(ch, nil, "s", discardLogger(), 0)
 	defer func() { _ = sink.Close() }()
 
 	// The filter holds the lead-in of what may be a query.
@@ -100,7 +100,7 @@ func TestHostSinkPromoteInEveryHeldState(t *testing.T) {
 			}
 
 			ch := &slowChannel{}
-			sink := newHostSink(ch, nil, "s", discardLogger())
+			sink := newHostSink(ch, nil, "s", discardLogger(), 0)
 			defer func() { _ = sink.Close() }()
 
 			_, err := sink.Write([]byte(tc.prefix))
@@ -120,7 +120,7 @@ func TestHostSinkPromoteAtEveryBoundaryOfADroppedQuery(t *testing.T) {
 	headerEnd := len("\x1bP+q") // classified once 'q' arrives
 	for k := 0; k <= len(in); k++ {
 		ch := &slowChannel{}
-		sink := newHostSink(ch, nil, "s", discardLogger())
+		sink := newHostSink(ch, nil, "s", discardLogger(), 0)
 		_, err := sink.Write([]byte(in[:k]))
 		require.NoError(t, err)
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
@@ -148,7 +148,7 @@ func TestHostSinkPromoteAtEveryBoundaryOfADroppedQuery(t *testing.T) {
 func promotedAt(t *testing.T, in string, k int) string {
 	t.Helper()
 	ch := &slowChannel{}
-	sink := newHostSink(ch, nil, "s", discardLogger())
+	sink := newHostSink(ch, nil, "s", discardLogger(), 0)
 	defer func() { _ = sink.Close() }()
 	_, err := sink.Write([]byte(in[:k]))
 	require.NoError(t, err)
@@ -243,7 +243,7 @@ func TestHostSinkPromoteMidDropKeepsTheQueryThatFollows(t *testing.T) {
 		{"\x1bP+q54", "4e", ""}, // still dropping when the write ends...
 	} {
 		ch := &slowChannel{}
-		sink := newHostSink(ch, nil, "s", discardLogger())
+		sink := newHostSink(ch, nil, "s", discardLogger(), 0)
 		_, err := sink.Write([]byte(c.before))
 		require.NoError(t, err)
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
@@ -256,7 +256,7 @@ func TestHostSinkPromoteMidDropKeepsTheQueryThatFollows(t *testing.T) {
 	}
 	// ...and settles on a later write.
 	ch := &slowChannel{}
-	sink := newHostSink(ch, nil, "s", discardLogger())
+	sink := newHostSink(ch, nil, "s", discardLogger(), 0)
 	defer func() { _ = sink.Close() }()
 	_, _ = sink.Write([]byte("\x1bP+q54"))
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
@@ -269,7 +269,7 @@ func TestHostSinkPromoteMidDropKeepsTheQueryThatFollows(t *testing.T) {
 
 func TestHostSinkSecondaryFiltersLiveQueries(t *testing.T) {
 	ch := &slowChannel{}
-	sink := newHostSink(ch, nil, "s", discardLogger())
+	sink := newHostSink(ch, nil, "s", discardLogger(), 0)
 	defer func() { _ = sink.Close() }()
 	_, err := sink.Write([]byte("a\x1b[6nb"))
 	require.NoError(t, err)
@@ -280,7 +280,7 @@ func TestHostSinkSecondaryFiltersLiveQueries(t *testing.T) {
 func TestHostSinkPromoteGivesUpWhenTheQueueDoesNotDrain(t *testing.T) {
 	gate := make(chan struct{})
 	ch := &gatedWriter{gate: gate, rec: &recordingWriter{}}
-	sink := newHostSink(ch, nil, "s", discardLogger())
+	sink := newHostSink(ch, nil, "s", discardLogger(), 0)
 	defer func() { _ = sink.Close(); close(gate) }()
 	_, err := sink.Write([]byte("stuck"))
 	require.NoError(t, err)
@@ -314,12 +314,10 @@ func (d *disconnectingChannel) disconnect() { d.once.Do(func() { close(d.closed)
 // watchdog like every other primary write, or the sink lock is held forever
 // and the fan-out with it.
 func TestHostSinkPromoteBoundsThePendingWriteByTheWatchdog(t *testing.T) {
-	orig := primaryStallTimeout
-	primaryStallTimeout = 50 * time.Millisecond
-	t.Cleanup(func() { primaryStallTimeout = orig })
+	const stall = 50 * time.Millisecond
 
 	ch := newDisconnectingChannel()
-	sink := newHostSink(ch, ch.disconnect, "s", discardLogger())
+	sink := newHostSink(ch, ch.disconnect, "s", discardLogger(), stall)
 	defer func() { _ = sink.Close() }()
 
 	// Held by the filter, so the async queue is empty and Flush is instant.
@@ -342,13 +340,11 @@ func TestHostSinkPromoteBoundsThePendingWriteByTheWatchdog(t *testing.T) {
 // but the write that settles the drop goes raw from the string's end: that is
 // a primary's write like any other, and the watchdog bounds it.
 func TestHostSinkPromoteBoundsTheSettlingWriteByTheWatchdog(t *testing.T) {
-	orig := primaryStallTimeout
-	primaryStallTimeout = 50 * time.Millisecond
-	t.Cleanup(func() { primaryStallTimeout = orig })
+	const stall = 50 * time.Millisecond
 
 	ch := newDisconnectingChannel()
 	defer ch.disconnect() // releases a write the watchdog left parked
-	sink := newHostSink(ch, ch.disconnect, "s", discardLogger())
+	sink := newHostSink(ch, ch.disconnect, "s", discardLogger(), stall)
 	defer func() { _ = sink.Close() }()
 
 	// Dropped by the filter, so nothing reaches the channel and Flush is instant.
@@ -381,16 +377,14 @@ func TestHostSinkPromoteBoundsTheSettlingWriteByTheWatchdog(t *testing.T) {
 // blocking slog.Handler fanout_test.go builds for
 // TestCommandRunDoesNotHangOnABlockedLogger.
 func TestHostSinkStallDisconnectsBeforeLogging(t *testing.T) {
-	orig := primaryStallTimeout
-	primaryStallTimeout = 50 * time.Millisecond
-	t.Cleanup(func() { primaryStallTimeout = orig })
+	const stall = 50 * time.Millisecond
 
 	blocked := make(chan struct{})
 	defer close(blocked)
 	logger := slog.New(newBlockingHandler(blocked)) // never returns until blocked is closed
 
 	ch := newDisconnectingChannel()
-	sink := newHostSink(ch, ch.disconnect, "s", logger)
+	sink := newHostSink(ch, ch.disconnect, "s", logger, stall)
 	defer func() { _ = sink.Close() }()
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
@@ -446,7 +440,7 @@ func TestHostSinkPromoteFailsOnAFailedSink(t *testing.T) {
 	disconnected := make(chan struct{})
 	var once sync.Once
 	sink := newHostSink(ch, func() { once.Do(func() { ch.openUp(); close(disconnected) }) },
-		"s", discardLogger())
+		"s", discardLogger(), 0)
 	defer func() { _ = sink.Close() }()
 
 	// The drain parks inside the filter's write to the channel.
@@ -485,11 +479,11 @@ func TestHostSinkCloseDisconnectsOnlyOnceAttached(t *testing.T) {
 	calls := make(chan struct{}, 4)
 	disconnect := func() { calls <- struct{}{} }
 
-	refused := newHostSink(io.Discard, disconnect, "refused", discardLogger())
+	refused := newHostSink(io.Discard, disconnect, "refused", discardLogger(), 0)
 	require.NoError(t, refused.Close())
 	require.Empty(t, calls, "a sink the fan-out refused must leave the connection alone")
 
-	attached := newHostSink(io.Discard, disconnect, "attached", discardLogger())
+	attached := newHostSink(io.Discard, disconnect, "attached", discardLogger(), 0)
 	attached.markAttached()
 	require.NoError(t, attached.Close())
 	require.Len(t, calls, 1, "an attached sink disconnects on the way out")
@@ -503,8 +497,8 @@ func TestHostClientsElectionIsNotHeldByABlockedLogger(t *testing.T) {
 	defer close(blocked)
 	hc := &hostClients{logger: slog.New(newBlockingHandler(blocked))}
 
-	a := &hostClient{id: "a", sink: newHostSink(io.Discard, nil, "a", discardLogger())}
-	b := &hostClient{id: "b", sink: newHostSink(io.Discard, nil, "b", discardLogger())}
+	a := &hostClient{id: "a", sink: newHostSink(io.Discard, nil, "a", discardLogger(), 0)}
+	b := &hostClient{id: "b", sink: newHostSink(io.Discard, nil, "b", discardLogger(), 0)}
 	defer func() { _ = a.sink.Close(); _ = b.sink.Close() }()
 
 	done := make(chan struct{})
@@ -519,8 +513,8 @@ func TestHostClientsElectionIsNotHeldByABlockedLogger(t *testing.T) {
 
 func TestHostClientsElectTheEarliestAndReelectOnRemoval(t *testing.T) {
 	hc := &hostClients{logger: discardLogger()}
-	a := &hostClient{id: "a", sink: newHostSink(io.Discard, nil, "a", discardLogger())}
-	b := &hostClient{id: "b", sink: newHostSink(io.Discard, nil, "b", discardLogger())}
+	a := &hostClient{id: "a", sink: newHostSink(io.Discard, nil, "a", discardLogger(), 0)}
+	b := &hostClient{id: "b", sink: newHostSink(io.Discard, nil, "b", discardLogger(), 0)}
 	defer func() { _ = a.sink.Close(); _ = b.sink.Close() }()
 	hc.add(a)
 	hc.add(b)
@@ -548,8 +542,8 @@ func TestHostClientsReportThePrimaryToThePacer(t *testing.T) {
 		defer mu.Unlock()
 		reports = append(reports, has)
 	}}
-	a := &hostClient{id: "a", sink: newHostSink(io.Discard, nil, "a", discardLogger())}
-	b := &hostClient{id: "b", sink: newHostSink(io.Discard, nil, "b", discardLogger())}
+	a := &hostClient{id: "a", sink: newHostSink(io.Discard, nil, "a", discardLogger(), 0)}
+	b := &hostClient{id: "b", sink: newHostSink(io.Discard, nil, "b", discardLogger(), 0)}
 	defer func() { _ = a.sink.Close(); _ = b.sink.Close() }()
 
 	hc.add(a)
@@ -569,7 +563,7 @@ func TestHostClientsReportThePrimaryToThePacer(t *testing.T) {
 // this whole path exists to get out of.
 func TestHostClientsAddRefusesAGoneClient(t *testing.T) {
 	hc := &hostClients{logger: discardLogger()}
-	c := &hostClient{id: "c", sink: newHostSink(io.Discard, nil, "c", discardLogger())}
+	c := &hostClient{id: "c", sink: newHostSink(io.Discard, nil, "c", discardLogger(), 0)}
 	defer func() { _ = c.sink.Close() }()
 
 	hc.remove(c)
@@ -592,16 +586,14 @@ func TestHostClientsAddRefusesAGoneClient(t *testing.T) {
 // second candidate arriving.
 func TestHostClientsElectAgainOnceACandidateCatchesUp(t *testing.T) {
 	gate := make(chan struct{})
-	behind := &hostClient{id: "behind", sink: newHostSink(&gatedWriter{gate: gate, rec: &recordingWriter{}}, nil, "behind", discardLogger())}
+	behind := &hostClient{id: "behind", sink: newHostSink(&gatedWriter{gate: gate, rec: &recordingWriter{}}, nil, "behind", discardLogger(), 0)}
 	_, err := behind.sink.Write([]byte("more than a second's worth"))
 	require.NoError(t, err)
 	defer func() { _ = behind.sink.Close() }()
 
-	orig := promoteFlushTimeout
-	promoteFlushTimeout = 50 * time.Millisecond
-	t.Cleanup(func() { promoteFlushTimeout = orig })
+	const flush = 50 * time.Millisecond
 
-	hc := &hostClients{logger: discardLogger()}
+	hc := &hostClients{promoteFlushTimeout: flush, logger: discardLogger()}
 	hc.add(behind)
 	require.Empty(t, hc.primaryID(), "a client that cannot drain is not promoted")
 
@@ -627,16 +619,14 @@ func TestHostClientsElectAgainOnceACandidateCatchesUp(t *testing.T) {
 // what makes the ordering observable rather than a race with the promotion.
 func TestAWatchedCandidateIsWatchableAgainBeforeItsElectionRuns(t *testing.T) {
 	gate := make(chan struct{})
-	behind := &hostClient{id: "behind", sink: newHostSink(&gatedWriter{gate: gate, rec: &recordingWriter{}}, nil, "behind", discardLogger())}
+	behind := &hostClient{id: "behind", sink: newHostSink(&gatedWriter{gate: gate, rec: &recordingWriter{}}, nil, "behind", discardLogger(), 0)}
 	_, err := behind.sink.Write([]byte("queued"))
 	require.NoError(t, err)
 	defer func() { _ = behind.sink.Close() }()
 
-	orig := promoteFlushTimeout
-	promoteFlushTimeout = 50 * time.Millisecond
-	t.Cleanup(func() { promoteFlushTimeout = orig })
+	const flush = 50 * time.Millisecond
 
-	hc := &hostClients{logger: discardLogger()}
+	hc := &hostClients{promoteFlushTimeout: flush, logger: discardLogger()}
 	hc.add(behind)
 	require.True(t, behind.watching.Load(), "a skipped candidate is watched for catching up")
 
@@ -656,7 +646,7 @@ func TestAWatchedCandidateIsWatchableAgainBeforeItsElectionRuns(t *testing.T) {
 	require.True(t, watchable, "the candidate was still spoken for while the election it triggered had not even started")
 
 	// And the election it triggered runs to the end before the test does:
-	// it reads promoteFlushTimeout, which the cleanup here restores.
+	// it uses the elector's configured promotion timeout.
 	require.Eventually(t, func() bool {
 		return hc.primaryID() == "behind"
 	}, 5*time.Second, time.Millisecond, "the released candidate was never promoted")
@@ -665,16 +655,14 @@ func TestAWatchedCandidateIsWatchableAgainBeforeItsElectionRuns(t *testing.T) {
 func TestHostClientsSkipACandidateThatCannotDrain(t *testing.T) {
 	gate := make(chan struct{})
 	defer close(gate)
-	stuck := &hostClient{id: "stuck", sink: newHostSink(&gatedWriter{gate: gate, rec: &recordingWriter{}}, nil, "stuck", discardLogger())}
+	stuck := &hostClient{id: "stuck", sink: newHostSink(&gatedWriter{gate: gate, rec: &recordingWriter{}}, nil, "stuck", discardLogger(), 0)}
 	_, _ = stuck.sink.Write([]byte("x"))
-	fine := &hostClient{id: "fine", sink: newHostSink(io.Discard, nil, "fine", discardLogger())}
+	fine := &hostClient{id: "fine", sink: newHostSink(io.Discard, nil, "fine", discardLogger(), 0)}
 	defer func() { _ = stuck.sink.Close(); _ = fine.sink.Close() }()
 
-	orig := promoteFlushTimeout
-	promoteFlushTimeout = 50 * time.Millisecond
-	t.Cleanup(func() { promoteFlushTimeout = orig })
+	const flush = 50 * time.Millisecond
 
-	hc := &hostClients{logger: discardLogger()}
+	hc := &hostClients{promoteFlushTimeout: flush, logger: discardLogger()}
 	hc.add(stuck)
 	require.Empty(t, hc.primaryID(), "a client that cannot drain is not promoted")
 	hc.add(fine)

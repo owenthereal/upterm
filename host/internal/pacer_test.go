@@ -83,9 +83,7 @@ func stuckSink(t *testing.T, onDrop func(error)) *uio.AsyncWriter {
 }
 
 // newTestPacer returns a pacer over a fresh fan-out with the stall timeout set
-// to stall. Called first in a test, its restore is the first cleanup
-// registered and so the last to run: after every cleanup that joins a
-// goroutine reading the timeout.
+// to stall.
 func newTestPacer(t *testing.T, stall time.Duration) (*guestPacer, *uio.MultiWriter) {
 	t.Helper()
 	return newTestPacerWithContext(t, t.Context(), stall)
@@ -95,11 +93,8 @@ func newTestPacer(t *testing.T, stall time.Duration) (*guestPacer, *uio.MultiWri
 // context itself.
 func newTestPacerWithContext(t *testing.T, ctx context.Context, stall time.Duration) (*guestPacer, *uio.MultiWriter) {
 	t.Helper()
-	orig := pacingStallTimeout
-	pacingStallTimeout = stall
-	t.Cleanup(func() { pacingStallTimeout = orig })
 	writers := uio.NewMultiWriter(uio.DefaultReplayBytes)
-	return newGuestPacer(ctx, writers), writers
+	return newGuestPacer(ctx, writers, stall), writers
 }
 
 // attachPaced attaches sink as HandleSession does: registered with the pacer
@@ -835,9 +830,6 @@ type emulatingPacer struct {
 
 func newEmulatingPacer(t *testing.T, stall time.Duration) *emulatingPacer {
 	t.Helper()
-	orig := pacingStallTimeout
-	pacingStallTimeout = stall
-	t.Cleanup(func() { pacingStallTimeout = orig })
 
 	e := &emulatingPacer{
 		writers:  uio.NewMultiWriter(uio.DefaultReplayBytes),
@@ -848,7 +840,7 @@ func newEmulatingPacer(t *testing.T, stall time.Duration) *emulatingPacer {
 	e.writers.SetReplayer(e.r, func(err error) { e.fellBack <- err })
 	// The size the ring is written at, which a join's emulation starts from.
 	e.writers.ResizeEnd(e.writers.ResizeBegin(termsize.Default), true)
-	e.p = newGuestPacer(t.Context(), io.MultiWriter(e.passed, e.writers))
+	e.p = newGuestPacer(t.Context(), io.MultiWriter(e.passed, e.writers), stall)
 	_, err := e.p.Write([]byte(ringBytes))
 	require.NoError(t, err)
 	return e
@@ -1333,7 +1325,7 @@ func requireReconstructed(t *testing.T, sink *uio.AsyncWriter, got *recordingWri
 // emulated, rather than waiting out its deadline, a minute off, to fall back.
 func TestGuestPacerLetsAJoinFinishACharacterTheRingEndsInside(t *testing.T) {
 	c := newSplitCharacter(t)
-	p := newGuestPacer(t.Context(), c.writers)
+	p := newGuestPacer(t.Context(), c.writers, 0)
 	joiner := termsize.Size{Cols: 100, Rows: 40}
 	got := &recordingWriter{}
 	sink := uio.NewAsyncWriter(got, uio.DefaultGuestBufferSize, nil)
@@ -1361,7 +1353,7 @@ func TestAJoinWhoseResizeLandsInsideACharacterHandsOverAtItsSize(t *testing.T) {
 	joiner := termsize.Size{Cols: 45, Rows: 24}
 	t.Run("a guest that paces, no primary", func(t *testing.T) {
 		c := newSplitCharacter(t)
-		p := newGuestPacer(t.Context(), c.writers)
+		p := newGuestPacer(t.Context(), c.writers, 0)
 		got := &recordingWriter{}
 		sink := uio.NewAsyncWriter(got, uio.DefaultGuestBufferSize, nil)
 		t.Cleanup(func() { p.remove(sink) })

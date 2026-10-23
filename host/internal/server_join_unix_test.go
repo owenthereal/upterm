@@ -153,14 +153,9 @@ func (e *doorEmulation) Render() ([]byte, error) {
 	return append([]byte(emulatedMark), e.consumed...), nil
 }
 
-// installReplayer has every session ServeWithContext builds from here on
-// use r, in place of the session's own. Called before startHost, as
-// capturePacer is, for the same reason.
-func installReplayer(t *testing.T, r uio.Replayer) {
-	t.Helper()
-	orig := sessionReplayer
-	sessionReplayer = func(string) uio.Replayer { return r }
-	t.Cleanup(func() { sessionReplayer = orig })
+// installReplayer configures a server before startHost launches its actors.
+func installReplayer(srv *Server, r uio.Replayer) {
+	srv.replayerFactory = func(string) uio.Replayer { return r }
 }
 
 // The pty takes the minimum over the terminals attached, per dimension.
@@ -179,8 +174,9 @@ func TestTheJoinerResizesThePtyBeforeTheCapture(t *testing.T) {
 
 	t.Run("no other terminal", func(t *testing.T) {
 		r := newDoorReplayer()
-		installReplayer(t, r)
-		h := startHost(t, &Server{Command: printsTheRing})
+		srv := &Server{Command: printsTheRing}
+		installReplayer(srv, r)
+		h := startHost(t, srv)
 		// A viewer has no terminal and counts towards no size: the session
 		// stays at the 80x24 it started at, and its ring now holds output.
 		_, viewer, _ := h.connectHost(t, nil)
@@ -197,8 +193,9 @@ func TestTheJoinerResizesThePtyBeforeTheCapture(t *testing.T) {
 
 	t.Run("an 80x24 terminal attached", func(t *testing.T) {
 		r := newDoorReplayer()
-		installReplayer(t, r)
-		h := startHost(t, &Server{Command: printsTheRing})
+		srv := &Server{Command: printsTheRing}
+		installReplayer(srv, r)
+		h := startHost(t, srv)
 		_, viewer, _ := h.connectHost(t, nil)
 		readUntil(t, viewer, ringMark)
 		_, desk := h.connectGuest(t, withWindow(desktop))
@@ -517,8 +514,9 @@ func TestTheDeadlineStartsBeforeThePacerGate(t *testing.T) {
 func TestAViewerStillGetsTheRawRing(t *testing.T) {
 	t.Run("a test's replayer", func(t *testing.T) {
 		r := newDoorReplayer()
-		installReplayer(t, r)
-		h := startHost(t, &Server{Command: printsTheRing})
+		srv := &Server{Command: printsTheRing}
+		installReplayer(srv, r)
+		h := startHost(t, srv)
 		_, first, _ := h.connectHost(t, nil)
 		readUntil(t, first, ringMark)
 
@@ -555,6 +553,8 @@ func TestTerminalsBeforeTheCommandOpenItAtTheirMinimum(t *testing.T) {
 	t.Cleanup(shared.abandon)
 	attached := make(chan struct{}, 2)
 	h := &sessionHandler{
+		timing:            (serverTiming{}).orDefault(),
+		replayBudget:      uio.ReplayBudget,
 		kind:              kindHost,
 		ptmx:              shared,
 		writers:           uio.NewMultiWriter(uio.DefaultReplayBytes),
@@ -604,6 +604,8 @@ func TestAJoinerThatLeavesBeforeTheCommandStartsDoesNotSizeIt(t *testing.T) {
 		writers = uio.NewMultiWriter(uio.DefaultReplayBytes)
 		attached = make(chan struct{}, 2)
 		h = &sessionHandler{
+			timing:            (serverTiming{}).orDefault(),
+			replayBudget:      uio.ReplayBudget,
 			kind:              kindHost,
 			ptmx:              shared,
 			writers:           writers,
@@ -723,6 +725,8 @@ func newJoinRig(t *testing.T, r uio.Replayer, ringBytes int, paced bool) *joinRi
 
 	rig := &joinRig{writers: writers, ptmx: p.(*pty), sizes: sizes}
 	rig.handler = sessionHandler{
+		timing:            (serverTiming{}).orDefault(),
+		replayBudget:      uio.ReplayBudget,
 		ptmx:              p,
 		writers:           writers,
 		eventEmmiter:      emitter.New(1),
@@ -732,7 +736,7 @@ func newJoinRig(t *testing.T, r uio.Replayer, ringBytes int, paced bool) *joinRi
 		logger:            discardLogger(),
 	}
 	if paced {
-		rig.pacer = newGuestPacer(t.Context(), writers)
+		rig.pacer = newGuestPacer(t.Context(), writers, 0)
 		rig.handler.pacer = rig.pacer
 	}
 	rig.handler.terminals.changed(p, "desktop", desktop.Cols, desktop.Rows, nil)

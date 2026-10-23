@@ -250,6 +250,8 @@ type Flusher interface {
 // checkRemovable, which is how Append enforces it. NewMultiWriter does not,
 // because it cannot report the error, so prefer Append.
 type MultiWriter struct {
+	// onJoinWait is installed before any join and observes only this fan-out.
+	onJoinWait func(joinWait)
 	// writeMu serializes the fan-out. Two producers must not write to the
 	// same attached writer at once: many writers are not concurrency safe,
 	// and even those that are would interleave halves of two writes.
