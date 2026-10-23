@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -119,46 +120,86 @@ func TestAdoptionAgainstANewerRegistrationInEveryOrder(t *testing.T) {
 	}
 }
 
-// TestAdoptionAgainstAPlainWriteInEveryOrder runs every order of P, W_c and
-// W_r, in that order, interleaved with S and F, in that order, after A R: 10
-// orders.
+// TestAdoptionAgainstAPlainWriteInEveryOrder expands the ten orders of
+// P<W_c<W_r and S<F with rebuild commit B_c and reply B_r. L is the first
+// acknowledged F after W_c, or W_r after S: the first step that reports loss.
+// Insert L<B_c<B_r while preserving each base order: four have one placement,
+// six have three, for 22 rows. In particular B_c after both F and W_r prevents
+// a rebuild from masking either decision in those six rows.
 //
-// P's value is another node's, of a generation above generation 1's, in the
-// key lease 1 still holds. That is a loss for generation 1's keeper to
-// rebuild, not a supersession. Whichever of reconcile and confirm sees it
-// first reports the loss, and confirm returns nil in every order, so F's
-// reply is a success.
-//
-// After the last step the host's connection survives and its slot is active,
-// the gauge is 1, lease 1 isn't live, and the fake's entry is generation 1's
-// own again, under a live lease that isn't lease 1. The end state is awaited
-// whole. A live successor shows only that the rebuild's transaction
-// committed, and Reregister returning comes earlier still; lease 1 going is
-// what shows the keeper has installed the successor and released the
-// original, the rebuild's last change. The fake's changes wake the wait. The
-// connection ending fails it at once, since nothing reopens a connection.
-//
-// The keeper's rebuild, which the first report starts, isn't a checkpoint: a
-// later W_r or F can find the original handle or the rebuilt one, and both
-// reach this end state. In a narrow window the keeper rebuilds twice: confirm
-// reads the cache before the rebuild has cached its write, and reports the
-// loss it read once the rebuild has replaced the handle, too late for the
-// replace to discard it, so the keeper rebuilds once more. That rebuild keeps
-// generation 1's entry under a live lease other than lease 1, and leaves the
-// slot, the gauge and the connection as they are, so it doesn't undo this end
-// state.
+// B_c acknowledges entry before transaction 2 reaches Consul, releases it,
+// then acknowledges its committed, held reply. B_r releases that reply and
+// awaits successor installation and original-lease retirement. Before B_c the
+// original handle must stay adopted and eligible steps must record loss;
+// between B_c/B_r the committed write is distinct from the installed handle.
+// After B_r and at the end, the live host, gauge, restored entry and retired
+// original lease are checked together. Later rebuilds pass through uncounted.
+// These are orders of acknowledged steps, not an enumeration of instructions
+// inside confirm or replacement; goroutines retain their normal scheduling.
 func TestAdoptionAgainstAPlainWriteInEveryOrder(t *testing.T) {
-	all := orders([]string{"P", "W_c", "W_r", "S", "F"}, map[string][]string{"P": {"W_c"}, "W_c": {"W_r"}, "S": {"F"}})
-	require.Len(t, all, 10)
+	base := orders([]string{"P", "W_c", "W_r", "S", "F"}, map[string][]string{"P": {"W_c"}, "W_c": {"W_r"}, "S": {"F"}})
+	require.Len(t, base, 10)
+	var all [][]string
+	placements := map[int]int{}
+	for _, order := range base {
+		seen := make(map[string]bool)
+		loss := -1
+		for i, step := range order {
+			if (step == "F" && seen["W_c"]) || (step == "W_r" && seen["S"]) {
+				loss = i
+				break
+			}
+			seen[step] = true
+		}
+		require.NotEqual(t, -1, loss)
+		count := 0
+		for commit := loss + 1; commit <= len(order); commit++ {
+			for reply := commit; reply <= len(order); reply++ {
+				row := append([]string{}, order[:commit]...)
+				row = append(row, "B_c")
+				row = append(row, order[commit:reply]...)
+				row = append(row, "B_r")
+				row = append(row, order[reply:]...)
+				all = append(all, row)
+				count++
+			}
+		}
+		placements[count]++
+	}
+	require.Equal(t, map[int]int{1: 4, 3: 6}, placements)
+	require.Len(t, all, 22)
 	for _, order := range all {
 		t.Run(strings.Join(order, " "), func(t *testing.T) {
-			h := newAdoptRace(t, adoptRaceConfig{hold: []uint64{1}, confirm: []uint64{1}})
+			h := newAdoptRace(t, adoptRaceConfig{hold: []uint64{1}, confirm: []uint64{1}, holdRebuild: true})
 			h.begin()
 			h.returned1()
-			h.run(order, func(_ map[string]bool, r hostReply) {
-				require.NoError(t, r.err, "generation 1's connection ended before its reply")
-				require.True(t, r.ok, "a plain write into its own key had generation 1 refused: %s", r.body)
-			})
+			seen := make(map[string]bool)
+			for _, step := range order {
+				switch step {
+				case "B_c":
+					h.commitRebuild()
+				case "B_r":
+					h.returnRebuild()
+				default:
+					h.run([]string{step}, func(_ map[string]bool, r hostReply) {
+						require.NoError(t, r.err, "generation 1's connection ended before its reply")
+						require.True(t, r.ok, "a plain write into its own key had generation 1 refused: %s", r.body)
+					})
+				}
+				// Check each decision before waiting for a rebuild a mutant may never
+				// start, and while the pre-transaction gate prevents an early repair.
+				if !seen["B_c"] && step != "B_c" && (seen["S"] || step == "S") {
+					h.requireOriginalSlot()
+				}
+				if !seen["B_c"] && ((step == "F" && seen["W_c"]) || (step == "W_r" && seen["S"])) {
+					_, index := h.lostReport()
+					require.NotZero(t, index, "%s did not record the plain-write loss", step)
+				}
+				seen[step] = true
+				if seen["B_c"] && !seen["B_r"] {
+					h.requireCommittedRebuild()
+				}
+			}
 			h.awaitEnd("the keeper never restored the entry", h.firstEnded, h.restoredUnmet)
 		})
 	}
@@ -320,14 +361,15 @@ func TestAdoptionOfAnAbsentEntryToday(t *testing.T) {
 // holds each delivery. A delivery is a call to updateSessionReplica, made on a
 // goroutine of its own, since the observer holds it.
 type adoptRace struct {
-	t      *testing.T
-	consul *fakeConsul
-	store  *consulSessionStore // this node's
-	other  *consulSessionStore // another node's, for generation 2 at C
-	delay  *delayedTxnReply    // holds this node's first transaction's reply; nil if not
-	s      *testSSHD
-	host   proven
-	id     string
+	t       *testing.T
+	consul  *fakeConsul
+	store   *consulSessionStore // this node's
+	other   *consulSessionStore // another node's, for generation 2 at C
+	delay   *delayedTxnReply    // holds the configured transaction replies; nil if none
+	rebuild *rebuildTxnGate     // holds transaction 2 before Consul sees it
+	s       *testSSHD
+	host    proven
+	id      string
 
 	// registered and confirming are the checkpoints onRegistered and
 	// beforeConfirm hold, by generation; a generation with none passes. Fixed
@@ -349,6 +391,8 @@ type adoptRaceConfig struct {
 	// delay holds the reply to this node's first transaction, generation 1's,
 	// until resume1.
 	delay bool
+	// holdRebuild holds transaction 2 before submission and after commit.
+	holdRebuild bool
 	// hold names the generations onRegistered holds, and confirm those
 	// beforeConfirm holds.
 	hold, confirm []uint64
@@ -418,8 +462,18 @@ func newAdoptRace(t *testing.T, cfg adoptRaceConfig) *adoptRace {
 	}
 	h.id = h.host.id()
 	var rt http.RoundTripper
-	if cfg.delay {
-		h.delay = newDelayedTxnReply(http.DefaultTransport, 1)
+	if cfg.delay || cfg.holdRebuild {
+		rt = ownedHTTPTransport(t)
+		var holds []int
+		if cfg.delay {
+			holds = append(holds, 1)
+		}
+		if cfg.holdRebuild {
+			h.rebuild = &rebuildTxnGate{next: rt, entered: make(chan struct{}), resume: make(chan struct{}), left: make(chan struct{})}
+			rt = h.rebuild
+			holds = append(holds, 2)
+		}
+		h.delay = newDelayedTxnReply(rt, holds...)
 		rt = h.delay
 	}
 	h.store = newFakeConsulStoreWith(t, consul, rt)
@@ -440,6 +494,70 @@ func newAdoptRace(t *testing.T, cfg adoptRaceConfig) *adoptRace {
 	return h
 }
 
+// rebuildTxnGate holds only transaction 2 before the underlying transport
+// sends it. Later transactions pass through, even while this one is held.
+// The delayed reply outside it independently holds the same write after commit.
+type rebuildTxnGate struct {
+	next                  http.RoundTripper
+	txns                  atomic.Int64
+	entered, resume, left chan struct{}
+	released              sync.Once
+}
+
+func (g *rebuildTxnGate) release()              { g.released.Do(func() { close(g.resume) }) }
+func (g *rebuildTxnGate) CloseIdleConnections() { closeTestIdleConnections(g.next) }
+func (g *rebuildTxnGate) RoundTrip(r *http.Request) (*http.Response, error) {
+	if r.URL.Path == "/v1/txn" && g.txns.Add(1) == 2 {
+		close(g.entered)
+		<-g.resume
+		resp, err := g.next.RoundTrip(r)
+		close(g.left)
+		return resp, err
+	}
+	return g.next.RoundTrip(r)
+}
+
+func (h *adoptRace) requireOriginalSlot() {
+	h.t.Helper()
+	served := h.served()
+	require.NotNil(h.t, served, "the original slot was removed before rebuild commit")
+	require.True(h.t, served.Same(h.reg1), "the original registration lost its slot before rebuild commit")
+	require.Equal(h.t, h.lease1, served.lease, "the original handle was replaced before rebuild commit")
+	require.True(h.t, h.consul.live(h.lease1), "the original lease was retired before rebuild commit")
+	require.False(h.t, isDone(h.firstEnded), "the host's connection was closed before rebuild commit")
+	require.Equal(h.t, 1.0, h.s.gauge(h.t))
+}
+
+func (h *adoptRace) commitRebuild() {
+	h.t.Helper()
+	receiveWithin(h.t, h.rebuild.entered, "the keeper never entered its rebuild transaction")
+	h.requireOriginalSlot()
+	pair := h.consul.entry()
+	require.NotNil(h.t, pair)
+	require.Equal(h.t, uint64(2), storedSession(pair.Value).Generation, "the rebuild committed before its release")
+	require.Equal(h.t, h.lease1, pair.Session)
+	h.rebuild.release()
+	receiveWithin(h.t, h.delay.entered(2), "the rebuild never committed")
+	receiveWithin(h.t, h.rebuild.left, "the rebuild transport never returned")
+	h.requireCommittedRebuild()
+}
+
+func (h *adoptRace) requireCommittedRebuild() {
+	h.t.Helper()
+	h.requireOriginalSlot()
+	pair := h.consul.entry()
+	require.NotNil(h.t, pair)
+	require.True(h.t, sameIdentity(storedSession(pair.Value), h.reg1.Session), "the committed rebuild did not restore the entry")
+	require.NotEqual(h.t, h.lease1, pair.Session, "the committed rebuild still uses the original lease")
+	require.True(h.t, h.consul.live(pair.Session), "the committed successor lease is not live")
+}
+
+func (h *adoptRace) returnRebuild() {
+	h.t.Helper()
+	h.delay.release(2)
+	h.awaitEnd("the rebuild never installed and retired the original lease", h.firstEnded, h.restoredUnmet)
+}
+
 // observe holds each delivery after the cache has taken it, and before
 // reconcile.
 func (h *adoptRace) observe(_, _ uint64, _ map[string]StoreEntry) {
@@ -458,8 +576,13 @@ func (h *adoptRace) releaseAll() {
 	for _, d := range h.deliveries {
 		d.release()
 	}
+	if h.rebuild != nil {
+		h.rebuild.release()
+	}
 	if h.delay != nil {
-		h.delay.release(1)
+		for n := range h.delay.holds {
+			h.delay.release(n)
+		}
 	}
 }
 
@@ -705,14 +828,20 @@ func (h *adoptRace) restoredUnmet() []string {
 		h.t.Fatal("the host's connection was closed")
 	}
 	var unmet []string
-	if !h.served().Same(h.reg1) {
+	served := h.served()
+	if !served.Same(h.reg1) {
 		unmet = append(unmet, "generation 1 has no slot")
+	} else if served.lease == h.lease1 || !h.consul.live(served.lease) {
+		unmet = append(unmet, "a live successor is not installed")
 	}
 	if g := h.s.gauge(h.t); g != 1 {
 		unmet = append(unmet, fmt.Sprintf("the gauge is %v, not 1", g))
 	}
 	if h.consul.live(h.lease1) {
 		unmet = append(unmet, "lease 1 is live")
+	}
+	if !slices.Contains(h.consul.destroyed(), h.lease1) {
+		unmet = append(unmet, "lease 1 has not been destroyed")
 	}
 	switch e := h.consul.entry(); {
 	case e == nil:
@@ -767,8 +896,8 @@ func (h *adoptRace) sessions() *localSessions {
 	return h.s.sshd.sessions
 }
 
-// lostReport is the delivery that last reported generation 1's slot's entry
-// lost, as the slot records it: zero if none has.
+// lostReport is the epoch and index attached to the latest loss report,
+// from a watch delivery or confirm's own registration: zero if none has.
 func (h *adoptRace) lostReport() (epoch, index uint64) {
 	h.t.Helper()
 	sessions := h.sessions()

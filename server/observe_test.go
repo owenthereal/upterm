@@ -6,9 +6,9 @@ import (
 	"slices"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
-	"github.com/owenthereal/upterm/internal/testhelpers"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -69,6 +69,9 @@ func (s *snapshots) await(t *testing.T, within time.Duration, ok func(map[string
 			s.mu.Lock()
 			entries, seen = s.entries, s.seen
 			s.mu.Unlock()
+			if seen && ok(entries) {
+				return entries
+			}
 			t.Fatalf("no delivery within %v showed the state waited for (any delivery: %v; the latest held %q)",
 				within, seen, slices.Sorted(maps.Keys(entries)))
 		}
@@ -80,6 +83,13 @@ func present(id string, gen uint64) func(map[string]StoreEntry) bool {
 	return func(entries map[string]StoreEntry) bool {
 		e, ok := entries[id]
 		return ok && e.Session.Generation == gen
+	}
+}
+
+// presentRegistration accepts the exact registration, including its lease.
+func presentRegistration(reg *Registration) func(map[string]StoreEntry) bool {
+	return func(entries map[string]StoreEntry) bool {
+		return present(reg.ID(), reg.Generation())(entries) && entries[reg.ID()].Lease == reg.lease
 	}
 }
 
@@ -95,17 +105,13 @@ func absent(id string) func(map[string]StoreEntry) bool {
 // An observer subscribed before a registration sees the watch deliver it, and
 // then deliver its release.
 func TestObserveSeesPresenceThenAbsence(t *testing.T) {
-	if !testhelpers.IsConsulAvailable() {
-		t.Skip("Consul not available - set CONSUL_URL or ensure Consul is running on localhost:8500")
-	}
+	client := ownedConsulTestClient(t)
 	consulURL, err := suiteConsulURL("observe")
 	require.NoError(t, err)
 	store, err := newConsulSessionStore(consulURL, time.Minute, sessionTestLogger)
 	require.NoError(t, err)
-	client, err := consulTestClient()
-	require.NoError(t, err)
 	t.Cleanup(func() {
-		_ = store.Close()
+		assert.NoError(t, store.Close())
 		assert.NoError(t, removeSuiteConsulData(client, store))
 	})
 
@@ -143,4 +149,43 @@ func TestAnAbandonedObserverDoesNotStallLaterWaits(t *testing.T) {
 	require.NoError(t, store.Release(ctx, reg))
 	go store.updateSessionReplica(consul.snapshot())
 	later.await(t, 5*time.Second, absent("id"))
+}
+
+// The first judgment predates the delivery, but the delivery is acknowledged
+// before await selects an already expired deadline. Consume its notification
+// so only the deadline is selectable: the last snapshot must still be judged.
+func TestSnapshotAwaitRechecksDeliveryAtDeadline(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		s := &snapshots{seen: true, notify: make(chan struct{}, 1)}
+		checked, resume, done := make(chan struct{}), make(chan struct{}), make(chan struct{})
+		release := sync.OnceFunc(func() { close(resume) })
+		t.Cleanup(release)
+		first := true
+		go func() {
+			defer close(done)
+			s.await(t, time.Second, func(entries map[string]StoreEntry) bool {
+				if first {
+					first = false
+					close(checked)
+					<-resume
+					return false
+				}
+				return present("id", 1)(entries)
+			})
+		}()
+		synctest.Wait()
+		require.True(t, isDone(checked), "await never judged the first snapshot")
+		time.Sleep(time.Second - time.Nanosecond)
+		synctest.Wait()
+		require.False(t, isDone(done), "await finished before its deadline")
+		time.Sleep(time.Nanosecond)
+		s.mu.Lock()
+		s.entries = map[string]StoreEntry{"id": {Session: &Session{ID: "id", Generation: 1}}}
+		s.mu.Unlock()
+		s.notify <- struct{}{}
+		<-s.notify
+		release()
+		synctest.Wait()
+		require.True(t, isDone(done), "await did not finish at its deadline")
+	})
 }

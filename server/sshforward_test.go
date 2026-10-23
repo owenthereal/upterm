@@ -1225,17 +1225,45 @@ func TestSSHForwardRewritesOnlyTheDownstreamsRejections(t *testing.T) {
 		guest, node := newForwardTestPeer(), newForwardTestPeer()
 		guest.rejection = &ssh.OpenChannelError{Reason: ssh.ConnectionFailed, Message: "upstream has no session"}
 		node.rejection = guest.rejection
-		close(guest.answered)
-		close(node.answered)
+		answerGuest := sync.OnceFunc(func() { close(guest.answered) })
+		answerNode := sync.OnceFunc(func() { close(node.answered) })
+		t.Cleanup(func() {
+			answerGuest()
+			answerNode()
+			guest.end()
+			node.end()
+		})
+		answerGuest()
+		answerNode()
 		done := make(chan error, 1)
 		go func() {
 			done <- forwardSSH(t.Context(), guest.sshPeer(), node.sshPeer(), abortConnection, discardCounter,
 				func(msg string) string { return "worded: " + msg })
 		}()
-		require.Equal(t, "worded: upstream has no session", (<-guest.open(false)).Message)
-		require.Equal(t, "upstream has no session", (<-node.open(false)).Message)
+		guestAnswer := guest.open(false)
+		synctest.Wait()
+		select {
+		case got := <-guestAnswer:
+			require.Equal(t, "worded: upstream has no session", got.Message)
+		default:
+			t.Fatal("the downstream never received its rewritten rejection")
+		}
+		nodeAnswer := node.open(false)
+		synctest.Wait()
+		select {
+		case got := <-nodeAnswer:
+			require.Equal(t, "upstream has no session", got.Message)
+		default:
+			t.Fatal("the upstream never received its original rejection")
+		}
 		node.end()
-		require.ErrorIs(t, <-done, io.EOF)
+		synctest.Wait()
+		select {
+		case err := <-done:
+			require.ErrorIs(t, err, io.EOF)
+		default:
+			t.Fatal("forwardSSH never finished after its peer ended")
+		}
 	})
 }
 

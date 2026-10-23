@@ -82,7 +82,7 @@ func TestALateRegisterReplyInEveryOrder(t *testing.T) {
 	for _, order := range base {
 		for _, sameStore := range []bool{true, false} {
 			t.Run(fmt.Sprintf("%s/sameStore=%t", strings.Join(order, " "), sameStore), func(t *testing.T) {
-				h := newLateReply(t)
+				h := newLateReply(t, sameStore)
 				h.commitHeld()
 				h.run(order, sameStore)
 				h.deliver()
@@ -102,7 +102,7 @@ func TestALateRegisterReplyHandRows(t *testing.T) {
 	// deliveries. The last one has already left T1's write out, so the reply
 	// mustn't cache it: nothing would correct it before the next delivery.
 	t.Run("A B Cc Cr W X WX D", func(t *testing.T) {
-		h := newLateReply(t)
+		h := newLateReply(t, false)
 		h.commitHeld()
 		h.commit2(false)
 		h.return2()
@@ -117,7 +117,7 @@ func TestALateRegisterReplyHandRows(t *testing.T) {
 	// Feasible: the watch reports a state, not each change, so T2's commit
 	// and its removal can reach this store as one delivery.
 	t.Run("A B Cc Cr X WX D", func(t *testing.T) {
-		h := newLateReply(t)
+		h := newLateReply(t, false)
 		h.commitHeld()
 		h.commit2(false)
 		h.return2()
@@ -133,7 +133,7 @@ func TestALateRegisterReplyHandRows(t *testing.T) {
 	// replace it. The check is at D, because WX would remove an overwrite too,
 	// and hide it.
 	t.Run("A B Cc Cr W X D WX", func(t *testing.T) {
-		h := newLateReply(t)
+		h := newLateReply(t, false)
 		h.commitHeld()
 		h.commit2(false)
 		h.return2()
@@ -153,7 +153,7 @@ func TestALateRegisterReplyHandRows(t *testing.T) {
 	// entry, and D can't put it back. Get's read-through, in the new epoch,
 	// may cache it, so the cache is checked first.
 	t.Run("A B W1 Δ D", func(t *testing.T) {
-		h := newLateReply(t)
+		h := newLateReply(t, false)
 		h.commitHeld()
 		h.deliver()
 		h.requireCached(1, h.lease1, "the delivery of T1's write didn't cache it")
@@ -168,7 +168,7 @@ func TestALateRegisterReplyHandRows(t *testing.T) {
 	// Feasible: the watch can deliver T1's write before T1's reply arrives.
 	// The reply describes the write the cache already holds, and leaves it.
 	t.Run("A B W1 D", func(t *testing.T) {
-		h := newLateReply(t)
+		h := newLateReply(t, false)
 		h.commitHeld()
 		h.deliver()
 		before, ok := h.store.cache.lookup(h.id)
@@ -185,7 +185,7 @@ func TestALateRegisterReplyHandRows(t *testing.T) {
 	// its own lease (one lease serves every attempt), and takes that write as
 	// its own.
 	t.Run("A lost retry", func(t *testing.T) {
-		h := newLateReply(t)
+		h := newLateReply(t, false)
 		h.loseReply()
 		r := h.retry()
 		require.NoError(t, r.err, "a registration whose reply was lost failed")
@@ -200,7 +200,7 @@ func TestALateRegisterReplyHandRows(t *testing.T) {
 	// retry finds T2's newer entry and is refused, and destroys its lease,
 	// T1's own; T2's entry stays.
 	t.Run("A lost Cc Cr retry", func(t *testing.T) {
-		h := newLateReply(t)
+		h := newLateReply(t, false)
 		h.loseReply()
 		h.commit2(false)
 		h.return2()
@@ -279,27 +279,34 @@ type lateReply struct {
 	delivered      uint64 // the index of this store's last delivery
 }
 
-func newLateReply(t *testing.T) *lateReply {
+func newLateReply(t *testing.T, sameStore bool) *lateReply {
+	holds := []int{1}
+	if sameStore {
+		holds = append(holds, 2)
+	}
 	consul := newFakeConsul(t, monotonicIndexes)
 	h := &lateReply{
 		t:          t,
 		consul:     consul,
 		id:         "late-reply",
-		delay:      newDelayedTxnReply(http.DefaultTransport, 1, 2),
-		lost:       &lostTxnReply{next: http.DefaultTransport, entered: make(chan struct{}), resume: make(chan struct{})},
-		otherDelay: newDelayedTxnReply(http.DefaultTransport, 1),
+		delay:      newDelayedTxnReply(ownedHTTPTransport(t), holds...),
+		lost:       &lostTxnReply{next: ownedHTTPTransport(t), entered: make(chan struct{}), resume: make(chan struct{})},
+		otherDelay: newDelayedTxnReply(ownedHTTPTransport(t), 1),
 	}
 	h.resumeLost = sync.OnceFunc(func() { close(h.lost.resume) })
 	h.other = newFakeConsulStoreWith(t, consul, h.otherDelay)
 	// However the run ends, no Register is left waiting on a hold. This runs
 	// before the fake's own cleanup closes it.
-	t.Cleanup(func() {
-		h.delay.release(1)
-		h.delay.release(2)
-		h.otherDelay.release(1)
-		h.resumeLost()
-	})
+	t.Cleanup(h.releaseReplies)
 	return h
+}
+
+func (h *lateReply) releaseReplies() {
+	for n := range h.delay.holds {
+		h.delay.release(n)
+	}
+	h.otherDelay.release(1)
+	h.resumeLost()
 }
 
 // commitHeld is A B: T1 registers from this store, and it returns once Consul
@@ -326,6 +333,7 @@ func (h *lateReply) begin(rt http.RoundTripper) {
 	h.t.Helper()
 	require.Nil(h.t, h.store, "T1 registers once")
 	h.store = newFakeConsulStoreWith(h.t, h.consul, rt)
+	h.t.Cleanup(h.releaseReplies)
 	h.first = h.register(h.store, "node-a:22", 1)
 }
 

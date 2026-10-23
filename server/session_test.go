@@ -149,6 +149,37 @@ func (suite *EmbeddedSessionManagerTestSuite) TestDeleteSession() {
 	suite.Error(err)
 }
 
+// ownedHTTPTransport keeps each fixture's idle connections private.
+func ownedHTTPTransport(t *testing.T) *http.Transport {
+	t.Helper()
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	t.Cleanup(transport.CloseIdleConnections)
+	return transport
+}
+
+func ownedConsulTestClient(t *testing.T) *api.Client {
+	t.Helper()
+	u, err := url.Parse(testhelpers.ConsulURL())
+	require.NoError(t, err)
+	cfg := api.DefaultConfig()
+	cfg.Address, cfg.Scheme = u.Host, u.Scheme
+	cfg.HttpClient = &http.Client{Timeout: DefaultConsulTimeout, Transport: ownedHTTPTransport(t)}
+	client, err := api.NewClient(cfg)
+	require.NoError(t, err)
+	ctx, cancel := context.WithTimeout(context.Background(), testhelpers.ConsulHealthCheckTimeout)
+	defer cancel()
+	if _, err := client.Status().LeaderWithQueryOptions((&api.QueryOptions{}).WithContext(ctx)); err != nil {
+		t.Skip("Consul not available - set CONSUL_URL or ensure Consul is running on localhost:8500")
+	}
+	return client
+}
+
+func closeTestIdleConnections(rt http.RoundTripper) {
+	if closer, ok := rt.(interface{ CloseIdleConnections() }); ok {
+		closer.CloseIdleConnections()
+	}
+}
+
 // suiteConsulURL is the Consul URL with a key prefix of the suite's own, inside
 // the one CONSUL_URL names. Other packages' tests share the agent and the
 // default prefix, so a suite that deletes its tree when it ends must not be
@@ -183,9 +214,7 @@ type ConsulSessionManagerTestSuite struct {
 
 func (suite *ConsulSessionManagerTestSuite) SetupSuite() {
 	// Skip if Consul is not available
-	if !testhelpers.IsConsulAvailable() {
-		suite.T().Skip("Consul not available - set CONSUL_URL or ensure Consul is running on localhost:8500")
-	}
+	suite.client = ownedConsulTestClient(suite.T())
 
 	consulURL, err := suiteConsulURL("session-manager")
 	suite.Require().NoError(err)
@@ -193,14 +222,13 @@ func (suite *ConsulSessionManagerTestSuite) SetupSuite() {
 	sm, err := newConsulSessionManager(consulURL, 5*time.Minute, sessionTestLogger)
 	suite.Require().NoError(err)
 	suite.sm = sm
-
-	// Setup client for cleanup
-	client, err := testhelpers.ConsulClient()
-	suite.Require().NoError(err)
-	suite.client = client
+	suite.T().Cleanup(func() { suite.NoError(sm.GetStore().Close()) })
 }
 
 func (suite *ConsulSessionManagerTestSuite) TearDownSuite() {
+	if suite.sm != nil {
+		defer func() { suite.NoError(suite.sm.GetStore().Close()) }()
+	}
 	if suite.client != nil && suite.sm != nil {
 		// Clean up test data using the actual key prefix from the store
 		if store, ok := suite.sm.GetStore().(*consulSessionStore); ok {
@@ -418,9 +446,7 @@ type ConsulStoreTestSuite struct {
 
 func (suite *ConsulStoreTestSuite) SetupSuite() {
 	// Skip if Consul is not available
-	if !testhelpers.IsConsulAvailable() {
-		suite.T().Skip("Consul not available - set CONSUL_URL or ensure Consul is running on localhost:8500")
-	}
+	suite.client = ownedConsulTestClient(suite.T())
 
 	consulURL, err := suiteConsulURL("store")
 	suite.Require().NoError(err)
@@ -430,23 +456,20 @@ func (suite *ConsulStoreTestSuite) SetupSuite() {
 	store1, err := newConsulSessionStore(consulURL, 5*time.Minute, sessionTestLogger)
 	suite.Require().NoError(err)
 	suite.store1 = store1
+	suite.T().Cleanup(func() { suite.NoError(store1.Close()) })
 
 	store2, err := newConsulSessionStore(consulURL, 5*time.Minute, sessionTestLogger)
 	suite.Require().NoError(err)
 	suite.store2 = store2
-
-	// Setup client for cleanup
-	client, err := testhelpers.ConsulClient()
-	suite.Require().NoError(err)
-	suite.client = client
+	suite.T().Cleanup(func() { suite.NoError(store2.Close()) })
 }
 
 func (suite *ConsulStoreTestSuite) TearDownSuite() {
 	if suite.store1 != nil {
-		_ = suite.store1.Close()
+		suite.NoError(suite.store1.Close())
 	}
 	if suite.store2 != nil {
-		_ = suite.store2.Close()
+		suite.NoError(suite.store2.Close())
 	}
 	if suite.client != nil {
 		// Clean up test data using the actual key prefix from the store
@@ -462,8 +485,11 @@ func (suite *ConsulStoreTestSuite) TestBasicStoreOperations() {
 		HostUser: "testuser",
 	}
 
+	t := suite.T()
+	deliveries := observe(t, suite.store1)
+
 	// Test Store
-	_, err := suite.store1.Register(context.Background(), session)
+	reg, err := suite.store1.Register(context.Background(), session)
 	suite.NoError(err)
 
 	// Test Get - should be immediately available (strong consistency)
@@ -473,18 +499,20 @@ func (suite *ConsulStoreTestSuite) TestBasicStoreOperations() {
 	suite.Equal(session.NodeAddr, retrievedSession.NodeAddr)
 	suite.Equal(session.HostUser, retrievedSession.HostUser)
 
+	deliveries.await(t, 5*time.Second, presentRegistration(reg))
+	suite.True(suite.store1.HasInCache(sessionID), "the watch delivered the registration without caching it")
+
 	// Test Update (requires delete first: the same generation from another node doesn't supersede it)
 	err = suite.store1.Delete(sessionID)
 	suite.NoError(err)
 
-	// Verify deletion with eventual consistency (Consul may take a moment to propagate)
-	suite.EventuallyWithT(func(t *assert.CollectT) {
-		_, err = suite.store1.Get(sessionID)
-		assert.Error(t, err, "session should be deleted")
-	}, 2*time.Second, 50*time.Millisecond)
+	deliveries.await(t, 5*time.Second, absent(sessionID))
+	suite.False(suite.store1.HasInCache(sessionID), "the watch delivered the deletion but kept the entry cached")
+	_, err = suite.store1.Get(sessionID)
+	suite.Error(err, "session should be deleted")
 
 	session.NodeAddr = "192.168.1.100:2222"
-	_, err = suite.store1.Register(context.Background(), session)
+	reg, err = suite.store1.Register(context.Background(), session)
 	suite.NoError(err)
 
 	// Should be immediately available (strong consistency)
@@ -492,16 +520,32 @@ func (suite *ConsulStoreTestSuite) TestBasicStoreOperations() {
 	suite.NoError(err)
 	suite.Equal("192.168.1.100:2222", retrievedSession.NodeAddr)
 
+	deliveries.await(t, 5*time.Second, presentRegistration(reg))
+	suite.True(suite.store1.HasInCache(sessionID), "the watch delivered the updated registration without caching it")
+
 	// Test Delete
 	err = suite.store1.Delete(sessionID)
 	suite.NoError(err)
 
-	// Verify deletion with eventual consistency (Consul may take a moment to propagate)
-	suite.EventuallyWithT(func(t *assert.CollectT) {
-		_, err = suite.store1.Get(sessionID)
-		assert.Error(t, err, "session should be deleted")
-	}, 2*time.Second, 50*time.Millisecond)
+	deliveries.await(t, 5*time.Second, absent(sessionID))
+	suite.False(suite.store1.HasInCache(sessionID), "the watch delivered the deletion but kept the entry cached")
+	_, err = suite.store1.Get(sessionID)
+	suite.Error(err, "session should be deleted")
 }
+
+// countedConsulRequests borrows the store's private API transport. The
+// original client retains ownership; wrapping it preserves idle cleanup.
+type countedConsulRequests struct {
+	next     http.RoundTripper
+	requests atomic.Int64
+}
+
+func (c *countedConsulRequests) RoundTrip(r *http.Request) (*http.Response, error) {
+	c.requests.Add(1)
+	return c.next.RoundTrip(r)
+}
+
+func (c *countedConsulRequests) CloseIdleConnections() { closeTestIdleConnections(c.next) }
 
 func (suite *ConsulStoreTestSuite) TestReplicationViaCacheAndWatch() {
 	sessionID := "replication-test"
@@ -514,28 +558,42 @@ func (suite *ConsulStoreTestSuite) TestReplicationViaCacheAndWatch() {
 	t := suite.T()
 	replicated := observe(t, suite.store2)
 
+	defer func() { _ = suite.store1.Delete(sessionID) }()
+
+	// Only the suite's test goroutine uses store2's API client. Its watch
+	// has a separate client and transport, and still delivers the real
+	// registration while this API request counter is installed. Neither
+	// already-used HTTP client's transport is changed.
+	requests := &countedConsulRequests{next: suite.store2.apiHTTP.Transport}
+	cfg := api.DefaultConfig()
+	cfg.Address, cfg.Scheme = suite.consulURL.Host, suite.consulURL.Scheme
+	if u := suite.consulURL.User; u != nil {
+		cfg.Token, _ = u.Password()
+	}
+	cfg.HttpClient = &http.Client{Timeout: suite.store2.apiHTTP.Timeout, Transport: requests}
+	client, err := api.NewClient(cfg)
+	suite.Require().NoError(err)
+	original := suite.store2.client
+	suite.store2.client = client
+	defer func() { suite.store2.client = original }() // before deletion and suite cleanup
+
 	// Store session in store1
-	_, err := suite.store1.Register(context.Background(), session)
+	_, err = suite.store1.Register(context.Background(), session)
 	suite.NoError(err)
-	defer func() {
-		_ = suite.store1.Delete(sessionID)
-	}()
 
 	// Wait for store2's watch to deliver it. The cache takes each delivery
 	// before the observers see it, so the read below finds it there.
 	replicated.await(t, 5*time.Second, present(sessionID, 0))
 	suite.True(suite.store2.HasInCache(sessionID), "store2's cache never took the session its watch delivered")
 
-	// Verify data integrity and measure lookup performance
-	start := time.Now()
+	// A cached lookup must return the replicated data without backend I/O;
+	// elapsed time also includes scheduling and synchronous debug logging.
 	retrievedSession, err := suite.store2.Get(sessionID)
-	duration := time.Since(start)
-
-	suite.NoError(err)
+	suite.Zero(requests.requests.Load(), "cached Get made a backend request")
+	suite.Require().NoError(err)
 	suite.Equal(sessionID, retrievedSession.ID)
 	suite.Equal("192.168.1.100:2222", retrievedSession.NodeAddr)
 	suite.Equal("testuser", retrievedSession.HostUser)
-	suite.Less(duration, 1*time.Millisecond, "Memory lookup should be instant")
 }
 
 func (suite *ConsulStoreTestSuite) TestReplicationHandlesDeletion() {
@@ -972,6 +1030,8 @@ type txnRollback struct {
 	next http.RoundTripper
 }
 
+func (t txnRollback) CloseIdleConnections() { closeTestIdleConnections(t.next) }
+
 func (t txnRollback) RoundTrip(r *http.Request) (*http.Response, error) {
 	if r.URL.Path != "/v1/txn" {
 		return t.next.RoundTrip(r)
@@ -1007,7 +1067,9 @@ func (suite *ConsulStoreTestSuite) TestBatchDeleteReportsOtherFailures() {
 
 			cfg := api.DefaultConfig()
 			cfg.Address, cfg.Scheme = consulURL.Host, consulURL.Scheme
-			cfg.HttpClient = &http.Client{Timeout: DefaultConsulTimeout, Transport: txnRollback{errs: errs, next: http.DefaultTransport}}
+			cfg.HttpClient = &http.Client{Timeout: DefaultConsulTimeout, Transport: txnRollback{errs: errs, next: ownedHTTPTransport(suite.T())}}
+			store.apiHTTP.CloseIdleConnections()
+			store.apiHTTP = cfg.HttpClient
 			store.client, err = api.NewClient(cfg)
 			suite.Require().NoError(err)
 
@@ -1039,6 +1101,8 @@ type firstSend struct {
 	next http.RoundTripper
 }
 
+func (f *firstSend) CloseIdleConnections() { closeTestIdleConnections(f.next) }
+
 func (f *firstSend) RoundTrip(r *http.Request) (*http.Response, error) {
 	f.mu.Lock()
 	if _, ok := f.at[r.URL.Path]; !ok {
@@ -1056,10 +1120,12 @@ func (suite *ConsulStoreTestSuite) TestConfirmedAtIsTheLeaseCreationSendTime() {
 	suite.Require().NoError(err)
 	defer func() { _ = store.Close() }()
 
-	sends := &firstSend{at: make(map[string]time.Time), next: http.DefaultTransport}
+	sends := &firstSend{at: make(map[string]time.Time), next: ownedHTTPTransport(suite.T())}
 	cfg := api.DefaultConfig()
 	cfg.Address, cfg.Scheme = consulURL.Host, consulURL.Scheme
 	cfg.HttpClient = &http.Client{Transport: sends}
+	store.apiHTTP.CloseIdleConnections()
+	store.apiHTTP = cfg.HttpClient
 	store.client, err = api.NewClient(cfg)
 	suite.Require().NoError(err)
 
@@ -1104,6 +1170,8 @@ func newDelayedTxnReply(next http.RoundTripper, hold ...int) *delayedTxnReply {
 	return d
 }
 
+func (d *delayedTxnReply) CloseIdleConnections() { closeTestIdleConnections(d.next) }
+
 func (d *delayedTxnReply) RoundTrip(r *http.Request) (*http.Response, error) {
 	resp, err := d.next.RoundTrip(r)
 	if err == nil && r.URL.Path == "/v1/txn" {
@@ -1140,10 +1208,16 @@ func (suite *ConsulStoreTestSuite) storeWithADelayedReply() (*consulSessionStore
 	consulURL := suite.consulURL
 	store, err := newConsulSessionStore(consulURL, 5*time.Minute, sessionTestLogger)
 	suite.Require().NoError(err)
-	delay := newDelayedTxnReply(http.DefaultTransport, 1)
+	delay := newDelayedTxnReply(ownedHTTPTransport(suite.T()), 1)
+	suite.T().Cleanup(func() {
+		delay.release(1)
+		suite.NoError(store.Close())
+	})
 	cfg := api.DefaultConfig()
 	cfg.Address, cfg.Scheme = consulURL.Host, consulURL.Scheme
 	cfg.HttpClient = &http.Client{Transport: delay}
+	store.apiHTTP.CloseIdleConnections()
+	store.apiHTTP = cfg.HttpClient
 	store.client, err = api.NewClient(cfg)
 	suite.Require().NoError(err)
 	return store, delay
@@ -1234,12 +1308,14 @@ func (suite *ConsulStoreTestSuite) TestALateReplyLeavesAnotherNodesNewerEntryCac
 	defer delay.release(1)
 	ctx, id := context.Background(), suite.uniq("late-reply-other-node")
 
+	deliveries := observe(suite.T(), store)
 	first := suite.registerDelayed(store, delay, &Session{ID: id, NodeAddr: "a:22", Generation: 1})
 	reg2, err := suite.store2.Register(ctx, &Session{ID: id, NodeAddr: "b:22", Generation: 2})
 	suite.Require().NoError(err)
 	defer func() { _ = suite.store2.Release(ctx, reg2) }()
-	suite.Require().Eventually(func() bool { return cachedGeneration(store, id) == 2 },
-		2*time.Second, 10*time.Millisecond, "the watch never delivered generation 2")
+	deliveries.await(suite.T(), 5*time.Second, presentRegistration(reg2))
+	suite.True(store.HasInCache(id), "the watch delivered generation 2 without caching it")
+	suite.Equal(uint64(2), cachedGeneration(store, id), "the watch did not cache generation 2")
 	delay.release(1)
 	reg1 := suite.awaitRegistered(first)
 
@@ -1248,6 +1324,9 @@ func (suite *ConsulStoreTestSuite) TestALateReplyLeavesAnotherNodesNewerEntryCac
 	suite.Require().NoError(store.Release(ctx, reg1))
 	suite.Equal(uint64(2), cachedGeneration(store, id), "the older registration's release dropped the newer entry from the cache")
 	suite.False(holdsLease(store, id, reg1.lease), "the older registration is still recorded as held")
+	local, err := store.Get(id)
+	suite.Require().NoError(err)
+	suite.Equal(uint64(2), local.Generation)
 	pair, _ := suite.consulGet(id)
 	suite.Require().NotNil(pair)
 	suite.Equal(reg2.lease, pair.Session)
@@ -1262,14 +1341,20 @@ func (suite *ConsulStoreTestSuite) TestALateReplyFromBeforeAnIndexDropIsNotCache
 	defer delay.release(1)
 	ctx, id := context.Background(), suite.uniq("late-reply-index-drop")
 
+	deliveries := observe(suite.T(), store)
 	first := suite.registerDelayed(store, delay, &Session{ID: id, NodeAddr: "a:22", Generation: 1})
 	// Let the watch deliver the committed entry, then stop it, so the only
 	// thing that can cache the entry again is the late reply: other tests,
 	// and other packages' tests, write under the same prefix, and any
 	// delivery would cache it legitimately.
-	suite.Require().Eventually(func() bool { return store.HasInCache(id) },
-		2*time.Second, 10*time.Millisecond, "the watch never delivered the entry")
-	store.watchPlan.Stop()
+	pair, _ := suite.consulGet(id)
+	suite.Require().NotNil(pair)
+	deliveries.await(suite.T(), 5*time.Second, func(entries map[string]StoreEntry) bool {
+		return present(id, 1)(entries) && entries[id].Lease == pair.Session
+	})
+	suite.True(store.HasInCache(id), "the watch delivered the entry without caching it")
+	suite.Equal(uint64(1), cachedGeneration(store, id))
+	suite.Require().NoError(store.stopWatch(context.Background()))
 	// The watch's index drops, as it does when the entry with the highest
 	// index goes, or after a restore.
 	store.updateSessionReplica(1, nil)
@@ -1322,6 +1407,8 @@ type lostTxnReply struct {
 	resume  chan struct{}
 }
 
+func (l *lostTxnReply) CloseIdleConnections() { closeTestIdleConnections(l.next) }
+
 func (l *lostTxnReply) RoundTrip(r *http.Request) (*http.Response, error) {
 	resp, err := l.next.RoundTrip(r)
 	if err == nil && r.URL.Path == "/v1/txn" && l.lost.CompareAndSwap(false, true) {
@@ -1347,10 +1434,12 @@ func (suite *ConsulStoreTestSuite) TestALostReplyToACommittedRegistrationStillSu
 			store, err := newConsulSessionStore(consulURL, 5*time.Minute, sessionTestLogger)
 			suite.Require().NoError(err)
 			defer func() { _ = store.Close() }()
-			lost := &lostTxnReply{next: http.DefaultTransport}
+			lost := &lostTxnReply{next: ownedHTTPTransport(suite.T())}
 			cfg := api.DefaultConfig()
 			cfg.Address, cfg.Scheme = consulURL.Host, consulURL.Scheme
 			cfg.HttpClient = &http.Client{Timeout: DefaultConsulTimeout, Transport: lost}
+			store.apiHTTP.CloseIdleConnections()
+			store.apiHTTP = cfg.HttpClient
 			store.client, err = api.NewClient(cfg)
 			suite.Require().NoError(err)
 
@@ -1378,14 +1467,16 @@ func (suite *ConsulStoreTestSuite) TestALateReplyDoesNotRestoreARemovedEntry() {
 	defer delay.release(1)
 	ctx, id := context.Background(), suite.uniq("late-reply-removed")
 
+	deliveries := observe(suite.T(), store)
 	first := suite.registerDelayed(store, delay, &Session{ID: id, NodeAddr: "a:22", Generation: 1})
 	reg2, err := suite.store2.Register(ctx, &Session{ID: id, NodeAddr: "b:22", Generation: 2})
 	suite.Require().NoError(err)
-	suite.Require().Eventually(func() bool { return cachedGeneration(store, id) == 2 },
-		2*time.Second, 10*time.Millisecond, "the watch never delivered generation 2")
+	deliveries.await(suite.T(), 5*time.Second, presentRegistration(reg2))
+	suite.True(store.HasInCache(id), "the watch delivered generation 2 without caching it")
+	suite.Equal(uint64(2), cachedGeneration(store, id), "the watch did not cache generation 2")
 	suite.Require().NoError(suite.store2.Release(ctx, reg2))
-	suite.Require().Eventually(func() bool { return !store.HasInCache(id) },
-		2*time.Second, 10*time.Millisecond, "the watch never delivered the removal")
+	deliveries.await(suite.T(), 5*time.Second, absent(id))
+	suite.False(store.HasInCache(id), "the watch delivered the removal but kept the entry cached")
 	delay.release(1)
 	reg1 := suite.awaitRegistered(first)
 	defer func() { _ = store.Release(ctx, reg1) }()
@@ -1410,7 +1501,7 @@ func (suite *ConsulStoreTestSuite) TestAFreshReadThatFindsTheEntryGoneUncachesIt
 	suite.Require().NoError(err)
 	defer func() { _ = store.Release(ctx, reg) }()
 	// Stop the watch, so only the fresh read can learn of the removal.
-	store.watchPlan.Stop()
+	suite.Require().NoError(store.stopWatch(context.Background()))
 	suite.Require().True(store.HasInCache(id))
 	_, err = suite.client.KV().Delete(store.SessionKey(id), nil)
 	suite.Require().NoError(err)
@@ -1720,14 +1811,17 @@ func newFakeConsulStore(t *testing.T, f *fakeConsul) *consulSessionStore {
 func newFakeConsulStoreWith(t *testing.T, f *fakeConsul, rt http.RoundTripper) *consulSessionStore {
 	cfg := api.DefaultConfig()
 	cfg.Address = f.URL
-	if rt != nil {
-		cfg.HttpClient = &http.Client{Transport: rt}
+	if rt == nil {
+		rt = ownedHTTPTransport(t)
 	}
+	cfg.HttpClient = &http.Client{Transport: rt}
 	client, err := api.NewClient(cfg)
 	require.NoError(t, err)
 	logger := slog.New(slog.DiscardHandler)
-	return &consulSessionStore{client: client, logger: logger, ttl: time.Minute, keyPrefix: "fake",
+	store := &consulSessionStore{client: client, apiHTTP: cfg.HttpClient, logger: logger, ttl: time.Minute, keyPrefix: "fake",
 		cache: newSessionCache(logger), held: make(map[string]map[string]struct{})}
+	t.Cleanup(func() { assert.NoError(t, store.Close()) })
+	return store
 }
 
 // The fake records every lease destroyed, whether or not it held the entry,

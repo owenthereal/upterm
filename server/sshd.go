@@ -147,8 +147,9 @@ type localRegistration struct {
 	// gone, or held by an older registration. It holds one report: a second
 	// adds nothing the keeper isn't already acting on.
 	lost chan struct{}
-	// lostEpoch and lostIndex are the watch delivery that last reported a
-	// loss, which replace weighs against the handle a rebuild installs.
+	// lostEpoch and lostIndex are the epoch and index attached to the latest
+	// loss report, from a watch delivery or confirm's own registration,
+	// which replace weighs against the handle a rebuild installs.
 	lostEpoch, lostIndex uint64
 }
 
