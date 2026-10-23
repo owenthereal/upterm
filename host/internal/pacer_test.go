@@ -9,6 +9,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/owenthereal/upterm/host/internal/replay"
@@ -25,33 +26,73 @@ const ptyWriteSize = 32 << 10
 // meteredWriter takes every to deliver each write and counts what it was
 // given: a link draining steadily at a known rate.
 type meteredWriter struct {
-	every time.Duration
-	n     atomic.Int64
+	every   time.Duration
+	release chan struct{}
+	n       atomic.Int64
+}
+
+func newMeteredWriter(t *testing.T, every time.Duration) *meteredWriter {
+	t.Helper()
+	m := &meteredWriter{every: every, release: make(chan struct{})}
+	release := sync.OnceFunc(func() { close(m.release) })
+	t.Cleanup(release)
+	return m
 }
 
 func (m *meteredWriter) Write(p []byte) (int, error) {
-	time.Sleep(m.every)
+	timer := time.NewTimer(m.every)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+	case <-m.release:
+	}
 	m.n.Add(int64(len(p)))
 	return len(p), nil
 }
 
-// heldLink is a meteredWriter that takes a piece only while the pacer is
-// holding a write, so the guest behind it is slower than the producer by
-// construction, however fast the producer runs. Setting free lets it run
-// without waiting, so a flush can complete and a failing test never leaves the
-// sink's drain parked here.
-type heldLink struct {
-	meteredWriter
-	p    *guestPacer
-	free atomic.Bool
+// steppedLink delivers exactly one piece per releasePiece. entered reports a
+// link write waiting for permission; releaseAll also frees a failing test.
+type steppedLink struct {
+	entered  <-chan struct{}
+	entering chan struct{}
+	piece    chan struct{}
+	all      chan struct{}
+	once     sync.Once
+	n        atomic.Int64
 }
 
-func (l *heldLink) Write(b []byte) (int, error) {
-	for !l.free.Load() && l.p.waiting.Load() == 0 {
-		time.Sleep(100 * time.Microsecond)
-	}
-	return l.meteredWriter.Write(b)
+func newSteppedLink(t *testing.T) *steppedLink {
+	t.Helper()
+	entered := make(chan struct{}, 1)
+	l := &steppedLink{entered: entered, entering: entered, piece: make(chan struct{}, 1), all: make(chan struct{})}
+	t.Cleanup(l.releaseAll)
+	return l
 }
+
+func (l *steppedLink) Write(b []byte) (int, error) {
+	select {
+	case l.entering <- struct{}{}:
+	case <-l.all:
+	}
+	select {
+	case <-l.piece:
+	case <-l.all:
+	}
+	l.n.Add(int64(len(b)))
+	return len(b), nil
+}
+
+func (l *steppedLink) releasePiece() bool {
+	select {
+	case <-l.entered:
+		l.piece <- struct{}{}
+		return true
+	default:
+		return false
+	}
+}
+
+func (l *steppedLink) releaseAll() { l.once.Do(func() { close(l.all) }) }
 
 // windowWriter accepts budget bytes at once and then blocks until release is
 // closed: a newcomer's fresh SSH windows, followed by never reading. Only the
@@ -74,11 +115,15 @@ func (w *windowWriter) Write(p []byte) (int, error) {
 func stuckSink(t *testing.T, onDrop func(error)) *uio.AsyncWriter {
 	t.Helper()
 	gate := make(chan struct{})
-	sink := uio.NewAsyncWriter(&gatedWriter{gate: gate, rec: &recordingWriter{}}, uio.DefaultGuestBufferSize, onDrop)
+	release := sync.OnceFunc(func() { close(gate) })
+	var sink *uio.AsyncWriter
 	t.Cleanup(func() {
-		_ = sink.Close()
-		close(gate)
+		if sink != nil {
+			_ = sink.Close()
+		}
+		release()
 	})
+	sink = uio.NewAsyncWriter(&gatedWriter{gate: gate, rec: &recordingWriter{}}, uio.DefaultGuestBufferSize, onDrop)
 	return sink
 }
 
@@ -128,14 +173,14 @@ func attachStuck(t *testing.T, p *guestPacer, writers *uio.MultiWriter) *uio.Asy
 func goWrite(t *testing.T, p *guestPacer, writes func()) <-chan struct{} {
 	t.Helper()
 	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		writes()
-	}()
 	t.Cleanup(func() {
 		p.release()
 		<-done
 	})
+	go func() {
+		defer close(done)
+		writes()
+	}()
 	return done
 }
 
@@ -147,17 +192,13 @@ func produce(p *guestPacer, n int) {
 	}
 }
 
-// requireHeld waits until the pacer is holding a write, then requires that the
-// write behind done has not returned.
+// requireHeld settles a bubble and checks both observable backpressure and
+// the producer still being pending.
 func requireHeld(t *testing.T, p *guestPacer, done <-chan struct{}) {
 	t.Helper()
-	require.Eventually(t, func() bool { return p.waiting.Load() > 0 }, 2*time.Second, time.Millisecond,
-		"the write was never held")
-	select {
-	case <-done:
-		t.Fatal("the write returned instead of being held")
-	default:
-	}
+	synctest.Wait()
+	require.Positive(t, p.waiting.Load(), "the write was never held")
+	requirePending(t, done, "the write returned instead of being held")
 }
 
 // requireReturns fails, rather than hangs, if what is behind done has not
@@ -171,14 +212,34 @@ func requireReturns(t *testing.T, done <-chan struct{}, d time.Duration) {
 	}
 }
 
-// awaitErr returns what an attach running on another goroutine returned,
-// failing if it has not returned within 2 s.
+// requireCompleted checks an immediate consequence without advancing time.
+func requireCompleted(t *testing.T, done <-chan struct{}) {
+	t.Helper()
+	synctest.Wait()
+	select {
+	case <-done:
+	default:
+		t.Fatal("the write did not return")
+	}
+}
+
+func requirePending(t *testing.T, done <-chan struct{}, what string) {
+	t.Helper()
+	select {
+	case <-done:
+		t.Fatal(what)
+	default:
+	}
+}
+
+// awaitErr settles a bubble and requires the attach to have returned.
 func awaitErr(t *testing.T, ch <-chan error) error {
 	t.Helper()
+	synctest.Wait()
 	select {
 	case err := <-ch:
 		return err
-	case <-time.After(2 * time.Second):
+	default:
 		t.Fatal("the attach did not return")
 		return nil
 	}
@@ -246,43 +307,56 @@ func (f *fakePaced) signal() {
 // The control shows that the same stuck guest holds it otherwise, so the
 // others pass for the reason they name.
 func TestGuestPacerPassesThroughWhenNothingPaces(t *testing.T) {
-	piece := make([]byte, ptyWriteSize)
-
 	t.Run("control", func(t *testing.T) {
-		p, writers := newTestPacer(t, time.Minute)
-		attachStuck(t, p, writers)
-		done := goWrite(t, p, func() { _, _ = p.Write(piece) })
-		requireHeld(t, p, done)
-		p.release()
-		requireReturns(t, done, 2*time.Second)
+		synctest.Test(t, func(t *testing.T) {
+			piece := make([]byte, ptyWriteSize)
+			p, writers := newTestPacer(t, time.Minute)
+			attachStuck(t, p, writers)
+			done := goWrite(t, p, func() { _, _ = p.Write(piece) })
+			requireHeld(t, p, done)
+			p.release()
+			requireCompleted(t, done)
+		})
 	})
 	t.Run("no guests", func(t *testing.T) {
-		p, _ := newTestPacer(t, time.Minute)
-		done := goWrite(t, p, func() { _, _ = p.Write(piece) })
-		requireReturns(t, done, 2*time.Second)
+		synctest.Test(t, func(t *testing.T) {
+			piece := make([]byte, ptyWriteSize)
+			p, _ := newTestPacer(t, time.Minute)
+			done := goWrite(t, p, func() { _, _ = p.Write(piece) })
+			requireCompleted(t, done)
+		})
 	})
 	t.Run("primary", func(t *testing.T) {
-		p, writers := newTestPacer(t, time.Minute)
-		attachStuck(t, p, writers)
-		p.setPrimary(true)
-		done := goWrite(t, p, func() { _, _ = p.Write(piece) })
-		requireReturns(t, done, 2*time.Second)
+		synctest.Test(t, func(t *testing.T) {
+			piece := make([]byte, ptyWriteSize)
+			p, writers := newTestPacer(t, time.Minute)
+			attachStuck(t, p, writers)
+			p.setPrimary(true)
+			done := goWrite(t, p, func() { _, _ = p.Write(piece) })
+			requireCompleted(t, done)
+		})
 	})
 	t.Run("released", func(t *testing.T) {
-		p, writers := newTestPacer(t, time.Minute)
-		attachStuck(t, p, writers)
-		p.release()
-		done := goWrite(t, p, func() { _, _ = p.Write(piece) })
-		requireReturns(t, done, 2*time.Second)
+		synctest.Test(t, func(t *testing.T) {
+			piece := make([]byte, ptyWriteSize)
+			p, writers := newTestPacer(t, time.Minute)
+			attachStuck(t, p, writers)
+			p.release()
+			done := goWrite(t, p, func() { _, _ = p.Write(piece) })
+			requireCompleted(t, done)
+		})
 	})
 	t.Run("context cancelled", func(t *testing.T) {
-		ctx, cancel := context.WithCancel(t.Context())
-		defer cancel()
-		p, writers := newTestPacerWithContext(t, ctx, time.Minute)
-		attachStuck(t, p, writers)
-		cancel()
-		done := goWrite(t, p, func() { _, _ = p.Write(piece) })
-		requireReturns(t, done, 2*time.Second)
+		synctest.Test(t, func(t *testing.T) {
+			piece := make([]byte, ptyWriteSize)
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			p, writers := newTestPacerWithContext(t, ctx, time.Minute)
+			attachStuck(t, p, writers)
+			cancel()
+			done := goWrite(t, p, func() { _, _ = p.Write(piece) })
+			requireCompleted(t, done)
+		})
 	})
 }
 
@@ -293,20 +367,23 @@ func TestGuestPacerPassesThroughWhenNothingPaces(t *testing.T) {
 // of the 500 ms asserted below and overflows the first guest's 1 MiB on the
 // way.
 func TestGuestPacerHoldsOutputToTheEarliestGuest(t *testing.T) {
-	p, writers := newTestPacer(t, time.Minute)
-	first := uio.NewAsyncWriter(&meteredWriter{every: 10 * time.Millisecond}, uio.DefaultGuestBufferSize, nil)
-	attachPaced(t, p, writers, first)
-	second := uio.NewAsyncWriter(io.Discard, uio.DefaultGuestBufferSize, nil)
-	attachPaced(t, p, writers, second)
-
-	start := time.Now()
-	done := goWrite(t, p, func() { produce(p, 2<<20) })
-	requireReturns(t, done, 10*time.Second)
-
-	require.GreaterOrEqual(t, time.Since(start), 500*time.Millisecond, "output outran the first guest")
-	require.Positive(t, p.holds.Load(), "no write was ever held")
-	require.True(t, first.Backlog().Live, "the pacing guest was dropped")
-	require.True(t, second.Backlog().Live, "the following guest was dropped")
+	synctest.Test(t, func(t *testing.T) {
+		p, writers := newTestPacer(t, time.Minute)
+		first := uio.NewAsyncWriter(newMeteredWriter(t, 10*time.Millisecond), uio.DefaultGuestBufferSize, nil)
+		attachPaced(t, p, writers, first)
+		second := uio.NewAsyncWriter(io.Discard, uio.DefaultGuestBufferSize, nil)
+		attachPaced(t, p, writers, second)
+		done := goWrite(t, p, func() { produce(p, 2<<20) })
+		requireHeld(t, p, done)
+		// About 60 pieces at 10 ms: the 2 MiB burst cannot finish in 500 ms.
+		time.Sleep(500*time.Millisecond - time.Nanosecond)
+		requireHeld(t, p, done)
+		time.Sleep(200*time.Millisecond + time.Nanosecond)
+		requireCompleted(t, done)
+		require.Positive(t, p.holds.Load(), "no write was ever held")
+		require.True(t, first.Backlog().Live, "the pacing guest was dropped")
+		require.True(t, second.Backlog().Live, "the following guest was dropped")
+	})
 }
 
 // The failure that decided the policy. A guest joining under backpressure
@@ -321,58 +398,48 @@ func TestGuestPacerHoldsOutputToTheEarliestGuest(t *testing.T) {
 // together at the start, both guests would begin with fresh windows and the
 // two policies would look alike.
 //
-// The established guest's link takes a piece only while the pacer is holding
-// the producer. The producer's own speed varies by an order of magnitude
-// between race and non-race builds, so no fixed rate can guarantee that the
-// established guest is what holds it back; draining only while held makes it
-// the bottleneck by construction. The same link drains nothing while a
-// newcomer is letting output through, which is how the fastest rule would
-// overflow it.
+// The established link delivers a piece only after the test observes a held
+// producer. If a newcomer takes over, no further established pieces are
+// released, so the finite burst overflows the guest that should have paced.
 func TestGuestPacerANonReadingNewcomerCannotDisplaceThePacer(t *testing.T) {
-	p, writers := newTestPacer(t, time.Minute)
-	link := &heldLink{meteredWriter: meteredWriter{every: 2 * time.Millisecond}, p: p}
-	t.Cleanup(func() { link.free.Store(true) })
-	established := uio.NewAsyncWriter(link, uio.DefaultGuestBufferSize, nil)
-	attachPaced(t, p, writers, established)
-
-	var produced int
-	backpressure := goWrite(t, p, func() {
-		piece := make([]byte, ptyWriteSize)
-		for p.holds.Load() < 8 && produced < 64<<20 {
-			_, _ = p.Write(piece)
-			produced += len(piece)
+	synctest.Test(t, func(t *testing.T) {
+		p, writers := newTestPacer(t, time.Minute)
+		link := newSteppedLink(t)
+		established := uio.NewAsyncWriter(link, uio.DefaultGuestBufferSize, nil)
+		attachPaced(t, p, writers, established)
+		backpressure := goWrite(t, p, func() { produce(p, 2<<20) })
+		requireHeld(t, p, backpressure)
+		// Delivery happens only while the established guest observably holds output.
+		drainHeld := func(done <-chan struct{}) {
+			for {
+				synctest.Wait()
+				select {
+				case <-done:
+					return
+				default:
+				}
+				require.Positive(t, p.waiting.Load(), "the write was never held")
+				requirePending(t, done, "the write returned instead of being held")
+				require.True(t, established.Backlog().Live, "the newcomer displaced the established guest")
+				require.True(t, link.releasePiece(), "the established link had no piece to deliver")
+			}
 		}
+		drainHeld(backpressure)
+		require.GreaterOrEqual(t, p.holds.Load(), int64(8), "the established guest did not hold output back")
+		newcomerLink := &windowWriter{budget: 4 << 20, release: make(chan struct{})}
+		t.Cleanup(func() { close(newcomerLink.release) })
+		newcomer := uio.NewAsyncWriter(newcomerLink, uio.DefaultGuestBufferSize, nil)
+		attachPaced(t, p, writers, newcomer)
+		// The 8 MiB burst exceeds the newcomer's 4 MiB windows plus its queue.
+		burst := goWrite(t, p, func() { produce(p, 8<<20) })
+		drainHeld(burst)
+		require.True(t, established.Backlog().Live, "the newcomer displaced the established guest")
+		require.False(t, newcomer.Backlog().Live, "a newcomer that never reads outlasted its windows and its cap")
+		require.ErrorIs(t, newcomer.Err(), uio.ErrOverflow)
+		link.releaseAll()
+		flush(t, established)
+		require.Equal(t, int64(10<<20), link.n.Load(), "the established guest missed output")
 	})
-	requireReturns(t, backpressure, 10*time.Second)
-	require.GreaterOrEqual(t, p.holds.Load(), int64(8),
-		"64 MiB went by without the established guest holding output back")
-
-	newcomerLink := &windowWriter{budget: 4 << 20, release: make(chan struct{})}
-	t.Cleanup(func() { close(newcomerLink.release) })
-	newcomer := uio.NewAsyncWriter(newcomerLink, uio.DefaultGuestBufferSize, nil)
-	attachPaced(t, p, writers, newcomer)
-
-	burst := goWrite(t, p, func() {
-		piece := make([]byte, ptyWriteSize)
-		// Cut short only once the established guest is gone, which fails the
-		// test below anyway; otherwise all 8 MiB go through.
-		for n := 0; n < 8<<20 && established.Backlog().Live; n += len(piece) {
-			_, _ = p.Write(piece)
-			produced += len(piece)
-		}
-	})
-	requireReturns(t, burst, 20*time.Second)
-	// Nothing is held any more, so the link would never take the rest.
-	link.free.Store(true)
-
-	require.True(t, established.Backlog().Live, "the newcomer displaced the established guest")
-	require.False(t, newcomer.Backlog().Live, "a newcomer that never reads outlasted its windows and its cap")
-	require.ErrorIs(t, newcomer.Err(), uio.ErrOverflow)
-
-	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
-	defer cancel()
-	require.NoError(t, established.Flush(ctx))
-	require.Equal(t, int64(produced), link.n.Load(), "the established guest missed output")
 }
 
 // A pacer that inherits a backlog — here from a primary that left while it
@@ -380,74 +447,112 @@ func TestGuestPacerANonReadingNewcomerCannotDisplaceThePacer(t *testing.T) {
 // backlog takes. 768 KiB at one piece per 100 ms is more than two seconds,
 // ten stall timeouts, with a piece landing every half a timeout.
 func TestGuestPacerLetsAPacerWorkThroughAnInheritedBacklog(t *testing.T) {
-	p, writers := newTestPacer(t, 200*time.Millisecond)
-	guest := uio.NewAsyncWriter(&meteredWriter{every: 100 * time.Millisecond}, uio.DefaultGuestBufferSize, nil)
-	attachPaced(t, p, writers, guest)
-
-	p.setPrimary(true)
-	_, err := p.Write(make([]byte, 768<<10))
-	require.NoError(t, err)
-	p.setPrimary(false)
-
-	start := time.Now()
-	done := goWrite(t, p, func() { _, _ = p.Write(make([]byte, ptyWriteSize)) })
-	requireReturns(t, done, 10*time.Second)
-
-	require.GreaterOrEqual(t, time.Since(start), time.Second, "the write did not wait for the inherited backlog")
-	require.True(t, guest.Backlog().Live, "a pacer delivering steadily was dropped as stalled")
+	synctest.Test(t, func(t *testing.T) {
+		p, writers := newTestPacer(t, 200*time.Millisecond)
+		guest := uio.NewAsyncWriter(newMeteredWriter(t, 100*time.Millisecond), uio.DefaultGuestBufferSize, nil)
+		attachPaced(t, p, writers, guest)
+		p.setPrimary(true)
+		_, err := p.Write(make([]byte, 768<<10))
+		require.NoError(t, err)
+		p.setPrimary(false)
+		start := time.Now()
+		done := goWrite(t, p, func() { _, _ = p.Write(make([]byte, ptyWriteSize)) })
+		requireHeld(t, p, done)
+		// 768 KiB needs 23 pieces to get below 64 KiB: 2.3 s > ten 200 ms stalls.
+		// Every 100 ms piece is progress within half a stall interval.
+		for step := 1; step <= 23; step++ {
+			time.Sleep(100 * time.Millisecond)
+			synctest.Wait()
+			require.True(t, guest.Backlog().Live, "a pacer delivering steadily was dropped as stalled at step %d", step)
+			if step < 23 {
+				requireHeld(t, p, done)
+			}
+		}
+		requireCompleted(t, done)
+		require.Greater(t, time.Since(start), 2*time.Second, "the write did not wait for the inherited backlog")
+		time.Sleep(200 * time.Millisecond)
+		flush(t, guest)
+	})
 }
 
-// A pacer that delivers nothing is dropped after the stall timeout, and the
-// next guest paces from the backlog it built up as a follower rather than
-// from empty. The lower bound is what tells those apart: the drop alone comes
-// at 200 ms, and the next guest needs about 700 ms to bring 256 KiB under the
-// low mark.
+// A pacer delivering nothing drops at 200 ms, and its successor must still
+// drain the inherited 256 KiB below the low mark before output resumes.
 func TestGuestPacerDropsAPacerThatDeliversNothing(t *testing.T) {
-	p, writers := newTestPacer(t, 200*time.Millisecond)
-	dropped := make(chan error, 1)
-	stuck := stuckSink(t, func(err error) { dropped <- err })
-	attachPaced(t, p, writers, stuck)
-	next := uio.NewAsyncWriter(&meteredWriter{every: 100 * time.Millisecond}, uio.DefaultGuestBufferSize, nil)
-	attachPaced(t, p, writers, next)
-
-	// Both guests are empty, so this passes and leaves each 256 KiB behind.
-	_, err := p.Write(make([]byte, 256<<10))
-	require.NoError(t, err)
-
-	start := time.Now()
-	done := goWrite(t, p, func() { _, _ = p.Write(make([]byte, ptyWriteSize)) })
-	requireReturns(t, done, 10*time.Second)
-	require.GreaterOrEqual(t, time.Since(start), 400*time.Millisecond,
-		"the write went out when the stuck guest was dropped, ahead of the next guest's backlog")
-
-	select {
-	case err := <-dropped:
-		require.ErrorIs(t, err, uio.ErrStalled)
-	case <-time.After(2 * time.Second):
-		t.Fatal("the stuck guest was never dropped")
-	}
-	require.True(t, next.Backlog().Live, "the next guest was dropped")
+	synctest.Test(t, func(t *testing.T) {
+		p, writers := newTestPacer(t, 200*time.Millisecond)
+		dropped := make(chan error, 1)
+		stuck := stuckSink(t, func(err error) { dropped <- err })
+		attachPaced(t, p, writers, stuck)
+		link := newSteppedLink(t)
+		next := uio.NewAsyncWriter(link, uio.DefaultGuestBufferSize, nil)
+		attachPaced(t, p, writers, next)
+		_, err := p.Write(make([]byte, 256<<10))
+		require.NoError(t, err)
+		start := time.Now()
+		done := goWrite(t, p, func() { _, _ = p.Write(make([]byte, ptyWriteSize)) })
+		requireHeld(t, p, done)
+		// No progress: live at 200 ms-1 ns, dropped exactly at 200 ms.
+		time.Sleep(200*time.Millisecond - time.Nanosecond)
+		synctest.Wait()
+		require.True(t, stuck.Backlog().Live, "the pacer was dropped before its stall deadline")
+		requireHeld(t, p, done)
+		time.Sleep(time.Nanosecond)
+		synctest.Wait()
+		require.False(t, stuck.Backlog().Live, "the pacer was not dropped at its stall deadline")
+		select {
+		case err := <-dropped:
+			require.ErrorIs(t, err, uio.ErrStalled)
+		default:
+			t.Fatal("the stuck guest was never dropped")
+		}
+		// The successor inherits all 256 KiB; the departure cannot open the gate.
+		requireHeld(t, p, done)
+		// At 100 ms per piece, draining the successor must still take at least 400 ms.
+		for step := 1; step <= 7; step++ {
+			time.Sleep(100 * time.Millisecond)
+			require.True(t, link.releasePiece(), "the successor had no piece to deliver")
+			synctest.Wait()
+			require.True(t, next.Backlog().Live, "the next guest was dropped")
+			if step < 7 {
+				requireHeld(t, p, done)
+			}
+		}
+		requireCompleted(t, done)
+		require.GreaterOrEqual(t, time.Since(start), 400*time.Millisecond, "the write went out ahead of the next guest's inherited backlog")
+	})
 }
 
 // When the pacer leaves, the next guest paces from its own backlog; the
 // departure does not open the gate.
 func TestGuestPacerHandsOverWhenThePacerLeaves(t *testing.T) {
-	p, writers := newTestPacer(t, time.Minute)
-	stuck := stuckSink(t, nil)
-	attachPaced(t, p, writers, stuck)
-	next := uio.NewAsyncWriter(&meteredWriter{every: 100 * time.Millisecond}, uio.DefaultGuestBufferSize, nil)
-	attachPaced(t, p, writers, next)
-
-	_, err := p.Write(make([]byte, 256<<10))
-	require.NoError(t, err)
-
-	start := time.Now()
-	done := goWrite(t, p, func() { _, _ = p.Write(make([]byte, ptyWriteSize)) })
-	requireHeld(t, p, done)
-	p.remove(stuck)
-	requireReturns(t, done, 10*time.Second)
-	require.GreaterOrEqual(t, time.Since(start), 400*time.Millisecond,
-		"the write went out when the pacer left, ahead of the next guest's backlog")
+	synctest.Test(t, func(t *testing.T) {
+		p, writers := newTestPacer(t, time.Minute)
+		stuck := stuckSink(t, nil)
+		attachPaced(t, p, writers, stuck)
+		link := newSteppedLink(t)
+		next := uio.NewAsyncWriter(link, uio.DefaultGuestBufferSize, nil)
+		attachPaced(t, p, writers, next)
+		_, err := p.Write(make([]byte, 256<<10))
+		require.NoError(t, err)
+		start := time.Now()
+		done := goWrite(t, p, func() { _, _ = p.Write(make([]byte, ptyWriteSize)) })
+		requireHeld(t, p, done)
+		p.remove(stuck)
+		requireHeld(t, p, done)
+		// Seven 32 KiB deliveries are needed to get the inherited 256 KiB below 64 KiB.
+		// At 100 ms per piece, draining the successor must still take at least 400 ms.
+		for step := 1; step <= 7; step++ {
+			time.Sleep(100 * time.Millisecond)
+			require.True(t, link.releasePiece(), "the successor had no piece to deliver")
+			synctest.Wait()
+			require.True(t, next.Backlog().Live, "the next guest was dropped")
+			if step < 7 {
+				requireHeld(t, p, done)
+			}
+		}
+		requireCompleted(t, done)
+		require.GreaterOrEqual(t, time.Since(start), 400*time.Millisecond, "the write went out ahead of the next guest's inherited backlog")
+	})
 }
 
 // The deadline and a delivered piece can be ready together. The abort is
@@ -457,129 +562,134 @@ func TestGuestPacerHandsOverWhenThePacerLeaves(t *testing.T) {
 // one are what show the re-arming: the second deadline exists only if the
 // pacer armed it after the first.
 func TestGuestPacerProgressAtTheDeadlineCancelsTheAbort(t *testing.T) {
-	p, _ := newTestPacer(t, 50*time.Millisecond)
-	fake := newFakePaced(2 * pacingLowWater)
-	require.NoError(t, p.attach(t.Context(), fake, func() error { return nil }))
-
-	done := goWrite(t, p, func() { _, _ = p.Write(make([]byte, ptyWriteSize)) })
-	requireHeld(t, p, done)
-	require.Eventually(t, func() bool { return fake.refusals() >= 2 }, 2*time.Second, time.Millisecond,
-		"the pacer did not keep trying the abort as its deadlines passed")
-	requireHeld(t, p, done)
-
-	fake.drain()
-	requireReturns(t, done, 2*time.Second)
+	synctest.Test(t, func(t *testing.T) {
+		p, _ := newTestPacer(t, 50*time.Millisecond)
+		fake := newFakePaced(2 * pacingLowWater)
+		require.NoError(t, p.attach(t.Context(), fake, func() error { return nil }))
+		done := goWrite(t, p, func() { _, _ = p.Write(make([]byte, ptyWriteSize)) })
+		requireHeld(t, p, done)
+		// Each 50 ms deadline loses to progress under the sink lock and rearms.
+		for attempt := 1; attempt <= 2; attempt++ {
+			time.Sleep(50*time.Millisecond - time.Nanosecond)
+			synctest.Wait()
+			require.Equal(t, attempt-1, fake.refusals(), "an abort was attempted before its deadline")
+			requireHeld(t, p, done)
+			time.Sleep(time.Nanosecond)
+			synctest.Wait()
+			require.Equal(t, attempt, fake.refusals(), "the pacer did not rearm its deadline")
+			requireHeld(t, p, done)
+		}
+		fake.drain()
+		requireCompleted(t, done)
+	})
 }
 
-// A guest is registered before Append publishes it to the fan-out. Registered
-// afterwards, a session with no other guest would write to it unpaced for as
-// long as its handler was descheduled — here the 100 ms appendFn sleeps once
-// attachGuestOutput has returned — and a producer running flat out overflows
-// 1 MiB in far less. Registered first, what reaches it before the pacer sees
-// it is its replay and at most one pty write that had already passed the gate.
+// Registration must precede publication: the ring is preloaded, appendFn is
+// held after publishing the sink, and only then does a finite producer start.
+// While attach is held, replay plus the low mark and one in-flight write bound
+// the guest's exposure, even if the handler makes no further progress.
 func TestGuestPacerRegistersAGuestBeforeItCanReceiveOutput(t *testing.T) {
-	p, writers := newTestPacer(t, time.Minute)
-
-	var (
-		stop     atomic.Bool
-		produced atomic.Int64
-		wg       sync.WaitGroup
-	)
-	t.Cleanup(func() {
-		stop.Store(true)
+	synctest.Test(t, func(t *testing.T) {
+		p, writers := newTestPacer(t, time.Minute)
+		_, err := writers.Write(make([]byte, uio.DefaultReplayBytes))
+		require.NoError(t, err)
+		sink := stuckSink(t, nil)
+		published, release := make(chan struct{}), make(chan struct{})
+		var once sync.Once
+		attached := make(chan error, 1)
+		t.Cleanup(func() {
+			once.Do(func() { close(release) })
+			p.release()
+			require.NoError(t, <-attached, "the attach failed once it was let finish")
+			writers.Remove(sink)
+			p.remove(sink)
+			_ = sink.Close()
+		})
+		go func() {
+			attached <- p.attach(t.Context(), sink, func() error {
+				if err := attachGuestOutput(t.Context(), time.Time{}, writers, sink, termsize.Size{}); err != nil {
+					return err
+				}
+				close(published)
+				<-release
+				return nil
+			})
+		}()
+		awaitClosed(t, published, "the attach never published its sink")
+		// Finite even if registration moves after append: 2 MiB can expose overflow.
+		done := goWrite(t, p, func() { produce(p, 2<<20) })
+		synctest.Wait()
+		b := sink.Backlog()
+		require.True(t, b.Live, "the guest overflowed while it was being attached")
+		require.LessOrEqual(t, b.Bytes, uio.DefaultReplayBytes+pacingLowWater+2*ptyWriteSize, "the guest took output unpaced while it was being attached")
+		requireHeld(t, p, done)
+		once.Do(func() { close(release) })
+		synctest.Wait()
+		// End pacing explicitly: this sink intentionally delivers nothing.
 		p.release()
-		wg.Wait()
+		requireCompleted(t, done)
 	})
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		piece := make([]byte, ptyWriteSize)
-		for !stop.Load() {
-			_, _ = p.Write(piece)
-			produced.Add(int64(len(piece)))
-		}
-	}()
-	// With nobody to pace on the producer runs flat out; this also fills the
-	// replay.
-	require.Eventually(t, func() bool { return produced.Load() >= uio.DefaultReplayBytes }, 2*time.Second, time.Millisecond,
-		"the producer never got going")
-
-	sink := stuckSink(t, nil)
-	require.NoError(t, p.attach(t.Context(), sink, func() error {
-		if err := attachGuestOutput(t.Context(), time.Time{}, writers, sink, termsize.Size{}); err != nil {
-			return err
-		}
-		time.Sleep(100 * time.Millisecond)
-		return nil
-	}))
-	t.Cleanup(func() {
-		writers.Remove(sink)
-		p.remove(sink)
-		_ = sink.Close()
-	})
-
-	b := sink.Backlog()
-	require.True(t, b.Live, "the guest overflowed while it was being attached")
-	require.LessOrEqual(t, b.Bytes, uio.DefaultReplayBytes+pacingLowWater+2*ptyWriteSize,
-		"the guest took output unpaced while it was being attached")
 }
 
 // Attachments are one transaction each, serialised: B cannot attach while A is
 // registered but not yet appended, so one guest at a time is being attached.
 // And registration order is attachment order, so A, attached first, paces.
 func TestGuestPacerSerialisesAttachments(t *testing.T) {
-	p, writers := newTestPacer(t, time.Minute)
-	a := stuckSink(t, nil)
-	b := uio.NewAsyncWriter(io.Discard, uio.DefaultGuestBufferSize, nil)
+	synctest.Test(t, func(t *testing.T) {
+		p, writers := newTestPacer(t, time.Minute)
+		a := stuckSink(t, nil)
+		b := uio.NewAsyncWriter(io.Discard, uio.DefaultGuestBufferSize, nil)
 
-	resume := make(chan struct{})
-	var (
-		resumeOnce sync.Once
-		wg         sync.WaitGroup
-	)
-	t.Cleanup(func() {
-		resumeOnce.Do(func() { close(resume) })
-		wg.Wait()
-		writers.Remove(a, b)
-		p.remove(a)
-		p.remove(b)
-		_ = b.Close()
-	})
-
-	aErr := make(chan error, 1)
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		aErr <- p.attach(t.Context(), a, func() error {
-			<-resume
-			return attachGuestOutput(t.Context(), time.Time{}, writers, a, termsize.Size{})
+		resume := make(chan struct{})
+		var (
+			resumeOnce sync.Once
+			wg         sync.WaitGroup
+		)
+		t.Cleanup(func() {
+			resumeOnce.Do(func() { close(resume) })
+			wg.Wait()
+			writers.Remove(a, b)
+			p.remove(a)
+			p.remove(b)
+			_ = b.Close()
 		})
-	}()
-	require.Eventually(t, func() bool { return registered(p) == 1 }, 2*time.Second, time.Millisecond,
-		"A was never registered")
 
-	bErr := make(chan error, 1)
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		bErr <- p.attach(t.Context(), b, func() error { return attachGuestOutput(t.Context(), time.Time{}, writers, b, termsize.Size{}) })
-	}()
-	select {
-	case err := <-bErr:
-		t.Fatalf("B's attach returned (%v) while A was registered but not yet attached", err)
-	case <-time.After(100 * time.Millisecond):
-	}
+		aErr := make(chan error, 1)
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			aErr <- p.attach(t.Context(), a, func() error {
+				<-resume
+				return attachGuestOutput(t.Context(), time.Time{}, writers, a, termsize.Size{})
+			})
+		}()
+		synctest.Wait()
+		require.Equal(t, 1, registered(p), "A was never registered")
 
-	resumeOnce.Do(func() { close(resume) })
-	require.NoError(t, awaitErr(t, aErr))
-	require.NoError(t, awaitErr(t, bErr))
+		bErr := make(chan error, 1)
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			bErr <- p.attach(t.Context(), b, func() error { return attachGuestOutput(t.Context(), time.Time{}, writers, b, termsize.Size{}) })
+		}()
+		synctest.Wait()
+		select {
+		case err := <-bErr:
+			t.Fatalf("B's attach returned (%v) while A was registered but not yet attached", err)
+		default:
+		}
 
-	_, err := writers.Write(make([]byte, 2*pacingLowWater))
-	require.NoError(t, err)
-	done := goWrite(t, p, func() { _, _ = p.Write(make([]byte, ptyWriteSize)) })
-	requireHeld(t, p, done)
-	p.release()
-	requireReturns(t, done, 2*time.Second)
+		resumeOnce.Do(func() { close(resume) })
+		require.NoError(t, awaitErr(t, aErr))
+		require.NoError(t, awaitErr(t, bErr))
+
+		_, err := writers.Write(make([]byte, 2*pacingLowWater))
+		require.NoError(t, err)
+		done := goWrite(t, p, func() { _, _ = p.Write(make([]byte, ptyWriteSize)) })
+		requireHeld(t, p, done)
+		p.release()
+		requireCompleted(t, done)
+	})
 }
 
 // A guest waiting at the gate for another's attach stops waiting when it
@@ -588,61 +698,73 @@ func TestGuestPacerSerialisesAttachments(t *testing.T) {
 // for it as before. An attach can hold the gate for a join's whole budget,
 // emulating, and a guest that left behind it would otherwise wait it out.
 func TestGuestPacerGateWaitsOnTheJoinersContext(t *testing.T) {
-	p, writers := newTestPacer(t, time.Minute)
-	a := uio.NewAsyncWriter(io.Discard, uio.DefaultGuestBufferSize, nil)
-	b := uio.NewAsyncWriter(io.Discard, uio.DefaultGuestBufferSize, nil)
-	c := uio.NewAsyncWriter(io.Discard, uio.DefaultGuestBufferSize, nil)
-	t.Cleanup(func() {
-		writers.Remove(a, c)
-		p.remove(a)
-		p.remove(c)
-		_ = a.Close()
-		_ = b.Close()
-		_ = c.Close()
+	synctest.Test(t, func(t *testing.T) {
+		p, writers := newTestPacer(t, time.Minute)
+		a := uio.NewAsyncWriter(io.Discard, uio.DefaultGuestBufferSize, nil)
+		b := uio.NewAsyncWriter(io.Discard, uio.DefaultGuestBufferSize, nil)
+		c := uio.NewAsyncWriter(io.Discard, uio.DefaultGuestBufferSize, nil)
+		t.Cleanup(func() {
+			writers.Remove(a, c)
+			p.remove(a)
+			p.remove(c)
+			_ = a.Close()
+			_ = b.Close()
+			_ = c.Close()
+		})
+
+		inside, release := make(chan struct{}), make(chan struct{})
+		var releaseOnce sync.Once
+		t.Cleanup(func() { releaseOnce.Do(func() { close(release) }) })
+		aErr := make(chan error, 1)
+		go func() {
+			aErr <- p.attach(t.Context(), a, func() error {
+				close(inside)
+				<-release
+				return attachGuestOutput(t.Context(), time.Time{}, writers, a, termsize.Size{})
+			})
+		}()
+		synctest.Wait()
+		select {
+		case <-inside:
+		default:
+			t.Fatal("A never took the gate")
+		}
+
+		left, leave := context.WithCancel(t.Context())
+		var bRan atomic.Bool
+		bErr := make(chan error, 1)
+		go func() {
+			bErr <- p.attach(left, b, func() error {
+				bRan.Store(true)
+				return nil
+			})
+		}()
+		synctest.Wait()
+		select {
+		case err := <-bErr:
+			t.Fatalf("B's attach returned (%v) while A held the gate", err)
+		default:
+		}
+		leave()
+		require.ErrorIs(t, awaitErr(t, bErr), context.Canceled, "B kept waiting after it left")
+		require.False(t, bRan.Load(), "B attached after it left")
+		require.Equal(t, 1, registered(p), "B was registered after it left")
+
+		cErr := make(chan error, 1)
+		go func() {
+			cErr <- p.attach(t.Context(), c, func() error { return attachGuestOutput(t.Context(), time.Time{}, writers, c, termsize.Size{}) })
+		}()
+		synctest.Wait()
+		select {
+		case err := <-cErr:
+			t.Fatalf("C's attach returned (%v) while A held the gate", err)
+		default:
+		}
+		releaseOnce.Do(func() { close(release) })
+		require.NoError(t, awaitErr(t, aErr))
+		require.NoError(t, awaitErr(t, cErr))
+		require.Equal(t, 2, registered(p))
 	})
-
-	inside, release := make(chan struct{}), make(chan struct{})
-	aErr := make(chan error, 1)
-	go func() {
-		aErr <- p.attach(t.Context(), a, func() error {
-			close(inside)
-			<-release
-			return attachGuestOutput(t.Context(), time.Time{}, writers, a, termsize.Size{})
-		})
-	}()
-	select {
-	case <-inside:
-	case <-time.After(2 * time.Second):
-		t.Fatal("A never took the gate")
-	}
-
-	left, leave := context.WithCancel(t.Context())
-	var bRan atomic.Bool
-	bErr := make(chan error, 1)
-	go func() {
-		bErr <- p.attach(left, b, func() error {
-			bRan.Store(true)
-			return nil
-		})
-	}()
-	leave()
-	require.ErrorIs(t, awaitErr(t, bErr), context.Canceled, "B kept waiting after it left")
-	require.False(t, bRan.Load(), "B attached after it left")
-	require.Equal(t, 1, registered(p), "B was registered after it left")
-
-	cErr := make(chan error, 1)
-	go func() {
-		cErr <- p.attach(t.Context(), c, func() error { return attachGuestOutput(t.Context(), time.Time{}, writers, c, termsize.Size{}) })
-	}()
-	select {
-	case err := <-cErr:
-		t.Fatalf("C's attach returned (%v) while A held the gate", err)
-	case <-time.After(100 * time.Millisecond):
-	}
-	close(release)
-	require.NoError(t, awaitErr(t, aErr))
-	require.NoError(t, awaitErr(t, cErr))
-	require.Equal(t, 2, registered(p))
 }
 
 // A guest that has already left is refused even with the slot free: it is
@@ -650,21 +772,23 @@ func TestGuestPacerGateWaitsOnTheJoinersContext(t *testing.T) {
 // select between a free slot and a done context picks either at random, and
 // a refusal that depended on it would pass by chance about half the time.
 func TestGuestPacerRefusesAGuestThatHasAlreadyLeft(t *testing.T) {
-	p, _ := newTestPacer(t, time.Minute)
-	left, leave := context.WithCancel(t.Context())
-	leave()
-	for i := range 200 {
-		sink := uio.NewAsyncWriter(io.Discard, uio.DefaultGuestBufferSize, nil)
-		ran := false
-		err := p.attach(left, sink, func() error {
-			ran = true
-			return nil
-		})
-		p.remove(sink)
-		_ = sink.Close()
-		require.ErrorIs(t, err, context.Canceled, "attempt %d", i)
-		require.False(t, ran, "attempt %d: a guest that had left was attached", i)
-	}
+	synctest.Test(t, func(t *testing.T) {
+		p, _ := newTestPacer(t, time.Minute)
+		left, leave := context.WithCancel(t.Context())
+		leave()
+		for i := range 200 {
+			sink := uio.NewAsyncWriter(io.Discard, uio.DefaultGuestBufferSize, nil)
+			ran := false
+			err := p.attach(left, sink, func() error {
+				ran = true
+				return nil
+			})
+			p.remove(sink)
+			_ = sink.Close()
+			require.ErrorIs(t, err, context.Canceled, "attempt %d", i)
+			require.False(t, ran, "attempt %d: a guest that had left was attached", i)
+		}
+	})
 }
 
 // A failed Append takes its registration back out, or a guest that never
@@ -672,22 +796,24 @@ func TestGuestPacerRefusesAGuestThatHasAlreadyLeft(t *testing.T) {
 // being closed, unlike attachGuestOutput's refusal: a closed sink is skipped
 // as dead anyway, which would hide a registration left behind.
 func TestGuestPacerRollsBackAFailedAttach(t *testing.T) {
-	p, _ := newTestPacer(t, time.Minute)
-	sink := stuckSink(t, nil)
-	_, err := sink.Write(make([]byte, 2*pacingLowWater))
-	require.NoError(t, err)
+	synctest.Test(t, func(t *testing.T) {
+		p, _ := newTestPacer(t, time.Minute)
+		sink := stuckSink(t, nil)
+		_, err := sink.Write(make([]byte, 2*pacingLowWater))
+		require.NoError(t, err)
 
-	refuse := func() error { return uio.ErrClosed }
-	require.ErrorIs(t, p.attach(t.Context(), sink, refuse), uio.ErrClosed)
-	require.Zero(t, registered(p), "a failed attach left its guest registered")
+		refuse := func() error { return uio.ErrClosed }
+		require.ErrorIs(t, p.attach(t.Context(), sink, refuse), uio.ErrClosed)
+		require.Zero(t, registered(p), "a failed attach left its guest registered")
 
-	done := goWrite(t, p, func() { _, _ = p.Write(make([]byte, ptyWriteSize)) })
-	requireReturns(t, done, 2*time.Second)
+		done := goWrite(t, p, func() { _, _ = p.Write(make([]byte, ptyWriteSize)) })
+		requireCompleted(t, done)
 
-	// And the transaction's lock went with it.
-	again := make(chan error, 1)
-	go func() { again <- p.attach(t.Context(), sink, refuse) }()
-	require.ErrorIs(t, awaitErr(t, again), uio.ErrClosed)
+		// And the transaction's lock went with it.
+		again := make(chan error, 1)
+		go func() { again <- p.attach(t.Context(), sink, refuse) }()
+		require.ErrorIs(t, awaitErr(t, again), uio.ErrClosed)
+	})
 }
 
 // A held write wakes for anything that ends its reason to wait, not only for
@@ -702,15 +828,17 @@ func TestGuestPacerWakesAWaitingWrite(t *testing.T) {
 		{"context cancelled", func(_ *guestPacer, _ *uio.AsyncWriter, cancel context.CancelFunc) { cancel() }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			ctx, cancel := context.WithCancel(t.Context())
-			defer cancel()
-			p, writers := newTestPacerWithContext(t, ctx, time.Minute)
-			pacer := attachStuck(t, p, writers)
+			synctest.Test(t, func(t *testing.T) {
+				ctx, cancel := context.WithCancel(t.Context())
+				defer cancel()
+				p, writers := newTestPacerWithContext(t, ctx, time.Minute)
+				pacer := attachStuck(t, p, writers)
 
-			done := goWrite(t, p, func() { _, _ = p.Write(make([]byte, ptyWriteSize)) })
-			requireHeld(t, p, done)
-			tc.wake(p, pacer, cancel)
-			requireReturns(t, done, 2*time.Second)
+				done := goWrite(t, p, func() { _, _ = p.Write(make([]byte, ptyWriteSize)) })
+				requireHeld(t, p, done)
+				tc.wake(p, pacer, cancel)
+				requireCompleted(t, done)
+			})
 		})
 	}
 }
@@ -719,26 +847,28 @@ func TestGuestPacerWakesAWaitingWrite(t *testing.T) {
 // a guest can join while a write is held — and joins behind the pacer, so the
 // write stays held.
 func TestGuestPacerDoesNotHoldAnAttachBehindAGatedWrite(t *testing.T) {
-	p, writers := newTestPacer(t, time.Minute)
-	attachStuck(t, p, writers)
-	done := goWrite(t, p, func() { _, _ = p.Write(make([]byte, ptyWriteSize)) })
-	requireHeld(t, p, done)
+	synctest.Test(t, func(t *testing.T) {
+		p, writers := newTestPacer(t, time.Minute)
+		attachStuck(t, p, writers)
+		done := goWrite(t, p, func() { _, _ = p.Write(make([]byte, ptyWriteSize)) })
+		requireHeld(t, p, done)
 
-	joiner := uio.NewAsyncWriter(io.Discard, uio.DefaultGuestBufferSize, nil)
-	t.Cleanup(func() {
-		writers.Remove(joiner)
-		p.remove(joiner)
-		_ = joiner.Close()
+		joiner := uio.NewAsyncWriter(io.Discard, uio.DefaultGuestBufferSize, nil)
+		t.Cleanup(func() {
+			writers.Remove(joiner)
+			p.remove(joiner)
+			_ = joiner.Close()
+		})
+		attached := make(chan error, 1)
+		go func() {
+			attached <- p.attach(t.Context(), joiner, func() error { return attachGuestOutput(t.Context(), time.Time{}, writers, joiner, termsize.Size{}) })
+		}()
+		require.NoError(t, awaitErr(t, attached), "a guest's attach failed while a write was held")
+		requireHeld(t, p, done)
+
+		p.release()
+		requireCompleted(t, done)
 	})
-	attached := make(chan error, 1)
-	go func() {
-		attached <- p.attach(t.Context(), joiner, func() error { return attachGuestOutput(t.Context(), time.Time{}, writers, joiner, termsize.Size{}) })
-	}()
-	require.NoError(t, awaitErr(t, attached), "a guest's attach failed while a write was held")
-	requireHeld(t, p, done)
-
-	p.release()
-	requireReturns(t, done, 2*time.Second)
 }
 
 // renderMark heads every render a heldReplayer's emulation makes, so that a
@@ -821,11 +951,12 @@ func (e *heldEmulation) Render() ([]byte, error) {
 // screen with a heldReplayer. The ring holds ringBytes, written at 80x24, and
 // passed is every write the pacer has let through to the fan-out.
 type emulatingPacer struct {
-	p        *guestPacer
-	writers  *uio.MultiWriter
-	r        *heldReplayer
-	passed   *recordingWriter
-	fellBack chan error // why each join that fell back did
+	p           *guestPacer
+	writers     *uio.MultiWriter
+	r           *heldReplayer
+	passed      *recordingWriter
+	fellBack    chan error // why each join that fell back did
+	releaseOnce sync.Once
 }
 
 func newEmulatingPacer(t *testing.T, stall time.Duration) *emulatingPacer {
@@ -837,6 +968,12 @@ func newEmulatingPacer(t *testing.T, stall time.Duration) *emulatingPacer {
 		passed:   &recordingWriter{},
 		fellBack: make(chan error, 4),
 	}
+	t.Cleanup(func() {
+		if e.p != nil {
+			e.p.release()
+		}
+		e.release()
+	})
 	e.writers.SetReplayer(e.r, func(err error) { e.fellBack <- err })
 	// The size the ring is written at, which a join's emulation starts from.
 	e.writers.ResizeEnd(e.writers.ResizeBegin(termsize.Default), true)
@@ -846,22 +983,22 @@ func newEmulatingPacer(t *testing.T, stall time.Duration) *emulatingPacer {
 	return e
 }
 
+func (e *emulatingPacer) release() { e.releaseOnce.Do(func() { close(e.r.release) }) }
+
 // join attaches sink through the pacer as the guest door does, with its
 // screen reconstructed for an 80x24 terminal by deadline, on a goroutine of
 // its own, and returns what the attach returns.
 func (e *emulatingPacer) join(t *testing.T, ctx context.Context, sink *uio.AsyncWriter, deadline time.Time) <-chan error {
 	t.Helper()
 	attached := make(chan error, 1)
-	go func() {
-		attached <- e.p.attach(ctx, sink, func() error {
-			return attachGuestOutput(ctx, deadline, e.writers, sink, termsize.Default)
-		})
-	}()
 	t.Cleanup(func() {
 		e.writers.Remove(sink)
 		e.p.remove(sink)
 		_ = sink.Close()
 	})
+	go func() {
+		attached <- e.p.attach(ctx, sink, func() error { return attachGuestOutput(ctx, deadline, e.writers, sink, termsize.Default) })
+	}()
 	return attached
 }
 
@@ -870,9 +1007,10 @@ func (e *emulatingPacer) join(t *testing.T, ctx context.Context, sink *uio.Async
 // being made.
 func (e *emulatingPacer) awaitStart(t *testing.T) {
 	t.Helper()
+	synctest.Wait()
 	select {
 	case <-e.r.started:
-	case <-time.After(2 * time.Second):
+	default:
 		t.Fatal("no join reached the replayer")
 	}
 }
@@ -895,12 +1033,13 @@ func flush(t *testing.T, sink *uio.AsyncWriter) {
 	require.NoError(t, sink.Flush(ctx))
 }
 
-// awaitClosed fails, rather than hangs, if ch is not closed within 2 s.
+// awaitClosed settles a bubble and requires the operation to have completed.
 func awaitClosed(t *testing.T, ch <-chan struct{}, what string) {
 	t.Helper()
+	synctest.Wait()
 	select {
 	case <-ch:
-	case <-time.After(2 * time.Second):
+	default:
 		t.Fatal(what)
 	}
 }
@@ -963,72 +1102,78 @@ func ends(s string) string {
 // the guest has the render and every byte written after its capture, once,
 // and nothing fell back.
 func TestGuestPacerHoldsTheCommandWhileItsGuestIsReplayed(t *testing.T) {
-	e := newEmulatingPacer(t, time.Minute)
-	got := &recordingWriter{}
-	sink := uio.NewAsyncWriter(got, uio.DefaultGuestBufferSize, nil)
-	attached := e.join(t, t.Context(), sink, time.Now().Add(time.Minute))
-	e.awaitStart(t)
+	synctest.Test(t, func(t *testing.T) {
+		e := newEmulatingPacer(t, time.Minute)
+		got := &recordingWriter{}
+		sink := uio.NewAsyncWriter(got, uio.DefaultGuestBufferSize, nil)
+		attached := e.join(t, t.Context(), sink, time.Now().Add(time.Minute))
+		e.awaitStart(t)
 
-	ps := pieces(4)
-	done := goWrite(t, e.p, func() { writeAll(e.p, ps) })
-	requireHeld(t, e.p, done)
-	e.requirePassedWhilePending(t)
+		ps := pieces(4)
+		done := goWrite(t, e.p, func() { writeAll(e.p, ps) })
+		requireHeld(t, e.p, done)
+		e.requirePassedWhilePending(t)
 
-	close(e.r.release)
-	require.NoError(t, awaitErr(t, attached))
-	requireReturns(t, done, 2*time.Second)
+		e.release()
+		require.NoError(t, awaitErr(t, attached))
+		requireCompleted(t, done)
 
-	flush(t, sink)
-	requireSent(t, got, renderMark+ringBytes+string(bytes.Join(ps, nil)),
-		"the guest missed or repeated output written after its capture")
-	e.requireNoFallback(t)
+		flush(t, sink)
+		requireSent(t, got, renderMark+ringBytes+string(bytes.Join(ps, nil)),
+			"the guest missed or repeated output written after its capture")
+		e.requireNoFallback(t)
+	})
 }
 
 // A guest attached and caught up paces, and a second guest being replayed
 // behind it holds nothing. It is a follower, and its join catches up on what
 // the command writes meanwhile; only the pacer's attach holds the command.
 func TestGuestPacerAFollowerBeingReplayedHoldsNothing(t *testing.T) {
-	e := newEmulatingPacer(t, time.Minute)
-	first := uio.NewAsyncWriter(io.Discard, uio.DefaultGuestBufferSize, nil)
-	attachPaced(t, e.p, e.writers, first)
-	flush(t, first)
+	synctest.Test(t, func(t *testing.T) {
+		e := newEmulatingPacer(t, time.Minute)
+		first := uio.NewAsyncWriter(io.Discard, uio.DefaultGuestBufferSize, nil)
+		attachPaced(t, e.p, e.writers, first)
+		flush(t, first)
 
-	got := &recordingWriter{}
-	second := uio.NewAsyncWriter(got, uio.DefaultGuestBufferSize, nil)
-	attached := e.join(t, t.Context(), second, time.Now().Add(time.Minute))
-	e.awaitStart(t)
+		got := &recordingWriter{}
+		second := uio.NewAsyncWriter(got, uio.DefaultGuestBufferSize, nil)
+		attached := e.join(t, t.Context(), second, time.Now().Add(time.Minute))
+		e.awaitStart(t)
 
-	done := goWrite(t, e.p, func() { _, _ = e.p.Write([]byte("during")) })
-	requireReturns(t, done, 2*time.Second)
-	require.Zero(t, e.p.holds.Load(), "a guest being replayed behind the pacer held the command")
+		done := goWrite(t, e.p, func() { _, _ = e.p.Write([]byte("during")) })
+		requireCompleted(t, done)
+		require.Zero(t, e.p.holds.Load(), "a guest being replayed behind the pacer held the command")
 
-	close(e.r.release)
-	require.NoError(t, awaitErr(t, attached))
-	flush(t, second)
-	require.Equal(t, renderMark+ringBytes+"during", string(got.bytes()),
-		"the follower missed or repeated output written while it was replayed")
-	e.requireNoFallback(t)
+		e.release()
+		require.NoError(t, awaitErr(t, attached))
+		flush(t, second)
+		require.Equal(t, renderMark+ringBytes+"during", string(got.bytes()),
+			"the follower missed or repeated output written while it was replayed")
+		e.requireNoFallback(t)
+	})
 }
 
 // A guest that leaves while it is replayed ends the hold it put on the
 // command: its join is refused with its context's error, its registration
 // goes with it, and the write held for it goes through.
 func TestGuestPacerAGuestThatLeavesWhileReplayedReleasesTheCommand(t *testing.T) {
-	e := newEmulatingPacer(t, time.Minute)
-	ctx, leave := context.WithCancel(t.Context())
-	defer leave()
-	sink := uio.NewAsyncWriter(io.Discard, uio.DefaultGuestBufferSize, nil)
-	attached := e.join(t, ctx, sink, time.Now().Add(time.Minute))
-	e.awaitStart(t)
+	synctest.Test(t, func(t *testing.T) {
+		e := newEmulatingPacer(t, time.Minute)
+		ctx, leave := context.WithCancel(t.Context())
+		defer leave()
+		sink := uio.NewAsyncWriter(io.Discard, uio.DefaultGuestBufferSize, nil)
+		attached := e.join(t, ctx, sink, time.Now().Add(time.Minute))
+		e.awaitStart(t)
 
-	done := goWrite(t, e.p, func() { writeAll(e.p, pieces(3)) })
-	requireHeld(t, e.p, done)
+		done := goWrite(t, e.p, func() { writeAll(e.p, pieces(3)) })
+		requireHeld(t, e.p, done)
 
-	leave()
-	require.ErrorIs(t, awaitErr(t, attached), context.Canceled)
-	requireReturns(t, done, 2*time.Second)
-	require.Zero(t, registered(e.p), "a guest that left while it was replayed is still registered")
-	e.requireNoFallback(t)
+		leave()
+		require.ErrorIs(t, awaitErr(t, attached), context.Canceled)
+		requireCompleted(t, done)
+		require.Zero(t, registered(e.p), "a guest that left while it was replayed is still registered")
+		e.requireNoFallback(t)
+	})
 }
 
 // However an attach ends, the hold it put on the command ends with it:
@@ -1048,38 +1193,41 @@ func TestGuestPacerEndsTheHoldHoweverTheAttachEnds(t *testing.T) {
 		{name: "panicked", end: func() error { panic("the attach panics") }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			p, _ := newTestPacer(t, time.Minute)
-			inside, finish, over := make(chan struct{}), make(chan struct{}), make(chan struct{})
-			go func() {
-				defer close(over)
-				// The test's own panic, which the attach must not swallow.
-				defer func() { _ = recover() }()
-				_ = p.attach(t.Context(), newFakePaced(0), func() error {
-					close(inside)
-					<-finish
-					return tc.end()
+			synctest.Test(t, func(t *testing.T) {
+				p, _ := newTestPacer(t, time.Minute)
+				inside, finish, over := make(chan struct{}), make(chan struct{}), make(chan struct{})
+				t.Cleanup(func() {
+					select {
+					case <-finish:
+					default:
+						close(finish)
+					}
+					<-over
 				})
-			}()
-			t.Cleanup(func() {
-				select {
-				case <-finish:
-				default:
-					close(finish)
-				}
-				<-over
-			})
-			awaitClosed(t, inside, "the attach never ran")
+				go func() {
+					defer close(over)
+					// The test's own panic, which the attach must not swallow.
+					defer func() { _ = recover() }()
+					_ = p.attach(t.Context(), newFakePaced(0), func() error {
+						close(inside)
+						<-finish
+						return tc.end()
+					})
+				}()
 
-			done := goWrite(t, p, func() { produce(p, 3*ptyWriteSize) })
-			requireHeld(t, p, done)
-			close(finish)
-			awaitClosed(t, over, "the attach never returned")
-			requireReturns(t, done, 2*time.Second)
-			want := 0
-			if tc.attached {
-				want = 1
-			}
-			require.Equal(t, want, registered(p))
+				awaitClosed(t, inside, "the attach never ran")
+
+				done := goWrite(t, p, func() { produce(p, 3*ptyWriteSize) })
+				requireHeld(t, p, done)
+				close(finish)
+				awaitClosed(t, over, "the attach never returned")
+				requireCompleted(t, done)
+				want := 0
+				if tc.attached {
+					want = 1
+				}
+				require.Equal(t, want, registered(p))
+			})
 		})
 	}
 }
@@ -1097,28 +1245,31 @@ func TestGuestPacerAPendingHoldEndsWithTheSession(t *testing.T) {
 		{"the command exits", func(p *guestPacer, _ context.CancelFunc) { p.release() }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			ctx, cancel := context.WithCancel(t.Context())
-			defer cancel()
-			p, _ := newTestPacerWithContext(t, ctx, time.Minute)
-			inside, finish := make(chan struct{}), make(chan struct{})
-			attached := make(chan error, 1)
-			go func() {
-				attached <- p.attach(t.Context(), newFakePaced(0), func() error {
-					close(inside)
-					<-finish
-					return nil
+			synctest.Test(t, func(t *testing.T) {
+				ctx, cancel := context.WithCancel(t.Context())
+				defer cancel()
+				p, _ := newTestPacerWithContext(t, ctx, time.Minute)
+				inside, finish := make(chan struct{}), make(chan struct{})
+				attached := make(chan error, 1)
+				t.Cleanup(func() {
+					close(finish)
+					require.NoError(t, <-attached, "the attach failed once it was let finish")
 				})
-			}()
-			t.Cleanup(func() {
-				close(finish)
-				require.NoError(t, <-attached, "the attach failed once it was let finish")
-			})
-			awaitClosed(t, inside, "the attach never ran")
+				go func() {
+					attached <- p.attach(t.Context(), newFakePaced(0), func() error {
+						close(inside)
+						<-finish
+						return nil
+					})
+				}()
 
-			done := goWrite(t, p, func() { produce(p, 3*ptyWriteSize) })
-			requireHeld(t, p, done)
-			tc.stop(p, cancel)
-			requireReturns(t, done, 2*time.Second)
+				awaitClosed(t, inside, "the attach never ran")
+
+				done := goWrite(t, p, func() { produce(p, 3*ptyWriteSize) })
+				requireHeld(t, p, done)
+				tc.stop(p, cancel)
+				requireCompleted(t, done)
+			})
 		})
 	}
 }
@@ -1128,37 +1279,43 @@ func TestGuestPacerAPendingHoldEndsWithTheSession(t *testing.T) {
 // attach through five stall deadlines, it is never judged stalled, and once
 // attached and caught up the write goes.
 func TestGuestPacerNeverJudgesAGuestStalledWhileItIsAttached(t *testing.T) {
-	const stall = 20 * time.Millisecond
-	p, _ := newTestPacer(t, stall)
-	fake := newFakePaced(0)
-	inside, finish := make(chan struct{}), make(chan struct{})
-	attached := make(chan error, 1)
-	go func() {
-		attached <- p.attach(t.Context(), fake, func() error {
-			close(inside)
-			<-finish
-			return nil
+	synctest.Test(t, func(t *testing.T) {
+		const stall = 20 * time.Millisecond
+		p, _ := newTestPacer(t, stall)
+		fake := newFakePaced(0)
+		inside, finish := make(chan struct{}), make(chan struct{})
+		attached := make(chan error, 1)
+		t.Cleanup(func() {
+			select {
+			case <-finish:
+			default:
+				close(finish)
+			}
 		})
-	}()
-	t.Cleanup(func() {
-		select {
-		case <-finish:
-		default:
-			close(finish)
+		go func() {
+			attached <- p.attach(t.Context(), fake, func() error {
+				close(inside)
+				<-finish
+				return nil
+			})
+		}()
+
+		awaitClosed(t, inside, "the attach never ran")
+
+		done := goWrite(t, p, func() { produce(p, 3*ptyWriteSize) })
+		requireHeld(t, p, done)
+		// Pending at all five 20 ms stall boundaries: no delivery is due yet.
+		for range 5 {
+			time.Sleep(stall)
+			synctest.Wait()
+			require.Zero(t, fake.refusals(), "a guest being attached was judged stalled")
+			requireHeld(t, p, done)
 		}
+
+		close(finish)
+		require.NoError(t, awaitErr(t, attached))
+		requireCompleted(t, done)
 	})
-	awaitClosed(t, inside, "the attach never ran")
-
-	done := goWrite(t, p, func() { produce(p, 3*ptyWriteSize) })
-	requireHeld(t, p, done)
-	// Not ordering anything: how long the write is held is the quantity.
-	time.Sleep(5 * stall)
-	require.Zero(t, fake.refusals(), "a guest being attached was judged stalled")
-	requireHeld(t, p, done)
-
-	close(finish)
-	require.NoError(t, awaitErr(t, attached))
-	requireReturns(t, done, 2*time.Second)
 }
 
 // The hold can't deadlock the join it waits for, because the handoff waits
@@ -1167,31 +1324,34 @@ func TestGuestPacerNeverJudgesAGuestStalledWhileItIsAttached(t *testing.T) {
 // up on, and one whose outcome comes after the reconstruction is released is
 // either waited for or caught up on, depending on which comes first: the pty
 // reports an outcome as its ioctl returns, writing nothing. The join's
-// deadline is a minute off, so a handoff that needed the command to write
-// would hang the attach past the bounded wait below rather than fall back.
+// deadline is a minute off. Once the resize resolves, settlement must finish
+// the attach immediately; needing more command output would leave it pending.
 func TestGuestPacerHoldNeedsNoWriteToEnd(t *testing.T) {
-	e := newEmulatingPacer(t, time.Minute)
-	sink := uio.NewAsyncWriter(io.Discard, uio.DefaultGuestBufferSize, nil)
-	attached := e.join(t, t.Context(), sink, time.Now().Add(time.Minute))
-	e.awaitStart(t)
-	done := goWrite(t, e.p, func() { writeAll(e.p, pieces(3)) })
-	requireHeld(t, e.p, done)
-	e.requirePassedWhilePending(t)
+	synctest.Test(t, func(t *testing.T) {
+		e := newEmulatingPacer(t, time.Minute)
+		sink := uio.NewAsyncWriter(io.Discard, uio.DefaultGuestBufferSize, nil)
+		attached := e.join(t, t.Context(), sink, time.Now().Add(time.Minute))
+		e.awaitStart(t)
+		done := goWrite(t, e.p, func() { writeAll(e.p, pieces(3)) })
+		requireHeld(t, e.p, done)
+		e.requirePassedWhilePending(t)
 
-	committed, unresolved := termsize.Size{Cols: 45, Rows: 24}, termsize.Size{Cols: 40, Rows: 20}
-	e.writers.ResizeEnd(e.writers.ResizeBegin(committed), true)
-	seq := e.writers.ResizeBegin(unresolved)
-	close(e.r.release)
-	e.writers.ResizeEnd(seq, true)
+		committed, unresolved := termsize.Size{Cols: 45, Rows: 24}, termsize.Size{Cols: 40, Rows: 20}
+		e.writers.ResizeEnd(e.writers.ResizeBegin(committed), true)
+		seq := e.writers.ResizeBegin(unresolved)
+		t.Cleanup(func() { e.writers.ResizeEnd(seq, false) })
+		e.release()
+		e.writers.ResizeEnd(seq, true)
 
-	require.NoError(t, awaitErr(t, attached), "the attach waited on the command it holds")
-	requireReturns(t, done, 2*time.Second)
-	var fed []termsize.Size
-	for _, ev := range e.r.fedEvents() {
-		fed = append(fed, ev.Size)
-	}
-	require.Equal(t, []termsize.Size{committed, unresolved}, fed, "the join didn't catch up on the resizes")
-	e.requireNoFallback(t)
+		require.NoError(t, awaitErr(t, attached), "the attach waited on the command it holds")
+		requireCompleted(t, done)
+		var fed []termsize.Size
+		for _, ev := range e.r.fedEvents() {
+			fed = append(fed, ev.Size)
+		}
+		require.Equal(t, []termsize.Size{committed, unresolved}, fed, "the join didn't catch up on the resizes")
+		e.requireNoFallback(t)
+	})
 }
 
 // One handoff waits on the command: an emulation that can't pass a resize
@@ -1201,43 +1361,47 @@ func TestGuestPacerHoldNeedsNoWriteToEnd(t *testing.T) {
 // deadline, which ends the hold. So the join's deadline bounds any hold an
 // attach puts on the command.
 func TestGuestPacerHoldEndsByTheJoinsDeadline(t *testing.T) {
-	e := newEmulatingPacer(t, time.Minute)
-	e.r.stuck = true
-	got := &recordingWriter{}
-	sink := uio.NewAsyncWriter(got, uio.DefaultGuestBufferSize, nil)
-	deadline := time.Now().Add(300 * time.Millisecond)
-	attached := e.join(t, t.Context(), sink, deadline)
-	e.awaitStart(t)
-	ps := pieces(3)
-	done := goWrite(t, e.p, func() { writeAll(e.p, ps) })
-	requireHeld(t, e.p, done)
+	synctest.Test(t, func(t *testing.T) {
+		e := newEmulatingPacer(t, time.Minute)
+		e.r.stuck = true
+		got := &recordingWriter{}
+		sink := uio.NewAsyncWriter(got, uio.DefaultGuestBufferSize, nil)
+		deadline := time.Now().Add(300 * time.Millisecond)
+		attached := e.join(t, t.Context(), sink, deadline)
+		e.awaitStart(t)
+		ps := pieces(3)
+		done := goWrite(t, e.p, func() { writeAll(e.p, ps) })
+		requireHeld(t, e.p, done)
 
-	// The guest's own resize, which the emulation can't pass without more
-	// output.
-	e.writers.ResizeEnd(e.writers.ResizeBegin(termsize.Size{Cols: 45, Rows: 24}), true)
-	close(e.r.release)
+		// The guest's own resize, which the emulation can't pass without more
+		// output.
+		e.writers.ResizeEnd(e.writers.ResizeBegin(termsize.Size{Cols: 45, Rows: 24}), true)
+		e.release()
 
-	requireReturns(t, done, time.Until(deadline)+2*time.Second)
-	ended := time.Now()
-	require.False(t, ended.Before(deadline), "the hold ended before the join's deadline, so the join never needed output")
-	// The hold ends within milliseconds of the deadline, under -race too. One
-	// that outlived the fallback would have nothing to end it here before the
-	// bound above gives up, two seconds on: the stall timeout is a minute, and
-	// a pending guest has none. Half a second leaves a loaded runner room and
-	// stays well short of that.
-	require.Less(t, ended.Sub(deadline), 500*time.Millisecond, "the hold outlived the join's deadline")
-	require.NoError(t, awaitErr(t, attached), "a join that falls back is attached")
-	select {
-	case err := <-e.fellBack:
-		require.ErrorIs(t, err, uio.ErrReplayDeadline)
-	default:
-		t.Fatal("the join didn't fall back")
-	}
-	flush(t, sink)
-	sent := string(got.bytes())
-	require.NotContains(t, sent, renderMark, "a join that fell back was handed a render")
-	require.True(t, strings.HasSuffix(sent, ringBytes+string(bytes.Join(ps, nil))),
-		"the guest missed output: sent %s", ends(sent))
+		// The 300 ms join budget bounds the pending hold exactly.
+		synctest.Wait()
+		time.Sleep(time.Until(deadline) - time.Nanosecond)
+		synctest.Wait()
+		requireHeld(t, e.p, done)
+		select {
+		case err := <-attached:
+			t.Fatalf("the join ended before its deadline: %v", err)
+		default:
+		}
+		time.Sleep(time.Nanosecond)
+		requireCompleted(t, done)
+		require.NoError(t, awaitErr(t, attached), "a join that falls back is attached")
+		select {
+		case err := <-e.fellBack:
+			require.ErrorIs(t, err, uio.ErrReplayDeadline)
+		default:
+			t.Fatal("the join didn't fall back")
+		}
+		flush(t, sink)
+		sent := string(got.bytes())
+		require.NotContains(t, sent, renderMark, "a join that fell back was handed a render")
+		requireSent(t, got, ringBytes+string(bytes.Join(ps, nil)), "the guest missed or repeated output")
+	})
 }
 
 // startSignal is a Replayer that says as each Start begins, which is inside
@@ -1290,9 +1454,10 @@ func (c *splitCharacter) join(t *testing.T, joiner termsize.Size, sink *uio.Asyn
 	})
 	attached := make(chan error, 1)
 	go func() { attached <- join() }()
+	synctest.Wait()
 	select {
 	case <-c.started:
-	case <-time.After(2 * time.Second):
+	default:
 		t.Fatal("no join reached the replayer")
 	}
 	return attached
@@ -1324,36 +1489,10 @@ func requireReconstructed(t *testing.T, sink *uio.AsyncWriter, got *recordingWri
 // on behalf of the guest being replayed, and the join hands over at once,
 // emulated, rather than waiting out its deadline, a minute off, to fall back.
 func TestGuestPacerLetsAJoinFinishACharacterTheRingEndsInside(t *testing.T) {
-	c := newSplitCharacter(t)
-	p := newGuestPacer(t.Context(), c.writers, 0)
-	joiner := termsize.Size{Cols: 100, Rows: 40}
-	got := &recordingWriter{}
-	sink := uio.NewAsyncWriter(got, uio.DefaultGuestBufferSize, nil)
-	t.Cleanup(func() { p.remove(sink) })
-	attached := c.join(t, joiner, sink, func() error {
-		return p.attach(t.Context(), sink, func() error {
-			return attachGuestOutput(t.Context(), time.Now().Add(time.Minute), c.writers, sink, joiner)
-		})
-	})
-
-	done := goWrite(t, p, func() { _, _ = p.Write([]byte(splitCharacterRest)) })
-	requireReturns(t, done, 2*time.Second)
-	require.NoError(t, awaitErr(t, attached), "the join waited for its deadline")
-	c.requireNoFallback(t)
-	requireReconstructed(t, sink, got)
-}
-
-// A joiner smaller than the pty is not held by the screen at the pty's old
-// size, and until the emulation has passed the joiner's own resize that is
-// the only size it has. So it renders nothing until then: the join waits for
-// the character's third byte, which lets the emulation pass the resize, and
-// hands over the screen at the joiner's size. Through the pacer, for a guest
-// that paces, and with no pacer, for a session with a primary.
-func TestAJoinWhoseResizeLandsInsideACharacterHandsOverAtItsSize(t *testing.T) {
-	joiner := termsize.Size{Cols: 45, Rows: 24}
-	t.Run("a guest that paces, no primary", func(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
 		c := newSplitCharacter(t)
 		p := newGuestPacer(t.Context(), c.writers, 0)
+		joiner := termsize.Size{Cols: 100, Rows: 40}
 		got := &recordingWriter{}
 		sink := uio.NewAsyncWriter(got, uio.DefaultGuestBufferSize, nil)
 		t.Cleanup(func() { p.remove(sink) })
@@ -1364,27 +1503,60 @@ func TestAJoinWhoseResizeLandsInsideACharacterHandsOverAtItsSize(t *testing.T) {
 		})
 
 		done := goWrite(t, p, func() { _, _ = p.Write([]byte(splitCharacterRest)) })
-		requireReturns(t, done, 2*time.Second)
+		requireCompleted(t, done)
 		require.NoError(t, awaitErr(t, attached), "the join waited for its deadline")
 		c.requireNoFallback(t)
 		requireReconstructed(t, sink, got)
 	})
-	t.Run("a primary, no pacer", func(t *testing.T) {
-		c := newSplitCharacter(t)
-		// The primary is written synchronously, inside the fan-out.
-		primary := &recordingWriter{}
-		require.NoError(t, c.writers.Append(primary))
-		got := &recordingWriter{}
-		sink := uio.NewAsyncWriter(got, uio.DefaultGuestBufferSize, nil)
-		attached := c.join(t, joiner, sink, func() error {
-			return attachGuestOutput(t.Context(), time.Now().Add(time.Minute), c.writers, sink, joiner)
-		})
+}
 
-		_, err := c.writers.Write([]byte(splitCharacterRest))
-		require.NoError(t, err)
-		require.NoError(t, awaitErr(t, attached), "the join waited for its deadline")
-		c.requireNoFallback(t)
-		requireReconstructed(t, sink, got)
+// A joiner smaller than the pty is not held by the screen at the pty's old
+// size, and until the emulation has passed the joiner's own resize that is
+// the only size it has. So it renders nothing until then: the join waits for
+// the character's third byte, which lets the emulation pass the resize, and
+// hands over the screen at the joiner's size. Through the pacer, for a guest
+// that paces, and with no pacer, for a session with a primary.
+func TestAJoinWhoseResizeLandsInsideACharacterHandsOverAtItsSize(t *testing.T) {
+	t.Run("a guest that paces, no primary", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			joiner := termsize.Size{Cols: 45, Rows: 24}
+			c := newSplitCharacter(t)
+			p := newGuestPacer(t.Context(), c.writers, 0)
+			got := &recordingWriter{}
+			sink := uio.NewAsyncWriter(got, uio.DefaultGuestBufferSize, nil)
+			t.Cleanup(func() { p.remove(sink) })
+			attached := c.join(t, joiner, sink, func() error {
+				return p.attach(t.Context(), sink, func() error {
+					return attachGuestOutput(t.Context(), time.Now().Add(time.Minute), c.writers, sink, joiner)
+				})
+			})
+
+			done := goWrite(t, p, func() { _, _ = p.Write([]byte(splitCharacterRest)) })
+			requireCompleted(t, done)
+			require.NoError(t, awaitErr(t, attached), "the join waited for its deadline")
+			c.requireNoFallback(t)
+			requireReconstructed(t, sink, got)
+		})
+	})
+	t.Run("a primary, no pacer", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			joiner := termsize.Size{Cols: 45, Rows: 24}
+			c := newSplitCharacter(t)
+			// The primary is written synchronously, inside the fan-out.
+			primary := &recordingWriter{}
+			require.NoError(t, c.writers.Append(primary))
+			got := &recordingWriter{}
+			sink := uio.NewAsyncWriter(got, uio.DefaultGuestBufferSize, nil)
+			attached := c.join(t, joiner, sink, func() error {
+				return attachGuestOutput(t.Context(), time.Now().Add(time.Minute), c.writers, sink, joiner)
+			})
+
+			_, err := c.writers.Write([]byte(splitCharacterRest))
+			require.NoError(t, err)
+			require.NoError(t, awaitErr(t, attached), "the join waited for its deadline")
+			c.requireNoFallback(t)
+			requireReconstructed(t, sink, got)
+		})
 	})
 }
 
@@ -1392,23 +1564,35 @@ func TestAJoinWhoseResizeLandsInsideACharacterHandsOverAtItsSize(t *testing.T) {
 // falls back to the raw ring at its deadline, for running out of time, and
 // not at once for a render at the pty's old size, which it never makes.
 func TestAJoinWhoseResizeLandsInsideACharacterFallsBackAtItsDeadline(t *testing.T) {
-	c := newSplitCharacter(t)
-	joiner := termsize.Size{Cols: 45, Rows: 24}
-	got := &recordingWriter{}
-	sink := uio.NewAsyncWriter(got, uio.DefaultGuestBufferSize, nil)
-	deadline := time.Now().Add(300 * time.Millisecond)
-	attached := c.join(t, joiner, sink, func() error {
-		return attachGuestOutput(t.Context(), deadline, c.writers, sink, joiner)
-	})
+	synctest.Test(t, func(t *testing.T) {
+		c := newSplitCharacter(t)
+		joiner := termsize.Size{Cols: 45, Rows: 24}
+		got := &recordingWriter{}
+		sink := uio.NewAsyncWriter(got, uio.DefaultGuestBufferSize, nil)
+		deadline := time.Now().Add(300 * time.Millisecond)
+		attached := c.join(t, joiner, sink, func() error {
+			return attachGuestOutput(t.Context(), deadline, c.writers, sink, joiner)
+		})
 
-	require.NoError(t, awaitErr(t, attached), "a join that falls back is attached")
-	require.False(t, time.Now().Before(deadline), "the join fell back before its deadline")
-	select {
-	case err := <-c.fellBack:
-		require.ErrorIs(t, err, uio.ErrReplayDeadline)
-	default:
-		t.Fatal("the join didn't fall back")
-	}
-	flush(t, sink)
-	require.True(t, strings.HasPrefix(string(got.bytes()), "prompt"), "the guest wasn't handed the raw ring")
+		// The 300 ms deadline is pending at -1 ns and completes at the boundary.
+		synctest.Wait()
+		time.Sleep(time.Until(deadline) - time.Nanosecond)
+		synctest.Wait()
+		select {
+		case err := <-attached:
+			t.Fatalf("the join ended before its deadline: %v", err)
+		default:
+		}
+		time.Sleep(time.Nanosecond)
+		require.NoError(t, awaitErr(t, attached), "a join that falls back is attached")
+		require.Equal(t, deadline, time.Now(), "the join did not end at its deadline")
+		select {
+		case err := <-c.fellBack:
+			require.ErrorIs(t, err, uio.ErrReplayDeadline)
+		default:
+			t.Fatal("the join didn't fall back")
+		}
+		flush(t, sink)
+		requireSent(t, got, "prompt\r\n\xe2\x9c", "the guest missed or repeated the raw ring")
+	})
 }
