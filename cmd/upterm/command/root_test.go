@@ -528,66 +528,175 @@ func TestPerRunFlagsAreExactlyTheRunsOwnChoices(t *testing.T) {
 	}, got)
 }
 
-func TestPerRunEnvStillAppliesWithAWarning(t *testing.T) {
-	t.Setenv("UPTERM_JOIN_TIMEOUT", "10m")
-	setupSessionRoots(t)
+func bindingCommand(t *testing.T, path ...string) *cobra.Command {
+	t.Helper()
+	cmd, _, err := Root().Find(path)
+	require.NoError(t, err)
+	require.NoError(t, cmd.ParseFlags(nil))
+	return cmd
+}
+
+func hostCmdForBinding(t *testing.T) *cobra.Command {
+	t.Helper()
+	cmd := hostCmd()
+	require.NoError(t, cmd.ParseFlags(nil))
+	return cmd
+}
+
+func TestPerRunValuesAreIgnored(t *testing.T) {
+	for _, tc := range []struct {
+		path        []string
+		flag, value string
+	}{
+		{[]string{"host"}, "detach", "true"},
+		{[]string{"host"}, "name", "build"},
+		{[]string{"host"}, "output", "json"},
+		{[]string{"join"}, "wait", "true"},
+		{[]string{"session", "info"}, "output", "json"},
+		{[]string{"session", "current"}, "output", "json"},
+		{[]string{"session", "set"}, "join-timeout", "10m"},
+	} {
+		for _, source := range []string{"env", "config", "both", "invalid", "invalid-env", "null", "empty"} {
+			t.Run(strings.Join(tc.path, " ")+"/"+tc.flag+"/"+source, func(t *testing.T) {
+				restoreFlags(t)
+				withConfig(t, "")
+				t.Setenv(envVarName(tc.flag), "")
+				if source == "config" || source == "both" {
+					withConfig(t, tc.flag+": "+tc.value+"\n")
+				}
+				if source == "invalid-env" {
+					t.Setenv(envVarName(tc.flag), "invalid")
+				}
+				if source == "invalid" {
+					withConfig(t, tc.flag+": [invalid]\n")
+				}
+				if source == "null" {
+					withConfig(t, tc.flag+":\n")
+				}
+				if source == "env" || source == "both" {
+					t.Setenv(envVarName(tc.flag), tc.value)
+				}
+				cmd := bindingCommand(t, tc.path...)
+				before := cmd.Flags().Lookup(tc.flag).Value.String()
+				supplied, deps, err := bindFlagsToEnv(cmd)
+				require.NoError(t, err)
+				require.Equal(t, before, cmd.Flags().Lookup(tc.flag).Value.String())
+				require.False(t, cmd.Flags().Changed(tc.flag))
+				require.False(t, supplied[tc.flag])
+				count := 1
+				if source == "both" {
+					count = 2
+				}
+				if source == "empty" {
+					count = 0
+				}
+				require.Len(t, deps, count)
+				require.NoError(t, cmd.Flags().Set(tc.flag, tc.value))
+				supplied, deps, err = bindFlagsToEnv(cmd)
+				require.NoError(t, err)
+				require.True(t, supplied[tc.flag])
+				require.True(t, cmd.Flags().Changed(tc.flag))
+				require.Empty(t, deps)
+				want := tc.value
+				if tc.flag == "join-timeout" {
+					want = "10m0s"
+				}
+				require.Equal(t, want, cmd.Flags().Lookup(tc.flag).Value.String())
+			})
+		}
+	}
+}
+
+func TestPerRunIgnoredFromIsTheAnnouncedRelease(t *testing.T) {
+	require.Equal(t, "v0.40", perRunIgnoredFrom)
+}
+
+func TestPerRunEnvIsIgnoredWithAWarning(t *testing.T) {
+	restoreFlags(t)
 	withConfig(t, "")
-	_, stderr, code := runCLI(t, "session", "set", "nosuch")
-	require.Equal(t, 4, code) // the value still applies: set looks the name up
-	require.Contains(t, stderr, "upterm: UPTERM_JOIN_TIMEOUT is deprecated for upterm session set; pass --join-timeout. It will be ignored there starting in "+perRunIgnoredFrom+".\n")
+	t.Setenv("UPTERM_DETACH", "true")
+	cmd := hostCmdForBinding(t)
+	_, deps, err := bindFlagsToEnv(cmd)
+	require.NoError(t, err)
+	require.False(t, cmd.Flags().Changed("detach"))
+	require.Len(t, deps, 1)
+	require.Equal(t, "upterm: ignoring UPTERM_DETACH; pass --detach", deps[0].ignoredLine())
 }
 
-func TestPerRunConfigNamesTheFile(t *testing.T) {
-	prevOutput := flagOutput
-	t.Cleanup(func() { flagOutput = prevOutput })
-	setupSessionRoots(t)
-	withConfig(t, "output: json\n")
-	_, stderr, code := runCLI(t, "session", "info", "nosuch")
-	require.Equal(t, 4, code) // the lookup fails, with the value or without it
-	require.Contains(t, stderr, "upterm: the output key in "+utils.UptermConfigFilePath()+" is deprecated; pass --output. It will be ignored starting in "+perRunIgnoredFrom+".\n")
-
-	// A config value alone still applies: without it, set would have nothing
-	// to set (exit 1), not a name to look up.
-	t.Setenv("UPTERM_JOIN_TIMEOUT", "")
-	require.NoError(t, os.Unsetenv("UPTERM_JOIN_TIMEOUT"))
-	withConfig(t, "join-timeout: 5m\n")
-	_, stderr, code = runCLI(t, "session", "set", "nosuch")
-	require.Equal(t, 4, code, stderr)
-	require.Contains(t, stderr, "upterm: the join-timeout key in "+utils.UptermConfigFilePath()+" is deprecated for upterm session set; pass --join-timeout. It will be ignored there starting in "+perRunIgnoredFrom+".\n")
-}
-
-// Each value env and config hold is one line, the one that applies and the
-// one it overrides alike: both stop being read in the same release. A value
-// on the command line outranks them both, and nothing is said.
 func TestPerRunWarnsOncePerValue(t *testing.T) {
+	restoreFlags(t)
 	setupSessionRoots(t)
 	withConfig(t, "join-timeout: 5m\n")
 	t.Setenv("UPTERM_JOIN_TIMEOUT", "10m")
 	_, stderr, code := runCLI(t, "session", "set", "nosuch")
-	require.Equal(t, 4, code)
-	require.Equal(t, "upterm: UPTERM_JOIN_TIMEOUT is deprecated for upterm session set; pass --join-timeout. It will be ignored there starting in "+perRunIgnoredFrom+".\n"+
-		"upterm: the join-timeout key in "+utils.UptermConfigFilePath()+" is deprecated for upterm session set; pass --join-timeout. It will be ignored there starting in "+perRunIgnoredFrom+".\n"+
-		"upterm: no session named \"nosuch\"\n", stderr)
-
+	require.Equal(t, 1, code)
+	require.Equal(t, "upterm: ignoring UPTERM_JOIN_TIMEOUT for upterm session set; pass --join-timeout\n"+
+		"upterm: ignoring the join-timeout key in "+utils.UptermConfigFilePath()+" for upterm session set; pass --join-timeout\n"+
+		"upterm: nothing to set: pass --join-timeout\n", stderr)
 	_, stderr, code = runCLI(t, "session", "set", "nosuch", "--join-timeout", "1m")
 	require.Equal(t, 4, code)
 	require.Equal(t, "upterm: no session named \"nosuch\"\n", stderr)
 }
 
-// The daemon re-parses the same argv, env and config, and applies the same
-// values; only the parent warns, since the daemon's stderr is the log.
 func TestPerRunWarningsAreTheParentsOnly(t *testing.T) {
+	restoreFlags(t)
 	setupSessionRoots(t)
-	withConfig(t, "")
-	t.Setenv("UPTERM_JOIN_TIMEOUT", "10m")
+	withConfig(t, "join-timeout: [invalid]\n")
+	t.Setenv("UPTERM_JOIN_TIMEOUT", "invalid")
 	_, stderr, code := runCLI(t, "session", "set", "nosuch")
-	require.Equal(t, 4, code)
-	require.Equal(t, 1, strings.Count(stderr, "UPTERM_JOIN_TIMEOUT is deprecated"), stderr)
-
+	require.Equal(t, 1, code)
+	require.Equal(t, 1, strings.Count(stderr, "ignoring UPTERM_JOIN_TIMEOUT"), stderr)
+	require.Equal(t, 1, strings.Count(stderr, "ignoring the join-timeout key"), stderr)
 	t.Setenv(daemonHandoffEnv, "3")
 	_, stderr, code = runCLI(t, "session", "set", "nosuch")
-	require.Equal(t, 4, code) // applied all the same
-	require.Equal(t, "upterm: no session named \"nosuch\"\n", stderr)
+	require.Equal(t, 1, code)
+	require.Equal(t, "upterm: nothing to set: pass --join-timeout\n", stderr)
+}
+
+func TestOrdinaryFlagsStillBind(t *testing.T) {
+	for _, source := range []string{"env", "config"} {
+		t.Run(source, func(t *testing.T) {
+			restoreFlags(t)
+			withConfig(t, "")
+			t.Setenv("UPTERM_JOIN_TIMEOUT", "")
+			t.Setenv("UPTERM_ADMIN_SOCKET", "")
+			if source == "env" {
+				t.Setenv("UPTERM_JOIN_TIMEOUT", "10m")
+				t.Setenv("UPTERM_ADMIN_SOCKET", "/tmp/admin.sock")
+			} else {
+				withConfig(t, "join-timeout: 10m\nadmin-socket: /tmp/admin.sock\n")
+			}
+			cmd := bindingCommand(t, "host")
+			supplied, deps, err := bindFlagsToEnv(cmd)
+			require.NoError(t, err)
+			require.Empty(t, deps)
+			require.True(t, supplied["join-timeout"])
+			require.Equal(t, "10m0s", cmd.Flags().Lookup("join-timeout").Value.String())
+			cmd = bindingCommand(t, "session", "current")
+			supplied, deps, err = bindFlagsToEnv(cmd)
+			require.NoError(t, err)
+			require.Empty(t, deps)
+			require.True(t, supplied["admin-socket"])
+			require.Equal(t, "/tmp/admin.sock", cmd.Flags().Lookup("admin-socket").Value.String())
+		})
+	}
+}
+
+func TestCLIOnlyOutputStaysSilent(t *testing.T) {
+	for _, path := range [][]string{{"session", "list"}, {"version"}} {
+		t.Run(strings.Join(path, " "), func(t *testing.T) {
+			restoreFlags(t)
+			withConfig(t, "output: [invalid]\n")
+			t.Setenv("UPTERM_OUTPUT", "invalid")
+			cmd := bindingCommand(t, path...)
+			supplied, deps, err := bindFlagsToEnv(cmd)
+			require.NoError(t, err)
+			require.Empty(t, deps)
+			require.False(t, supplied["output"])
+			require.False(t, cmd.Flags().Changed("output"))
+			require.Empty(t, cmd.Flags().Lookup("output").Value.String())
+		})
+	}
 }
 
 // A CLI-only flag is never bound to env or config: an `output:` key or
@@ -607,4 +716,117 @@ func TestCLIOnlyFlagsIgnoreEnvAndConfig(t *testing.T) {
 	require.Empty(t, out)
 	require.False(t, supplied["output"])
 	require.Empty(t, deps)
+}
+
+func TestPerRunConfigMappingsAreIgnored(t *testing.T) {
+	for _, tc := range []struct {
+		path        []string
+		flag, value string
+	}{
+		{[]string{"host"}, "detach", "true"},
+		{[]string{"host"}, "name", "build"},
+		{[]string{"host"}, "output", "json"},
+		{[]string{"join"}, "wait", "true"},
+		{[]string{"session", "info"}, "output", "json"},
+		{[]string{"session", "current"}, "output", "json"},
+		{[]string{"session", "set"}, "join-timeout", "10m"},
+	} {
+		for _, mapping := range []string{"{nested: invalid}", "{}"} {
+			t.Run(strings.Join(tc.path, " ")+"/"+tc.flag+"/"+mapping, func(t *testing.T) {
+				restoreFlags(t)
+				withConfig(t, tc.flag+": "+mapping+"\n")
+				t.Setenv(envVarName(tc.flag), "")
+				cmd := bindingCommand(t, tc.path...)
+				before := cmd.Flags().Lookup(tc.flag).Value.String()
+				supplied, deps, err := bindFlagsToEnv(cmd)
+				require.NoError(t, err)
+				require.Equal(t, before, cmd.Flags().Lookup(tc.flag).Value.String())
+				require.False(t, cmd.Flags().Changed(tc.flag))
+				require.False(t, supplied[tc.flag])
+				require.Len(t, deps, 1)
+				require.Equal(t, tc.flag, deps[0].Flag)
+				require.True(t, deps[0].InConfig)
+				require.NoError(t, cmd.ParseFlags([]string{"--" + tc.flag + "=" + tc.value}))
+				supplied, deps, err = bindFlagsToEnv(cmd)
+				require.NoError(t, err)
+				require.True(t, supplied[tc.flag])
+				require.True(t, cmd.Flags().Changed(tc.flag))
+				require.Empty(t, deps)
+				want := tc.value
+				if tc.flag == "join-timeout" {
+					want = "10m0s"
+				}
+				require.Equal(t, want, cmd.Flags().Lookup(tc.flag).Value.String())
+			})
+		}
+	}
+}
+
+func TestConfigMappingsDoNotBypassOrdinaryBindingValidation(t *testing.T) {
+	for _, key := range []string{"authorized-user", "join-timeout", "unknown"} {
+		t.Run(key, func(t *testing.T) {
+			restoreFlags(t)
+			withConfig(t, "output: {format: json}\n"+key+": {nested: invalid}\n")
+			cmd := bindingCommand(t, "host")
+			_, _, err := bindFlagsToEnv(cmd)
+			require.ErrorContains(t, err, `unknown config key "`+key+`.nested"`)
+		})
+	}
+}
+
+func TestEmptyConfigMappingsForBoundKeysAreRejected(t *testing.T) {
+	for _, key := range []string{"authorized-user", "join-timeout"} {
+		t.Run(key, func(t *testing.T) {
+			restoreFlags(t)
+			withConfig(t, key+": {}\n")
+			_, _, err := bindFlagsToEnv(bindingCommand(t, "host"))
+			require.ErrorContains(t, err, key)
+			errs := validateConfigFile(Root(), utils.UptermConfigFilePath())
+			require.Len(t, errs, 1)
+			require.Contains(t, errs[0].Error(), key)
+		})
+	}
+}
+
+func TestDottedIgnoredKeyNamesRemainUnknown(t *testing.T) {
+	restoreFlags(t)
+	withConfig(t, "output.format: json\n")
+	_, _, err := bindFlagsToEnv(bindingCommand(t, "session", "info"))
+	require.ErrorContains(t, err, `unknown config key "output.format"`)
+	errs := validateConfigFile(Root(), utils.UptermConfigFilePath())
+	require.Len(t, errs, 1)
+	require.Contains(t, errs[0].Error(), `unknown key "output.format"`)
+}
+
+func TestLiteralDottedKeysCoexistingWithIgnoredValuesRemainUnknown(t *testing.T) {
+	for _, body := range []string{
+		"output: {}\noutput.format: json\n",
+		"output: text\noutput.format: json\n",
+		"output: {format: text}\noutput.format: json\n",
+		"output.format: json\noutput: {format: text}\n",
+		"output: {format: {nested: text}}\noutput.format.nested: json\n",
+		"OUTPUT: {}\nOUTPUT.FORMAT: json\n",
+		"output: {}\noutput.format: {}\n",
+		"output: {format: text}\noutput.format: {nested: json}\n",
+	} {
+		t.Run(body, func(t *testing.T) {
+			restoreFlags(t)
+			setupSessionRoots(t)
+			withConfig(t, body)
+			t.Run("binding", func(t *testing.T) {
+				cmd := bindingCommand(t, "session", "info")
+				_, _, err := bindFlagsToEnv(cmd)
+				require.ErrorContains(t, err, `unknown config key "output.format`)
+				require.NoError(t, cmd.ParseFlags([]string{"--output=json"}))
+				_, _, err = bindFlagsToEnv(cmd)
+				require.ErrorContains(t, err, `unknown config key "output.format`)
+			})
+			t.Run("config edit", func(t *testing.T) {
+				t.Setenv("VISUAL", "true")
+				_, stderr, code := runCLI(t, "config", "edit")
+				require.Equal(t, 1, code, stderr)
+				require.Contains(t, stderr, `unknown key "output.format`)
+			})
+		})
+	}
 }

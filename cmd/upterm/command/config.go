@@ -39,7 +39,14 @@ A flag's value comes from the first of these that sets it:
   2. An environment variable: UPTERM_ and the flag's name in capitals, with
      _ for -, e.g. UPTERM_HIDE_CLIENT_IP=true for --hide-client-ip
   3. The config file
-  4. The flag's default`, configPath),
+  4. The flag's default
+
+These flags take values only from the command line:
+  --output on host, session info, session current, session list and version
+  --name and --detach on host
+  --join-timeout on session set
+  --wait on join
+Host's --join-timeout still reads env and config.`, configPath),
 	}
 
 	cmd.AddCommand(configPathCmd())
@@ -191,7 +198,9 @@ func configEditRunE(c *cobra.Command, args []string) error {
 
 	// Check the file as commands will read it, and say everything wrong with
 	// it at once.
-	if errs := validateConfigFile(c.Root(), configPath); len(errs) > 0 {
+	errs, deps := checkConfigFile(c.Root(), configPath)
+	warnDeprecations(c.ErrOrStderr(), deps)
+	if len(errs) > 0 {
 		return multierror.Append(nil, errs...)
 	}
 
@@ -263,32 +272,39 @@ type configProblem struct {
 // problem, whole). Each names the file and ends on how to fix it. A key is a
 // problem when it is unknown, has no value, or holds a value its flag refuses;
 // and when its value passes the flag but fails a check that the command it
-// belongs to makes before running (host's, and the session commands' output
-// format), made by the functions that command itself calls. The checks are
+// belongs to makes before running, made by the functions that command
+// itself calls. The checks are
 // the table and the loop over the users below it. A file that doesn't exist
 // has no problems, as commands read it.
 //
-// It applies the file's values to the flags under root, so those flags hold
+// Ignored keys are known but neither applied nor validated. It applies the
+// file's remaining values to the flags under root, so those flags hold
 // them afterwards: config edit's process exits after it.
 func validateConfigFile(root *cobra.Command, path string) []error {
-	v := viper.New()
+	errs, _ := checkConfigFile(root, path)
+	return errs
+}
+
+// checkConfigFile also returns notices for config values commands ignore.
+func checkConfigFile(root *cobra.Command, path string) ([]error, []deprecation) {
+	v, literalKeys := configViper()
 	v.SetConfigFile(path)
 	if err := v.ReadInConfig(); err != nil {
 		var parseErr viper.ConfigParseError
 		switch {
 		case errors.Is(err, fs.ErrNotExist):
-			return nil
+			return nil, nil
 		case errors.As(err, &parseErr):
-			return []error{fmt.Errorf("%s: %w; %s", path, err, fixConfig)}
+			return []error{fmt.Errorf("%s: %w; %s", path, err, fixConfig)}, nil
 		default:
-			return []error{fmt.Errorf("failed to read config file %s: %w", path, err)}
+			return []error{fmt.Errorf("failed to read config file %s: %w", path, err)}, nil
 		}
 	}
 
 	known := knownFlagNames(root)
 	settable := make(map[string][]*pflag.Flag)
 	visitTreeFlags(root, func(f *pflag.Flag) {
-		if f.Name != "help" && !hasAnnotation(f, annotationCLIOnly) {
+		if f.Name != "help" && !hasAnnotation(f, annotationCLIOnly) && !hasAnnotation(f, annotationPerRun) {
 			settable[f.Name] = append(settable[f.Name], f)
 		}
 	})
@@ -300,12 +316,14 @@ func validateConfigFile(root *cobra.Command, path string) []error {
 		failed[key] = true
 	}
 
-	keys := v.AllKeys()
+	keys := configKeysForCommand(v, root, literalKeys)
 	slices.Sort(keys)
 	for _, key := range keys {
 		switch {
 		case !known[key]:
 			problem(key, fmt.Sprintf("unknown key %q", key))
+		case len(settable[key]) == 0:
+			continue
 		case !v.IsSet(key):
 			problem(key, key+": config key has no value")
 		default:
@@ -321,7 +339,7 @@ func validateConfigFile(root *cobra.Command, path string) []error {
 	// first key.
 	held := make(map[string]bool, len(keys))
 	for _, key := range keys {
-		held[key] = true
+		held[key] = len(settable[key]) > 0
 	}
 	for _, c := range []struct {
 		keys  []string
@@ -330,13 +348,6 @@ func validateConfigFile(root *cobra.Command, path string) []error {
 		{[]string{"join-timeout"}, func() error { return validateJoinTimeout(flagJoinTimeout) }},
 		{[]string{"read-only", "allow-local-tcp-forwarding"}, func() error {
 			return validateReadOnlyForwarding(flagReadOnly, flagAllowLocalTCPForwarding)
-		}},
-		// detach is judged on accept's value, unless accept is itself refused.
-		{[]string{"detach"}, func() error {
-			if failed["accept"] {
-				return nil
-			}
-			return validateDetachAccept(flagDetach, flagAccept)
 		}},
 		{[]string{"server"}, func() error { return validateServer(flagServer) }},
 		{[]string{"proxy"}, func() error { _, err := parseProxyURL(flagProxy); return err }},
@@ -349,17 +360,6 @@ func validateConfigFile(root *cobra.Command, path string) []error {
 			return err
 		}},
 		{[]string{"force-command"}, func() error { _, err := parseForceCommand(flagForceCommand); return err }},
-		{[]string{"name"}, func() error { return validateSessionNameFlag(flagName) }},
-		// Valid for the commands that print a session, host's -o json among
-		// them; a command that wants more of it (host needs --detach) asks
-		// when it runs.
-		{[]string{"output"}, func() error {
-			if flagOutput == "" {
-				return nil
-			}
-			_, err := sessionOutput(flagOutput)
-			return err
-		}},
 	} {
 		runs := true
 		for _, key := range c.keys {
@@ -390,7 +390,38 @@ func validateConfigFile(root *cobra.Command, path string) []error {
 	for _, p := range problems {
 		errs = append(errs, fmt.Errorf("%s: %s; %s", path, p.what, fixConfig))
 	}
-	return errs
+	var deps []deprecation
+	noticeKeys := append([]string(nil), keys...)
+	for key := range known {
+		if v.InConfig(key) && !slices.Contains(noticeKeys, key) {
+			noticeKeys = append(noticeKeys, key)
+		}
+	}
+	slices.Sort(noticeKeys)
+	for _, key := range noticeKeys {
+		var collect func(*cobra.Command)
+		seen := make(map[string]bool)
+		collect = func(cmd *cobra.Command) {
+			cmd.LocalFlags().VisitAll(func(f *pflag.Flag) {
+				if f.Name != key || !hasAnnotation(f, annotationPerRun) {
+					return
+				}
+				d := deprecation{Flag: key, Source: path, InConfig: true}
+				if boundElsewhere(cmd, key) {
+					d.Command = cmd.CommandPath()
+				}
+				if !seen[d.Command] {
+					deps = append(deps, d)
+					seen[d.Command] = true
+				}
+			})
+			for _, child := range cmd.Commands() {
+				collect(child)
+			}
+		}
+		collect(root)
+	}
+	return errs, deps
 }
 
 // setFlagsFromConfig sets each of flags, all named name, to val, a value from

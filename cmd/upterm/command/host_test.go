@@ -976,9 +976,9 @@ func TestHostWithoutItsLogWarnsOnce(t *testing.T) {
 	require.NotContains(t, stderr, "(see ", "nothing of the session is in the log")
 }
 
-// UPTERM_NAME still names the session before v0.40, and upterm host says
-// once that it will be ignored from perRunIgnoredFrom.
-func TestHostNameFromEnvStillAppliesWithAWarning(t *testing.T) {
+// An ignored name leaves host to generate its own session name.
+func TestHostNameFromEnvIsIgnoredWithAWarning(t *testing.T) {
+	restoreFlags(t)
 	withConfig(t, "")
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -996,8 +996,8 @@ func TestHostNameFromEnvStillAppliesWithAWarning(t *testing.T) {
 	inProcessDaemons(t, []string{"true"})
 	_, stderr, code := runCLI(t, "host", "--detach", "--accept", "--server", "ssh://127.0.0.1:1", "--", "true")
 	require.Equal(t, 1, code)
-	require.Contains(t, stderr, "upterm: session x could not start: ")
-	require.Equal(t, 1, strings.Count(stderr, "upterm: UPTERM_NAME is deprecated; pass --name. This environment variable will be ignored starting in "+perRunIgnoredFrom+".\n"), stderr)
+	require.Regexp(t, `upterm: session true-[a-z0-9]+ could not start: `, stderr)
+	require.Equal(t, 1, strings.Count(stderr, "upterm: ignoring UPTERM_NAME; pass --name\n"), stderr)
 }
 
 // Test_hostCmd_authorizedKeysErrorNamesTheFileOnce pins that nobody re-wraps

@@ -103,7 +103,8 @@ func TestConfigEditNamesEveryProblemOnItsOwnLine(t *testing.T) {
 	_, stderr, code := runCLI(t, "config", "edit")
 	require.Equal(t, 1, code)
 	require.Equal(t,
-		"upterm: "+configPath+": unknown key \"bogus-key\"; run upterm config edit to fix it\n"+
+		"upterm: ignoring the join-timeout key in "+configPath+" for upterm session set; pass --join-timeout\n"+
+			"upterm: "+configPath+": unknown key \"bogus-key\"; run upterm config edit to fix it\n"+
 			"upterm: "+configPath+": join-timeout: --join-timeout cannot be negative; use 0 to wait forever; run upterm config edit to fix it\n"+
 			"upterm: "+configPath+": unknown key \"zzz\"; run upterm config edit to fix it\n",
 		stderr)

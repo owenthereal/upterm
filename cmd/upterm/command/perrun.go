@@ -14,12 +14,12 @@ import (
 // (host's --name, say) reached every run of every command with a flag of that
 // name.
 const (
-	annotationPerRun  = "upterm/per-run"  // env/config still applies until v0.40, with a warning
+	annotationPerRun  = "upterm/per-run"  // env/config ignored, with a notice
 	annotationCLIOnly = "upterm/cli-only" // never bound to env or config
 )
 
 // perRunIgnoredFrom is the release from which per-run values from env or
-// config are ignored. Until then they still apply and draw a warning.
+// config are ignored.
 const perRunIgnoredFrom = "v0.40"
 
 // perRun marks flags of fs as per-run.
@@ -78,20 +78,16 @@ func boundElsewhere(cmd *cobra.Command, name string) bool {
 	return bound
 }
 
-// notice is the warning line for d, while the value still applies.
-func (d deprecation) notice() string {
+// ignoredLine is the notice for an env or config value that is ignored.
+func (d deprecation) ignoredLine() string {
 	what := d.Source
 	if d.InConfig {
 		what = fmt.Sprintf("the %s key in %s", d.Flag, d.Source)
 	}
 	if d.Command != "" {
-		return fmt.Sprintf("upterm: %s is deprecated for %s; pass --%s. It will be ignored there starting in %s.", what, d.Command, d.Flag, perRunIgnoredFrom)
+		what += " for " + d.Command
 	}
-	it := "It"
-	if !d.InConfig {
-		it = "This environment variable"
-	}
-	return fmt.Sprintf("upterm: %s is deprecated; pass --%s. %s will be ignored starting in %s.", what, d.Flag, it, perRunIgnoredFrom)
+	return fmt.Sprintf("upterm: ignoring %s; pass --%s", what, d.Flag)
 }
 
 // warnDeprecations prints each deprecation's line on w, in the parent only:
@@ -102,6 +98,6 @@ func warnDeprecations(w io.Writer, deps []deprecation) {
 		return
 	}
 	for _, d := range deps {
-		_, _ = fmt.Fprintln(w, d.notice())
+		_, _ = fmt.Fprintln(w, d.ignoredLine())
 	}
 }
