@@ -201,17 +201,6 @@ func requireHeld(t *testing.T, p *guestPacer, done <-chan struct{}) {
 	requirePending(t, done, "the write returned instead of being held")
 }
 
-// requireReturns fails, rather than hangs, if what is behind done has not
-// returned within d.
-func requireReturns(t *testing.T, done <-chan struct{}, d time.Duration) {
-	t.Helper()
-	select {
-	case <-done:
-	case <-time.After(d):
-		t.Fatalf("still waiting after %v", d)
-	}
-}
-
 // requireCompleted checks an immediate consequence without advancing time.
 func requireCompleted(t *testing.T, done <-chan struct{}) {
 	t.Helper()

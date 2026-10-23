@@ -14,6 +14,7 @@ import (
 	"sync"
 	"syscall"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/olebedev/emitter"
@@ -96,10 +97,12 @@ func TestCommand_ContextCancellation(t *testing.T) {
 // way; on macOS the slave write blocks until the master reads, so the race
 // cannot be reproduced with a real process.
 type exitedPTY struct {
-	mu        sync.Mutex
-	pending   [][]byte
-	closed    bool
-	readDelay time.Duration
+	mu          sync.Mutex
+	pending     [][]byte
+	closed      bool
+	readDelay   time.Duration
+	release     chan struct{}
+	releaseOnce sync.Once
 
 	// sizeH, sizeW record the last Setsize call, so a test can assert what a
 	// caller resized this fake to.
@@ -110,8 +113,25 @@ type exitedPTY struct {
 	redraws int
 }
 
+// newExitedPTY owns the delayed read's release even when an assertion fails.
+func newExitedPTY(t *testing.T, pending [][]byte, delay time.Duration) *exitedPTY {
+	t.Helper()
+	release := make(chan struct{})
+	p := &exitedPTY{pending: pending, readDelay: delay, release: release}
+	t.Cleanup(func() { _ = p.Close() })
+	return p
+}
+
 func (p *exitedPTY) Read(b []byte) (int, error) {
-	time.Sleep(p.readDelay)
+	if p.readDelay > 0 {
+		timer := time.NewTimer(p.readDelay)
+		defer timer.Stop()
+		select {
+		case <-timer.C:
+		case <-p.release:
+			return 0, io.EOF
+		}
+	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.closed || len(p.pending) == 0 {
@@ -137,6 +157,9 @@ func (p *exitedPTY) Close() error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.closed = true
+	if p.release != nil {
+		p.releaseOnce.Do(func() { close(p.release) })
+	}
 	return nil
 }
 func (p *exitedPTY) Setsize(h, w int) error {
@@ -175,27 +198,26 @@ func (p *exitedPTY) Signal(syscall.Signal) error { return nil }
 // just before exiting is delivered rather than dropped when Run notices the
 // exit.
 func TestCommand_DrainsOutputAfterExit(t *testing.T) {
-	require := require.New(t)
+	synctest.Test(t, func(t *testing.T) {
+		require := require.New(t)
 
-	const lastLine = "written just before exit"
-	writers := uio.NewMultiWriter(uio.DefaultReplayBytes)
-	var out recordingWriter
-	require.NoError(writers.Append(&out))
+		const lastLine = "written just before exit"
+		writers := uio.NewMultiWriter(uio.DefaultReplayBytes)
+		var out recordingWriter
+		require.NoError(writers.Append(&out))
 
-	cmd := &command{
-		logger:  discardLogger(),
-		writers: writers,
-		ctx:     context.Background(),
-		ptmx: &exitedPTY{
-			pending:   [][]byte{[]byte("first chunk\r\n"), []byte(lastLine + "\r\n")},
-			readDelay: 20 * time.Millisecond,
-		},
-	}
+		cmd := &command{
+			logger:  discardLogger(),
+			writers: writers,
+			ctx:     context.Background(),
+			ptmx:    newExitedPTY(t, [][]byte{[]byte("first chunk\r\n"), []byte(lastLine + "\r\n")}, 20*time.Millisecond),
+		}
 
-	patientExitDrain(cmd)
-	require.NoError(cmd.Run())
+		patientExitDrain(cmd)
+		require.NoError(cmd.Run())
 
-	require.Contains(string(out.bytes()), lastLine, "output buffered in the pty at exit was dropped")
+		require.Contains(string(out.bytes()), lastLine, "output buffered in the pty at exit was dropped")
+	})
 }
 
 // signalPTY records the signals it is sent and ends when told to. Read
