@@ -127,7 +127,11 @@ func checkPacerTiming(t *testing.T, stall, want time.Duration) {
 		require.EqualValues(t, 1, p.waiting.Load())
 		time.Sleep(want - time.Nanosecond)
 		synctest.Wait()
-		require.Empty(t, done)
+		select {
+		case <-done:
+			t.Fatal("pacer dropped the sink before its configured deadline")
+		default:
+		}
 		time.Sleep(time.Nanosecond)
 		synctest.Wait()
 		select {
