@@ -533,6 +533,20 @@ func (suite *ConsulStoreTestSuite) TestBasicStoreOperations() {
 	suite.Error(err, "session should be deleted")
 }
 
+// countedConsulRequests borrows the store's private API transport. The
+// original client retains ownership; wrapping it preserves idle cleanup.
+type countedConsulRequests struct {
+	next     http.RoundTripper
+	requests atomic.Int64
+}
+
+func (c *countedConsulRequests) RoundTrip(r *http.Request) (*http.Response, error) {
+	c.requests.Add(1)
+	return c.next.RoundTrip(r)
+}
+
+func (c *countedConsulRequests) CloseIdleConnections() { closeTestIdleConnections(c.next) }
+
 func (suite *ConsulStoreTestSuite) TestReplicationViaCacheAndWatch() {
 	sessionID := "replication-test"
 	session := &Session{
@@ -544,28 +558,42 @@ func (suite *ConsulStoreTestSuite) TestReplicationViaCacheAndWatch() {
 	t := suite.T()
 	replicated := observe(t, suite.store2)
 
+	defer func() { _ = suite.store1.Delete(sessionID) }()
+
+	// Only the suite's test goroutine uses store2's API client. Its watch
+	// has a separate client and transport, and still delivers the real
+	// registration while this API request counter is installed. Neither
+	// already-used HTTP client's transport is changed.
+	requests := &countedConsulRequests{next: suite.store2.apiHTTP.Transport}
+	cfg := api.DefaultConfig()
+	cfg.Address, cfg.Scheme = suite.consulURL.Host, suite.consulURL.Scheme
+	if u := suite.consulURL.User; u != nil {
+		cfg.Token, _ = u.Password()
+	}
+	cfg.HttpClient = &http.Client{Timeout: suite.store2.apiHTTP.Timeout, Transport: requests}
+	client, err := api.NewClient(cfg)
+	suite.Require().NoError(err)
+	original := suite.store2.client
+	suite.store2.client = client
+	defer func() { suite.store2.client = original }() // before deletion and suite cleanup
+
 	// Store session in store1
-	_, err := suite.store1.Register(context.Background(), session)
+	_, err = suite.store1.Register(context.Background(), session)
 	suite.NoError(err)
-	defer func() {
-		_ = suite.store1.Delete(sessionID)
-	}()
 
 	// Wait for store2's watch to deliver it. The cache takes each delivery
 	// before the observers see it, so the read below finds it there.
 	replicated.await(t, 5*time.Second, present(sessionID, 0))
 	suite.True(suite.store2.HasInCache(sessionID), "store2's cache never took the session its watch delivered")
 
-	// Verify data integrity and measure lookup performance
-	start := time.Now()
+	// A cached lookup must return the replicated data without backend I/O;
+	// elapsed time also includes scheduling and synchronous debug logging.
 	retrievedSession, err := suite.store2.Get(sessionID)
-	duration := time.Since(start)
-
-	suite.NoError(err)
+	suite.Zero(requests.requests.Load(), "cached Get made a backend request")
+	suite.Require().NoError(err)
 	suite.Equal(sessionID, retrievedSession.ID)
 	suite.Equal("192.168.1.100:2222", retrievedSession.NodeAddr)
 	suite.Equal("testuser", retrievedSession.HostUser)
-	suite.Less(duration, 1*time.Millisecond, "Memory lookup should be instant")
 }
 
 func (suite *ConsulStoreTestSuite) TestReplicationHandlesDeletion() {
