@@ -149,8 +149,14 @@ func sentryTestLogger(t *testing.T) (*Logger, func() []*sentry.Event) {
 		hub.BindClient(previousClient)
 	})
 	logger, err := New(Debug(), Sentry(strings.Replace(server.URL, "http://", "http://public@", 1)+"/1"))
+	if err == nil {
+		client := hub.Client()
+		t.Cleanup(func() {
+			defer client.Close()
+			require.NoError(t, logger.Close())
+		})
+	}
 	require.NoError(t, err)
-	t.Cleanup(func() { require.NoError(t, logger.Close()) })
 	return logger, func() []*sentry.Event {
 		mu.Lock()
 		defer mu.Unlock()
