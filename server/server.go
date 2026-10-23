@@ -138,7 +138,7 @@ func Start(ctx context.Context, opt Opt, logger *slog.Logger) error {
 
 	privateKeys, err := utils.ReadFiles(opt.PrivateKeys)
 	if err != nil {
-		return nil
+		return err
 	}
 
 	if pp := os.Getenv("PRIVATE_KEY"); pp != "" {
