@@ -485,8 +485,11 @@ func (suite *ConsulStoreTestSuite) TestBasicStoreOperations() {
 		HostUser: "testuser",
 	}
 
+	t := suite.T()
+	deliveries := observe(t, suite.store1)
+
 	// Test Store
-	_, err := suite.store1.Register(context.Background(), session)
+	reg, err := suite.store1.Register(context.Background(), session)
 	suite.NoError(err)
 
 	// Test Get - should be immediately available (strong consistency)
@@ -496,18 +499,20 @@ func (suite *ConsulStoreTestSuite) TestBasicStoreOperations() {
 	suite.Equal(session.NodeAddr, retrievedSession.NodeAddr)
 	suite.Equal(session.HostUser, retrievedSession.HostUser)
 
+	deliveries.await(t, 5*time.Second, presentRegistration(reg))
+	suite.True(suite.store1.HasInCache(sessionID), "the watch delivered the registration without caching it")
+
 	// Test Update (requires delete first: the same generation from another node doesn't supersede it)
 	err = suite.store1.Delete(sessionID)
 	suite.NoError(err)
 
-	// Verify deletion with eventual consistency (Consul may take a moment to propagate)
-	suite.EventuallyWithT(func(t *assert.CollectT) {
-		_, err = suite.store1.Get(sessionID)
-		assert.Error(t, err, "session should be deleted")
-	}, 2*time.Second, 50*time.Millisecond)
+	deliveries.await(t, 5*time.Second, absent(sessionID))
+	suite.False(suite.store1.HasInCache(sessionID), "the watch delivered the deletion but kept the entry cached")
+	_, err = suite.store1.Get(sessionID)
+	suite.Error(err, "session should be deleted")
 
 	session.NodeAddr = "192.168.1.100:2222"
-	_, err = suite.store1.Register(context.Background(), session)
+	reg, err = suite.store1.Register(context.Background(), session)
 	suite.NoError(err)
 
 	// Should be immediately available (strong consistency)
@@ -515,15 +520,17 @@ func (suite *ConsulStoreTestSuite) TestBasicStoreOperations() {
 	suite.NoError(err)
 	suite.Equal("192.168.1.100:2222", retrievedSession.NodeAddr)
 
+	deliveries.await(t, 5*time.Second, presentRegistration(reg))
+	suite.True(suite.store1.HasInCache(sessionID), "the watch delivered the updated registration without caching it")
+
 	// Test Delete
 	err = suite.store1.Delete(sessionID)
 	suite.NoError(err)
 
-	// Verify deletion with eventual consistency (Consul may take a moment to propagate)
-	suite.EventuallyWithT(func(t *assert.CollectT) {
-		_, err = suite.store1.Get(sessionID)
-		assert.Error(t, err, "session should be deleted")
-	}, 2*time.Second, 50*time.Millisecond)
+	deliveries.await(t, 5*time.Second, absent(sessionID))
+	suite.False(suite.store1.HasInCache(sessionID), "the watch delivered the deletion but kept the entry cached")
+	_, err = suite.store1.Get(sessionID)
+	suite.Error(err, "session should be deleted")
 }
 
 func (suite *ConsulStoreTestSuite) TestReplicationViaCacheAndWatch() {
@@ -1273,12 +1280,14 @@ func (suite *ConsulStoreTestSuite) TestALateReplyLeavesAnotherNodesNewerEntryCac
 	defer delay.release(1)
 	ctx, id := context.Background(), suite.uniq("late-reply-other-node")
 
+	deliveries := observe(suite.T(), store)
 	first := suite.registerDelayed(store, delay, &Session{ID: id, NodeAddr: "a:22", Generation: 1})
 	reg2, err := suite.store2.Register(ctx, &Session{ID: id, NodeAddr: "b:22", Generation: 2})
 	suite.Require().NoError(err)
 	defer func() { _ = suite.store2.Release(ctx, reg2) }()
-	suite.Require().Eventually(func() bool { return cachedGeneration(store, id) == 2 },
-		2*time.Second, 10*time.Millisecond, "the watch never delivered generation 2")
+	deliveries.await(suite.T(), 5*time.Second, presentRegistration(reg2))
+	suite.True(store.HasInCache(id), "the watch delivered generation 2 without caching it")
+	suite.Equal(uint64(2), cachedGeneration(store, id), "the watch did not cache generation 2")
 	delay.release(1)
 	reg1 := suite.awaitRegistered(first)
 
@@ -1287,6 +1296,9 @@ func (suite *ConsulStoreTestSuite) TestALateReplyLeavesAnotherNodesNewerEntryCac
 	suite.Require().NoError(store.Release(ctx, reg1))
 	suite.Equal(uint64(2), cachedGeneration(store, id), "the older registration's release dropped the newer entry from the cache")
 	suite.False(holdsLease(store, id, reg1.lease), "the older registration is still recorded as held")
+	local, err := store.Get(id)
+	suite.Require().NoError(err)
+	suite.Equal(uint64(2), local.Generation)
 	pair, _ := suite.consulGet(id)
 	suite.Require().NotNil(pair)
 	suite.Equal(reg2.lease, pair.Session)
@@ -1301,13 +1313,19 @@ func (suite *ConsulStoreTestSuite) TestALateReplyFromBeforeAnIndexDropIsNotCache
 	defer delay.release(1)
 	ctx, id := context.Background(), suite.uniq("late-reply-index-drop")
 
+	deliveries := observe(suite.T(), store)
 	first := suite.registerDelayed(store, delay, &Session{ID: id, NodeAddr: "a:22", Generation: 1})
 	// Let the watch deliver the committed entry, then stop it, so the only
 	// thing that can cache the entry again is the late reply: other tests,
 	// and other packages' tests, write under the same prefix, and any
 	// delivery would cache it legitimately.
-	suite.Require().Eventually(func() bool { return store.HasInCache(id) },
-		2*time.Second, 10*time.Millisecond, "the watch never delivered the entry")
+	pair, _ := suite.consulGet(id)
+	suite.Require().NotNil(pair)
+	deliveries.await(suite.T(), 5*time.Second, func(entries map[string]StoreEntry) bool {
+		return present(id, 1)(entries) && entries[id].Lease == pair.Session
+	})
+	suite.True(store.HasInCache(id), "the watch delivered the entry without caching it")
+	suite.Equal(uint64(1), cachedGeneration(store, id))
 	suite.Require().NoError(store.stopWatch(context.Background()))
 	// The watch's index drops, as it does when the entry with the highest
 	// index goes, or after a restore.
@@ -1421,14 +1439,16 @@ func (suite *ConsulStoreTestSuite) TestALateReplyDoesNotRestoreARemovedEntry() {
 	defer delay.release(1)
 	ctx, id := context.Background(), suite.uniq("late-reply-removed")
 
+	deliveries := observe(suite.T(), store)
 	first := suite.registerDelayed(store, delay, &Session{ID: id, NodeAddr: "a:22", Generation: 1})
 	reg2, err := suite.store2.Register(ctx, &Session{ID: id, NodeAddr: "b:22", Generation: 2})
 	suite.Require().NoError(err)
-	suite.Require().Eventually(func() bool { return cachedGeneration(store, id) == 2 },
-		2*time.Second, 10*time.Millisecond, "the watch never delivered generation 2")
+	deliveries.await(suite.T(), 5*time.Second, presentRegistration(reg2))
+	suite.True(store.HasInCache(id), "the watch delivered generation 2 without caching it")
+	suite.Equal(uint64(2), cachedGeneration(store, id), "the watch did not cache generation 2")
 	suite.Require().NoError(suite.store2.Release(ctx, reg2))
-	suite.Require().Eventually(func() bool { return !store.HasInCache(id) },
-		2*time.Second, 10*time.Millisecond, "the watch never delivered the removal")
+	deliveries.await(suite.T(), 5*time.Second, absent(id))
+	suite.False(store.HasInCache(id), "the watch delivered the removal but kept the entry cached")
 	delay.release(1)
 	reg1 := suite.awaitRegistered(first)
 	defer func() { _ = store.Release(ctx, reg1) }()
