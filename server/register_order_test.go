@@ -285,21 +285,23 @@ func newLateReply(t *testing.T) *lateReply {
 		t:          t,
 		consul:     consul,
 		id:         "late-reply",
-		delay:      newDelayedTxnReply(http.DefaultTransport, 1, 2),
-		lost:       &lostTxnReply{next: http.DefaultTransport, entered: make(chan struct{}), resume: make(chan struct{})},
-		otherDelay: newDelayedTxnReply(http.DefaultTransport, 1),
+		delay:      newDelayedTxnReply(ownedHTTPTransport(t), 1, 2),
+		lost:       &lostTxnReply{next: ownedHTTPTransport(t), entered: make(chan struct{}), resume: make(chan struct{})},
+		otherDelay: newDelayedTxnReply(ownedHTTPTransport(t), 1),
 	}
 	h.resumeLost = sync.OnceFunc(func() { close(h.lost.resume) })
 	h.other = newFakeConsulStoreWith(t, consul, h.otherDelay)
 	// However the run ends, no Register is left waiting on a hold. This runs
 	// before the fake's own cleanup closes it.
-	t.Cleanup(func() {
-		h.delay.release(1)
-		h.delay.release(2)
-		h.otherDelay.release(1)
-		h.resumeLost()
-	})
+	t.Cleanup(h.releaseReplies)
 	return h
+}
+
+func (h *lateReply) releaseReplies() {
+	h.delay.release(1)
+	h.delay.release(2)
+	h.otherDelay.release(1)
+	h.resumeLost()
 }
 
 // commitHeld is A B: T1 registers from this store, and it returns once Consul
@@ -326,6 +328,7 @@ func (h *lateReply) begin(rt http.RoundTripper) {
 	h.t.Helper()
 	require.Nil(h.t, h.store, "T1 registers once")
 	h.store = newFakeConsulStoreWith(h.t, h.consul, rt)
+	h.t.Cleanup(h.releaseReplies)
 	h.first = h.register(h.store, "node-a:22", 1)
 }
 

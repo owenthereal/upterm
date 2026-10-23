@@ -8,7 +8,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/owenthereal/upterm/internal/testhelpers"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -95,17 +94,13 @@ func absent(id string) func(map[string]StoreEntry) bool {
 // An observer subscribed before a registration sees the watch deliver it, and
 // then deliver its release.
 func TestObserveSeesPresenceThenAbsence(t *testing.T) {
-	if !testhelpers.IsConsulAvailable() {
-		t.Skip("Consul not available - set CONSUL_URL or ensure Consul is running on localhost:8500")
-	}
+	client := ownedConsulTestClient(t)
 	consulURL, err := suiteConsulURL("observe")
 	require.NoError(t, err)
 	store, err := newConsulSessionStore(consulURL, time.Minute, sessionTestLogger)
 	require.NoError(t, err)
-	client, err := consulTestClient()
-	require.NoError(t, err)
 	t.Cleanup(func() {
-		_ = store.Close()
+		assert.NoError(t, store.Close())
 		assert.NoError(t, removeSuiteConsulData(client, store))
 	})
 

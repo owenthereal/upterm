@@ -459,7 +459,12 @@ type consulSessionStore struct {
 	// Hybrid cache for instant lookups with fallback to Consul
 	cache *sessionCache
 	// Watch management
-	watchPlan *watch.Plan
+	watchPlan          *watch.Plan
+	apiHTTP, watchHTTP *http.Client
+	watchDone          chan struct{}
+	closeOnce          sync.Once
+	closeErr           error
+	closeTimeout       time.Duration
 	// held maps each session ID this instance registered to the lock sessions
 	// it registered it under and hasn't released: one, or more while a late
 	// reply or a rebuilt registration's old lease is outstanding. Delete and
@@ -499,6 +504,7 @@ func newConsulSessionStore(consulURL *url.URL, ttl time.Duration, logger *slog.L
 
 	client, err := api.NewClient(config)
 	if err != nil {
+		config.HttpClient.CloseIdleConnections()
 		return nil, fmt.Errorf("failed to create consul client: %w", err)
 	}
 
@@ -515,12 +521,19 @@ func newConsulSessionStore(consulURL *url.URL, ttl time.Duration, logger *slog.L
 
 	store := &consulSessionStore{
 		client:    client,
+		apiHTTP:   config.HttpClient,
 		logger:    logger,
 		ttl:       ttl,
 		keyPrefix: keyPrefix,
 		cache:     newSessionCache(logger),
 		held:      make(map[string]map[string]struct{}),
 	}
+	ready := false
+	defer func() {
+		if !ready {
+			_ = store.Close()
+		}
+	}()
 
 	// Register the node with Consul
 	if err := store.registerNode(); err != nil {
@@ -532,6 +545,7 @@ func newConsulSessionStore(consulURL *url.URL, ttl time.Duration, logger *slog.L
 		return nil, fmt.Errorf("failed to start session watch: %w", err)
 	}
 
+	ready = true
 	return store, nil
 }
 
@@ -1220,9 +1234,12 @@ func (c *consulSessionStore) startSessionWatch(cfg *api.Config) error {
 			DisableKeepAlives:   false,
 		},
 	}
+	c.watchHTTP = watchConfig.HttpClient
+	c.watchDone = make(chan struct{})
 
 	// Start watching in background
 	go func() {
+		defer close(c.watchDone)
 		c.logger.Info("starting session watch for full replication")
 		if err := watchPlan.RunWithConfig(watchConfig.Address, &watchConfig); err != nil {
 			c.logger.Error("session watch failed", "error", err)
@@ -1281,12 +1298,44 @@ func (c *consulSessionStore) Observe(fn func(epoch, index uint64, entries map[st
 	c.observers = append(c.observers, fn)
 }
 
-// Close gracefully stops the session watch and cleans up resources
-func (c *consulSessionStore) Close() error {
+// stopWatch stops the plan and joins its run, including an entered observer.
+// It leaves the API client usable. It must not be called from an observer,
+// since observers run on the watch goroutine being joined.
+func (c *consulSessionStore) stopWatch(ctx context.Context) error {
 	if c.watchPlan != nil {
 		c.watchPlan.Stop()
 	}
-	return nil
+	if c.watchDone == nil {
+		return nil
+	}
+	select {
+	case <-c.watchDone:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// Close stops and joins the watch within the instance's bound, then releases
+// both clients' idle connections, even if an observer did not return in time.
+// Like stopWatch, Close must not be called from an observer callback.
+func (c *consulSessionStore) Close() error {
+	c.closeOnce.Do(func() {
+		timeout := c.closeTimeout
+		if timeout <= 0 {
+			timeout = DefaultConsulTimeout
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+		defer cancel()
+		c.closeErr = c.stopWatch(ctx)
+		if c.apiHTTP != nil {
+			c.apiHTTP.CloseIdleConnections()
+		}
+		if c.watchHTTP != nil {
+			c.watchHTTP.CloseIdleConnections()
+		}
+	})
+	return c.closeErr
 }
 
 // HasInCache checks if a session exists in the local cache (useful for testing watch functionality)

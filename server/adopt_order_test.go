@@ -419,7 +419,7 @@ func newAdoptRace(t *testing.T, cfg adoptRaceConfig) *adoptRace {
 	h.id = h.host.id()
 	var rt http.RoundTripper
 	if cfg.delay {
-		h.delay = newDelayedTxnReply(http.DefaultTransport, 1)
+		h.delay = newDelayedTxnReply(ownedHTTPTransport(t), 1)
 		rt = h.delay
 	}
 	h.store = newFakeConsulStoreWith(t, consul, rt)
