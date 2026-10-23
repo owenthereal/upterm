@@ -56,8 +56,8 @@ func TestConsulCloseBoundsAStuckObserver(t *testing.T) {
 		default:
 			release()
 			synctest.Wait()
-			<-closed
-			t.Fatal("Close did not return at its observer deadline")
+			err := <-closed
+			t.Fatalf("Close did not return at its observer deadline: %v", err)
 		}
 	})
 }
@@ -93,8 +93,8 @@ func TestConsulCloseUsesDefaultBound(t *testing.T) {
 				default:
 					release()
 					synctest.Wait()
-					<-closed
-					t.Fatal("Close did not return at the default bound")
+					err := <-closed
+					t.Fatalf("Close did not return at the default bound: %v", err)
 				}
 			})
 		})
