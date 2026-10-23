@@ -12,6 +12,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/stretchr/testify/require"
@@ -238,6 +239,31 @@ func within[T any](t *testing.T, ch <-chan T, what string) T {
 	}
 }
 
+// settledReplay receives an immediate consequence after all bubble work settles.
+// Unlike within, it cannot advance fake time to hide a delayed wakeup.
+func settledReplay[T any](t *testing.T, ch <-chan T, what string) T {
+	t.Helper()
+	synctest.Wait()
+	select {
+	case v := <-ch:
+		return v
+	default:
+		t.Fatalf("%s did not complete after settling", what)
+		var zero T
+		return zero
+	}
+}
+
+func pendingReplay[T any](t *testing.T, ch <-chan T, what string) {
+	t.Helper()
+	synctest.Wait()
+	select {
+	case v := <-ch:
+		t.Fatalf("%s completed early: %v", what, v)
+	default:
+	}
+}
+
 // parkedStart is a start hook that hands entered each capture and then parks
 // until gate closes or the join's ctx is done.
 func parkedStart(entered chan<- *Capture, gate <-chan struct{}) func(int, context.Context, time.Time, *Capture) error {
@@ -280,39 +306,41 @@ func attachedTimes(w *MultiWriter, sink io.Writer) int {
 func joined(chunks [][]byte) string { return string(bytes.Join(chunks, nil)) }
 
 // The fake's Start blocks on a gate. Meanwhile "B" is written: an attached
-// recorder receives "B" within 50 ms (Write never waits on the emulation).
+// recorder receives "B" as work settles (Write never waits on the emulation).
 // Then the gate opens: the joiner receives the fake's render, then "B",
 // once each, then live writes.
 func TestAppendSizedSendsTheRenderThenWhatItMissed(t *testing.T) {
-	entered, gate := make(chan *Capture, 1), make(chan struct{})
-	r := &fakeReplayer{start: parkedStart(entered, gate)}
-	w, fallbacks := joinable(DefaultReplayBytes, r)
-	w.Pinned(at80x24)
-	var live recordingWriter
-	require.NoError(t, w.Append(&live))
-	writeString(w, "A")
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancelJoin := context.WithCancel(t.Context())
+		t.Cleanup(cancelJoin)
+		entered, gate := make(chan *Capture, 1), make(chan struct{})
+		releaseGate := sync.OnceFunc(func() { close(gate) })
+		t.Cleanup(releaseGate)
+		r := &fakeReplayer{start: parkedStart(entered, gate)}
+		w, fallbacks := joinable(DefaultReplayBytes, r)
+		w.Pinned(at80x24)
+		var live recordingWriter
+		require.NoError(t, w.Append(&live))
+		writeString(w, "A")
 
-	var joiner recordingWriter
-	done := joinAsync(w, t.Context(), far(), &joiner)
-	c := within(t, entered, "Start")
-	require.True(t, c.Pinned)
-	require.NotSame(t, w.modes, c.Modes, "the capture's tracker is a clone")
+		var joiner recordingWriter
+		done := joinAsync(w, ctx, far(), &joiner)
+		c := settledReplay(t, entered, "Start")
+		require.True(t, c.Pinned)
+		require.NotSame(t, w.modes, c.Modes, "the capture's tracker is a clone")
 
-	wrote := make(chan struct{})
-	go func() { defer close(wrote); writeString(w, "B") }()
-	select {
-	case <-wrote:
-	case <-time.After(50 * time.Millisecond):
-		t.Fatal("a Write waited on the emulation")
-	}
-	require.Equal(t, "AB", string(live.bytes()))
-	require.Empty(t, joiner.bytes(), "attached before the handoff")
+		wrote := make(chan struct{})
+		go func() { defer close(wrote); writeString(w, "B") }()
+		settledReplay(t, wrote, "a Write while the emulation is parked")
+		require.Equal(t, "AB", string(live.bytes()))
+		require.Empty(t, joiner.bytes(), "attached before the handoff")
 
-	close(gate)
-	require.NoError(t, within(t, done, "the join"))
-	writeString(w, "C")
-	require.Equal(t, "<A>BC", string(joiner.bytes()), "the render, what it missed, then live output, once each")
-	require.Empty(t, fallbacks.all())
+		releaseGate()
+		require.NoError(t, settledReplay(t, done, "the join"))
+		writeString(w, "C")
+		require.Equal(t, "<A>BC", string(joiner.bytes()), "the render, what it missed, then live output, once each")
+		require.Empty(t, fallbacks.all())
+	})
 }
 
 // While the fake is gated, ResizeBegin+ResizeEnd(true) and a write: Feed is
@@ -427,35 +455,34 @@ func TestCaptureStopsAtADeletedResizeToo(t *testing.T) { captureStopsAtATentativ
 
 // A tentative event at the handoff: no attach until its ResizeEnd.
 func TestHandoffWaitsForATentativeResize(t *testing.T) {
-	entered, gate := make(chan *Capture, 1), make(chan struct{})
-	r := &fakeReplayer{start: parkedStart(entered, gate)}
-	w, fallbacks := joinable(DefaultReplayBytes, r)
-	waits := joinWaits(t, w)
-	resize(w, at80x24)
-	writeString(w, "A")
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancelJoin := context.WithCancel(t.Context())
+		t.Cleanup(cancelJoin)
+		entered, gate := make(chan *Capture, 1), make(chan struct{})
+		releaseGate := sync.OnceFunc(func() { close(gate) })
+		t.Cleanup(releaseGate)
+		r := &fakeReplayer{start: parkedStart(entered, gate)}
+		w, fallbacks := joinable(DefaultReplayBytes, r)
+		waits := joinWaits(t, w)
+		resize(w, at80x24)
+		writeString(w, "A")
 
-	var joiner recordingWriter
-	done := joinAsync(w, t.Context(), far(), &joiner)
-	within(t, entered, "Start")
-	seq := w.ResizeBegin(at45x30)
-	close(gate)
+		var joiner recordingWriter
+		done := joinAsync(w, ctx, far(), &joiner)
+		settledReplay(t, entered, "Start")
+		seq := w.ResizeBegin(at45x30)
+		releaseGate()
 
-	select {
-	case wait := <-waits:
-		require.Equal(t, waitResize, wait)
-	case err := <-done:
-		t.Fatalf("the join ended before the resize's outcome: %v", err)
-	case <-time.After(5 * time.Second):
-		t.Fatal("the join never waited")
-	}
-	require.Empty(t, joiner.bytes())
-	require.Zero(t, attachedTimes(w, &joiner))
+		require.Equal(t, waitResize, settledReplay(t, waits, "the resize wait"))
+		require.Empty(t, joiner.bytes())
+		require.Zero(t, attachedTimes(w, &joiner))
 
-	w.ResizeEnd(seq, true)
-	require.NoError(t, within(t, done, "the join"))
-	require.Equal(t, []fedCall{{sizes: []SizeEvent{{Seq: seq, Offset: 1, Size: at45x30}}}}, r.feeds())
-	require.Equal(t, "<A>", string(joiner.bytes()))
-	require.Empty(t, fallbacks.all())
+		w.ResizeEnd(seq, true)
+		require.NoError(t, settledReplay(t, done, "the join"))
+		require.Equal(t, []fedCall{{sizes: []SizeEvent{{Seq: seq, Offset: 1, Size: at45x30}}}}, r.feeds())
+		require.Equal(t, "<A>", string(joiner.bytes()))
+		require.Empty(t, fallbacks.all())
+	})
 }
 
 // More than the ring written while gated: the fallback, ErrReplayGapEvicted
@@ -613,7 +640,7 @@ func TestAppendSizedAttachesNothingOnceTheJoinerLeft(t *testing.T) {
 		{"in Start", func(t *testing.T, r *fakeReplayer, _ *MultiWriter) func() {
 			entered := make(chan *Capture, 1)
 			r.start = parkedStart(entered, nil) // no gate: only the cancel ends Start
-			return func() { within(t, entered, "Start") }
+			return func() { settledReplay(t, entered, "Start") }
 		}},
 		{"waiting on a resize", func(t *testing.T, r *fakeReplayer, w *MultiWriter) func() {
 			waits := joinWaits(t, w)
@@ -621,27 +648,29 @@ func TestAppendSizedAttachesNothingOnceTheJoinerLeft(t *testing.T) {
 				w.ResizeBegin(at45x30) // never ended
 				return nil
 			}
-			return func() { require.Equal(t, waitResize, within(t, waits, "the wait")) }
+			return func() { require.Equal(t, waitResize, settledReplay(t, waits, "the wait")) }
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			r := &fakeReplayer{}
-			w, fallbacks := joinable(DefaultReplayBytes, r)
-			parked := tc.park(t, r, w)
-			resize(w, at80x24)
-			writeString(w, "A")
+			synctest.Test(t, func(t *testing.T) {
+				r := &fakeReplayer{}
+				w, fallbacks := joinable(DefaultReplayBytes, r)
+				parked := tc.park(t, r, w)
+				resize(w, at80x24)
+				writeString(w, "A")
 
-			ctx, cancel := context.WithCancel(t.Context())
-			defer cancel()
-			var joiner recordingWriter
-			done := joinAsync(w, ctx, far(), &joiner)
-			parked()
-			cancel()
+				ctx, cancel := context.WithCancel(t.Context())
+				defer cancel()
+				var joiner recordingWriter
+				done := joinAsync(w, ctx, far(), &joiner)
+				parked()
+				cancel()
 
-			require.ErrorIs(t, within(t, done, "the join"), context.Canceled)
-			require.Empty(t, joiner.bytes())
-			require.Zero(t, attachedTimes(w, &joiner))
-			require.Empty(t, fallbacks.all())
+				require.ErrorIs(t, settledReplay(t, done, "the join"), context.Canceled)
+				require.Empty(t, joiner.bytes())
+				require.Zero(t, attachedTimes(w, &joiner))
+				require.Empty(t, fallbacks.all())
+			})
 		})
 	}
 }
@@ -721,18 +750,20 @@ func TestAcquireRefusesOnceShutdown(t *testing.T) {
 		{"the permit frees as the join begins to wait", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			w := NewMultiWriter(DefaultReplayBytes)
-			require.NoError(t, w.Shutdown(t.Context()))
-			if tc.held {
-				w.onJoinWait = func(joinWait) { <-w.permit }
-			}
-			for i := range attempts {
+			synctest.Test(t, func(t *testing.T) {
+				w := NewMultiWriter(DefaultReplayBytes)
+				require.NoError(t, w.Shutdown(t.Context()))
 				if tc.held {
-					w.permit <- struct{}{}
+					w.onJoinWait = func(joinWait) { <-w.permit }
 				}
-				require.ErrorIs(t, w.acquire(t.Context(), far()), ErrClosed, "attempt %d", i)
-				require.Empty(t, w.permit, "attempt %d left the permit taken", i)
-			}
+				for i := range attempts {
+					if tc.held {
+						w.permit <- struct{}{}
+					}
+					require.ErrorIs(t, w.acquire(t.Context(), far()), ErrClosed, "attempt %d", i)
+					require.Empty(t, w.permit, "attempt %d left the permit taken", i)
+				}
+			})
 		})
 	}
 }
@@ -750,19 +781,21 @@ func TestAcquireRefusesAJoinerThatHasLeft(t *testing.T) {
 		{"the permit frees as the join begins to wait", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			w := NewMultiWriter(DefaultReplayBytes)
-			ctx, cancel := context.WithCancel(t.Context())
-			cancel()
-			if tc.held {
-				w.onJoinWait = func(joinWait) { <-w.permit }
-			}
-			for i := range attempts {
+			synctest.Test(t, func(t *testing.T) {
+				w := NewMultiWriter(DefaultReplayBytes)
+				ctx, cancel := context.WithCancel(t.Context())
+				cancel()
 				if tc.held {
-					w.permit <- struct{}{}
+					w.onJoinWait = func(joinWait) { <-w.permit }
 				}
-				require.ErrorIs(t, w.acquire(ctx, far()), context.Canceled, "attempt %d", i)
-				require.Empty(t, w.permit, "attempt %d left the permit taken", i)
-			}
+				for i := range attempts {
+					if tc.held {
+						w.permit <- struct{}{}
+					}
+					require.ErrorIs(t, w.acquire(ctx, far()), context.Canceled, "attempt %d", i)
+					require.Empty(t, w.permit, "attempt %d left the permit taken", i)
+				}
+			})
 		})
 	}
 }
@@ -772,40 +805,44 @@ func TestAcquireRefusesAJoinerThatHasLeft(t *testing.T) {
 // refused and its Start never called, whichever way select breaks the tie
 // between the permit and the fan-out closing, so the join repeats.
 func TestAppendSizedStartsNoEmulationOnceShutdown(t *testing.T) {
-	const attempts = 200
-	for i := range attempts {
-		func() {
-			entered, gate := make(chan *Capture, 1), make(chan struct{})
-			r := &fakeReplayer{start: parkedStart(entered, gate)}
-			w, fallbacks := joinable(DefaultReplayBytes, r)
-			resize(w, at80x24)
-			writeString(w, "A")
+	synctest.Test(t, func(t *testing.T) {
+		const attempts = 200
+		for i := range attempts {
+			func() {
+				entered, gate := make(chan *Capture, 1), make(chan struct{})
+				releaseGate := sync.OnceFunc(func() { close(gate) })
+				t.Cleanup(releaseGate)
+				r := &fakeReplayer{start: parkedStart(entered, gate)}
+				w, fallbacks := joinable(DefaultReplayBytes, r)
+				resize(w, at80x24)
+				writeString(w, "A")
 
-			var a, b recordingWriter
-			var doneA <-chan error
-			// Installed before either join starts. Only B waits for A's permit.
-			// Once it does, end the session and A's emulation, and let A return.
-			var errA error
-			w.onJoinWait = func(what joinWait) {
-				if what != waitPermit {
-					return
+				var a, b recordingWriter
+				var doneA <-chan error
+				// Installed before either join starts. Only B waits for A's permit.
+				// Once it does, end the session and A's emulation, and let A return.
+				var errA error
+				w.onJoinWait = func(what joinWait) {
+					if what != waitPermit {
+						return
+					}
+					_ = w.Shutdown(t.Context())
+					releaseGate()
+					errA = <-doneA
 				}
-				_ = w.Shutdown(t.Context())
-				close(gate)
-				errA = <-doneA
-			}
-			doneA = joinAsync(w, t.Context(), far(), &a)
-			within(t, entered, "A's Start")
-			doneB := joinAsync(w, t.Context(), far(), &b)
+				doneA = joinAsync(w, t.Context(), far(), &a)
+				settledReplay(t, entered, "A's Start")
+				doneB := joinAsync(w, t.Context(), far(), &b)
 
-			require.ErrorIs(t, within(t, doneB, "B"), ErrClosed, "attempt %d", i)
-			require.ErrorIs(t, errA, ErrClosed, "attempt %d", i)
-			require.Equal(t, 1, r.starts(), "attempt %d: a join began an emulation after Shutdown", i)
-			require.Empty(t, b.bytes())
-			require.Zero(t, attachedTimes(w, &b))
-			require.Empty(t, fallbacks.all())
-		}()
-	}
+				require.ErrorIs(t, settledReplay(t, doneB, "B"), ErrClosed, "attempt %d", i)
+				require.ErrorIs(t, errA, ErrClosed, "attempt %d", i)
+				require.Equal(t, 1, r.starts(), "attempt %d: a join began an emulation after Shutdown", i)
+				require.Empty(t, b.bytes())
+				require.Zero(t, attachedTimes(w, &b))
+				require.Empty(t, fallbacks.all())
+			}()
+		}
+	})
 }
 
 // A viewer size, no replayer, a passed deadline, an empty ring: Start is
@@ -857,62 +894,60 @@ func TestAppendSizedTakesTheFastPath(t *testing.T) {
 // Two joins: the second's Start begins only after the first's semaphore is
 // released; a second join whose ctx ends while waiting returns at once.
 func TestAppendSizedEmulatesOneAtATime(t *testing.T) {
-	entered, gate := make(chan *Capture, 1), make(chan struct{})
-	started := make(chan int, 4)
-	var a recordingWriter
-	var early atomic.Bool
-	park := parkedStart(entered, gate)
-	r := &fakeReplayer{start: func(n int, ctx context.Context, deadline time.Time, c *Capture) error {
-		if n == 0 {
-			return park(n, ctx, deadline, c)
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancelJoin := context.WithCancel(t.Context())
+		t.Cleanup(cancelJoin)
+		entered, gate := make(chan *Capture, 1), make(chan struct{})
+		releaseGate := sync.OnceFunc(func() { close(gate) })
+		t.Cleanup(releaseGate)
+		started := make(chan int, 4)
+		var a recordingWriter
+		var early atomic.Bool
+		park := parkedStart(entered, gate)
+		r := &fakeReplayer{start: func(n int, ctx context.Context, deadline time.Time, c *Capture) error {
+			if n == 0 {
+				return park(n, ctx, deadline, c)
+			}
+			early.Store(len(a.bytes()) == 0)
+			started <- n
+			return nil
+		}}
+		w, fallbacks := joinable(DefaultReplayBytes, r)
+		waits := joinWaits(t, w)
+		resize(w, at80x24)
+		writeString(w, "A")
+		doneA := joinAsync(w, ctx, far(), &a)
+		settledReplay(t, entered, "A's Start")
+
+		// B leaves while it waits for the permit A holds.
+		ctxB, cancel := context.WithCancel(ctx)
+		var b recordingWriter
+		doneB := joinAsync(w, ctxB, far(), &b)
+		t.Cleanup(cancel)
+		require.Equal(t, waitPermit, settledReplay(t, waits, "B's permit wait"))
+		pendingReplay(t, doneB, "B while A holds the permit")
+		cancel()
+		require.ErrorIs(t, settledReplay(t, doneB, "B after cancellation"), context.Canceled)
+		require.Equal(t, 1, r.starts(), "B never started")
+		for len(waits) > 0 {
+			<-waits
 		}
-		early.Store(len(a.bytes()) == 0)
-		started <- n
-		return nil
-	}}
-	w, fallbacks := joinable(DefaultReplayBytes, r)
-	waits := joinWaits(t, w)
-	resize(w, at80x24)
-	writeString(w, "A")
-	doneA := joinAsync(w, t.Context(), far(), &a)
-	within(t, entered, "A's Start")
 
-	// B leaves while it waits for the permit A holds.
-	ctx, cancel := context.WithCancel(t.Context())
-	var b recordingWriter
-	doneB := joinAsync(w, ctx, far(), &b)
-	cancel()
-	select {
-	case err := <-doneB:
-		require.ErrorIs(t, err, context.Canceled)
-	case <-time.After(50 * time.Millisecond):
-		t.Fatal("a join whose ctx ended while it waited didn't return at once")
-	}
-	require.Equal(t, 1, r.starts(), "B never started")
-	for len(waits) > 0 {
-		<-waits
-	}
-
-	// C waits for it too, and starts once A has attached and released it.
-	var c recordingWriter
-	doneC := joinAsync(w, t.Context(), far(), &c)
-	select {
-	case wait := <-waits:
-		require.Equal(t, waitPermit, wait)
-	case n := <-started:
-		t.Fatalf("join %d started while A held the permit", n)
-	case <-time.After(5 * time.Second):
-		t.Fatal("C never waited")
-	}
-	close(gate)
-	require.NoError(t, within(t, doneA, "A"))
-	require.NoError(t, within(t, doneC, "C"))
-	require.Equal(t, 1, within(t, started, "C's Start"))
-	require.False(t, early.Load(), "C started before A had attached")
-	require.Equal(t, "<A>", string(a.bytes()))
-	require.Equal(t, "<A>", string(c.bytes()))
-	require.Empty(t, b.bytes())
-	require.Empty(t, fallbacks.all())
+		// C waits for it too, and starts once A has attached and released it.
+		var c recordingWriter
+		doneC := joinAsync(w, ctx, far(), &c)
+		require.Equal(t, waitPermit, settledReplay(t, waits, "C's permit wait"))
+		pendingReplay(t, started, "C while A holds the permit")
+		releaseGate()
+		require.NoError(t, settledReplay(t, doneA, "A"))
+		require.NoError(t, settledReplay(t, doneC, "C"))
+		require.Equal(t, 1, settledReplay(t, started, "C's Start"))
+		require.False(t, early.Load(), "C started before A had attached")
+		require.Equal(t, "<A>", string(a.bytes()))
+		require.Equal(t, "<A>", string(c.bytes()))
+		require.Empty(t, b.bytes())
+		require.Empty(t, fallbacks.all())
+	})
 }
 
 // A CSI split by the filter at the capture ("\x1b[3" pending): it completes
@@ -1039,112 +1074,127 @@ func TestAppendSizedFallsBackOnAnUnknownSizeAfterTheCapture(t *testing.T) {
 // The permit is held through the catch-up: join A's catch-up Feed is gated;
 // join B arrives: B's Start does not begin until A has attached; then it runs.
 func TestAppendSizedHoldsThePermitThroughCatchUp(t *testing.T) {
-	fedA, gate := make(chan struct{}), make(chan struct{})
-	started := make(chan int, 4)
-	var a, b recordingWriter
-	var early atomic.Bool
-	r := &fakeReplayer{}
-	w, fallbacks := joinable(DefaultReplayBytes, r)
-	waits := joinWaits(t, w)
-	r.start = func(n int, _ context.Context, _ time.Time, _ *Capture) error {
-		if n == 0 {
-			// Something for A's handoff to catch up on.
-			resize(w, at45x30)
-			writeString(w, "X")
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancelJoin := context.WithCancel(t.Context())
+		t.Cleanup(cancelJoin)
+		fedA, gate := make(chan struct{}), make(chan struct{})
+		releaseGate := sync.OnceFunc(func() { close(gate) })
+		t.Cleanup(releaseGate)
+		started := make(chan int, 4)
+		var a, b recordingWriter
+		var early atomic.Bool
+		r := &fakeReplayer{}
+		w, fallbacks := joinable(DefaultReplayBytes, r)
+		waits := joinWaits(t, w)
+		r.start = func(n int, _ context.Context, _ time.Time, _ *Capture) error {
+			if n == 0 {
+				// Something for A's handoff to catch up on.
+				resize(w, at45x30)
+				writeString(w, "X")
+				return nil
+			}
+			early.Store(len(a.bytes()) == 0)
+			started <- n
 			return nil
 		}
-		early.Store(len(a.bytes()) == 0)
-		started <- n
-		return nil
-	}
-	r.feed = func(n int, _ [][]byte, _ []SizeEvent) error {
-		if n == 0 {
-			close(fedA)
-			<-gate
+		r.feed = func(n int, _ [][]byte, _ []SizeEvent) error {
+			if n == 0 {
+				close(fedA)
+				<-gate
+			}
+			return nil
 		}
-		return nil
-	}
-	resize(w, at80x24)
-	writeString(w, "A")
+		resize(w, at80x24)
+		writeString(w, "A")
 
-	doneA := joinAsync(w, t.Context(), far(), &a)
-	within(t, fedA, "A's catch-up")
-	doneB := joinAsync(w, t.Context(), far(), &b)
-	select {
-	case wait := <-waits:
-		require.Equal(t, waitPermit, wait)
-	case n := <-started:
-		t.Fatalf("join %d started during A's catch-up", n)
-	case <-time.After(5 * time.Second):
-		t.Fatal("B never waited")
-	}
-	close(gate)
+		doneA := joinAsync(w, ctx, far(), &a)
+		settledReplay(t, fedA, "A's catch-up")
+		doneB := joinAsync(w, ctx, far(), &b)
+		require.Equal(t, waitPermit, settledReplay(t, waits, "B's permit wait"))
+		pendingReplay(t, started, "B during A's catch-up")
+		pendingReplay(t, doneA, "A during catch-up")
+		releaseGate()
 
-	require.NoError(t, within(t, doneA, "A"))
-	require.NoError(t, within(t, doneB, "B"))
-	require.Equal(t, 1, within(t, started, "B's Start"))
-	require.False(t, early.Load(), "B started before A had attached")
-	require.Equal(t, "<AX>", string(a.bytes()))
-	require.Equal(t, "<AX>", string(b.bytes()))
-	require.Empty(t, fallbacks.all())
+		require.NoError(t, settledReplay(t, doneA, "A"))
+		require.NoError(t, settledReplay(t, doneB, "B"))
+		require.Equal(t, 1, settledReplay(t, started, "B's Start"))
+		require.False(t, early.Load(), "B started before A had attached")
+		require.Equal(t, "<AX>", string(a.bytes()))
+		require.Equal(t, "<AX>", string(b.bytes()))
+		require.Empty(t, fallbacks.all())
+	})
 }
 
 // The fake defers an offered event (its Handoff's lastSeq stays before it);
 // two more catch-ups follow: the fake is offered each Seq exactly once.
 func TestCatchUpNeverOffersAnEventTwice(t *testing.T) {
-	entered, gate := make(chan *Capture, 1), make(chan struct{})
-	fed, proceed := make(chan int), make(chan struct{})
-	r := &fakeReplayer{
-		start: parkedStart(entered, gate),
-		feed: func(n int, _ [][]byte, _ []SizeEvent) error {
-			fed <- n
-			<-proceed
-			return nil
-		},
-	}
-	w, fallbacks := joinable(DefaultReplayBytes, r)
-	resize(w, at80x24)
-	writeString(w, "A")
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancelJoin := context.WithCancel(t.Context())
+		t.Cleanup(cancelJoin)
+		entered, gate := make(chan *Capture, 1), make(chan struct{})
+		releaseGate := sync.OnceFunc(func() { close(gate) })
+		t.Cleanup(releaseGate)
+		fed, proceed := make(chan int), make(chan struct{})
+		r := &fakeReplayer{
+			start: parkedStart(entered, gate),
+			feed: func(n int, _ [][]byte, _ []SizeEvent) error {
+				select {
+				case fed <- n:
+				case <-ctx.Done():
+					return ctx.Err()
+				}
+				select {
+				case <-proceed:
+				case <-ctx.Done():
+					return ctx.Err()
+				}
+				return nil
+			},
+		}
+		w, fallbacks := joinable(DefaultReplayBytes, r)
+		resize(w, at80x24)
+		writeString(w, "A")
 
-	var joiner recordingWriter
-	done := joinAsync(w, t.Context(), far(), &joiner)
-	within(t, entered, "Start")
-	seq := w.ResizeBegin(at45x30)
-	w.ResizeEnd(seq, true)
-	r.leaveInTail(seq, true)
-	writeString(w, "a")
-	close(gate)
+		var joiner recordingWriter
+		done := joinAsync(w, ctx, far(), &joiner)
+		settledReplay(t, entered, "Start")
+		seq := w.ResizeBegin(at45x30)
+		w.ResizeEnd(seq, true)
+		r.leaveInTail(seq, true)
+		writeString(w, "a")
+		releaseGate()
 
-	// Each catch-up finds the event still unapplied, and more output.
-	require.Equal(t, 0, within(t, fed, "the first catch-up"))
-	writeString(w, "b")
-	proceed <- struct{}{}
-	require.Equal(t, 1, within(t, fed, "the second"))
-	writeString(w, "c")
-	proceed <- struct{}{}
-	require.Equal(t, 2, within(t, fed, "the third"))
-	r.leaveInTail(seq, false)
-	proceed <- struct{}{}
+		// Each catch-up finds the event still unapplied, and more output.
+		require.Equal(t, 0, settledReplay(t, fed, "the first catch-up"))
+		writeString(w, "b")
+		proceed <- struct{}{}
+		require.Equal(t, 1, settledReplay(t, fed, "the second"))
+		writeString(w, "c")
+		proceed <- struct{}{}
+		require.Equal(t, 2, settledReplay(t, fed, "the third"))
+		r.leaveInTail(seq, false)
+		proceed <- struct{}{}
 
-	require.NoError(t, within(t, done, "the join"))
-	feeds := r.feeds()
-	require.Equal(t, []fedCall{
-		{chunks: "a", sizes: []SizeEvent{{Seq: seq, Offset: 1, Size: at45x30}}},
-		{chunks: "b"},
-		{chunks: "c"},
-	}, feeds)
-	offered := map[uint64]int{}
-	for _, e := range r.captures[0].Sizes {
-		offered[e.Seq]++
-	}
-	for _, f := range feeds {
-		for _, e := range f.sizes {
+		require.NoError(t, settledReplay(t, done, "the join"))
+		feeds := r.feeds()
+		require.Equal(t, []fedCall{
+			{chunks: "a", sizes: []SizeEvent{{Seq: seq, Offset: 1, Size: at45x30}}},
+			{chunks: "b"},
+			{chunks: "c"},
+		}, feeds)
+		offered := map[uint64]int{}
+		for _, e := range r.captures[0].Sizes {
 			offered[e.Seq]++
 		}
-	}
-	require.Equal(t, map[uint64]int{1: 1, seq: 1}, offered)
-	require.Equal(t, "<Aabc>", string(joiner.bytes()))
-	require.Empty(t, fallbacks.all())
+		for _, f := range feeds {
+			for _, e := range f.sizes {
+				offered[e.Seq]++
+			}
+		}
+		require.Equal(t, map[uint64]int{1: 1, seq: 1}, offered)
+		require.Equal(t, "<Aabc>", string(joiner.bytes()))
+		require.Empty(t, fallbacks.all())
+	})
 }
 
 // When a catch-up would offer the emulation nothing new, the join waits for
@@ -1153,35 +1203,39 @@ func TestCatchUpNeverOffersAnEventTwice(t *testing.T) {
 // renders once, at Start, before handing off or falling back. The catch-up
 // that leaves the event in the tail renders nothing.
 func TestCatchUpWaitsWhenThereIsNothingNewToOffer(t *testing.T) {
-	entered, gate := make(chan *Capture, 1), make(chan struct{})
-	r := &fakeReplayer{start: parkedStart(entered, gate)}
-	w, fallbacks := joinable(DefaultReplayBytes, r)
-	waits := joinWaits(t, w)
-	resize(w, at80x24)
-	writeString(w, "A")
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancelJoin := context.WithCancel(t.Context())
+		t.Cleanup(cancelJoin)
+		entered, gate := make(chan *Capture, 1), make(chan struct{})
+		releaseGate := sync.OnceFunc(func() { close(gate) })
+		t.Cleanup(releaseGate)
+		r := &fakeReplayer{start: parkedStart(entered, gate)}
+		w, fallbacks := joinable(DefaultReplayBytes, r)
+		waits := joinWaits(t, w)
+		resize(w, at80x24)
+		writeString(w, "A")
 
-	var joiner recordingWriter
-	done := joinAsync(w, t.Context(), time.Now().Add(300*time.Millisecond), &joiner)
-	within(t, entered, "Start")
-	seq := w.ResizeBegin(at45x30)
-	w.ResizeEnd(seq, true)
-	r.leaveInTail(seq, true)
-	writeString(w, "a")
-	close(gate)
+		var joiner recordingWriter
+		const wait = 300 * time.Millisecond
+		done := joinAsync(w, ctx, time.Now().Add(wait), &joiner)
+		settledReplay(t, entered, "Start")
+		seq := w.ResizeBegin(at45x30)
+		w.ResizeEnd(seq, true)
+		r.leaveInTail(seq, true)
+		writeString(w, "a")
+		releaseGate()
 
-	select {
-	case wait := <-waits:
-		require.Equal(t, waitOutput, wait)
-	case err := <-done:
-		t.Fatalf("the join ended without waiting, after %d renders: %v", r.renderCount(), err)
-	case <-time.After(5 * time.Second):
-		t.Fatal("the join never waited")
-	}
-	require.NoError(t, within(t, done, "the join"))
-	require.Equal(t, []error{errDeadlineInASequence}, fallbacks.all())
-	require.Equal(t, 1, r.renderCount(), "Start's render, and none while the event is in the tail")
-	require.Len(t, r.feeds(), 1)
-	require.Equal(t, "Aa", string(joiner.bytes()), "today's replay")
+		require.Equal(t, waitOutput, settledReplay(t, waits, "the output wait"))
+		time.Sleep(wait - time.Nanosecond)
+		pendingReplay(t, done, "the catch-up deadline")
+		require.Len(t, r.feeds(), 1)
+		time.Sleep(time.Nanosecond)
+		require.NoError(t, settledReplay(t, done, "the join"))
+		require.Equal(t, []error{errDeadlineInASequence}, fallbacks.all())
+		require.Equal(t, 1, r.renderCount(), "Start's render, and none while the event is in the tail")
+		require.Len(t, r.feeds(), 1)
+		require.Equal(t, "Aa", string(joiner.bytes()), "today's replay")
+	})
 }
 
 // A join that runs out of time says what it was doing: emulating, which is
@@ -1189,86 +1243,122 @@ func TestCatchUpWaitsWhenThereIsNothingNewToOffer(t *testing.T) {
 // of a character or a sequence a resize fell inside, or for another join's
 // emulation, each ErrReplayDeadline wrapped with what it waited for.
 func TestAppendSizedSaysWhatTheDeadlineCaughtTheJoinDoing(t *testing.T) {
-	const wait = 200 * time.Millisecond
 	for _, tc := range []struct {
-		name string
-		// join joins sink to w, set up by it to run out of time as the case
-		// says, and ends whatever it started once the join is over.
-		join func(t *testing.T, sink io.Writer) (*fallbackLog, error)
-		want error
+		name                string
+		size                termsize.Size
+		waitFor             joinWait
+		steer               func(t *testing.T, r *fakeReplayer, w *MultiWriter)
+		beforeStart         bool
+		startBeforeDeadline bool
+		want                error
+		raw                 string
 	}{
-		{"emulating", func(t *testing.T, sink io.Writer) (*fallbackLog, error) {
-			r := &fakeReplayer{start: func(_ int, _ context.Context, deadline time.Time, _ *Capture) error {
-				// A replayer that finishes, but only once the deadline has
-				// passed.
-				time.Sleep(time.Until(deadline) + 10*time.Millisecond)
-				return nil
-			}}
-			w, fallbacks := joinable(DefaultReplayBytes, r)
-			resize(w, at80x24)
-			writeString(w, "A")
-			return fallbacks, w.AppendSized(t.Context(), time.Now().Add(wait), at80x24, sink)
-		}, ErrReplayDeadline},
-
-		{"waiting for a resize's outcome", func(t *testing.T, sink io.Writer) (*fallbackLog, error) {
-			entered, gate := make(chan *Capture, 1), make(chan struct{})
-			w, fallbacks := joinable(DefaultReplayBytes, &fakeReplayer{start: parkedStart(entered, gate)})
-			resize(w, at80x24)
-			writeString(w, "A")
-			done := joinAsync(w, t.Context(), time.Now().Add(wait), sink)
-			within(t, entered, "Start")
-			seq := w.ResizeBegin(at45x30)
-			defer w.ResizeEnd(seq, true)
-			close(gate)
-			return fallbacks, within(t, done, "the join")
-		}, errDeadlineAtAResize},
-
-		{"waiting for the rest of a sequence", func(t *testing.T, sink io.Writer) (*fallbackLog, error) {
-			r := &fakeReplayer{}
-			w, fallbacks := joinable(DefaultReplayBytes, r)
-			resize(w, at80x24)
-			writeString(w, "A")
-			seq := w.ResizeBegin(at45x30)
-			w.ResizeEnd(seq, true)
-			// The resize fell inside a sequence the stream has yet to end.
-			r.leaveInTail(seq, true)
-			writeString(w, "\x1b[3")
-			return fallbacks, w.AppendSized(t.Context(), time.Now().Add(wait), at45x30, sink)
-		}, errDeadlineInASequence},
-
-		{"waiting for another join's emulation", func(t *testing.T, sink io.Writer) (*fallbackLog, error) {
-			entered, gate := make(chan *Capture, 1), make(chan struct{})
-			w, fallbacks := joinable(DefaultReplayBytes, &fakeReplayer{start: parkedStart(entered, gate)})
-			resize(w, at80x24)
-			writeString(w, "A")
-			var first recordingWriter
-			holder := joinAsync(w, t.Context(), far(), &first)
-			within(t, entered, "the first join's Start")
-			err := w.AppendSized(t.Context(), time.Now().Add(wait), at80x24, sink)
-			close(gate)
-			require.NoError(t, within(t, holder, "the first join"))
-			return fallbacks, err
-		}, errDeadlineAtThePermit},
+		{
+			name: "emulating", size: at80x24,
+			steer: func(_ *testing.T, r *fakeReplayer, _ *MultiWriter) {
+				r.start = func(_ int, _ context.Context, deadline time.Time, _ *Capture) error {
+					time.Sleep(time.Until(deadline))
+					return nil
+				}
+			},
+			want: ErrReplayDeadline, raw: "A",
+		},
+		{
+			name: "waiting for a resize's outcome", size: at80x24, waitFor: waitResize,
+			steer: func(t *testing.T, r *fakeReplayer, w *MultiWriter) {
+				r.start = func(int, context.Context, time.Time, *Capture) error {
+					seq := w.ResizeBegin(at45x30)
+					t.Cleanup(func() { w.ResizeEnd(seq, true) })
+					return nil
+				}
+			},
+			want: errDeadlineAtAResize, raw: "A",
+		},
+		{
+			name: "waiting for the rest of a sequence", size: at45x30, waitFor: waitOutput,
+			steer: func(_ *testing.T, r *fakeReplayer, w *MultiWriter) {
+				seq := w.ResizeBegin(at45x30)
+				w.ResizeEnd(seq, true)
+				r.leaveInTail(seq, true)
+				writeString(w, "\x1b[3")
+			},
+			want: errDeadlineInASequence, raw: "A\x1b[3",
+		},
+		{
+			name: "waiting for another join's emulation", size: at80x24, waitFor: waitPermit,
+			steer: func(t *testing.T, _ *fakeReplayer, w *MultiWriter) {
+				require.NoError(t, w.acquire(t.Context(), far()))
+				t.Cleanup(w.release)
+			},
+			want: errDeadlineAtThePermit, raw: "A",
+		},
+		{name: "before Start", size: at80x24, beforeStart: true, want: errDeadlineBeforeStart, raw: "A"},
+		{name: "before Start just before deadline", size: at80x24, beforeStart: true, startBeforeDeadline: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			var sink recordingWriter
-			fallbacks, err := tc.join(t, &sink)
-			require.NoError(t, err)
-			errs := fallbacks.all()
-			require.Len(t, errs, 1)
-			require.Equal(t, tc.want, errs[0], "%v", errs[0])
-			require.ErrorIs(t, errs[0], ErrReplayDeadline)
-			require.NotEqual(t, byte('<'), firstByte(sink.bytes()), "the raw ring, not a render")
+			synctest.Test(t, func(t *testing.T) {
+				const wait = 200 * time.Millisecond
+				deadline := time.Now().Add(wait)
+				ctx, cancel := context.WithCancel(t.Context())
+				t.Cleanup(cancel)
+				r := &fakeReplayer{}
+				w, fallbacks := joinable(DefaultReplayBytes, r)
+				waits := joinWaits(t, w)
+				resize(w, at80x24)
+				writeString(w, "A")
+				if tc.steer != nil {
+					tc.steer(t, r, w)
+				}
+				var sink recordingWriter
+				var done <-chan error
+				var start func()
+				if tc.beforeStart {
+					// Exercise the internal stages: AppendSized has no pause
+					// between acquiring the permit and checking Start's deadline.
+					j := &join{t: w, ctx: ctx, deadline: deadline, size: tc.size, w: &sink}
+					c, complete, err := j.capture()
+					require.NoError(t, err)
+					require.False(t, complete)
+					require.NoError(t, w.acquire(ctx, deadline))
+					t.Cleanup(w.release)
+					result := make(chan error, 1)
+					done = result
+					start = func() { j.start(c); result <- j.handoff() }
+				} else {
+					result := make(chan error, 1)
+					go func() { result <- w.AppendSized(ctx, deadline, tc.size, &sink) }()
+					done = result
+					if tc.want != ErrReplayDeadline {
+						require.Equal(t, tc.waitFor, settledReplay(t, waits, "the deadline wait"))
+					}
+				}
+				time.Sleep(wait - time.Nanosecond)
+				pendingReplay(t, done, "the join before its deadline")
+				require.Empty(t, sink.bytes())
+				require.Empty(t, fallbacks.all())
+				if !tc.startBeforeDeadline {
+					time.Sleep(time.Nanosecond)
+				}
+				if start != nil {
+					start()
+				}
+				require.NoError(t, settledReplay(t, done, "the join at its deadline"))
+				if tc.startBeforeDeadline {
+					require.Equal(t, 1, r.starts(), "Start is allowed one nanosecond before the deadline")
+					require.Equal(t, "<A>", string(sink.bytes()))
+					require.Empty(t, fallbacks.all())
+					return
+				}
+				errs := fallbacks.all()
+				require.Equal(t, []error{tc.want}, errs)
+				require.ErrorIs(t, errs[0], ErrReplayDeadline)
+				require.Equal(t, tc.raw, string(sink.bytes()), "exact raw replay at the deadline")
+				if tc.beforeStart {
+					require.Zero(t, r.starts(), "Start must not run at the deadline")
+				}
+			})
 		})
 	}
-}
-
-// firstByte is p's first byte, or 0.
-func firstByte(p []byte) byte {
-	if len(p) == 0 {
-		return 0
-	}
-	return p[0]
 }
 
 // The emulation renders only once it has passed every resize it was
@@ -1279,42 +1369,46 @@ func firstByte(p []byte) byte {
 // for output, and the output that lets the emulation pass the resize brings
 // the one render, which the join hands over.
 func TestAppendSizedRendersNothingBeforeTheNewestOfferedResize(t *testing.T) {
-	r := &fakeReplayer{}
-	var seq uint64
-	var early atomic.Bool // a render made with the resize in the tail
-	r.render = func(_ uint64, consumed []byte) ([]byte, error) {
-		r.mu.Lock()
-		inTail := r.tail[seq]
-		r.mu.Unlock()
-		if inTail {
-			early.Store(true)
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancelJoin := context.WithCancel(t.Context())
+		t.Cleanup(cancelJoin)
+		r := &fakeReplayer{}
+		var seq uint64
+		var early atomic.Bool // a render made with the resize in the tail
+		r.render = func(_ uint64, consumed []byte) ([]byte, error) {
+			r.mu.Lock()
+			inTail := r.tail[seq]
+			r.mu.Unlock()
+			if inTail {
+				early.Store(true)
+			}
+			return []byte("<" + string(consumed) + ">"), nil
 		}
-		return []byte("<" + string(consumed) + ">"), nil
-	}
-	r.feed = func(int, [][]byte, []SizeEvent) error {
-		// The rest of the character, which lets the emulation pass the resize.
-		r.leaveInTail(seq, false)
-		return nil
-	}
-	w, fallbacks := joinable(DefaultReplayBytes, r)
-	waits := joinWaits(t, w)
-	resize(w, at80x24)
-	writeString(w, "A")
-	seq = w.ResizeBegin(at45x30)
-	w.ResizeEnd(seq, true)
-	r.leaveInTail(seq, true)
+		r.feed = func(int, [][]byte, []SizeEvent) error {
+			// The rest of the character, which lets the emulation pass the resize.
+			r.leaveInTail(seq, false)
+			return nil
+		}
+		w, fallbacks := joinable(DefaultReplayBytes, r)
+		waits := joinWaits(t, w)
+		resize(w, at80x24)
+		writeString(w, "A")
+		seq = w.ResizeBegin(at45x30)
+		w.ResizeEnd(seq, true)
+		r.leaveInTail(seq, true)
 
-	var joiner recordingWriter
-	done := joinAsync(w, t.Context(), far(), &joiner)
-	require.Equal(t, waitOutput, within(t, waits, "the wait for output"))
-	require.Zero(t, r.renderCount(), "a render was made at a size older than the joiner's resize")
+		var joiner recordingWriter
+		done := joinAsync(w, ctx, far(), &joiner)
+		require.Equal(t, waitOutput, settledReplay(t, waits, "the wait for output"))
+		require.Zero(t, r.renderCount(), "a render was made at a size older than the joiner's resize")
 
-	writeString(w, "B")
-	require.NoError(t, within(t, done, "the join"))
-	require.False(t, early.Load(), "a render was made with the joiner's resize in the emulation's tail")
-	require.Equal(t, 1, r.renderCount())
-	require.Equal(t, "<AB>", string(joiner.bytes()))
-	require.Empty(t, fallbacks.all())
+		writeString(w, "B")
+		require.NoError(t, settledReplay(t, done, "the join"))
+		require.False(t, early.Load(), "a render was made with the joiner's resize in the emulation's tail")
+		require.Equal(t, 1, r.renderCount())
+		require.Equal(t, "<AB>", string(joiner.bytes()))
+		require.Empty(t, fallbacks.all())
+	})
 }
 
 // io falls back when a render is longer than DefaultReplayBytes, so one
@@ -1396,12 +1490,7 @@ func TestShutdownWakesAParkedJoin(t *testing.T) {
 		require.NoError(t, w.Shutdown(ctx))
 	}
 	closedAtOnce := func(t *testing.T, done <-chan error) {
-		select {
-		case err := <-done:
-			require.ErrorIs(t, err, ErrClosed)
-		case <-time.After(50 * time.Millisecond):
-			t.Fatal("a parked join slept through Shutdown")
-		}
+		require.ErrorIs(t, settledReplay(t, done, "the parked join after Shutdown"), ErrClosed)
 	}
 
 	for _, tc := range []struct {
@@ -1425,49 +1514,55 @@ func TestShutdownWakesAParkedJoin(t *testing.T) {
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			r := &fakeReplayer{}
-			w, fallbacks := joinable(DefaultReplayBytes, r)
-			waits := joinWaits(t, w)
-			tc.steer(r, w)
-			resize(w, at80x24)
-			writeString(w, "A")
+			synctest.Test(t, func(t *testing.T) {
+				r := &fakeReplayer{}
+				w, fallbacks := joinable(DefaultReplayBytes, r)
+				waits := joinWaits(t, w)
+				tc.steer(r, w)
+				resize(w, at80x24)
+				writeString(w, "A")
 
-			var joiner recordingWriter
-			done := joinAsync(w, t.Context(), far(), &joiner)
-			require.Equal(t, tc.wait, within(t, waits, "the wait"))
-			shutdown(t, w)
-			closedAtOnce(t, done)
-			require.Empty(t, joiner.bytes())
-			require.Zero(t, attachedTimes(w, &joiner))
-			require.Empty(t, fallbacks.all())
-			require.Zero(t, len(w.permit), "the permit was given back")
+				var joiner recordingWriter
+				done := joinAsync(w, t.Context(), far(), &joiner)
+				require.Equal(t, tc.wait, settledReplay(t, waits, "the wait"))
+				shutdown(t, w)
+				closedAtOnce(t, done)
+				require.Empty(t, joiner.bytes())
+				require.Zero(t, attachedTimes(w, &joiner))
+				require.Empty(t, fallbacks.all())
+				require.Zero(t, len(w.permit), "the permit was given back")
+			})
 		})
 	}
 
 	t.Run("waiting for the permit", func(t *testing.T) {
-		entered, gate := make(chan *Capture, 1), make(chan struct{})
-		r := &fakeReplayer{start: parkedStart(entered, gate)}
-		w, fallbacks := joinable(DefaultReplayBytes, r)
-		waits := joinWaits(t, w)
-		resize(w, at80x24)
-		writeString(w, "A")
+		synctest.Test(t, func(t *testing.T) {
+			entered, gate := make(chan *Capture, 1), make(chan struct{})
+			releaseGate := sync.OnceFunc(func() { close(gate) })
+			t.Cleanup(releaseGate)
+			r := &fakeReplayer{start: parkedStart(entered, gate)}
+			w, fallbacks := joinable(DefaultReplayBytes, r)
+			waits := joinWaits(t, w)
+			resize(w, at80x24)
+			writeString(w, "A")
 
-		var a, b recordingWriter
-		doneA := joinAsync(w, t.Context(), far(), &a)
-		within(t, entered, "A's Start")
-		doneB := joinAsync(w, t.Context(), far(), &b)
-		require.Equal(t, waitPermit, within(t, waits, "B's wait"))
-		shutdown(t, w)
-		closedAtOnce(t, doneB)
-		require.Equal(t, 1, r.starts(), "B never started")
+			var a, b recordingWriter
+			doneA := joinAsync(w, t.Context(), far(), &a)
+			settledReplay(t, entered, "A's Start")
+			doneB := joinAsync(w, t.Context(), far(), &b)
+			require.Equal(t, waitPermit, settledReplay(t, waits, "B's wait"))
+			shutdown(t, w)
+			closedAtOnce(t, doneB)
+			require.Equal(t, 1, r.starts(), "B never started")
 
-		close(gate)
-		require.ErrorIs(t, within(t, doneA, "A"), ErrClosed)
-		require.Zero(t, len(w.permit), "the permit was given back")
-		require.Empty(t, a.bytes())
-		require.Empty(t, b.bytes())
-		require.Zero(t, attachedTimes(w, &a)+attachedTimes(w, &b))
-		require.Empty(t, fallbacks.all())
+			releaseGate()
+			require.ErrorIs(t, settledReplay(t, doneA, "A"), ErrClosed)
+			require.Zero(t, len(w.permit), "the permit was given back")
+			require.Empty(t, a.bytes())
+			require.Empty(t, b.bytes())
+			require.Zero(t, attachedTimes(w, &a)+attachedTimes(w, &b))
+			require.Empty(t, fallbacks.all())
+		})
 	})
 }
 
@@ -1835,34 +1930,29 @@ func TestRawFallbackAfterAnOverflow(t *testing.T) {
 func TestJoinWaitHookBelongsToItsWriter(t *testing.T) {
 	for _, what := range []joinWait{waitPermit, waitResize, waitOutput} {
 		t.Run(fmt.Sprint(what), func(t *testing.T) {
-			a, b := NewMultiWriter(1), NewMultiWriter(1)
-			aWaits, bWaits := joinWaits(t, a), joinWaits(t, b)
-			ctx, cancel := context.WithCancel(t.Context())
-			defer cancel()
-			done := make(chan struct{})
-			t.Cleanup(func() { cancel(); <-done })
-			if what == waitPermit {
-				a.permit <- struct{}{}
-			}
-			go func() {
-				defer close(done)
+			synctest.Test(t, func(t *testing.T) {
+				a, b := NewMultiWriter(1), NewMultiWriter(1)
+				aWaits, bWaits := joinWaits(t, a), joinWaits(t, b)
+				ctx, cancel := context.WithCancel(t.Context())
+				defer cancel()
+				done := make(chan struct{})
+				t.Cleanup(func() { cancel(); <-done })
 				if what == waitPermit {
-					_ = a.take(ctx, time.Now().Add(time.Second))
-					return
+					a.permit <- struct{}{}
 				}
-				j := join{t: a, ctx: ctx, deadline: time.Now().Add(time.Second)}
-				j.wait(what, make(chan struct{}))
-			}()
-			select {
-			case got := <-aWaits:
-				require.Equal(t, what, got)
-			case got := <-bWaits:
-				t.Fatalf("writer B received writer A's wait: %v", got)
-			case <-time.After(time.Second):
-				t.Fatal("writer A did not receive its wait")
-			}
-			require.Empty(t, bWaits, "writer B must not observe writer A's wait")
-			cancel()
+				go func() {
+					defer close(done)
+					if what == waitPermit {
+						_ = a.take(ctx, time.Now().Add(time.Second))
+						return
+					}
+					j := join{t: a, ctx: ctx, deadline: time.Now().Add(time.Second)}
+					j.wait(what, make(chan struct{}))
+				}()
+				require.Equal(t, what, settledReplay(t, aWaits, "writer A's wait"))
+				require.Empty(t, bWaits, "writer B must not observe writer A's wait")
+				cancel()
+			})
 		})
 	}
 }
