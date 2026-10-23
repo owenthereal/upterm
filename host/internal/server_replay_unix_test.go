@@ -333,18 +333,38 @@ func TestAFallbackIsLoggedWithItsReason(t *testing.T) {
 	require.Contains(t, lines[1], `the replayer's frame`)
 }
 
-// slowReplayer is the session's own replayer, slowed down: each Start waits
-// until the session's pacer holds the command, or for a second if it never
-// does, then emulates. It stands for an emulation that takes a while.
+// slowReplayer waits for the session's pacer to hold the command before
+// emulating. Missing readiness fails within one second, inside the join's
+// separate ten-second replay budget.
 type slowReplayer struct {
 	uio.Replayer
-	pacer *guestPacer // the session's, handed over as ServeWithContext builds it
+	pacer *guestPacer // installed before the command or any join starts
+	held  <-chan struct{}
+	ready chan error
+}
+
+func (r *slowReplayer) awaitHold(ctx context.Context) error {
+	guard := time.NewTimer(time.Second)
+	defer guard.Stop()
+	for {
+		select {
+		case <-r.held:
+			if r.pacer.waiting.Load() > 0 {
+				return nil
+			}
+		case <-guard.C:
+			return fmt.Errorf("the pacer never reported a held write")
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
 }
 
 func (r *slowReplayer) Start(ctx context.Context, deadline time.Time, c *uio.Capture, size termsize.Size) (uio.Emulation, error) {
-	// Polled: the pacer announces nothing when it starts to hold.
-	for until := time.Now().Add(time.Second); r.pacer.waiting.Load() == 0 && time.Now().Before(until); {
-		time.Sleep(time.Millisecond)
+	err := r.awaitHold(ctx)
+	r.ready <- err
+	if err != nil {
+		return nil, err
 	}
 	return r.Replayer.Start(ctx, deadline, c, size)
 }
@@ -353,16 +373,24 @@ func (r *slowReplayer) Start(ctx context.Context, deadline time.Time, c *uio.Cap
 // joining it, which paces. While the guest's screen is reconstructed the
 // command is held to it, so the output since the capture stays within the
 // low mark and a write, and the guest is handed the reconstruction, which
-// starts with sequences. Without the hold, the second the slowed emulation
-// waits is far more output than the ring holds, the output since the capture
-// is evicted before the handoff, and the guest is handed the raw ring, in
-// which a command printing only "y" lines puts no sequence at all.
+// starts with sequences. A missing hold fails the bounded readiness wait.
+// A fallback would hand over the raw ring, in which a command printing only
+// "y" lines puts no sequence at all.
 func TestAGuestJoiningAFloodGetsItsScreenReconstructed(t *testing.T) {
-	// The budget covers the slowed emulation either way, so a join that
-	// falls back does so for the output it lost, not for time.
-	r := &slowReplayer{Replayer: replay.New()}
+	// Keep a ten-second replay budget, independently of the one-second
+	// readiness guard, and require a reconstruction rather than a fallback.
+	held := make(chan struct{}, 1)
+	r := &slowReplayer{Replayer: replay.New(), held: held, ready: make(chan error, 1)}
 	srv := &Server{Command: []string{"yes"}, replayBudget: 10 * time.Second}
-	srv.onGuestPacer = func(p *guestPacer) { r.pacer = p }
+	srv.onGuestPacer = func(p *guestPacer) {
+		r.pacer = p
+		p.onWait = func() {
+			select {
+			case held <- struct{}{}:
+			default:
+			}
+		}
+	}
 	installReplayer(srv, r)
 	h := startHost(t, srv)
 	// A viewer, which counts towards no size and paces nothing, sees the
@@ -374,6 +402,12 @@ func TestAGuestJoiningAFloodGetsItsScreenReconstructed(t *testing.T) {
 	go func() { _, _ = io.Copy(io.Discard, viewer) }()
 
 	_, out := h.connectGuest(t, withWindow(desktop))
+	select {
+	case err := <-r.ready:
+		require.NoError(t, err, "the slow replayer did not observe backpressure")
+	case <-time.After(harnessTimeout):
+		t.Fatal("the slow replayer never reported readiness")
+	}
 	first := make([]byte, 64)
 	_, err := io.ReadFull(out, first)
 	require.NoError(t, err)

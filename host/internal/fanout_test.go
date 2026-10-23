@@ -7,6 +7,7 @@ import (
 	"slices"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/owenthereal/upterm/internal/termsize"
@@ -55,31 +56,47 @@ func testSigners(t *testing.T) []ssh.Signer {
 // pass just as happily with the release deleted. A closed sink refuses writes,
 // which is the observable consequence of its goroutine being released.
 func TestAttachGuestOutputReleasesTheSinkWhenRefused(t *testing.T) {
-	writers := uio.NewMultiWriter(uio.DefaultReplayBytes)
-	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
-	defer cancel()
-	require.NoError(t, writers.Shutdown(ctx))
+	synctest.Test(t, func(t *testing.T) {
+		writers := uio.NewMultiWriter(uio.DefaultReplayBytes)
+		ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+		defer cancel()
+		require.NoError(t, writers.Shutdown(ctx))
 
-	var out recordingWriter
-	sink := uio.NewAsyncWriter(&out, uio.DefaultGuestBufferSize, nil)
+		var out recordingWriter
+		sink := uio.NewAsyncWriter(&out, uio.DefaultGuestBufferSize, nil)
+		defer func() { _ = sink.Close() }()
 
-	require.ErrorIs(t, attachGuestOutput(t.Context(), time.Time{}, writers, sink, termsize.Size{}), uio.ErrClosed)
+		require.ErrorIs(t, attachGuestOutput(t.Context(), time.Time{}, writers, sink, termsize.Size{}), uio.ErrClosed)
 
-	_, err := sink.Write([]byte("output"))
-	require.ErrorIs(t, err, uio.ErrWriterClosed,
-		"a refused attach must release the sink it was given")
+		_, err := sink.Write([]byte("output"))
+		require.ErrorIs(t, err, uio.ErrWriterClosed,
+			"a refused attach must release the sink it was given")
+	})
 }
 
 // delayedWriter always takes longer to deliver than the copy takes to finish,
 // so output is provably still pending when the producer stops. Without the
 // flush, Run returns before this writer has been given anything at all.
 type delayedWriter struct {
-	delay time.Duration
-	rec   *recordingWriter
+	delay   time.Duration
+	rec     *recordingWriter
+	release <-chan struct{}
+}
+
+func newDelayedWriter(t *testing.T, delay time.Duration, rec *recordingWriter) *delayedWriter {
+	t.Helper()
+	release := make(chan struct{})
+	t.Cleanup(sync.OnceFunc(func() { close(release) }))
+	return &delayedWriter{delay: delay, rec: rec, release: release}
 }
 
 func (d *delayedWriter) Write(p []byte) (int, error) {
-	time.Sleep(d.delay)
+	timer := time.NewTimer(d.delay)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+	case <-d.release:
+	}
 	return d.rec.Write(p)
 }
 
@@ -92,34 +109,33 @@ func (d *delayedWriter) Write(p []byte) (int, error) {
 // it a barrier — and asserting *immediately after Run returns*, rather than
 // eventually, is what makes this test notice if it moves back.
 func TestCommandRunFlushesAcceptedOutputBeforeReturning(t *testing.T) {
-	const lastLine = "written just before exit"
+	synctest.Test(t, func(t *testing.T) {
+		const lastLine = "written just before exit"
 
-	var guestOut recordingWriter
-	// 200ms: longer than the copy takes to drain the pty, and well inside
-	// guestFlushTimeout, so the flush both has work to do and can finish it.
-	guest := uio.NewAsyncWriter(&delayedWriter{delay: 200 * time.Millisecond, rec: &guestOut},
-		uio.DefaultGuestBufferSize, nil)
-	defer func() { _ = guest.Close() }()
+		var guestOut recordingWriter
+		// 200ms: longer than the copy takes to drain the pty, and well inside
+		// guestFlushTimeout, so the flush both has work to do and can finish it.
+		guest := uio.NewAsyncWriter(newDelayedWriter(t, 200*time.Millisecond, &guestOut),
+			uio.DefaultGuestBufferSize, nil)
+		defer func() { _ = guest.Close() }()
 
-	writers := uio.NewMultiWriter(uio.DefaultReplayBytes)
-	require.NoError(t, writers.Append(guest))
+		writers := uio.NewMultiWriter(uio.DefaultReplayBytes)
+		require.NoError(t, writers.Append(guest))
 
-	cmd := &command{
-		logger:  discardLogger(),
-		writers: writers,
-		ctx:     t.Context(),
-		ptmx: &exitedPTY{
-			pending:   [][]byte{[]byte("first chunk\r\n"), []byte(lastLine + "\r\n")},
-			readDelay: 20 * time.Millisecond,
-		},
-	}
+		cmd := &command{
+			logger:  discardLogger(),
+			writers: writers,
+			ctx:     t.Context(),
+			ptmx:    newExitedPTY(t, [][]byte{[]byte("first chunk\r\n"), []byte(lastLine + "\r\n")}, 20*time.Millisecond),
+		}
 
-	patientExitDrain(cmd)
-	require.NoError(t, cmd.Run())
+		patientExitDrain(cmd)
+		require.NoError(t, cmd.Run())
 
-	// No Eventually: the guarantee is that this has already happened.
-	require.Contains(t, string(guestOut.bytes()), lastLine,
-		"Run returned with output still queued for an attached guest")
+		// No Eventually: the guarantee is that this has already happened.
+		require.Contains(t, string(guestOut.bytes()), lastLine,
+			"Run returned with output still queued for an attached guest")
+	})
 }
 
 // A guest too stuck to receive its tail must leave a trace.
@@ -130,44 +146,43 @@ func TestCommandRunFlushesAcceptedOutputBeforeReturning(t *testing.T) {
 // whose last screenful never arrived looks from the outside like output the
 // command never produced.
 func TestCommandRunLogsAGuestThatNeverReceivedItsTail(t *testing.T) {
-	// Never released, so the flush can only end at its deadline.
-	gate := make(chan struct{})
-	defer close(gate)
-	guest := uio.NewAsyncWriter(&gatedWriter{gate: gate, rec: &recordingWriter{}},
-		uio.DefaultGuestBufferSize, nil)
-	defer func() { _ = guest.Close() }()
+	synctest.Test(t, func(t *testing.T) {
+		// Never released, so the flush can only end at its deadline.
+		gate := make(chan struct{})
+		defer close(gate)
+		guest := uio.NewAsyncWriter(&gatedWriter{gate: gate, rec: &recordingWriter{}},
+			uio.DefaultGuestBufferSize, nil)
+		defer func() { _ = guest.Close() }()
 
-	writers := uio.NewMultiWriter(uio.DefaultReplayBytes)
-	require.NoError(t, writers.Append(guest))
+		writers := uio.NewMultiWriter(uio.DefaultReplayBytes)
+		require.NoError(t, writers.Append(guest))
 
-	// The handler is slow but working, and the bound is far above its delay.
-	// With the default 100ms bound, a CI runner starved of CPU could fail to
-	// schedule the logging goroutine in time and Run returned before the line
-	// landed. A slow handler also makes a fire-and-forget regression fail every
-	// time instead of only when the goroutine happens to lose the race.
-	var logs recordingWriter
-	cmd := &command{
-		logger:  slog.New(slog.NewTextHandler(&delayedWriter{delay: 200 * time.Millisecond, rec: &logs}, nil)),
-		writers: writers,
-		ctx:     t.Context(),
-		ptmx: &exitedPTY{
-			pending:   [][]byte{[]byte("never delivered\r\n")},
-			readDelay: 20 * time.Millisecond,
-		},
-		flushLogTimeoutForTesting: 30 * time.Second,
-	}
+		// The handler is slow but working, and the bound is far above its delay.
+		// With the default 100ms bound, a CI runner starved of CPU could fail to
+		// schedule the logging goroutine in time and Run returned before the line
+		// landed. A slow handler also makes a fire-and-forget regression fail every
+		// time instead of only when the goroutine happens to lose the race.
+		var logs recordingWriter
+		cmd := &command{
+			logger:                    slog.New(slog.NewTextHandler(newDelayedWriter(t, 200*time.Millisecond, &logs), nil)),
+			writers:                   writers,
+			ctx:                       t.Context(),
+			ptmx:                      newExitedPTY(t, [][]byte{[]byte("never delivered\r\n")}, 20*time.Millisecond),
+			flushLogTimeoutForTesting: 30 * time.Second,
+		}
 
-	patientExitDrain(cmd)
-	require.NoError(t, cmd.Run())
+		patientExitDrain(cmd)
+		require.NoError(t, cmd.Run())
 
-	// No Eventually, deliberately. The line is written off the actor's return
-	// path so a blocked handler cannot hang the exit, but it is waited for
-	// under a bound, so with a working handler it has landed by the time Run
-	// returns. Asserting immediately is what pins that: a fire-and-forget
-	// version passes under Eventually and still loses the line at process
-	// exit, which is the whole failure being guarded against.
-	require.Contains(t, string(logs.bytes()), "gave up delivering final output to a guest",
-		"a guest that lost its tail left no trace in the host log")
+		// No Eventually, deliberately. The line is written off the actor's return
+		// path so a blocked handler cannot hang the exit, but it is waited for
+		// under a bound, so with a working handler it has landed by the time Run
+		// returns. Asserting immediately is what pins that: a fire-and-forget
+		// version passes under Eventually and still loses the line at process
+		// exit, which is the whole failure being guarded against.
+		require.Contains(t, string(logs.bytes()), "gave up delivering final output to a guest",
+			"a guest that lost its tail left no trace in the host log")
+	})
 }
 
 // The other half of that bound: a handler that never returns must not hold the
@@ -176,38 +191,44 @@ func TestCommandRunLogsAGuestThatNeverReceivedItsTail(t *testing.T) {
 // process anyway — with stdout redirected and stderr on a stopped terminal,
 // which is exactly the shape of session this whole change exists for.
 func TestCommandRunDoesNotHangOnABlockedLogger(t *testing.T) {
-	// Stuck guest, so the flush fails and there is a warning to write at all.
-	guestGate := make(chan struct{})
-	defer close(guestGate)
-	guest := uio.NewAsyncWriter(&gatedWriter{gate: guestGate, rec: &recordingWriter{}},
-		uio.DefaultGuestBufferSize, nil)
-	defer func() { _ = guest.Close() }()
-
-	writers := uio.NewMultiWriter(uio.DefaultReplayBytes)
-	require.NoError(t, writers.Append(guest))
-
-	// And a handler that never returns from Write.
-	logGate := make(chan struct{})
-	defer close(logGate)
-	cmd := &command{
-		logger:  slog.New(slog.NewTextHandler(&gatedWriter{gate: logGate, rec: &recordingWriter{}}, nil)),
-		writers: writers,
-		ctx:     t.Context(),
-		ptmx: &exitedPTY{
-			pending:   [][]byte{[]byte("never delivered\r\n")},
-			readDelay: 20 * time.Millisecond,
-		},
-	}
-
-	done := make(chan error, 1)
-	go func() { done <- cmd.Run() }()
-
-	select {
-	case err := <-done:
-		require.NoError(t, err)
-	case <-time.After(10 * time.Second):
-		t.Fatal("a blocked logger held the host's exit open")
-	}
+	synctest.Test(t, func(t *testing.T) {
+		guestGate, logGate := make(chan struct{}), make(chan struct{})
+		defer close(guestGate)
+		defer close(logGate)
+		guestStarted, logStarted := make(chan struct{}), make(chan struct{})
+		guest := uio.NewAsyncWriter(&gatedWriter{gate: guestGate, rec: &recordingWriter{}, started: guestStarted}, uio.DefaultGuestBufferSize, nil)
+		defer func() { _ = guest.Close() }()
+		writers := uio.NewMultiWriter(uio.DefaultReplayBytes)
+		require.NoError(t, writers.Append(guest))
+		cmd := &command{
+			logger:  slog.New(slog.NewTextHandler(&gatedWriter{gate: logGate, rec: &recordingWriter{}, started: logStarted}, nil)),
+			writers: writers, ctx: t.Context(),
+			ptmx: newExitedPTY(t, [][]byte{[]byte("never delivered\r\n")}, 20*time.Millisecond),
+		}
+		defer func() { _ = cmd.ptmx.Close() }()
+		done := make(chan struct{})
+		var runErr error
+		go func() { defer close(done); runErr = cmd.Run() }()
+		synctest.Wait()
+		time.Sleep(20 * time.Millisecond)
+		requireCompleted(t, guestStarted)
+		// The second read reports EOF at 40ms and starts the 1s flush.
+		time.Sleep(20 * time.Millisecond)
+		synctest.Wait()
+		time.Sleep(time.Second - time.Nanosecond)
+		synctest.Wait()
+		requirePending(t, logStarted, "warning started before the flush deadline")
+		requirePending(t, done, "Run returned before the flush deadline")
+		time.Sleep(time.Nanosecond)
+		requireCompleted(t, logStarted)
+		requirePending(t, done, "Run skipped the logger's bound")
+		time.Sleep(100*time.Millisecond - time.Nanosecond)
+		synctest.Wait()
+		requirePending(t, done, "Run returned before the logger deadline")
+		time.Sleep(time.Nanosecond)
+		requireCompleted(t, done)
+		require.NoError(t, runErr)
+	})
 }
 
 // The shutdown barrier: waitIdle can return while the producer is still going,
@@ -226,40 +247,36 @@ func TestCommandRunDoesNotHangOnABlockedLogger(t *testing.T) {
 // it. The comparison is against a synchronous writer attached to the same
 // fan-out, which by definition has everything the fan-out accepted.
 func TestCommandRunLosesNothingWhenTheProducerOutlivesWaitIdle(t *testing.T) {
-	var accepted recordingWriter // synchronous: the reference for what got in
-	var guestOut recordingWriter
-	guest := uio.NewAsyncWriter(&delayedWriter{delay: 200 * time.Millisecond, rec: &guestOut},
-		uio.DefaultGuestBufferSize, nil)
-	defer func() { _ = guest.Close() }()
+	synctest.Test(t, func(t *testing.T) {
+		var accepted recordingWriter // synchronous: the reference for what got in
+		var guestOut recordingWriter
+		guest := uio.NewAsyncWriter(newDelayedWriter(t, 200*time.Millisecond, &guestOut),
+			uio.DefaultGuestBufferSize, nil)
+		defer func() { _ = guest.Close() }()
 
-	writers := uio.NewMultiWriter(uio.DefaultReplayBytes)
-	require.NoError(t, writers.Append(&accepted))
-	require.NoError(t, writers.Append(guest))
+		writers := uio.NewMultiWriter(uio.DefaultReplayBytes)
+		require.NoError(t, writers.Append(&accepted))
+		require.NoError(t, writers.Append(guest))
 
-	var pending [][]byte
-	for i := range 75 {
-		pending = append(pending, []byte{byte('a' + i%26)})
-	}
-	cmd := &command{timing: serverTiming{outputIdle: 5 * time.Second},
-		logger:  discardLogger(),
-		writers: writers,
-		ctx:     t.Context(),
-		ptmx: &exitedPTY{
-			pending: pending,
-			// 75 chunks at this cadence total 1.5s, longer than
-			// outputDrainTimeout, so it is that 1s deadline -- not quiet --
-			// that ends the wait while the copy is still producing. With the
-			// quiet window widened above, a first read slowed by scheduler
-			// contention can no longer be taken for quiet instead.
-			readDelay: 20 * time.Millisecond,
-		},
-	}
+		// 75 reads at 20ms take 1.5s: output outlives the 1s hard
+		// drain bound, while the 5s quiet window cannot end it first.
+		var pending [][]byte
+		for i := range 75 {
+			pending = append(pending, []byte{byte('a' + i%26)})
+		}
+		cmd := &command{timing: serverTiming{outputIdle: 5 * time.Second},
+			logger:  discardLogger(),
+			writers: writers,
+			ctx:     t.Context(),
+			ptmx:    newExitedPTY(t, pending, 20*time.Millisecond),
+		}
 
-	require.NoError(t, cmd.Run())
+		require.NoError(t, cmd.Run())
 
-	require.NotEmpty(t, accepted.bytes())
-	require.Equal(t, string(accepted.bytes()), string(guestOut.bytes()),
-		"output accepted by the fan-out was lost at teardown")
+		require.NotEmpty(t, accepted.bytes())
+		require.Equal(t, string(accepted.bytes()), string(guestOut.bytes()),
+			"output accepted by the fan-out was lost at teardown")
+	})
 }
 
 // A write the pacer is holding is not activity, so waitIdle would read a gated
@@ -277,36 +294,39 @@ func TestCommandRunLosesNothingWhenTheProducerOutlivesWaitIdle(t *testing.T) {
 // The synchronous recorder on the fan-out is the reference for what got past
 // the pacer.
 func TestCommandRunReleasesPacingBeforeWaitingForIdle(t *testing.T) {
-	p, writers := newTestPacer(t, time.Minute)
-	var accepted recordingWriter
-	require.NoError(t, writers.Append(&accepted))
-	attachPaced(t, p, writers, stuckSink(t, nil))
+	synctest.Test(t, func(t *testing.T) {
+		p, writers := newTestPacer(t, time.Minute)
+		var accepted recordingWriter
+		require.NoError(t, writers.Append(&accepted))
+		attachPaced(t, p, writers, stuckSink(t, nil))
 
-	cmd := &command{
-		logger:  discardLogger(),
-		writers: writers,
-		pacer:   p,
-		ctx:     t.Context(),
-		ptmx: &exitedPTY{
-			pending: [][]byte{
-				make([]byte, ptyWriteSize),
-				make([]byte, ptyWriteSize),
-				[]byte("tail-1\r\n"),
-				[]byte("tail-2\r\n"),
-			},
-			readDelay: 20 * time.Millisecond,
-		},
-	}
+		cmd := &command{
+			logger:  discardLogger(),
+			writers: writers,
+			pacer:   p,
+			ctx:     t.Context(),
+			ptmx: newExitedPTY(t, [][]byte{
+				make([]byte, ptyWriteSize), make([]byte, ptyWriteSize), []byte("tail-1\r\n"), []byte("tail-2\r\n"),
+			}, 20*time.Millisecond),
+		}
 
-	var runErr error
-	patientExitDrain(cmd)
-	done := goWrite(t, p, func() { runErr = cmd.Run() })
-	requireReturns(t, done, 10*time.Second)
-	require.NoError(t, runErr)
-
-	got := string(accepted.bytes())
-	require.Contains(t, got, "tail-1", "a write held by the pacer was lost at exit")
-	require.Contains(t, got, "tail-2", "the pty's tail was cut off behind a held write")
+		var runErr error
+		patientExitDrain(cmd)
+		done := goWrite(t, p, func() { runErr = cmd.Run() })
+		defer func() { _ = cmd.ptmx.Close() }()
+		synctest.Wait()
+		time.Sleep(100 * time.Millisecond)
+		synctest.Wait()
+		require.Contains(t, string(accepted.bytes()), "tail-2",
+			"pacing was not released before the idle wait")
+		// Delivery is deliberately blocked; shutdown waits the 1s flush bound.
+		time.Sleep(time.Second)
+		requireCompleted(t, done)
+		require.NoError(t, runErr)
+		got := string(accepted.bytes())
+		require.Contains(t, got, "tail-1", "a write held by the pacer was lost at exit")
+		require.Contains(t, got, "tail-2", "the pty's tail was cut off behind a held write")
+	})
 }
 
 // Under parent cancellation the command and the session handlers would
@@ -315,37 +335,35 @@ func TestCommandRunReleasesPacingBeforeWaitingForIdle(t *testing.T) {
 // parent's cancellation; only the SSH server actor's interrupt releases them,
 // after giving the command a bounded chance to finish.
 func TestSessionContextSurvivesParentCancellation(t *testing.T) {
-	parent, cancelParent := context.WithCancel(context.Background())
-	sessCtx, cancelSessions := context.WithCancel(sessionContext(parent))
-	defer cancelSessions()
+	synctest.Test(t, func(t *testing.T) {
+		parent, cancelParent := context.WithCancel(context.Background())
+		sessCtx, cancelSessions := context.WithCancel(sessionContext(parent))
+		defer cancelSessions()
 
-	cancelParent()
-
-	select {
-	case <-sessCtx.Done():
-		t.Fatal("sessions were released by the parent, ahead of the fan-out")
-	case <-time.After(100 * time.Millisecond):
-	}
-
-	cancelSessions()
-	select {
-	case <-sessCtx.Done():
-	case <-time.After(2 * time.Second):
-		t.Fatal("the interrupt must still be able to release sessions")
-	}
+		cancelParent()
+		synctest.Wait()
+		requirePending(t, sessCtx.Done(), "sessions were released by the parent, ahead of the fan-out")
+		cancelSessions()
+		requireCompleted(t, sessCtx.Done())
+	})
 }
 
 func TestWaitClosedReturnsOnCloseAndOnTimeout(t *testing.T) {
-	closed := make(chan struct{})
-	close(closed)
-	start := time.Now()
-	waitClosed(closed, time.Minute)
-	require.Less(t, time.Since(start), time.Second, "an already-closed channel must not wait")
-
-	start = time.Now()
-	waitClosed(make(chan struct{}), 50*time.Millisecond)
-	require.GreaterOrEqual(t, time.Since(start), 50*time.Millisecond,
-		"a command that never finishes must not hold shutdown open forever")
+	synctest.Test(t, func(t *testing.T) {
+		closed, immediate := make(chan struct{}), make(chan struct{})
+		close(closed)
+		go func() { defer close(immediate); waitClosed(closed, time.Minute) }()
+		requireCompleted(t, immediate)
+		pending, returned := make(chan struct{}), make(chan struct{})
+		defer close(pending)
+		go func() { defer close(returned); waitClosed(pending, 50*time.Millisecond) }()
+		synctest.Wait()
+		time.Sleep(50*time.Millisecond - time.Nanosecond)
+		synctest.Wait()
+		requirePending(t, returned, "waitClosed returned before its deadline")
+		time.Sleep(time.Nanosecond)
+		requireCompleted(t, returned)
+	})
 }
 
 // Cancellation-led shutdown: the sessions must not be released until the
@@ -358,51 +376,52 @@ func TestWaitClosedReturnsOnCloseAndOnTimeout(t *testing.T) {
 // cannot arrange — there, whether anything is still queued depends on window
 // and socket sizes that differ per platform.
 func TestReleaseSessionsWaitsForTheFanOut(t *testing.T) {
-	gate := make(chan struct{})
-	var guestOut recordingWriter
-	guest := uio.NewAsyncWriter(&gatedWriter{gate: gate, rec: &guestOut},
-		uio.DefaultGuestBufferSize, nil)
-	defer func() { _ = guest.Close() }()
+	synctest.Test(t, func(t *testing.T) {
+		gate := make(chan struct{})
+		release := sync.OnceFunc(func() { close(gate) })
+		defer release()
+		var guestOut recordingWriter
+		guest := uio.NewAsyncWriter(&gatedWriter{gate: gate, rec: &guestOut},
+			uio.DefaultGuestBufferSize, nil)
+		defer func() { _ = guest.Close() }()
 
-	writers := uio.NewMultiWriter(uio.DefaultReplayBytes)
-	require.NoError(t, writers.Append(guest))
-	_, _ = writers.Write([]byte("tail of the session"))
+		writers := uio.NewMultiWriter(uio.DefaultReplayBytes)
+		require.NoError(t, writers.Append(guest))
+		_, _ = writers.Write([]byte("tail of the session"))
 
-	released := make(chan struct{})
-	cmdDone := make(chan struct{})
-	go func() {
-		defer close(cmdDone)
-		flushCtx, cancel := context.WithTimeout(context.Background(), guestFlushTimeout)
-		defer cancel()
-		_ = writers.Shutdown(flushCtx)
-	}()
-	go func() {
-		defer close(released)
-		releaseSessions(cmdDone, outputDrainTimeout+guestFlushTimeout, func() {})
-	}()
+		released := make(chan struct{})
+		cmdDone := make(chan struct{})
+		go func() {
+			defer close(cmdDone)
+			flushCtx, cancel := context.WithTimeout(context.Background(), guestFlushTimeout)
+			defer cancel()
+			_ = writers.Shutdown(flushCtx)
+		}()
+		go func() {
+			defer close(released)
+			releaseSessions(cmdDone, outputDrainTimeout+guestFlushTimeout, func() {})
+		}()
 
-	select {
-	case <-released:
-		t.Fatal("sessions were released while output was still being delivered")
-	case <-time.After(100 * time.Millisecond):
-	}
-
-	close(gate)
-	select {
-	case <-released:
+		synctest.Wait()
+		requirePending(t, released, "sessions were released while output was still being delivered")
+		release()
+		requireCompleted(t, released)
 		require.Equal(t, "tail of the session", string(guestOut.bytes()))
-	case <-time.After(5 * time.Second):
-		t.Fatal("sessions were never released")
-	}
+	})
 }
 
 // gatedWriter delivers nothing until its gate is closed.
 type gatedWriter struct {
-	gate <-chan struct{}
-	rec  *recordingWriter
+	gate    <-chan struct{}
+	rec     *recordingWriter
+	started chan struct{}
+	once    sync.Once
 }
 
 func (g *gatedWriter) Write(p []byte) (int, error) {
+	if g.started != nil {
+		g.once.Do(func() { close(g.started) })
+	}
 	<-g.gate
 	return g.rec.Write(p)
 }

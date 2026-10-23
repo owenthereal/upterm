@@ -94,6 +94,10 @@ type guestPacer struct {
 	// held, so a test can observe backpressure rather than sleep on it.
 	waiting atomic.Int32
 	holds   atomic.Int64
+
+	// onWait observes entry to a held write after waiting and holds increase.
+	// Installed before use; called outside locks and must not block.
+	onWait func()
 }
 
 // newGuestPacer returns a pacer writing to w. Pacing stops for good once ctx
@@ -310,6 +314,9 @@ func (p *guestPacer) wait(n int) {
 			counted = true
 			p.waiting.Add(1)
 			p.holds.Add(1)
+			if p.onWait != nil {
+				p.onWait()
+			}
 		}
 		if pending {
 			if timer != nil {

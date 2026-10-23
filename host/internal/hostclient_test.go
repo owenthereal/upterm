@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	uio "github.com/owenthereal/upterm/io"
@@ -554,6 +555,116 @@ func TestHostClientsReportThePrimaryToThePacer(t *testing.T) {
 	mu.Lock()
 	defer mu.Unlock()
 	require.Equal(t, []bool{true, false, true, false}, reports)
+}
+
+// The observer may inspect the elector, including from a removal callback.
+// Check lock availability first so an incorrectly placed callback reports a
+// bounded assertion failure instead of parking the test in primaryID.
+func TestPrimaryChangeHookRunsAfterUnlock(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		type observation struct {
+			id       string
+			unlocked bool
+		}
+		observed := make(chan observation, 4)
+		hc := &hostClients{logger: discardLogger()}
+		hc.onPrimaryChanged = func() {
+			muFree := hc.mu.TryLock()
+			if muFree {
+				hc.mu.Unlock()
+			}
+			electionFree := hc.electMu.TryLock()
+			if electionFree {
+				hc.electMu.Unlock()
+			}
+			o := observation{unlocked: muFree && electionFree}
+			if o.unlocked {
+				o.id = hc.primaryID()
+			}
+			observed <- o
+		}
+		a := &hostClient{id: "a", sink: newHostSink(io.Discard, nil, "a", discardLogger(), 0)}
+		b := &hostClient{id: "b", sink: newHostSink(io.Discard, nil, "b", discardLogger(), 0)}
+		t.Cleanup(func() { _ = a.sink.Close(); _ = b.sink.Close() })
+		change := func(action func(), want ...string) {
+			t.Helper()
+			done := make(chan struct{})
+			go func() { defer close(done); action() }()
+			synctest.Wait()
+			select {
+			case <-done:
+			default:
+				t.Fatal("primary change did not finish: observer blocked the elector")
+			}
+			for _, id := range want {
+				select {
+				case got := <-observed:
+					require.True(t, got.unlocked, "primary change observer ran while an elector lock was held")
+					require.Equal(t, id, got.id, "primary change observer saw the wrong primary ID")
+				default:
+					t.Fatalf("primary change observer did not report primary ID %q", id)
+				}
+			}
+			select {
+			case got := <-observed:
+				t.Fatalf("unexpected primary change observation: %+v", got)
+			default:
+			}
+		}
+		change(func() { hc.add(a) }, "a")
+		change(func() { hc.add(b) })
+		change(func() { hc.remove(a) }, "", "b")
+		change(func() { hc.remove(b) }, "")
+		change(func() { hc.remove(b) })
+	})
+}
+
+func TestPacerWaitHookObservesAHeldWrite(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		type observation struct {
+			waiting  int32
+			holds    int64
+			unlocked bool
+		}
+		observed := make(chan observation, 1)
+		p := newGuestPacer(t.Context(), io.Discard, time.Hour)
+		p.onWait = func() {
+			unlocked := p.mu.TryLock()
+			if unlocked {
+				p.mu.Unlock()
+			}
+			select {
+			case observed <- observation{p.waiting.Load(), p.holds.Load(), unlocked}:
+			default:
+			}
+		}
+		require.NoError(t, p.attach(t.Context(), newFakePaced(pacingLowWater), func() error { return nil }))
+		done := make(chan error, 1)
+		t.Cleanup(func() { p.release(); synctest.Wait() })
+		go func() { _, err := p.Write([]byte("held")); done <- err }()
+		synctest.Wait()
+		select {
+		case got := <-observed:
+			require.True(t, got.unlocked, "pacer wait observer ran while the pacer lock was held")
+			require.Positive(t, got.waiting, "pacer wait observer ran before the write was counted as waiting")
+			require.EqualValues(t, 1, got.holds, "pacer wait observer ran before the hold was counted")
+		default:
+			t.Fatal("pacer wait observer did not report the held write")
+		}
+		select {
+		case err := <-done:
+			t.Fatalf("the observed write was not held: %v", err)
+		default:
+		}
+		p.release()
+		synctest.Wait()
+		select {
+		case err := <-done:
+			require.NoError(t, err)
+		default:
+			t.Fatal("the observer blocked the writer after pacing was released")
+		}
+	})
 }
 
 // Removal now runs on whichever goroutine saw the connection go, which can be
