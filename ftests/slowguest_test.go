@@ -879,16 +879,67 @@ func waitHeld(t *testing.T, progress string, aSeen *atomic.Int64, aClosed <-chan
 	t.Fatal("the producer was never held to A's rate")
 }
 
-// discard drains ch until stop closes, for output a case has no use for but
+// discard drains ch until ch or stop closes, for output a case has no use for but
 // must not leave unread: an unread channel stops its client reading.
-func discard(ch chan string, stop <-chan struct{}) {
+func discard(ch chan string, stop <-chan struct{}) <-chan struct{} {
+	done := make(chan struct{})
 	go func() {
+		defer close(done)
 		for {
 			select {
-			case <-ch:
+			case _, ok := <-ch:
+				if !ok {
+					return
+				}
 			case <-stop:
 				return
 			}
 		}
 	}()
+	return done
+}
+
+func TestDiscardStopsOnEOFOrStop(t *testing.T) {
+	for _, ending := range []string{"EOF", "stop"} {
+		t.Run(ending, func(t *testing.T) {
+			ch, stop := make(chan string), make(chan struct{})
+			closeStop := func() {
+				select {
+				case <-stop:
+				default:
+					close(stop)
+				}
+			}
+			var done <-chan struct{}
+			t.Cleanup(func() {
+				closeStop()
+				select {
+				case <-done:
+				case <-time.After(time.Second):
+					t.Error("discard worker did not stop during cleanup")
+				}
+			})
+			done = discard(ch, stop)
+			select {
+			case ch <- "output":
+			case <-time.After(time.Second):
+				t.Fatal("discard did not consume output")
+			}
+			select {
+			case <-done:
+				t.Fatal("discard returned while input and stop were open")
+			default:
+			}
+			if ending == "EOF" {
+				close(ch)
+			} else {
+				closeStop()
+			}
+			select {
+			case <-done:
+			case <-time.After(time.Second):
+				t.Fatalf("discard did not terminate on %s", ending)
+			}
+		})
+	}
 }
