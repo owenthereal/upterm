@@ -5,6 +5,9 @@ package internal
 import (
 	"context"
 	"fmt"
+	"os"
+	"os/exec"
+	"syscall"
 	"testing"
 	"time"
 
@@ -98,4 +101,37 @@ func Test_Command_SessionEnvBeatsTheInheritedOne(t *testing.T) {
 
 	require.Contains(t, string(out.bytes()), "NAME=inner-session SOCKET=/inner/admin.sock",
 		"the session's own environment must beat the one it inherited")
+}
+
+func TestStartPTYKeepsProvidedStdio(t *testing.T) {
+	for _, input := range []bool{false, true} {
+		t.Run(fmt.Sprintf("input=%v", input), func(t *testing.T) {
+			stream, err := os.OpenFile(os.DevNull, os.O_RDWR, 0)
+			require.NoError(t, err)
+			defer func() { _ = stream.Close() }()
+			cmd := exec.Command("sleep", "60")
+			attrs := &syscall.SysProcAttr{}
+			cmd.SysProcAttr = attrs
+			if input {
+				cmd.Stdin = stream
+				// Stdout is the slave here; the supplied stdin is deliberately not a tty.
+				attrs.Ctty = 1
+			} else {
+				cmd.Stdout, cmd.Stderr = stream, stream
+			}
+			p, err := startPty(cmd, termsize.Default, false, nil)
+			require.NoError(t, err)
+			defer func() { _ = p.Kill(); _ = p.Close(); _ = p.Wait() }()
+			require.Same(t, attrs, cmd.SysProcAttr)
+			require.True(t, attrs.Setsid)
+			require.True(t, attrs.Setctty)
+			if input {
+				require.Same(t, stream, cmd.Stdin)
+				require.Equal(t, 1, attrs.Ctty)
+			} else {
+				require.Same(t, stream, cmd.Stdout)
+				require.Same(t, stream, cmd.Stderr)
+			}
+		})
+	}
 }

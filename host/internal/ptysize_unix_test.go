@@ -6,16 +6,33 @@ import (
 	"bytes"
 	"os"
 	"os/exec"
+	"runtime"
 	"sync"
 	"syscall"
 	"testing"
 	"time"
 
-	ptylib "github.com/creack/pty"
 	"github.com/owenthereal/upterm/internal/termsize"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/sys/unix"
 )
+
+// Inspect geometry without Fd, which would disable Linux master pollability.
+func ptyFileSize(f *os.File) (rows, cols int, err error) {
+	rc, err := f.SyscallConn()
+	if err != nil {
+		return 0, 0, err
+	}
+	var ws *unix.Winsize
+	var ioctlErr error
+	if err := rc.Control(func(fd uintptr) { ws, ioctlErr = unix.IoctlGetWinsize(int(fd), unix.TIOCGWINSZ) }); err != nil {
+		return 0, 0, err
+	}
+	if ioctlErr != nil {
+		return 0, 0, ioctlErr
+	}
+	return int(ws.Row), int(ws.Col), nil
+}
 
 func Test_StartPty_AppliesInitialSize(t *testing.T) {
 	cmd := exec.Command("sleep", "5")
@@ -26,7 +43,7 @@ func Test_StartPty_AppliesInitialSize(t *testing.T) {
 	f, ok := p.(*pty)
 	require.True(t, ok)
 
-	rows, cols, err := ptylib.Getsize(f.File)
+	rows, cols, err := ptyFileSize(f.File)
 	require.NoError(t, err)
 	require.Equal(t, 43, rows)
 	require.Equal(t, 132, cols)
@@ -44,7 +61,7 @@ func Test_StartPty_PinnedIgnoresResize(t *testing.T) {
 
 	f, ok := p.(*pty)
 	require.True(t, ok)
-	rows, cols, err := ptylib.Getsize(f.File)
+	rows, cols, err := ptyFileSize(f.File)
 	require.NoError(t, err)
 	require.Equal(t, 43, rows)
 	require.Equal(t, 132, cols)
@@ -60,7 +77,7 @@ func Test_StartPty_UnpinnedHonoursResize(t *testing.T) {
 
 	f, ok := p.(*pty)
 	require.True(t, ok)
-	rows, cols, err := ptylib.Getsize(f.File)
+	rows, cols, err := ptyFileSize(f.File)
 	require.NoError(t, err)
 	require.Equal(t, 24, rows)
 	require.Equal(t, 80, cols)
@@ -78,12 +95,9 @@ func Test_StartPty_UnpinnedHonoursResize(t *testing.T) {
 // exact race the real event goroutine — which never synchronises with
 // whoever closes — can hit.
 //
-// The read is what releases a parked master write, on either OS, and here
-// it happens on demand — the round signals the command to read — rather
-// than by killing or closing anything. The command's exit releases it too
-// on macOS, where the slave's close fails the write, but not on Linux,
-// where a parked write outlives the slave; and the master's Go-level Close
-// releases nothing while the writer holds its reference, on either OS.
+// Linux Close releases the prepared master's poll operations. On other Unix
+// platforms the child reads on demand to release the blocking write after the
+// Go-level Close, while the resizer continues exercising descriptor control.
 //
 // Eight rounds, not one: the race detector reports a given racing pair only
 // once per process, so under -count=N only the first run that observes a
@@ -158,9 +172,11 @@ func ioctlsAgainstAParkedWrite(t *testing.T) {
 	time.Sleep(50 * time.Millisecond) // the loop is running against the parked write
 
 	require.NoError(t, p.Close())
-	// The command reads only when told: released on demand, within ~50 ms,
-	// rather than by the command's exit — which macOS alone would honour.
-	require.NoError(t, cmd.Process.Signal(syscall.SIGUSR1))
+	// Linux Close releases the pollable write and may hang up the child. Other
+	// Unix platforms release the blocking write by asking the child to read.
+	if runtime.GOOS != "linux" {
+		require.NoError(t, cmd.Process.Signal(syscall.SIGUSR1))
+	}
 
 	select {
 	case <-done:
@@ -170,8 +186,7 @@ func ioctlsAgainstAParkedWrite(t *testing.T) {
 
 	stopResizing()
 	<-resizing
-
-	require.NoError(t, p.Kill())
+	// The deferred cleanup kills/reaps the child if Close has not hung it up.
 }
 
 // Test_Pty_IoctlsOnAClosedPtyAreNotErrors matches the Windows pty's contract
@@ -218,7 +233,7 @@ func (r *sizeRecorder) ResizeBegin(size termsize.Size) uint64 {
 	r.seq++
 	c := sizeCall{Kind: "begin", Size: size, Seq: r.seq}
 	if r.file != nil {
-		rows, cols, err := ptylib.Getsize(r.file)
+		rows, cols, err := ptyFileSize(r.file)
 		if err == nil {
 			c.Before = termsize.Size{Cols: cols, Rows: rows}
 		}
@@ -271,7 +286,7 @@ func TestPtyReportsEachResizeInTwoSteps(t *testing.T) {
 	}
 	winsize := func(t *testing.T, p *pty) termsize.Size {
 		t.Helper()
-		rows, cols, err := ptylib.Getsize(p.File)
+		rows, cols, err := ptyFileSize(p.File)
 		require.NoError(t, err)
 		return termsize.Size{Cols: cols, Rows: rows}
 	}

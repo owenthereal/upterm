@@ -27,16 +27,32 @@ func startPty(c *exec.Cmd, size termsize.Size, pinned bool, r sizeReporter) (PTY
 		size = termsize.Default
 	}
 
-	// StartWithSize, not Start-then-Setsize: a child can read its window size
-	// before a follow-up ioctl lands, and a full-screen program that does so
-	// draws its first frame at the kernel default.
-	f, err := ptylib.StartWithSize(c, &ptylib.Winsize{
-		Rows: uint16(size.Rows),
-		Cols: uint16(size.Cols),
-	})
+	f, slave, err := openSizedPTY(size)
 	if err != nil {
 		return nil, err
 	}
+	defer func() { _ = slave.Close() }()
+
+	// Keep caller-provided streams, as creack/pty's StartWithSize does.
+	if c.Stdin == nil {
+		c.Stdin = slave
+	}
+	if c.Stdout == nil {
+		c.Stdout = slave
+	}
+	if c.Stderr == nil {
+		c.Stderr = slave
+	}
+	if c.SysProcAttr == nil {
+		c.SysProcAttr = &syscall.SysProcAttr{}
+	}
+	c.SysProcAttr.Setsid = true
+	c.SysProcAttr.Setctty = true
+	if err := c.Start(); err != nil {
+		_ = f.Close()
+		return nil, err
+	}
+
 	reportStart(r, size, pinned)
 
 	return wrapPty(f, c, pinned, r), nil
@@ -46,24 +62,18 @@ func startPty(c *exec.Cmd, size termsize.Size, pinned bool, r sizeReporter) (PTY
 // whose environment also names that pty in SSH_TTY, as sshd's does for a
 // session with a terminal.
 //
-// What ptylib.StartWithSize does, with one step added: the name is only known
-// once the pty is open, and the environment is fixed once the command starts.
+// The slave name is only known once the pty is open, and the environment is
+// fixed once the command starts.
 func startSessionPty(c *exec.Cmd, size termsize.Size) (PTY, error) {
 	if !size.Valid() {
 		size = termsize.Default
 	}
 
-	f, slave, err := ptylib.Open()
+	f, slave, err := openSizedPTY(size)
 	if err != nil {
 		return nil, err
 	}
 	defer func() { _ = slave.Close() }()
-
-	// Sized before the command starts, for the reason startPty gives.
-	if err := ptylib.Setsize(f, &ptylib.Winsize{Rows: uint16(size.Rows), Cols: uint16(size.Cols)}); err != nil {
-		_ = f.Close()
-		return nil, err
-	}
 
 	if c.Env == nil {
 		c.Env = os.Environ()
@@ -81,6 +91,27 @@ func startSessionPty(c *exec.Cmd, size termsize.Size) (PTY, error) {
 	}
 
 	return wrapPty(f, c, false, nil), nil
+}
+
+// openSizedPTY acquires both handles and prepares the master before any child
+// starts. Sizing first lets a command observe its initial geometry immediately;
+// preparation afterward keeps Fd-based setup away from the published master.
+func openSizedPTY(size termsize.Size) (master, slave *os.File, err error) {
+	master, slave, err = ptylib.Open()
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := ptylib.Setsize(master, &ptylib.Winsize{Rows: uint16(size.Rows), Cols: uint16(size.Cols)}); err != nil {
+		_ = master.Close()
+		_ = slave.Close()
+		return nil, nil, err
+	}
+	master, err = preparePTYMaster(master)
+	if err != nil {
+		_ = slave.Close()
+		return nil, nil, err
+	}
+	return master, slave, nil
 }
 
 // Linux kernel return EIO when attempting to read from a master pseudo
@@ -107,8 +138,8 @@ func wrapPty(f *os.File, cmd *exec.Cmd, pinned bool, r sizeReporter) *pty {
 	return &pty{File: f, cmd: cmd, pinned: pinned, report: r, pid: pid, process: process}
 }
 
-// Pty is a wrapper of the pty *os.File that provides a read/write mutex.
-// This is to prevent data race that might happen for reszing, reading and closing.
+// pty wraps the master and its command. Non-Linux platforms retain a mutex
+// across Read and Close; Linux uses the File poller so Close releases parked I/O.
 // See ftests failure:
 // * https://travis-ci.org/owenthereal/upterm/jobs/632489866
 // * https://travis-ci.org/owenthereal/upterm/jobs/632458125
@@ -234,13 +265,9 @@ func (pty *pty) Redraw() error {
 // the file, so a Close racing it cannot destroy the file under the ioctl and
 // the number can never be one the process has reused. Fd() takes no
 // reference: it reads the number bare, and the write path — unlocked,
-// parked in the kernel while the command is not reading — is what finishes
-// the close when that write finally returns; on Linux a write whose command
-// has exited never does, and the descriptor lives until the process exits.
+// still in progress — may be the operation that finally releases the file.
 // control reports a closed file as os.ErrClosed and leaves what to do about
-// it to the caller. Blocking mode is unaffected: StartWithSize already
-// applied the initial size through Fd(), which put the master in blocking
-// mode before the first write.
+// it to the caller. Unlike Fd, it preserves the prepared master's poller mode.
 func (pty *pty) control(f func(fd uintptr) error) error {
 	rc, err := pty.SyscallConn()
 	if err != nil {
@@ -258,17 +285,11 @@ func (pty *pty) control(f func(fd uintptr) error) error {
 }
 
 func (pty *pty) Read(p []byte) (n int, err error) {
-	pty.RLock()
-	defer pty.RUnlock()
-
-	return pty.File.Read(p)
+	return readPTY(pty, p)
 }
 
 func (pty *pty) Close() error {
-	pty.Lock()
-	defer pty.Unlock()
-
-	return pty.File.Close()
+	return closePTY(pty)
 }
 
 // Wait waits for the process to exit
