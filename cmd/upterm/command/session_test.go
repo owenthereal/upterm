@@ -796,34 +796,22 @@ func localClock(at time.Time) string { return at.Local().Format("15:04:05") }
 // the view's column.
 func viewRow(label, value string) string { return fmt.Sprintf("%-18s%s\n", label, value) }
 
-// withLocal makes loc the local zone for the times the commands write. It
-// pins absTime's zone and leaves time.Local alone: every time.Now in the
-// process reads that, so swapping it fails under -race whenever a timer from
-// an earlier test is still running.
-func withLocal(t *testing.T, loc *time.Location) {
-	t.Helper()
-	orig := localZone
-	localZone = loc
-	t.Cleanup(func() { localZone = orig })
-}
-
 // Deadlines and past events are printed with their date and zone, since a
 // time of day alone doesn't say which day, or where.
 func TestAbsoluteTimesNameTheirZone(t *testing.T) {
 	at := time.Date(2026, 10, 12, 5, 31, 2, 0, time.UTC)
-	withLocal(t, time.UTC)
-	require.Equal(t, "2026-10-12 05:31:02 UTC", absTime(at))
+	require.Equal(t, "2026-10-12 05:31:02 UTC", absTimeIn(at, time.UTC))
 	la, err := time.LoadLocation("America/Los_Angeles")
 	require.NoError(t, err)
-	withLocal(t, la)
-	require.Equal(t, "2026-10-11 22:31:02 PDT", absTime(at))
+	require.Equal(t, "2026-10-11 22:31:02 PDT", absTimeIn(at, la))
+	require.Equal(t, "2026-10-12 05:31:02 UTC", absTimeIn(at, time.UTC), "a different location did not change the earlier result")
 }
 
 // A zone with no abbreviation, as a machine without a zone database can have,
 // still reads as a zone: its offset, never an empty one.
 func TestAbsoluteTimesNameAZoneWithoutAName(t *testing.T) {
-	withLocal(t, time.FixedZone("", -7*60*60))
-	require.Equal(t, "2026-10-11 22:31:02 -0700", absTime(time.Date(2026, 10, 12, 5, 31, 2, 0, time.UTC)))
+	at := time.Date(2026, 10, 12, 5, 31, 2, 0, time.UTC)
+	require.Equal(t, "2026-10-11 22:31:02 -0700", absTimeIn(at, time.FixedZone("", -7*60*60)))
 }
 
 // runInfo is `session info NAME` as a user runs it, and what it printed.
@@ -2622,14 +2610,33 @@ func TestJoinTimeoutLineShowsTheDateAndZone(t *testing.T) {
 	at := time.Date(2026, 10, 12, 5, 31, 2, 0, time.UTC)
 	la, err := time.LoadLocation("America/Los_Angeles")
 	require.NoError(t, err)
-	withLocal(t, la)
 
-	require.Equal(t, "Join deadline: 2026-10-11 22:31:02 PDT",
-		joinTimeoutText(sessionInfo{Status: "ready", JoinTimeout: "10m", JoinDeadline: at, JoinStateSource: "daemon"}))
-	require.Equal(t, "Join timeout: fired at 2026-10-11 22:31:02 PDT",
-		joinTimeoutText(sessionInfo{Status: statusEnded, Reason: "join_timeout", JoinDeadline: at, JoinStateSource: "record"}))
-	require.Equal(t, "Join timeout: disabled (guest joined at 2026-10-11 22:31:02 PDT)",
-		joinTimeoutText(sessionInfo{Status: "ready", FirstGuestJoinedAt: at, JoinStateSource: "daemon"}))
+	for _, tc := range []struct {
+		name  string
+		info  sessionInfo
+		label string
+		utc   string
+		pdt   string
+	}{
+		{"deadline", sessionInfo{Status: "ready", JoinTimeout: "10m", JoinDeadline: at, JoinStateSource: "daemon"},
+			"Join deadline:", "2026-10-12 05:31:02 UTC", "2026-10-11 22:31:02 PDT"},
+		{"fired", sessionInfo{Status: statusEnded, Reason: "join_timeout", JoinDeadline: at, JoinStateSource: "record"},
+			"Join timeout:", "fired at 2026-10-12 05:31:02 UTC", "fired at 2026-10-11 22:31:02 PDT"},
+		{"guest joined", sessionInfo{Status: "ready", FirstGuestJoinedAt: at, JoinStateSource: "daemon"},
+			"Join timeout:", "disabled (guest joined at 2026-10-12 05:31:02 UTC)", "disabled (guest joined at 2026-10-11 22:31:02 PDT)"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			label, value := joinTimeoutRowIn(tc.info, time.UTC)
+			require.Equal(t, tc.label, label)
+			require.Equal(t, tc.utc, value)
+			label, value = joinTimeoutRowIn(tc.info, la)
+			require.Equal(t, tc.label, label)
+			require.Equal(t, tc.pdt, value)
+			label, value = joinTimeoutRowIn(tc.info, time.UTC)
+			require.Equal(t, tc.label, label)
+			require.Equal(t, tc.utc, value, "a different location did not change the earlier row")
+		})
+	}
 }
 
 func TestSummaryPrintsTheJoinTimeoutLine(t *testing.T) {

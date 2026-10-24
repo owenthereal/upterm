@@ -255,15 +255,6 @@ func TestJoinLinePrintsAboveSSH(t *testing.T) {
 		renderSessionDetail(detail, 80))
 }
 
-// pinClock fixes what the status row calls "now", so whether a next attempt is
-// still ahead does not depend on when the test runs.
-func pinClock(t *testing.T, at time.Time) {
-	t.Helper()
-	orig := now
-	now = func() time.Time { return at }
-	t.Cleanup(func() { now = orig })
-}
-
 // clock is a time as the status row prints it: local, to the second.
 func clock(t time.Time) string { return t.Local().Format("15:04:05") }
 
@@ -291,9 +282,9 @@ var wantHints = []struct{ reason, hint string }{
 func Test_renderSessionDetail_Reconnecting(t *testing.T) {
 	lost := time.Date(2026, 10, 4, 10, 0, 0, 0, time.UTC)
 	next := lost.Add(30 * time.Second)
-	pinClock(t, lost.Add(5*time.Second))
+	at := lost.Add(5 * time.Second)
 
-	got := renderSessionDetail(SessionDetail{
+	got := renderSessionDetailAt(SessionDetail{
 		Name:          "demo",
 		Status:        "reconnecting",
 		SessionID:     "sid-1",
@@ -304,7 +295,7 @@ func Test_renderSessionDetail_Reconnecting(t *testing.T) {
 		TunnelReason:  "relay_key_changed",
 		TunnelLostAt:  lost,
 		NextAttemptAt: next,
-	}, 80)
+	}, 80, at)
 
 	want := "Session: sid-1\n\n" +
 		row("Name:", "demo") +
@@ -321,9 +312,9 @@ func Test_renderSessionDetail_Reconnecting(t *testing.T) {
 // reason the relay can't help.
 func Test_renderSessionDetail_DisconnectedByAnUnsupportedRelay(t *testing.T) {
 	lost := time.Date(2026, 10, 4, 10, 0, 0, 0, time.UTC)
-	pinClock(t, lost.Add(time.Minute))
+	at := lost.Add(time.Minute)
 
-	got := renderSessionDetail(SessionDetail{
+	got := renderSessionDetailAt(SessionDetail{
 		Name:         "demo",
 		Status:       "disconnected",
 		SessionID:    "sid-1",
@@ -331,7 +322,7 @@ func Test_renderSessionDetail_DisconnectedByAnUnsupportedRelay(t *testing.T) {
 		Reconnect:    "unsupported",
 		TunnelReason: "reconnect_unsupported",
 		TunnelLostAt: lost,
-	}, 80)
+	}, 80, at)
 
 	want := "Session: sid-1\n\n" +
 		row("Name:", "demo") +
@@ -368,7 +359,7 @@ func Test_StatusHint_OnlyWhereItHelps(t *testing.T) {
 func Test_StatusText(t *testing.T) {
 	lost := time.Date(2026, 10, 4, 10, 0, 0, 0, time.UTC)
 	next := lost.Add(30 * time.Second)
-	pinClock(t, lost.Add(5*time.Second))
+	at := lost.Add(5 * time.Second)
 
 	cases := []struct {
 		name   string
@@ -392,7 +383,7 @@ func Test_StatusText(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			assert.Equal(t, tc.want, StatusText(tc.detail))
+			assert.Equal(t, tc.want, statusTextAt(tc.detail, at))
 		})
 	}
 }
@@ -408,14 +399,18 @@ func Test_StatusText_NextAttemptAlreadyPast(t *testing.T) {
 	detail := SessionDetail{Status: "reconnecting", TunnelReason: "network", TunnelLostAt: lost, NextAttemptAt: next}
 	withoutNext := "reconnecting — network since " + clock(lost)
 
-	pinClock(t, next.Add(-time.Second))
-	assert.Equal(t, withoutNext+", next attempt "+clock(next), StatusText(detail), "still ahead")
+	before := next.Add(-time.Nanosecond)
+	withNext := withoutNext + ", next attempt " + clock(next)
+	assert.Equal(t, withNext, statusTextAt(detail, before), "still ahead by one nanosecond")
+	assert.Equal(t, withoutNext, statusTextAt(detail, next), "due this instant is not ahead")
+	assert.Equal(t, withoutNext, statusTextAt(detail, next.Add(time.Nanosecond)), "behind by one nanosecond")
+	assert.Equal(t, withNext, statusTextAt(detail, before), "a later instant did not change the earlier status")
 
-	pinClock(t, next)
-	assert.Equal(t, withoutNext, StatusText(detail), "due this instant is not ahead")
-
-	pinClock(t, next.Add(15*time.Second))
-	assert.Equal(t, withoutNext, StatusText(detail), "behind")
+	wantBefore := "Session: \n\n" + row("Status:", withNext) + row("Hint:", "upterm can't reach the relay; it keeps retrying.")
+	wantDue := "Session: \n\n" + row("Status:", withoutNext) + row("Hint:", "upterm can't reach the relay; it keeps retrying.")
+	assert.Equal(t, wantBefore, renderSessionDetailAt(detail, 80, before))
+	assert.Equal(t, wantDue, renderSessionDetailAt(detail, 80, next))
+	assert.Equal(t, wantBefore, renderSessionDetailAt(detail, 80, before), "a later instant did not change the earlier view")
 }
 
 // Test_ReconnectNote: the one fact about the relay that holds at every status,
@@ -432,14 +427,14 @@ func Test_ReconnectNote(t *testing.T) {
 // status prints, in a view that has everything else a live session has.
 func Test_renderSessionDetail_RowsByStatus(t *testing.T) {
 	lost := time.Date(2026, 10, 4, 10, 0, 0, 0, time.UTC)
-	pinClock(t, lost.Add(time.Second))
+	at := lost.Add(time.Second)
 
 	render := func(status, reconnect string) string {
-		return renderSessionDetail(SessionDetail{
+		return renderSessionDetailAt(SessionDetail{
 			Name: "demo", Status: status, SessionID: "sid-1", Command: "bash",
 			Host: "ssh://example.com:22", SSHCommand: "ssh sid-1@example.com",
 			Reconnect: reconnect, TunnelReason: "network", TunnelLostAt: lost,
-		}, 80)
+		}, 80, at)
 	}
 
 	ready := render("ready", "supported")

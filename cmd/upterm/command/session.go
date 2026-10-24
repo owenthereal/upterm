@@ -1558,18 +1558,17 @@ func shortDuration(d time.Duration) string {
 	return s
 }
 
-// localZone is the zone absTime writes in: the machine's. It is a variable so
-// that a test can pin it; swapping time.Local itself would race with every
-// time.Now in the process, which reads it.
-var localZone = time.Local
-
 // absTime is t in the reader's local time with its date and zone, for
 // deadlines and events in the past: a time of day alone doesn't say which day
 // or where. The zone is always named. Go writes UTC for UTC, the zone
 // database's abbreviation for any other, and the offset ("-0700") for a zone
 // that has no abbreviation, as on a machine without a zone database.
-func absTime(t time.Time) string {
-	return t.In(localZone).Format("2006-01-02 15:04:05 MST")
+func absTime(at time.Time) string {
+	return absTimeIn(at, time.Local)
+}
+
+func absTimeIn(at time.Time, loc *time.Location) string {
+	return at.In(loc).Format("2006-01-02 15:04:05 MST")
 }
 
 // joinTimeoutRow says what happened to the session's join timeout, not only
@@ -1581,15 +1580,19 @@ func absTime(t time.Time) string {
 //
 // It returns the row's label and its value, empty when there is nothing to say.
 func joinTimeoutRow(info sessionInfo) (label, value string) {
+	return joinTimeoutRowIn(info, time.Local)
+}
+
+func joinTimeoutRowIn(info sessionInfo, loc *time.Location) (label, value string) {
 	if !info.FirstGuestJoinedAt.IsZero() {
-		return "Join timeout:", "disabled (guest joined at " + absTime(info.FirstGuestJoinedAt) + ")"
+		return "Join timeout:", "disabled (guest joined at " + absTimeIn(info.FirstGuestJoinedAt, loc) + ")"
 	}
 	if info.Status == statusEnded {
 		switch {
 		case info.Reason == sessiondir.ReasonJoinTimeout && !info.JoinDeadline.IsZero():
-			return "Join timeout:", "fired at " + absTime(info.JoinDeadline)
+			return "Join timeout:", "fired at " + absTimeIn(info.JoinDeadline, loc)
 		case !info.JoinDeadline.IsZero():
-			return "Join deadline:", absTime(info.JoinDeadline) + " (last recorded before the session ended)"
+			return "Join deadline:", absTimeIn(info.JoinDeadline, loc) + " (last recorded before the session ended)"
 		case info.JoinTimeout != "":
 			return "Join timeout:", info.JoinTimeout + " (last recorded before the session ended)"
 		default:
@@ -1598,7 +1601,7 @@ func joinTimeoutRow(info sessionInfo) (label, value string) {
 	}
 	switch {
 	case !info.JoinDeadline.IsZero():
-		label, value = "Join deadline:", absTime(info.JoinDeadline)
+		label, value = "Join deadline:", absTimeIn(info.JoinDeadline, loc)
 	case info.JoinTimeout != "":
 		label, value = "Join timeout:", info.JoinTimeout+" (counts from readiness)"
 	case info.JoinStateSource == joinStateFromRecord:
