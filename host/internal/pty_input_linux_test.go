@@ -3,10 +3,14 @@
 package internal
 
 import (
+	"bufio"
 	"bytes"
+	"context"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"runtime"
 	"strings"
@@ -30,7 +34,7 @@ func ptyTestProcess(t *testing.T) bool {
 	}
 	exe, err := os.Executable()
 	require.NoError(t, err)
-	cmd := exec.Command(exe, "-test.v", "-test.timeout=10s", "-test.run=^"+regexp.QuoteMeta(t.Name())+"$")
+	cmd := exec.Command(exe, "-test.v", "-test.timeout=10s", "-test.cpu="+fmt.Sprint(runtime.GOMAXPROCS(0)), "-test.run=^"+regexp.QuoteMeta(t.Name())+"$")
 	cmd.Env = append(os.Environ(), "UPTERM_PTY_TEST_PROCESS="+t.Name())
 	out, err := cmd.CombinedOutput()
 	t.Logf("fixture process:\n%s", out)
@@ -286,4 +290,151 @@ func TestPTYCloseDoesNotWaitOnTheMutex(t *testing.T) {
 		}
 		timer.Stop()
 	}
+}
+
+type ptyInputResult struct {
+	n   int
+	err error
+}
+
+func cancelablePTYWrite(ctx context.Context, p PTY, b []byte, done chan<- ptyInputResult) {
+	w, ok := p.(interface {
+		WriteContext(context.Context, []byte) (int, error)
+	})
+	if !ok {
+		done <- ptyInputResult{err: fmt.Errorf("PTY has no cancelable input owner")}
+		return
+	}
+	n, err := w.WriteContext(ctx, b)
+	done <- ptyInputResult{n, err}
+}
+
+func inputCancellationPTY(t *testing.T) (PTY, *exec.Cmd, string) {
+	t.Helper()
+	release := filepath.Join(t.TempDir(), "read-count")
+	cmd := exec.Command("sh", "-c", `stty raw -echo; printf READY; while [ ! -f "$1" ]; do sleep 0.01; done; head -c "$(cat "$1")" | wc -c; head -c 6; printf END; exec sleep 60`, "pty-input", release)
+	p, err := startPty(cmd, termsize.Default, false, nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = p.Close(); _ = cmd.Process.Kill(); _ = cmd.Wait() })
+	ready := make([]byte, 5)
+	_, err = io.ReadFull(p, ready)
+	require.NoError(t, err)
+	require.Equal(t, "READY", string(ready))
+	require.NoError(t, p.(*pty).File.SetReadDeadline(time.Now().Add(time.Second)))
+	return p, cmd, release
+}
+
+func awaitPTYInput(t *testing.T, done <-chan ptyInputResult) ptyInputResult {
+	t.Helper()
+	select {
+	case result := <-done:
+		return result
+	case <-time.After(time.Second):
+		t.Fatal("canceled PTY input did not return within 1s")
+		return ptyInputResult{}
+	}
+}
+
+func TestPTYInputCancellationReleasesOnlyItsWriter(t *testing.T) {
+	if !ptyTestProcess(t) {
+		return
+	}
+	p, cmd, release := inputCancellationPTY(t)
+	require.NoError(t, p.(*pty).File.SetReadDeadline(time.Now().Add(-time.Second)))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan ptyInputResult, 1)
+	go cancelablePTYWrite(ctx, p, bytes.Repeat([]byte("x"), 4<<20), done)
+	require.Eventually(t, func() bool { return ptyWorkerParked("cancelablePTYWrite") }, time.Second, time.Millisecond, "owned PTY write did not park")
+	cancel()
+	result := awaitPTYInput(t, done)
+	require.ErrorIs(t, result.err, context.Canceled)
+	require.Greater(t, result.n, 0, "accepted prefix must be preserved")
+	require.Less(t, result.n, 4<<20)
+	require.NoError(t, cmd.Process.Signal(syscall.Signal(0)))
+	_, readErr := p.Read(make([]byte, 1))
+	require.ErrorIs(t, readErr, os.ErrDeadlineExceeded, "write cancellation must preserve the read deadline")
+	require.NoError(t, p.(*pty).File.SetReadDeadline(time.Now().Add(time.Second)))
+	require.NoError(t, os.WriteFile(release, []byte(fmt.Sprint(result.n)), 0600))
+	reader := bufio.NewReader(p)
+	count, err := reader.ReadString('\n')
+	require.NoError(t, err)
+	require.Equal(t, fmt.Sprintf("%d\n", result.n), count)
+	n, err := p.Write([]byte("MARKER"))
+	require.NoError(t, err)
+	require.Equal(t, 6, n)
+	want := "MARKEREND"
+	got := make([]byte, len(want))
+	_, err = io.ReadFull(reader, got)
+	require.NoError(t, err)
+	require.Equal(t, want, string(got), "accepted prefix and later marker must each arrive exactly once")
+}
+
+func TestPTYInputWaiterCannotCancelTheActiveWriter(t *testing.T) {
+	if !ptyTestProcess(t) {
+		return
+	}
+	p, _, release := inputCancellationPTY(t)
+	active := make(chan ptyInputResult, 1)
+	go cancelablePTYWrite(context.Background(), p, bytes.Repeat([]byte("x"), 256<<10), active)
+	require.Eventually(t, func() bool { return ptyWorkerParked("cancelablePTYWrite") }, time.Second, time.Millisecond, "active PTY write did not park")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	waiter := make(chan ptyInputResult, 1)
+	go cancelablePTYWrite(ctx, p, []byte("BAD"), waiter)
+	cancel()
+	result := awaitPTYInput(t, waiter)
+	require.ErrorIs(t, result.err, context.Canceled)
+	require.Zero(t, result.n)
+	select {
+	case result := <-active:
+		t.Fatalf("waiter canceled the active writer: %+v", result)
+	default:
+	}
+	require.NoError(t, os.WriteFile(release, []byte("262144"), 0600))
+	result = awaitPTYInput(t, active)
+	require.NoError(t, result.err)
+	require.Equal(t, 256<<10, result.n)
+	reader := bufio.NewReader(p)
+	count, err := reader.ReadString('\n')
+	require.NoError(t, err)
+	require.Equal(t, fmt.Sprintf("%d\n", result.n), count)
+	n, err := p.Write([]byte("MARKER"))
+	require.NoError(t, err)
+	require.Equal(t, 6, n)
+	want := "MARKEREND"
+	got := make([]byte, len(want))
+	_, err = io.ReadFull(reader, got)
+	require.NoError(t, err)
+	require.Equal(t, want, string(got))
+}
+
+func TestHandlerOwnerCancellationReleasesActiveAndQueuedPTYInput(t *testing.T) {
+	if !ptyTestProcess(t) {
+		return
+	}
+	h := startHost(t, &Server{AwaitInitialClient: true,
+		Command: []string{"sh", "-c", `stty raw -echo; printf READY; exec sleep 60`}})
+	aIn, aOut, _, _ := h.connectHostGated(t, &hostPty{term: "xterm", cols: 80, rows: 24})
+	readUntil(t, aOut, "READY")
+	bIn, bOut, _, _ := h.connectHostGated(t, &hostPty{term: "xterm", cols: 80, rows: 24})
+	readUntil(t, bOut, "READY")
+	for _, in := range []io.Writer{aIn, bIn} {
+		_, err := in.Write(bytes.Repeat([]byte("x"), 256<<10))
+		require.NoError(t, err)
+	}
+	count := func() int {
+		buf := make([]byte, 1<<20)
+		n := runtime.Stack(buf, true)
+		return strings.Count(string(buf[:n]), "(*ptyInput).WriteContext(")
+	}
+	require.Eventually(t, func() bool { return count() == 2 }, time.Second, time.Millisecond, "handler inputs did not reach active and queued write ownership")
+	require.True(t, ptyWorkerParked("WriteContext"), "active handler input must be parked in the runtime poller")
+	h.cancel()
+	select {
+	case <-h.stopped:
+	case <-time.After(3 * time.Second):
+		t.Fatal("owner shutdown did not join active and queued input actors")
+	}
+	require.Zero(t, count(), "owned PTY write survived handler owner shutdown")
 }

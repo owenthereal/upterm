@@ -17,3 +17,5 @@ func closePTY(p *pty) error {
 	defer p.Unlock()
 	return p.File.Close()
 }
+
+func initPTYInput(p *pty) {}

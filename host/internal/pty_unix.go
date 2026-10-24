@@ -135,7 +135,9 @@ func wrapPty(f *os.File, cmd *exec.Cmd, pinned bool, r sizeReporter) *pty {
 		pid = cmd.Process.Pid
 		process = cmd.Process
 	}
-	return &pty{File: f, cmd: cmd, pinned: pinned, report: r, pid: pid, process: process}
+	p := &pty{File: f, cmd: cmd, pinned: pinned, report: r, pid: pid, process: process}
+	initPTYInput(p)
+	return p
 }
 
 // pty wraps the master and its command. Non-Linux platforms retain a mutex
@@ -145,6 +147,7 @@ func wrapPty(f *os.File, cmd *exec.Cmd, pinned bool, r sizeReporter) *pty {
 // * https://travis-ci.org/owenthereal/upterm/jobs/632458125
 type pty struct {
 	*os.File
+	input  *ptyInput
 	cmd    *exec.Cmd // Process started with this PTY
 	pinned bool
 

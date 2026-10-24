@@ -1,6 +1,7 @@
 package internal
 
 import (
+	"context"
 	"os"
 	"time"
 
@@ -41,3 +42,13 @@ func preparePTYMaster(f *os.File) (*os.File, error) {
 // Close must reach the poller without waiting for a Read that Close releases.
 func readPTY(p *pty, b []byte) (int, error) { return p.File.Read(b) }
 func closePTY(p *pty) error                 { return p.File.Close() }
+
+func initPTYInput(p *pty) { p.input = newPTYInput(p.File) }
+
+func (p *pty) WriteContext(ctx context.Context, b []byte) (int, error) {
+	return p.input.WriteContext(ctx, b)
+}
+
+func (p *pty) Write(b []byte) (int, error) {
+	return p.WriteContext(context.Background(), b)
+}
