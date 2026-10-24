@@ -1142,8 +1142,10 @@ func Test_Host_StopSessionRPCEndsTheSession(t *testing.T) {
 	awaitMarker(t, out, "READY")
 
 	rec := run.record(t)
-	client, err := host.AdminClient(rec.AdminSocket)
+	conn, err := host.AdminConn(rec.AdminSocket)
 	require.NoError(t, err)
+	t.Cleanup(func() { _ = conn.Close() })
+	client := api.NewAdminServiceClient(conn)
 
 	// A request for any other launch is refused, and the session lives: that
 	// is what keeps a replacement from being stopped in place of the session

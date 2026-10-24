@@ -693,7 +693,7 @@ func testProxyConcurrentGuests(t *testing.T, hostShareURL, hostNodeAddr, clientJ
 	session := shareHost(t, h, hostShareURL, hostNodeAddr)
 
 	hostInputCh, hostOutputCh := h.InputOutput()
-	hostScanner := scanner(hostOutputCh)
+	hostScanner := scanner(t, hostOutputCh)
 
 	scanners := make([]*bufio.Scanner, 0, guests)
 	for i := range guests {
@@ -702,7 +702,7 @@ func testProxyConcurrentGuests(t *testing.T, hostShareURL, hostNodeAddr, clientJ
 		t.Cleanup(c.Close)
 
 		_, out := c.InputOutput()
-		scanners = append(scanners, scanner(out))
+		scanners = append(scanners, scanner(t, out))
 	}
 	awaitGuestsAttached(t, adminSocketFile, guests)
 
@@ -752,7 +752,7 @@ func testProxyIdleKeepalive(t *testing.T, hostShareURL, hostNodeAddr, clientJoin
 	defer c.Close()
 
 	remoteInputCh, remoteOutputCh := c.InputOutput()
-	remoteScanner := scanner(remoteOutputCh)
+	remoteScanner := scanner(t, remoteOutputCh)
 
 	remoteInputCh <- `echo "before-idle"`
 	expectLine(t, remoteScanner, `echo "before-idle"`, "guest should echo before going idle")

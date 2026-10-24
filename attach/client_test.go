@@ -189,6 +189,7 @@ type blockingOnLastSink struct {
 	mu      sync.Mutex
 	writes  int
 	entered chan struct{}
+	release chan struct{}
 	once    sync.Once
 }
 
@@ -199,7 +200,7 @@ func (b *blockingOnLastSink) Write(p []byte) (int, error) {
 	b.mu.Unlock()
 	if n > b.stopAfter {
 		b.once.Do(func() { close(b.entered) })
-		select {} // a terminal that has stopped, and nothing to resume it
+		<-b.release // the terminal stays stopped until fixture cleanup
 	}
 	return len(p), nil
 }
@@ -217,7 +218,8 @@ func TestClientReturnsWhenTheTerminalStopsOnTheModeRestore(t *testing.T) {
 		_ = s.Exit(0)
 	})
 
-	sink := &blockingOnLastSink{stopAfter: 1, entered: make(chan struct{})}
+	sink := &blockingOnLastSink{stopAfter: 1, entered: make(chan struct{}), release: make(chan struct{})}
+	t.Cleanup(func() { close(sink.release) })
 	c := &Client{Socket: door.socket, HostKeys: door.pin(), Stdout: sink,
 		Pty: &Pty{Term: "xterm", Size: termsize.Default}, limits: lim}
 	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
@@ -666,7 +668,8 @@ func TestClient_SuspendDetachesWhenTheTerminalDoesNotTakeAModeWrite(t *testing.T
 			more := make(chan string, 1)
 			d := suspendingDoor(t, sigs, more)
 
-			sink := &blockingOnLastSink{stopAfter: tc.stopAfter, entered: make(chan struct{})}
+			sink := &blockingOnLastSink{stopAfter: tc.stopAfter, entered: make(chan struct{}), release: make(chan struct{})}
+			t.Cleanup(func() { close(sink.release) })
 			var hooked atomic.Bool
 			pr, pw := io.Pipe()
 			defer func() { _ = pw.Close() }()
@@ -875,7 +878,8 @@ func TestClientReportsARemoteExitWhileForwardingInput(t *testing.T) {
 		time.Sleep(100 * time.Millisecond)
 		_ = s.Exit(5)
 	})
-	pr, _ := io.Pipe() // held open, never written: a terminal nobody types on
+	pr, pw := io.Pipe() // held open while the client runs: a terminal nobody types on
+	t.Cleanup(func() { _ = pw.Close() })
 	c := &Client{Socket: door.socket, HostKeys: door.pin(), Stdin: pr, Stdout: io.Discard,
 		Pty: &Pty{Term: "xterm", Size: termsize.Default}}
 	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
@@ -1179,8 +1183,9 @@ func TestClientDetachIsNotHeldByAnInputWriteOnAnExhaustedWindow(t *testing.T) {
 		{name: "EOF with a held escape byte", filler: sshWindow - 1, tail: "\r~", closeStdin: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			door := serveDoor(t, func(s gssh.Session) { select {} }) // never reads its input
+			door := serveDoor(t, func(s gssh.Session) { <-s.Context().Done() }) // never reads its input
 			pr, pw := io.Pipe()
+			t.Cleanup(func() { _ = pw.Close() })
 			c := &Client{Socket: door.socket, HostKeys: door.pin(), Stdin: pr, Stdout: io.Discard, Escape: '~',
 				limits: lim}
 			ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
@@ -1216,7 +1221,7 @@ func TestClientDetachIsNotHeldByAnInputWriteOnAnExhaustedWindow(t *testing.T) {
 // Enter off the pipe, and a test that typed it inline would hang here instead
 // of failing at the bound below.
 func TestClientEscapeDetachesWhileAnInputWriteIsParked(t *testing.T) {
-	door := serveDoor(t, func(s gssh.Session) { select {} }) // never reads its input
+	door := serveDoor(t, func(s gssh.Session) { <-s.Context().Done() }) // never reads its input
 	pr, pw := io.Pipe()
 	defer func() { _ = pw.Close() }()
 	c := &Client{Socket: door.socket, HostKeys: door.pin(), Stdin: pr, Stdout: io.Discard, Escape: '~'}
@@ -1246,7 +1251,7 @@ func TestClientEscapeDetachesWhileAnInputWriteIsParked(t *testing.T) {
 // delivery is parked. Past the window every keystroke is queued rather than
 // written, and the terminal is read at the speed it is typed at.
 func TestClientKeepsReadingWhileDeliveryIsParked(t *testing.T) {
-	door := serveDoor(t, func(s gssh.Session) { select {} }) // never reads its input
+	door := serveDoor(t, func(s gssh.Session) { <-s.Context().Done() }) // never reads its input
 	pr, pw := io.Pipe()
 	defer func() { _ = pw.Close() }()
 	c := &Client{Socket: door.socket, HostKeys: door.pin(), Stdin: pr, Stdout: io.Discard, Escape: '~'}
@@ -1415,7 +1420,7 @@ func TestClientDropsInputBeyondTheBacklogAndStillDetaches(t *testing.T) {
 	defer close(release)
 	handler := newBlockingHandler(release)
 
-	door := serveDoor(t, func(s gssh.Session) { select {} }) // never reads its input
+	door := serveDoor(t, func(s gssh.Session) { <-s.Context().Done() }) // never reads its input
 	pr, pw := io.Pipe()
 	defer func() { _ = pw.Close() }()
 	c := &Client{Socket: door.socket, HostKeys: door.pin(), Stdin: pr, Stdout: io.Discard, Escape: '~',
@@ -1573,18 +1578,30 @@ func TestClientSetupIsBoundedByCancellationAgainstAnUnresponsivePeer(t *testing.
 	socket := filepath.Join(shortTempDir(t), "mute.sock")
 	ln, err := net.Listen("unix", socket)
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = ln.Close() })
+	release := make(chan struct{})
+	done := make(chan struct{})
+	t.Cleanup(func() {
+		close(release)
+		_ = ln.Close()
+		select {
+		case <-done:
+		case <-time.After(testTimeout):
+			t.Error("unresponsive peer did not stop")
+		}
+	})
 	go func() {
+		defer close(done)
 		conn, err := ln.Accept()
 		if err != nil {
 			return
 		}
+		defer func() { _ = conn.Close() }()
 		cfg := &ssh.ServerConfig{PublicKeyCallback: func(ssh.ConnMetadata, ssh.PublicKey) (*ssh.Permissions, error) { return nil, nil }}
 		cfg.AddHostKey(signer)
 		// Handshake, then silence: channels are never accepted, requests
 		// never answered.
 		_, _, _, _ = ssh.NewServerConn(conn, cfg)
-		select {}
+		<-release
 	}()
 
 	c := &Client{Socket: socket, HostKeys: []ssh.PublicKey{signer.PublicKey()}, Stdout: io.Discard}
@@ -1613,12 +1630,26 @@ func TestClientCancellationReleasesABlockedInputWrite(t *testing.T) {
 	})
 	// More than the 2 MiB channel window, written as fast as the pipe allows.
 	pr, pw := io.Pipe()
-	go func() { _, _ = pw.Write(bytes.Repeat([]byte("k"), 4<<20)) }()
+	writerDone := make(chan struct{})
+	t.Cleanup(func() {
+		_ = pr.Close()
+		_ = pw.Close()
+		select {
+		case <-writerDone:
+		case <-time.After(testTimeout):
+			t.Error("input fixture writer did not stop")
+		}
+	})
+	go func() {
+		defer close(writerDone)
+		_, _ = pw.Write(bytes.Repeat([]byte("k"), 4<<20))
+	}()
 	// A logger of its own: past the backlog this drops input and says so, and
 	// the default logger would put that on the test's stderr.
 	c := &Client{Socket: door.socket, HostKeys: door.pin(), Stdin: pr, Stdout: io.Discard,
 		Logger: slog.New(slog.DiscardHandler)}
 	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
 	go func() { time.Sleep(500 * time.Millisecond); cancel() }()
 	done := runAsync(t, ctx, c)
 	select {
@@ -1644,7 +1675,8 @@ func TestClientDeclaresInteractivityOnlyWithPtyAndStdin(t *testing.T) {
 	})
 	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
 	defer cancel()
-	held, _ := io.Pipe()
+	held, keyboard := io.Pipe()
+	t.Cleanup(func() { _ = keyboard.Close() })
 
 	for _, tc := range []struct {
 		name        string
@@ -1772,7 +1804,8 @@ func TestClientAttachesToADaemonWithSeveralSignersWhenAllAreParsedAndPinned(t *t
 
 func TestClientContextCancellationDetaches(t *testing.T) {
 	door := serveDoor(t, func(s gssh.Session) { _, _ = io.Copy(io.Discard, s) })
-	pr, _ := io.Pipe() // never written, never closed
+	pr, pw := io.Pipe() // never written while the client runs
+	t.Cleanup(func() { _ = pw.Close() })
 	c := &Client{Socket: door.socket, HostKeys: door.pin(), Stdin: pr, Stdout: io.Discard}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := runAsync(t, ctx, c)

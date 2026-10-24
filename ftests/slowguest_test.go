@@ -305,8 +305,8 @@ func testClientSlowGuestDropped(t *testing.T, hostURL, hostNodeAddr, clientJoinU
 	// same hazard ftests/host_test.go:106 already documents.
 	hostInput, hostOutput := h.InputOutput()
 	_, healthyOutput := healthy.InputOutput()
-	hostMarkers := watchMarkers(hostOutput)
-	healthyMarkers := watchMarkers(healthyOutput)
+	hostMarkers := watchMarkers(t, hostOutput)
+	healthyMarkers := watchMarkers(t, healthyOutput)
 
 	// Observe the stalled guest's own channel without ever reading its stdout.
 	// Started before the burst because the forwarder's watchdog takes seconds to
@@ -486,7 +486,7 @@ func testClientSurvivesBurstWithoutPrimary(t *testing.T, hostURL, hostNodeAddr, 
 
 	hostInput, hostOutput := h.InputOutput()
 	_, guestOutput := g.InputOutput()
-	markers := watchMarkers(throttled(guestOutput, readRate))
+	markers := watchMarkers(t, throttled(t, guestOutput, readRate))
 	discard(hostOutput, stop)
 
 	// The whole burst at once: nothing but the pacer holds the command back.
@@ -589,7 +589,7 @@ func testClientNewcomerDoesNotDisplacePacer(t *testing.T, hostURL, hostNodeAddr,
 	// The viewer's output is drained and not asserted on.
 	hostInput, hostOutput := h.InputOutput()
 	_, aOutput := a.InputOutput()
-	aMarkers := watchLines(throttled(aOutput, readRate), streamChunkMarker)
+	aMarkers := watchLines(t, throttled(t, aOutput, readRate), streamChunkMarker)
 	var aSeen atomic.Int64
 	aSeen.Store(-1)
 	go func() {
@@ -681,13 +681,14 @@ func testHostExitsWhileGuestHoldsConnection(t *testing.T, hostURL, hostNodeAddr,
 
 	c := &Client{PrivateKeys: []string{ClientPrivateKey}}
 	require.NoError(t, c.Join(session, clientJoinURL))
+	defer c.Close()
 	_, guestOutput := c.InputOutput()
 	go func() {
 		for range guestOutput { //nolint:revive // drained, not inspected
 		}
 	}()
-	// Deliberately never closed: the guest keeps its SSH connection while the
-	// host's command exits underneath it.
+	// The deferred close runs after the lifetime assertion: the guest keeps
+	// its SSH connection while the host's command exits underneath it.
 
 	hostInput, _ := h.InputOutput()
 	hostInput <- "" // zero chunks, so this one line lets the helper exit on its own
@@ -722,8 +723,8 @@ func awaitBurstChunk(t *testing.T, markers <-chan string, chunk int, who string)
 
 // watchMarkers starts draining ch immediately and reports every line carrying a
 // burst marker.
-func watchMarkers(ch chan string) <-chan string {
-	return watchLines(ch, burstChunkMarker)
+func watchMarkers(t *testing.T, ch chan string) <-chan string {
+	return watchLines(t, ch, burstChunkMarker)
 }
 
 // watchLines starts draining ch immediately and reports every line carrying
@@ -736,10 +737,21 @@ func watchMarkers(ch chan string) <-chan string {
 // across two chunks would be missed — so it scans the stream, using the suite's
 // existing scanner helper, which pipes the channel into a bufio.Scanner for
 // exactly this reason.
-func watchLines(ch chan string, marker string) <-chan string {
+func watchLines(t *testing.T, ch chan string, marker string) <-chan string {
+	t.Helper()
 	lines := make(chan string, 4096)
+	stop, done := make(chan struct{}), make(chan struct{})
+	t.Cleanup(func() {
+		close(stop)
+		select {
+		case <-done:
+		case <-time.After(callbackTimeout):
+			t.Error("line watcher did not stop")
+		}
+	})
+	s := scanner(t, ch)
 	go func() {
-		s := scanner(ch)
+		defer close(done)
 		for s.Scan() {
 			if !strings.Contains(s.Text(), marker) {
 				continue
@@ -751,7 +763,15 @@ func watchLines(ch chan string, marker string) <-chan string {
 		}
 		// Keep draining: stopping here would stall the client whose output
 		// this is.
-		for range ch { //nolint:revive // drained, not inspected
+		for {
+			select {
+			case _, ok := <-ch:
+				if !ok {
+					return
+				}
+			case <-stop:
+				return
+			}
 		}
 	}()
 	return lines
@@ -793,12 +813,44 @@ func readProgress(path string) int {
 // standing in for a link that slow. Each string pays for its own length in
 // time before it goes on, and time spent waiting for input banks no credit, so
 // a burst after a lull goes no faster than steady output would.
-func throttled(ch chan string, rate int) chan string {
+func throttled(t *testing.T, ch chan string, rate int) chan string {
+	t.Helper()
 	out := make(chan string)
+	stop, done := make(chan struct{}), make(chan struct{})
+	t.Cleanup(func() {
+		close(stop)
+		select {
+		case <-done:
+		case <-time.After(callbackTimeout):
+			t.Error("throttled output did not stop")
+		}
+	})
 	go func() {
-		for s := range ch {
-			time.Sleep(time.Duration(len(s)) * time.Second / time.Duration(rate))
-			out <- s
+		defer close(done)
+		defer close(out)
+		for {
+			var s string
+			select {
+			case value, ok := <-ch:
+				if !ok {
+					return
+				}
+				s = value
+			case <-stop:
+				return
+			}
+			timer := time.NewTimer(time.Duration(len(s)) * time.Second / time.Duration(rate))
+			select {
+			case <-timer.C:
+			case <-stop:
+				timer.Stop()
+				return
+			}
+			select {
+			case out <- s:
+			case <-stop:
+				return
+			}
 		}
 	}()
 	return out
@@ -828,16 +880,67 @@ func waitHeld(t *testing.T, progress string, aSeen *atomic.Int64, aClosed <-chan
 	t.Fatal("the producer was never held to A's rate")
 }
 
-// discard drains ch until stop closes, for output a case has no use for but
+// discard drains ch until ch or stop closes, for output a case has no use for but
 // must not leave unread: an unread channel stops its client reading.
-func discard(ch chan string, stop <-chan struct{}) {
+func discard(ch chan string, stop <-chan struct{}) <-chan struct{} {
+	done := make(chan struct{})
 	go func() {
+		defer close(done)
 		for {
 			select {
-			case <-ch:
+			case _, ok := <-ch:
+				if !ok {
+					return
+				}
 			case <-stop:
 				return
 			}
 		}
 	}()
+	return done
+}
+
+func TestDiscardStopsOnEOFOrStop(t *testing.T) {
+	for _, ending := range []string{"EOF", "stop"} {
+		t.Run(ending, func(t *testing.T) {
+			ch, stop := make(chan string), make(chan struct{})
+			closeStop := func() {
+				select {
+				case <-stop:
+				default:
+					close(stop)
+				}
+			}
+			var done <-chan struct{}
+			t.Cleanup(func() {
+				closeStop()
+				select {
+				case <-done:
+				case <-time.After(time.Second):
+					t.Error("discard worker did not stop during cleanup")
+				}
+			})
+			done = discard(ch, stop)
+			select {
+			case ch <- "output":
+			case <-time.After(time.Second):
+				t.Fatal("discard did not consume output")
+			}
+			select {
+			case <-done:
+				t.Fatal("discard returned while input and stop were open")
+			default:
+			}
+			if ending == "EOF" {
+				close(ch)
+			} else {
+				closeStop()
+			}
+			select {
+			case <-done:
+			case <-time.After(time.Second):
+				t.Fatalf("discard did not terminate on %s", ending)
+			}
+		})
+	}
 }

@@ -17,6 +17,7 @@ const (
 // IsConsulAvailable checks if Consul is running and accessible with timeout handling
 func IsConsulAvailable() bool {
 	config := api.DefaultConfig()
+	defer config.Transport.CloseIdleConnections()
 	consulURLStr := ConsulURL()
 	u, err := url.Parse(consulURLStr)
 	if err != nil {
@@ -33,18 +34,8 @@ func IsConsulAvailable() bool {
 	ctx, cancel := context.WithTimeout(context.Background(), ConsulHealthCheckTimeout)
 	defer cancel()
 
-	done := make(chan bool, 1)
-	go func() {
-		_, err = client.Status().Leader()
-		done <- err == nil
-	}()
-
-	select {
-	case result := <-done:
-		return result
-	case <-ctx.Done():
-		return false
-	}
+	_, err = client.Status().LeaderWithQueryOptions((&api.QueryOptions{}).WithContext(ctx))
+	return err == nil
 }
 
 // ConsulURL returns the Consul URL from environment or default
