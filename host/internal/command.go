@@ -294,6 +294,8 @@ func (c *command) Start(ctx context.Context, initial termsize.Size) (PTY, error)
 
 func (c *command) Run() error {
 	timing := c.timing.orDefault()
+	closer := newPTYCloser(c.ptmx)
+	defer func() { closer.wait(time.Now().Add(time.Second)) }()
 	var g run.Group
 	{
 		// output: the pty into the fan-out. Every consumer — the local
@@ -409,7 +411,7 @@ func (c *command) Run() error {
 				// The session is ending and the command is not: hang it up
 				// the way a terminal going away would, and escalate only if
 				// it stays.
-				terminateWith(c.ptmx, exited, timing.hangup, c.grace(), c.logger, c.name)
+				terminateWith(c.ptmx, closer, exited, timing.hangup, c.grace(), c.logger, c.name)
 				// terminate's own final wait is bounded -- it may return
 				// with the process still not confirmed exited, however
 				// unlikely -- so waitErr may still be being written by the
@@ -437,40 +439,15 @@ func (c *command) Run() error {
 			// since ctx is already done.
 			cancel()
 
-			// Fired, not waited on, same as terminate's own close (see its
-			// doc comment for why a close here can never be relied on to
-			// return): run.Group calls every actor's interrupt before it
-			// waits for any execute to return, so an interrupt parked in a
-			// blocking Close would hang Run's own return exactly the way a
-			// synchronous close inside terminate would hang terminate's.
-			// waitDone still keeps this from firing until terminate's own
-			// execute has returned, but not from overlapping it: terminate's
-			// own close runs on closeAsync's own goroutine, not the actor's,
-			// and may still be in flight here. That overlap is harmless --
-			// os.File.Close is safe to call twice, and the Windows pty
-			// guards its own close the same way -- so which of the two
-			// closes actually reaches the descriptor first does not matter:
-			// whichever wins, wins, and the daemon's own process exit closes
-			// it regardless of either.
-			//
-			// That the output actor has already drained by the time this
-			// runs is a separate guarantee, and not this gate's doing:
-			// run.Group calls interrupts in the order actors were added, so
-			// the output actor's own interrupt (above, waitIdle) always runs
-			// to completion first, whichever actor returned first.
+			// The output interrupt has already drained. Share the close that
+			// termination may have started; the final join happens after all
+			// actors return so Close cannot hold up escalation.
 			<-waitDone
-			closeAsync(c.ptmx)
+			closer.start()
 		})
 	}
 
 	return g.Run()
-}
-
-// closeAsync starts closing ptmx on its own goroutine and returns without
-// waiting. See terminate's doc comment for why a close here can never be
-// relied on to return, and why it is fired anyway.
-func closeAsync(ptmx PTY) {
-	go func() { _ = ptmx.Close() }()
 }
 
 // outputFlusher is a PTY that can discard its tty's output queue without
@@ -502,15 +479,16 @@ type outputFlusher interface {
 // up is logged: Result() staying zero for it is fine, but it should not also be
 // silent.
 //
-// The close is fired on its own goroutine rather than waited on, and this
-// is load-bearing, not a style choice. Read holds the pty's read lock for
+// The shared closer starts Close on its own goroutine and final cleanup joins
+// it under a bound. On non-Linux Unix, Read holds the pty's read lock for
 // the length of a blocking read and Close takes the write lock, so a
 // synchronous close here would wait on a read that only the process's exit
 // ends -- the very hang this step exists to break. Bypassing that lock does
 // not fix it either: the master is opened in blocking mode with no poller
 // registration, so the Go runtime itself defers the underlying close(2)
 // behind whatever read is already in flight, independent of any lock this
-// package takes. Firing it is still worth doing: once the reader is
+// package takes. Linux instead prepares pollable I/O released by Close.
+// Starting Close is still worth doing: once the reader is
 // released -- the process's own exit, or the case this step exists for, a
 // leader already stuck in exit() because its slave is already closed -- the
 // close lands, and anything still holding the master open past that point
@@ -538,7 +516,8 @@ type outputFlusher interface {
 // changes nothing that follows it.
 // terminateWith uses the bounds copied when the command or session started.
 // A forced command's handler may outlive the session.
-func terminateWith(ptmx PTY, exited <-chan struct{}, hangup, grace time.Duration, logger *slog.Logger, name string) {
+func terminateWith(ptmx PTY, closer *ptyCloser, exited <-chan struct{}, hangup, grace time.Duration, logger *slog.Logger, name string) {
+	closer.until = time.Now().Add(hangup + 3*grace)
 	// gone reports whether exited has already closed, without blocking:
 	// sending a signal after that would reach whatever pid the kernel has
 	// since reused, not the command, and closing or killing an already-gone
@@ -645,7 +624,7 @@ func terminateWith(ptmx PTY, exited <-chan struct{}, hangup, grace time.Duration
 				"name", name, "error", err)
 		}
 	}
-	closeAsync(ptmx)
+	closer.start()
 	if wait(grace) {
 		return
 	}

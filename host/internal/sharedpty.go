@@ -1,6 +1,7 @@
 package internal
 
 import (
+	"context"
 	"errors"
 	"sync"
 	"syscall"
@@ -110,11 +111,24 @@ func (s *sharedPTY) wait() (PTY, error) {
 }
 
 func (s *sharedPTY) Write(p []byte) (int, error) {
-	ptmx, err := s.wait()
-	if err != nil {
+	return s.WriteContext(context.Background(), p)
+}
+
+func (s *sharedPTY) WriteContext(ctx context.Context, p []byte) (int, error) {
+	select {
+	case <-ctx.Done():
+		return 0, ctx.Err()
+	case <-s.done:
+		return 0, errNoPty
+	case <-s.ready:
+	}
+	if err := ctx.Err(); err != nil {
 		return 0, err
 	}
-	return ptmx.Write(p)
+	s.mu.Lock()
+	ptmx := s.ptmx
+	s.mu.Unlock()
+	return ptyInputWriter(ctx, ptmx).Write(p)
 }
 
 func (s *sharedPTY) Read(p []byte) (int, error) {

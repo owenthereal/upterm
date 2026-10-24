@@ -549,6 +549,15 @@ func TestAForcedCommandsResetIsBounded(t *testing.T) {
 	}
 
 	done := make(chan struct{})
+	t.Cleanup(func() {
+		_ = guest.Close()
+		close(guest.winCh)
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+			t.Error("cleanup could not join the forced-command handler")
+		}
+	})
 	go func() { defer close(done); h.HandleSession(guest) }()
 
 	select {

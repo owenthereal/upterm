@@ -34,9 +34,10 @@ func TestHandleSessionDoesNotBlockOnAStalledReadOnlyGuest(t *testing.T) {
 	_, err := writers.Write([]byte("output from before this guest joined"))
 	require.NoError(t, err)
 
-	// Never released: the guest stays stalled for the whole test, so anything
-	// written to it directly blocks forever.
+	// Keep the guest stalled until the handler returns, then release the
+	// test-owned writer even if an assertion fails.
 	gate := make(chan struct{})
+	defer close(gate)
 	guest := &fakeGuestSession{
 		ctx:   fakeGuestContext{sessionID: "test-session"},
 		winCh: make(chan gssh.Window),

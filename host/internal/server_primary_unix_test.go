@@ -588,31 +588,52 @@ func TestAHungUpPrimaryStopsConstrainingTheSize(t *testing.T) {
 // the parked write has drained: it would report the context's error instead
 // of delivering the bytes still pending in the channel.
 func TestInputAcceptedBeforeAHangUpIsDeliveredWhenTheCommandReads(t *testing.T) {
-	// Gated, so the command's second of not reading starts when A attaches,
-	// not when the daemon did: a slow attach must not let head start reading
-	// before the write is parked, which would pass this test for nothing.
-	h := startHost(t, &Server{AwaitInitialClient: true,
-		Command: []string{"sh", "-c", `stty raw -echo; printf 'READY\n'; sleep 1; head -c 262144 | wc -c`}})
-
-	aIn, aOut, _, aGate := h.connectHostGated(t, &hostPty{term: "xterm", cols: 80, rows: 24})
-	readUntil(t, aOut, "READY")
-	// Fits the channel window, so this returns whether or not the daemon is
-	// draining it: about a kilobyte on macOS and twenty on Linux parks in
-	// the pty's queue, one io.Copy chunk parks in the write, and the rest
-	// sits in the channel.
-	_, err := aIn.Write(bytes.Repeat([]byte("x"), 256<<10))
-	require.NoError(t, err)
-	// Long enough for the daemon to have taken the bytes off the channel and
-	// parked in the pty; microseconds of work, so the margin is large.
-	time.Sleep(200 * time.Millisecond)
-	// The client hangs up with all of it still parked in the daemon.
-	require.NoError(t, aGate.Close())
-
-	_, bOut, _ := h.connectHost(t, &hostPty{term: "xterm", cols: 80, rows: 24})
-	// wc prints the count once every one of the 256 KiB reached the pty
-	// after the hang-up; matching the digits rather than the whole line
-	// dodges the padding difference between BSD and GNU wc.
-	readUntil(t, bOut, "262144")
+	for _, transport := range []bool{false, true} {
+		name := "channel"
+		if transport {
+			name = "transport"
+		}
+		t.Run(name, func(t *testing.T) {
+			release := filepath.Join(t.TempDir(), "read")
+			h := startHost(t, &Server{AwaitInitialClient: true,
+				Command: []string{"sh", "-c", `stty raw -echo; printf 'READY\n'; while [ ! -f "$1" ]; do sleep 0.01; done; head -c 262144 | wc -c; printf DELIVERED`, "buffered-input", release}})
+			changed := watchPrimaryChanges(h.srv)
+			client, gate := h.dialHostConn(t)
+			sess, err := client.NewSession()
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = sess.Close() })
+			require.NoError(t, sess.RequestPty("xterm", 24, 80, ssh.TerminalModes{}))
+			require.NoError(t, sess.Setenv(upterm.AttachInteractiveEnvVar, "1"))
+			aIn, err := sess.StdinPipe()
+			require.NoError(t, err)
+			aOut, err := sess.StdoutPipe()
+			require.NoError(t, err)
+			require.NoError(t, sess.Shell())
+			readUntil(t, aOut, "READY")
+			payload := bytes.Repeat([]byte("x"), 256<<10)
+			_, err = aIn.Write(payload)
+			require.NoError(t, err)
+			// The request reply acknowledges the SSH mux received the preceding data
+			// packets. The command remains behind the file gate throughout departure.
+			_, err = sess.SendRequest("buffered-input-accepted", true, nil)
+			require.NoError(t, err)
+			if transport {
+				require.NoError(t, gate.Close())
+			} else {
+				require.NoError(t, sess.Close())
+				// A global request on the live transport acknowledges that its
+				// SSH mux processed the preceding channel-close packet.
+				_, _, err = client.SendRequest("departure-accepted", true, nil)
+				require.NoError(t, err)
+			}
+			if transport {
+				awaitPrimaryID(t, h.srv, changed, "", "departure did not release election ownership")
+			}
+			_, bOut, _ := h.connectHost(t, &hostPty{term: "xterm", cols: 80, rows: 24})
+			require.NoError(t, os.WriteFile(release, nil, 0600))
+			require.Contains(t, readUntil(t, bOut, "DELIVERED"), "262144")
+		})
+	}
 }
 
 // watchPrimaryChanges subscribes before the action that may change election.

@@ -1133,6 +1133,9 @@ func (h *sessionHandler) HandleSession(sess gssh.Session) {
 			return
 		}
 
+		closer := newPTYCloser(ptmx)
+		defer func() { closer.wait(time.Now().Add(time.Second)) }()
+
 		// Waited on outside the group, so the wait actor and terminate can
 		// both watch it. Its end is recorded against the session's shutdown
 		// the moment Wait returns, before exited closes: which branch the
@@ -1206,7 +1209,7 @@ func (h *sessionHandler) HandleSession(sess gssh.Session) {
 					// away would, and escalate only if it stays. Killing it
 					// outright left a full-screen program no chance to put the
 					// guest's terminal back.
-					terminateWith(ptmx, exited, h.timing.hangup, h.timing.forceCommandStop, h.logger, h.forceCommand[0])
+					terminateWith(ptmx, closer, exited, h.timing.hangup, h.timing.forceCommandStop, h.logger, h.forceCommand[0])
 				}
 				// terminate's own waits are bounded, so the command may not be
 				// confirmed gone; waitErr is only safe to read once it is.
@@ -1219,9 +1222,8 @@ func (h *sessionHandler) HandleSession(sess gssh.Session) {
 
 				drainForceCommandOutput(h.logger, output, outputDrained, nil)
 				cancelOut()
-				// Fired, not waited on: see terminate for why a close of the
-				// master can never be relied on to return.
-				closeAsync(ptmx)
+				// Start after output drains; final cleanup joins the same Close.
+				closer.start()
 
 				select {
 				case <-exited:
@@ -1357,49 +1359,15 @@ func (h *sessionHandler) HandleSession(sess gssh.Session) {
 				h.hostClients.add(c)
 				defer h.hostClients.remove(c) // runs before the removal above
 
-				// Election cleanup is tied to the connection's end, not to
-				// this handler's return. The handler cannot return while its
-				// input actor is parked in ptmx.Write — the command stopped
-				// reading its pty, and a kernel write there is released by
-				// the command reading; on macOS also by the command's exit,
-				// which fails the write, but on Linux by nothing short of
-				// the daemon's exit — so the deferred removal above can be
-				// an arbitrarily long way off, and until it runs the elector
-				// holds a gone client as primary: no election runs, every
-				// later client stays a filtered secondary, and live queries
-				// reach nobody.
-				//
-				// sess.Context() is what every departure shares. charm's
-				// handleConn defers conn.Close(), which cancels it, whether
-				// the transport ended because the client hung up or because
-				// the daemon closed it; a server-side close (the watchdog's,
-				// the overflow path's) cancels it synchronously in the same
-				// call, so this actor wakes at the same instant either way.
-				//
-				// It must not end the group, though: run.Group's interrupt
-				// would cancel the input actor's context too, and
-				// contextReader.Read never starts a read on a context already
-				// cancelled — so the bytes the client sent before hanging up,
-				// still pending in the SSH channel, would be lost instead of
-				// delivered the next time the command reads. The input actor
-				// ends the group itself, from the EOF it reads once its write
-				// returns, exactly as before this actor existed; this one
-				// only frees the elector and then waits to be interrupted,
-				// like the window-change loop below.
-				//
-				// What is left behind until then is the handler goroutine
-				// itself, still parked in that pty write until the command
-				// reads — on macOS also until the command exits, which fails
-				// the write, but on Linux until nothing short of the
-				// daemon's exit — and with it everything the handler defers:
-				// writers.Remove, sink.Close and the client-left event all
-				// wait for it, so a client that left with its input parked
-				// is still listed by session info until then. That stays
-				// bounded by the session's life because upterm host exits
-				// with its session; an embedder that keeps the process
-				// alive keeps this goroutine — and, on Linux, the thread
-				// blocked in the write — running until it exits. It holds
-				// nothing the fan-out or the elector needs.
+				// Connection departure removes election ownership immediately, while input
+				// already queued in SSH still belongs to the command. Do not
+				// end the group from sess.Context: that would discard buffered
+				// input before the command resumes reading. The input actor
+				// ends the group after draining to EOF, or its existing owner
+				// cancels it at session/group shutdown. Linux cancels its owned
+				// write without closing the shared PTY.
+				// Until then the handler's deferred sink/client cleanup waits;
+				// nothing it holds prevents a replacement primary's election.
 				ctx, cancel := context.WithCancel(h.ctx)
 				g.Add(func() error {
 					select {
@@ -1642,7 +1610,7 @@ func (h *sessionHandler) HandleSession(sess gssh.Session) {
 		// input
 		ctx, cancel := context.WithCancel(h.ctx)
 		g.Add(func() error {
-			_, err := io.Copy(ptmx, uio.NewContextReader(ctx, sess))
+			_, err := io.Copy(ptyInputWriter(ctx, ptmx), uio.NewContextReader(ctx, sess))
 			return untilGuestLeaves(ctx, err)
 		}, func(err error) {
 			cancel()

@@ -1,14 +1,16 @@
 package internal
 
 import (
+	"context"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/stretchr/testify/require"
 )
 
-// Every waiter on a shared handle is parked in a blocking call, so abandoning
-// it is the only thing that can release them: the gate that timed out and the
+// Noncancelable waiters on a shared handle need abandonment to release
+// them: the gate that timed out and the
 // command that failed to start both leave clients holding this handle with no
 // pty behind it, and a waiter nobody releases is a session that never ends.
 func TestSharedPTYAbandonReleasesEveryWaiter(t *testing.T) {
@@ -94,4 +96,46 @@ func TestSharedPtySetsizeRecordsOrDelegatesAtomically(t *testing.T) {
 	h, w = p.lastSize()
 	require.Equal(t, 43, h)
 	require.Equal(t, 132, w)
+}
+
+func TestSharedPTYInputCancellationBeforePublication(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		s := newSharedPTY()
+		t.Cleanup(s.abandon)
+		writer, ok := any(s).(interface {
+			WriteContext(context.Context, []byte) (int, error)
+		})
+		require.True(t, ok, "shared PTY must support cancelable input publication")
+		ctx, cancel := context.WithCancel(context.Background())
+		done := make(chan error, 1)
+		go func() { _, err := writer.WriteContext(ctx, []byte("lost")); done <- err }()
+		synctest.Wait()
+		cancel()
+		synctest.Wait()
+		select {
+		case err := <-done:
+			require.ErrorIs(t, err, context.Canceled)
+		default:
+			t.Fatal("canceled input still waits for publication")
+		}
+		later := make(chan inputTestResult, 1)
+		go func() {
+			n, err := writer.WriteContext(context.Background(), []byte("later"))
+			later <- inputTestResult{n, err}
+		}()
+		synctest.Wait()
+		select {
+		case <-later:
+			t.Fatal("unpublished successor returned before publication")
+		default:
+		}
+		p := &readFromInputPTY{exitedPTY: &exitedPTY{}}
+		s.set(p)
+		synctest.Wait()
+		result := <-later
+		require.NoError(t, result.err)
+		require.Equal(t, 5, result.n)
+		require.Equal(t, "later", p.got.String())
+		require.Equal(t, 1, p.contextCalls)
+	})
 }

@@ -20,12 +20,12 @@ import (
 	"time"
 
 	gssh "charm.land/ssh"
-	ptylib "github.com/creack/pty"
 	"github.com/olebedev/emitter"
 	"github.com/owenthereal/upterm/internal/termsize"
 	uio "github.com/owenthereal/upterm/io"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/crypto/ssh"
+	"golang.org/x/sys/unix"
 )
 
 // The terminals the tests below join with, and the pty they make: a session
@@ -634,9 +634,7 @@ func TestAJoinerThatLeavesBeforeTheCommandStartsDoesNotSizeIt(t *testing.T) {
 			_ = p.Wait()
 		})
 		shared.set(p)
-		rows, cols, err := ptylib.Getsize(p.(*pty).File)
-		require.NoError(t, err)
-		return termsize.Size{Cols: cols, Rows: rows}
+		return inspectPTYSize(t, p.(*pty))
 	}
 
 	t.Run("the client leaves while its join waits for the fan-out", func(t *testing.T) {
@@ -864,9 +862,7 @@ func (r *joinRig) holdTheGate(t *testing.T) {
 // ptySize is the rig's pty's size, as the kernel has it.
 func (r *joinRig) ptySize(t *testing.T) termsize.Size {
 	t.Helper()
-	rows, cols, err := ptylib.Getsize(r.ptmx.File)
-	require.NoError(t, err)
-	return termsize.Size{Cols: cols, Rows: rows}
+	return inspectPTYSize(t, r.ptmx)
 }
 
 // ptySizes passes a pty's reports on to the fan-out and keeps every size it
@@ -1098,4 +1094,18 @@ func (o *joinerOutput) await(t *testing.T, marker string) string {
 			t.Fatalf("the joiner was never sent %q; it was sent %s", marker, summarize(got))
 		}
 	}
+}
+
+// Inspect geometry without File.Fd, which would turn a Linux pollable master
+// back into blocking I/O while this fixture still owns live readers/writers.
+func inspectPTYSize(t *testing.T, p *pty) termsize.Size {
+	t.Helper()
+	var size *unix.Winsize
+	err := p.control(func(fd uintptr) error {
+		var err error
+		size, err = unix.IoctlGetWinsize(int(fd), unix.TIOCGWINSZ)
+		return err
+	})
+	require.NoError(t, err)
+	return termsize.Size{Cols: int(size.Col), Rows: int(size.Row)}
 }

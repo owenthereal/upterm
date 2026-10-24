@@ -4,6 +4,7 @@ package internal
 
 import (
 	"os/exec"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -42,76 +43,32 @@ func TestExitCodeExecExitStatus(t *testing.T) {
 	assert.Equal(t, 7, code)
 }
 
-// TestPtyKillDoesNotWaitOnTheLock pins that Kill must not take the pty's
-// RWMutex. terminate can reach Kill while its own close is still
-// pending, queued for the write lock behind a Read parked on the master, and
-// Go's sync.RWMutex holds every new reader behind a pending writer -- so a
-// Kill that took either lock would wait on a read that only the command's
-// exit ends, which is what Kill is there to cause.
-//
-// TestCommandRunSurvivesAParkedReaderDuringClose cannot tell: terminate sends
-// the group SIGKILL through Signal before it calls Kill, and that alone ends
-// the command and frees the lock, so a Kill that took it there is late, not
-// stuck. Here nothing but Kill is sent.
+// Kill must remain independent of the PTY mutex, including platforms where a
+// parked Read and a queued Close can hold it throughout termination.
 func TestPtyKillDoesNotWaitOnTheLock(t *testing.T) {
 	cmd := exec.Command("sleep", "30")
 	ptmx, err := startPty(cmd, termsize.Size{}, false, nil)
 	require.NoError(t, err)
 	p := ptmx.(*pty)
-
-	readDone := make(chan struct{})
-	var closeDone chan struct{} // made only once the Close goroutine starts
 	t.Cleanup(func() {
-		// Only the command's exit releases the parked Read, and with it the
-		// lock: end it directly, never through the pty, in case Kill did not.
 		_ = cmd.Process.Kill()
 		_ = cmd.Wait()
-		<-readDone
-		if closeDone != nil {
-			<-closeDone
-		}
+		_ = p.Close()
 	})
 
-	// sleep writes nothing, so this Read holds the read lock until the
-	// command exits. It has the lock once a write lock cannot be had.
-	go func() {
-		defer close(readDone)
-		_, _ = p.Read(make([]byte, 1))
-	}()
-	require.Eventually(t, func() bool {
-		if p.TryLock() {
-			p.Unlock()
-			return false
-		}
-		return true
-	}, time.Second, time.Millisecond, "Read never took the read lock")
-
-	// Close queues for the write lock behind that Read; once it has, not
-	// even a read lock can be had.
-	closeDone = make(chan struct{})
-	go func() {
-		defer close(closeDone)
-		_ = p.Close()
-	}()
-	require.Eventually(t, func() bool {
-		if p.TryRLock() {
-			p.RUnlock()
-			return false
-		}
-		return true
-	}, time.Second, time.Millisecond, "Close never queued for the write lock")
-
+	p.Lock()
+	release := sync.OnceFunc(p.Unlock)
+	t.Cleanup(release) // Release the mutex before process/file cleanup on Fatal.
 	killed := make(chan error, 1)
 	go func() { killed <- p.Kill() }()
 	select {
 	case err := <-killed:
 		require.NoError(t, err)
 	case <-time.After(2 * time.Second):
-		t.Fatal("Kill waited on the pty's lock, held by a parked Read with a Close queued behind it")
+		t.Fatal("Kill waited on the pty's lock")
 	}
+	release()
 
-	// And Kill alone is what ended the command: the Read and the Close are
-	// both still parked until it exits.
 	var exitErr *exec.ExitError
 	require.ErrorAs(t, cmd.Wait(), &exitErr)
 	ws, ok := exitErr.Sys().(syscall.WaitStatus)
