@@ -34,6 +34,20 @@ func forwardTestPair(t *testing.T, serverConfig *ssh.ServerConfig, clientConfig 
 // record what the server side reads, as the proxy does of a host.
 func forwardTestPairWrapped(t *testing.T, serverConfig *ssh.ServerConfig, clientConfig *ssh.ClientConfig, wrap func(net.Conn) net.Conn) (sshPeer, sshPeer) {
 	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dialer := &net.Dialer{}
+	return forwardTestPairOn(t, serverConfig, clientConfig, wrap, listener, func(ctx context.Context) (net.Conn, error) {
+		return dialer.DialContext(ctx, "tcp", listener.Addr().String())
+	})
+}
+
+// forwardTestPairOn preserves the handshake and cleanup checks for either transport.
+func forwardTestPairOn(t *testing.T, serverConfig *ssh.ServerConfig, clientConfig *ssh.ClientConfig, wrap func(net.Conn) net.Conn, listener net.Listener, dial func(context.Context) (net.Conn, error)) (sshPeer, sshPeer) {
+	t.Helper()
+	t.Cleanup(func() { _ = listener.Close() })
 	_, private, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatal(err)
@@ -49,22 +63,23 @@ func forwardTestPairWrapped(t *testing.T, serverConfig *ssh.ServerConfig, client
 	if clientConfig == nil {
 		clientConfig = &ssh.ClientConfig{User: "test", HostKeyCallback: ssh.InsecureIgnoreHostKey()}
 	}
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
 	defer func() { _ = listener.Close() }()
 	type result struct {
 		peer sshPeer
 		err  error
 	}
 	accepted := make(chan result, 1)
+	acceptDone := make(chan struct{})
+	t.Cleanup(func() { _ = listener.Close(); <-acceptDone })
 	go func() {
+		defer close(acceptDone)
 		conn, err := listener.Accept()
 		if err != nil {
 			accepted <- result{err: err}
 			return
 		}
+		raw := conn
+		t.Cleanup(func() { _ = raw.Close() })
 		if wrap != nil {
 			conn = wrap(conn)
 		}
@@ -82,10 +97,11 @@ func forwardTestPairWrapped(t *testing.T, serverConfig *ssh.ServerConfig, client
 		_ = conn.SetDeadline(time.Time{})
 		accepted <- result{peer: sshPeer{sc, channels, requests}}
 	}()
-	conn, err := net.Dial("tcp", listener.Addr().String())
+	conn, err := dial(t.Context())
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = conn.Close() })
 	_ = conn.SetDeadline(time.Now().Add(10 * time.Second))
 	cc, channels, requests, err := ssh.NewClientConn(conn, listener.Addr().String(), clientConfig)
 	if err != nil {

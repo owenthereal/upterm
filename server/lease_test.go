@@ -95,20 +95,6 @@ var errConsulDown = errors.New("consul unreachable")
 
 var testLeaseTiming = leaseTiming{retryBase: 10 * time.Millisecond, retryMax: 40 * time.Millisecond, rebuildBound: 200 * time.Millisecond}
 
-// lateWake is how late a woken goroutine may run on a loaded CI runner under
-// -race; GitHub's Windows runners have woken them more than 100 ms late. A
-// close is asserted never to come before its deadline, which the code under
-// test guarantees, and at most this long after it.
-const lateWake = 150 * time.Millisecond
-
-// requireClosedAt asserts a close at deadline: never before it, and no more
-// than lateWake after it.
-func requireClosedAt(t *testing.T, at, deadline time.Time, what string) {
-	t.Helper()
-	require.False(t, at.Before(deadline), "closed %v before %s", deadline.Sub(at), what)
-	require.LessOrEqual(t, at.Sub(deadline), lateWake, "closed %v after %s", at.Sub(deadline), what)
-}
-
 // blockUntil stands in for a store call that hangs until its context ends, or
 // until release fires, returning its result.
 func blockUntil(ctx context.Context, release <-chan struct{}) error {
