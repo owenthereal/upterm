@@ -462,14 +462,6 @@ Exits 4 when no session has the name, and 1 for any other failure.`,
 	return cmd
 }
 
-// stopWaitTimeout bounds how long `session stop` waits for the name to be
-// released once the daemon has acknowledged. The teardown's worst case is
-// about sixteen seconds -- hangupGrace plus three DefaultStopGraces, as
-// DefaultStopGrace's own comment says -- plus the record's publication;
-// thirty seconds is that with room, and a daemon still holding the name
-// past it is one to name a pid for.
-var stopWaitTimeout = 30 * time.Second
-
 // stopPollInterval is how often the release is checked for.
 const stopPollInterval = 200 * time.Millisecond
 
@@ -670,7 +662,15 @@ Exits 4 when no session has the name, and 1 for any other failure.`,
 }
 
 // stopSession asks the session named to end and waits for it to have ended.
+// The teardown's worst case is about sixteen seconds -- hangupGrace plus
+// three DefaultStopGraces -- plus the record's publication; thirty seconds
+// is that with room, and a daemon still holding the name past it is one to
+// name a pid for.
 func stopSession(ctx context.Context, arg string, out io.Writer) error {
+	return stopSessionWithin(ctx, arg, out, 30*time.Second)
+}
+
+func stopSessionWithin(ctx context.Context, arg string, out io.Writer, bound time.Duration) error {
 	stateRoot := utils.UptermStateDir()
 	lookupCtx, cancelLookup := context.WithTimeout(ctx, sessionQueryTimeout)
 	r, err := resolveSession(lookupCtx, arg)
@@ -703,10 +703,12 @@ func stopSession(ctx context.Context, arg string, out io.Writer) error {
 	if err != nil {
 		return err
 	}
-	client, err := host.AdminClient(adminSocket)
+	conn, err := host.AdminConn(adminSocket)
 	if err != nil {
 		return err
 	}
+	defer func() { _ = conn.Close() }()
+	client := api.NewAdminServiceClient(conn)
 	rpcCtx, cancelRPC := context.WithTimeout(ctx, sessionQueryTimeout)
 	// The launch that was inspected, not just the name: the socket path
 	// belongs to the name, and a session that ended between the read above
@@ -750,15 +752,15 @@ func stopSession(ctx context.Context, arg string, out io.Writer) error {
 
 	// Acknowledged. The name is free once this launch has released it, or
 	// once another launch holds it, which is the same thing from here.
-	deadline := time.Now().Add(stopWaitTimeout)
+	deadline := time.Now().Add(bound)
 	var lastInspectErr error
 	for {
 		remaining := time.Until(deadline)
 		if remaining <= 0 {
 			if lastInspectErr != nil {
-				return fmt.Errorf("session %s acknowledged the stop but its completion could not be confirmed after %s: %w", name, shortDuration(stopWaitTimeout), lastInspectErr)
+				return fmt.Errorf("session %s acknowledged the stop but its completion could not be confirmed after %s: %w", name, shortDuration(bound), lastInspectErr)
 			}
-			return fmt.Errorf("session %s acknowledged the stop but is still running after %s (%s)", name, shortDuration(stopWaitTimeout), pidOf(rec))
+			return fmt.Errorf("session %s acknowledged the stop but is still running after %s (%s)", name, shortDuration(bound), pidOf(rec))
 		}
 		pollCtx, cancelPoll := context.WithTimeout(ctx, min(sessionQueryTimeout, remaining))
 		cur, curHeld, err := sessiondir.Inspect(pollCtx, stateRoot, name)
@@ -901,10 +903,12 @@ func setSession(ctx context.Context, arg string, joinTimeout time.Duration, out 
 	if err != nil {
 		return err
 	}
-	client, err := host.AdminClient(adminSocket)
+	conn, err := host.AdminConn(adminSocket)
 	if err != nil {
 		return err
 	}
+	defer func() { _ = conn.Close() }()
+	client := api.NewAdminServiceClient(conn)
 	rpcCtx, cancelRPC := context.WithTimeout(ctx, sessionQueryTimeout)
 	// Dialled before anything is sent. The client connects lazily, so a
 	// request that failed can't say whether it ever left; a dial that failed
@@ -1558,18 +1562,17 @@ func shortDuration(d time.Duration) string {
 	return s
 }
 
-// localZone is the zone absTime writes in: the machine's. It is a variable so
-// that a test can pin it; swapping time.Local itself would race with every
-// time.Now in the process, which reads it.
-var localZone = time.Local
-
 // absTime is t in the reader's local time with its date and zone, for
 // deadlines and events in the past: a time of day alone doesn't say which day
 // or where. The zone is always named. Go writes UTC for UTC, the zone
 // database's abbreviation for any other, and the offset ("-0700") for a zone
 // that has no abbreviation, as on a machine without a zone database.
-func absTime(t time.Time) string {
-	return t.In(localZone).Format("2006-01-02 15:04:05 MST")
+func absTime(at time.Time) string {
+	return absTimeIn(at, time.Local)
+}
+
+func absTimeIn(at time.Time, loc *time.Location) string {
+	return at.In(loc).Format("2006-01-02 15:04:05 MST")
 }
 
 // joinTimeoutRow says what happened to the session's join timeout, not only
@@ -1581,15 +1584,19 @@ func absTime(t time.Time) string {
 //
 // It returns the row's label and its value, empty when there is nothing to say.
 func joinTimeoutRow(info sessionInfo) (label, value string) {
+	return joinTimeoutRowIn(info, time.Local)
+}
+
+func joinTimeoutRowIn(info sessionInfo, loc *time.Location) (label, value string) {
 	if !info.FirstGuestJoinedAt.IsZero() {
-		return "Join timeout:", "disabled (guest joined at " + absTime(info.FirstGuestJoinedAt) + ")"
+		return "Join timeout:", "disabled (guest joined at " + absTimeIn(info.FirstGuestJoinedAt, loc) + ")"
 	}
 	if info.Status == statusEnded {
 		switch {
 		case info.Reason == sessiondir.ReasonJoinTimeout && !info.JoinDeadline.IsZero():
-			return "Join timeout:", "fired at " + absTime(info.JoinDeadline)
+			return "Join timeout:", "fired at " + absTimeIn(info.JoinDeadline, loc)
 		case !info.JoinDeadline.IsZero():
-			return "Join deadline:", absTime(info.JoinDeadline) + " (last recorded before the session ended)"
+			return "Join deadline:", absTimeIn(info.JoinDeadline, loc) + " (last recorded before the session ended)"
 		case info.JoinTimeout != "":
 			return "Join timeout:", info.JoinTimeout + " (last recorded before the session ended)"
 		default:
@@ -1598,7 +1605,7 @@ func joinTimeoutRow(info sessionInfo) (label, value string) {
 	}
 	switch {
 	case !info.JoinDeadline.IsZero():
-		label, value = "Join deadline:", absTime(info.JoinDeadline)
+		label, value = "Join deadline:", absTimeIn(info.JoinDeadline, loc)
 	case info.JoinTimeout != "":
 		label, value = "Join timeout:", info.JoinTimeout+" (counts from readiness)"
 	case info.JoinStateSource == joinStateFromRecord:
@@ -2319,10 +2326,12 @@ func currentAdminSocketFile() string {
 }
 
 func session(ctx context.Context, adminSocket string) (*api.GetSessionResponse, error) {
-	c, err := host.AdminClient(adminSocket)
+	conn, err := host.AdminConn(adminSocket)
 	if err != nil {
 		return nil, err
 	}
+	defer func() { _ = conn.Close() }()
+	c := api.NewAdminServiceClient(conn)
 
 	return c.GetSession(ctx, &api.GetSessionRequest{})
 }

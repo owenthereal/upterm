@@ -32,11 +32,29 @@ func takeTerminalFor(f *os.File) func() error {
 // after the write can run before the line arrives, which then outlives it.
 func typeLine(t *testing.T, ptmx, tty *os.File, line string) {
 	t.Helper()
-	_, _ = ptmx.Write([]byte(line))
+	n, err := ptmx.Write([]byte(line))
+	require.NoError(t, err)
+	require.Equal(t, len(line), n)
+	ready := []unix.PollFd{{Fd: int32(tty.Fd()), Events: unix.POLLIN}}
+	n, err = unix.Poll(ready, 5000)
+	require.NoError(t, err)
+	require.Equal(t, 1, n)
+	require.NotZero(t, ready[0].Revents&unix.POLLIN)
+}
+
+// readTerminalInput is tty's sole reader, so readiness cannot be consumed by
+// another reader between the bounded poll and the read.
+func readTerminalInput(t *testing.T, tty *os.File) []byte {
+	t.Helper()
 	ready := []unix.PollFd{{Fd: int32(tty.Fd()), Events: unix.POLLIN}}
 	n, err := unix.Poll(ready, 5000)
 	require.NoError(t, err)
 	require.Equal(t, 1, n)
+	require.NotZero(t, ready[0].Revents&unix.POLLIN)
+	b := make([]byte, 64)
+	n, err = tty.Read(b)
+	require.NoError(t, err)
+	return b[:n]
 }
 
 // Keys typed while the terminal was cooked, before the first join, belong to
@@ -46,10 +64,10 @@ func TestTakeTerminalFlushesTypedAheadInput(t *testing.T) {
 	typeLine(t, ptmx, tty, "typed-before-join\n")
 	take := takeTerminalFor(tty) // raw.enter + flush
 	require.NoError(t, take())
-	readable := make(chan int, 1)
-	go func() { b := make([]byte, 64); n, _ := tty.Read(b); readable <- n }()
-	_, _ = ptmx.Write([]byte("x"))
-	require.Equal(t, 1, <-readable) // only what was typed after the flush
+	n, err := ptmx.Write([]byte("x"))
+	require.NoError(t, err)
+	require.Equal(t, 1, n)
+	require.Equal(t, []byte("x"), readTerminalInput(t, tty))
 }
 
 // Both questions drop what was typed at the guest's terminal before them,
@@ -61,10 +79,10 @@ func TestPromptsFlushTheGuestsTerminal(t *testing.T) {
 	for _, flush := range []func() error{passphrase.flush, keys.flush} {
 		typeLine(t, ptmx, tty, "typed-ahead\n")
 		require.NoError(t, flush())
-		readable := make(chan string, 1)
-		go func() { b := make([]byte, 64); n, _ := tty.Read(b); readable <- string(b[:n]) }()
-		_, _ = ptmx.Write([]byte("x\n"))
-		require.Equal(t, "x\n", <-readable)
+		n, err := ptmx.Write([]byte("x\n"))
+		require.NoError(t, err)
+		require.Equal(t, 2, n)
+		require.Equal(t, []byte("x\n"), readTerminalInput(t, tty))
 	}
 }
 

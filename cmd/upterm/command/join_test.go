@@ -785,8 +785,13 @@ func TestPassphrasePromptRestoresEchoOnEveryWayOut(t *testing.T) {
 
 	t.Run("cancelled before echo is off", func(t *testing.T) {
 		log, gate := &modeLog{}, make(chan struct{})
-		never, _ := io.Pipe()
+		never, unblock := io.Pipe()
+		t.Cleanup(func() {
+			_ = unblock.Close()
+			_ = never.Close()
+		})
 		ctx, cancel := context.WithCancel(context.Background())
+		t.Cleanup(cancel)
 		done := make(chan error, 1)
 		go func() { _, err := newPrompt(never, log, gate).prompt(ctx, "id"); done <- err }()
 		cancel()
@@ -796,8 +801,13 @@ func TestPassphrasePromptRestoresEchoOnEveryWayOut(t *testing.T) {
 	})
 	t.Run("cancelled mid-read", func(t *testing.T) {
 		log := &modeLog{}
-		never, _ := io.Pipe()
+		never, unblock := io.Pipe()
+		t.Cleanup(func() {
+			_ = unblock.Close()
+			_ = never.Close()
+		})
 		ctx, cancel := context.WithCancel(context.Background())
+		t.Cleanup(cancel)
 		done := make(chan error, 1)
 		go func() { _, err := newPrompt(never, log, nil).prompt(ctx, "id"); done <- err }()
 		require.Eventually(t, func() bool { return len(final(log)) == 1 }, time.Second, time.Millisecond)

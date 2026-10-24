@@ -796,34 +796,22 @@ func localClock(at time.Time) string { return at.Local().Format("15:04:05") }
 // the view's column.
 func viewRow(label, value string) string { return fmt.Sprintf("%-18s%s\n", label, value) }
 
-// withLocal makes loc the local zone for the times the commands write. It
-// pins absTime's zone and leaves time.Local alone: every time.Now in the
-// process reads that, so swapping it fails under -race whenever a timer from
-// an earlier test is still running.
-func withLocal(t *testing.T, loc *time.Location) {
-	t.Helper()
-	orig := localZone
-	localZone = loc
-	t.Cleanup(func() { localZone = orig })
-}
-
 // Deadlines and past events are printed with their date and zone, since a
 // time of day alone doesn't say which day, or where.
 func TestAbsoluteTimesNameTheirZone(t *testing.T) {
 	at := time.Date(2026, 10, 12, 5, 31, 2, 0, time.UTC)
-	withLocal(t, time.UTC)
-	require.Equal(t, "2026-10-12 05:31:02 UTC", absTime(at))
+	require.Equal(t, "2026-10-12 05:31:02 UTC", absTimeIn(at, time.UTC))
 	la, err := time.LoadLocation("America/Los_Angeles")
 	require.NoError(t, err)
-	withLocal(t, la)
-	require.Equal(t, "2026-10-11 22:31:02 PDT", absTime(at))
+	require.Equal(t, "2026-10-11 22:31:02 PDT", absTimeIn(at, la))
+	require.Equal(t, "2026-10-12 05:31:02 UTC", absTimeIn(at, time.UTC), "a different location did not change the earlier result")
 }
 
 // A zone with no abbreviation, as a machine without a zone database can have,
 // still reads as a zone: its offset, never an empty one.
 func TestAbsoluteTimesNameAZoneWithoutAName(t *testing.T) {
-	withLocal(t, time.FixedZone("", -7*60*60))
-	require.Equal(t, "2026-10-11 22:31:02 -0700", absTime(time.Date(2026, 10, 12, 5, 31, 2, 0, time.UTC)))
+	at := time.Date(2026, 10, 12, 5, 31, 2, 0, time.UTC)
+	require.Equal(t, "2026-10-11 22:31:02 -0700", absTimeIn(at, time.FixedZone("", -7*60*60)))
 }
 
 // runInfo is `session info NAME` as a user runs it, and what it printed.
@@ -1853,22 +1841,17 @@ func Test_stopSession(t *testing.T) {
 		require.ErrorContains(t, stopSession(context.Background(), "nope", &out), `no session named "nope"`)
 	})
 	t.Run("a stop the daemon acknowledged but did not finish is reported, bounded", func(t *testing.T) {
-		old := stopWaitTimeout
-		stopWaitTimeout = 300 * time.Millisecond
-		t.Cleanup(func() { stopWaitTimeout = old })
 		setupSessionRoots(t)
 		d := claimSession(t, "stuck-1")
 		releaseAtEnd(t, d)
 		require.NoError(t, d.Update(func(r *sessiondir.Record) { r.Status = sessiondir.StatusReady; r.SessionID = "sid" }))
 		serveStubAdminWithStop(t, d.AdminSocket(), &api.GetSessionResponse{SessionId: "sid", Host: "ssh://127.0.0.1:2222"}, d.LaunchID(), func() {})
 		var out bytes.Buffer
-		err := stopSession(context.Background(), "stuck-1", &out)
-		require.ErrorContains(t, err, "still running after")
+		err := stopSessionWithin(context.Background(), "stuck-1", &out, 300*time.Millisecond)
+		require.ErrorContains(t, err, "still running after 300ms")
+		require.Empty(t, out.String())
 	})
 	t.Run("an acknowledged stop with an unreadable record cannot be confirmed", func(t *testing.T) {
-		old := stopWaitTimeout
-		stopWaitTimeout = 80 * time.Millisecond
-		t.Cleanup(func() { stopWaitTimeout = old })
 		setupSessionRoots(t)
 		d := claimSession(t, "corrupt-after-ack")
 		releaseAtEnd(t, d)
@@ -1877,9 +1860,11 @@ func Test_stopSession(t *testing.T) {
 			_ = os.WriteFile(d.RecordPath(), []byte("{not json"), 0600)
 		})
 		var out bytes.Buffer
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
 		started := time.Now()
-		err := stopSession(context.Background(), "corrupt-after-ack", &out)
-		require.ErrorContains(t, err, "could not be confirmed")
+		err := stopSessionWithin(ctx, "corrupt-after-ack", &out, 80*time.Millisecond)
+		require.ErrorContains(t, err, "could not be confirmed after 80ms")
 		var syntax *json.SyntaxError
 		require.ErrorAs(t, err, &syntax, "the inspection cause must be available to callers")
 		require.Less(t, time.Since(started), time.Second, "stop must remain bounded by its short deadline")
@@ -2622,14 +2607,33 @@ func TestJoinTimeoutLineShowsTheDateAndZone(t *testing.T) {
 	at := time.Date(2026, 10, 12, 5, 31, 2, 0, time.UTC)
 	la, err := time.LoadLocation("America/Los_Angeles")
 	require.NoError(t, err)
-	withLocal(t, la)
 
-	require.Equal(t, "Join deadline: 2026-10-11 22:31:02 PDT",
-		joinTimeoutText(sessionInfo{Status: "ready", JoinTimeout: "10m", JoinDeadline: at, JoinStateSource: "daemon"}))
-	require.Equal(t, "Join timeout: fired at 2026-10-11 22:31:02 PDT",
-		joinTimeoutText(sessionInfo{Status: statusEnded, Reason: "join_timeout", JoinDeadline: at, JoinStateSource: "record"}))
-	require.Equal(t, "Join timeout: disabled (guest joined at 2026-10-11 22:31:02 PDT)",
-		joinTimeoutText(sessionInfo{Status: "ready", FirstGuestJoinedAt: at, JoinStateSource: "daemon"}))
+	for _, tc := range []struct {
+		name  string
+		info  sessionInfo
+		label string
+		utc   string
+		pdt   string
+	}{
+		{"deadline", sessionInfo{Status: "ready", JoinTimeout: "10m", JoinDeadline: at, JoinStateSource: "daemon"},
+			"Join deadline:", "2026-10-12 05:31:02 UTC", "2026-10-11 22:31:02 PDT"},
+		{"fired", sessionInfo{Status: statusEnded, Reason: "join_timeout", JoinDeadline: at, JoinStateSource: "record"},
+			"Join timeout:", "fired at 2026-10-12 05:31:02 UTC", "fired at 2026-10-11 22:31:02 PDT"},
+		{"guest joined", sessionInfo{Status: "ready", FirstGuestJoinedAt: at, JoinStateSource: "daemon"},
+			"Join timeout:", "disabled (guest joined at 2026-10-12 05:31:02 UTC)", "disabled (guest joined at 2026-10-11 22:31:02 PDT)"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			label, value := joinTimeoutRowIn(tc.info, time.UTC)
+			require.Equal(t, tc.label, label)
+			require.Equal(t, tc.utc, value)
+			label, value = joinTimeoutRowIn(tc.info, la)
+			require.Equal(t, tc.label, label)
+			require.Equal(t, tc.pdt, value)
+			label, value = joinTimeoutRowIn(tc.info, time.UTC)
+			require.Equal(t, tc.label, label)
+			require.Equal(t, tc.utc, value, "a different location did not change the earlier row")
+		})
+	}
 }
 
 func TestSummaryPrintsTheJoinTimeoutLine(t *testing.T) {
@@ -3672,10 +3676,6 @@ func TestWaitLaunchChangedNamesEachSessionByWhatIdentifiesIt(t *testing.T) {
 // Neither the wait for that nor the look at the record afterwards takes it
 // for the one stopped.
 func TestStopByIDOfARecordWithNoLaunchIDTreatsAReplacementWithNoneAsAnotherSession(t *testing.T) {
-	old := stopWaitTimeout
-	stopWaitTimeout = time.Second
-	t.Cleanup(func() { stopWaitTimeout = old })
-
 	setupSessionRoots(t)
 	a := readyHeldWithoutLaunchID(t, "build", "sid-1")
 	// The launch the daemon answers for is the record's: none. It ends and the
@@ -3687,7 +3687,7 @@ func TestStopByIDOfARecordWithNoLaunchIDTreatsAReplacementWithNoneAsAnotherSessi
 	})
 
 	var out bytes.Buffer
-	require.NoError(t, stopSession(context.Background(), "sid-1", &out))
+	require.NoError(t, stopSessionWithin(context.Background(), "sid-1", &out, time.Second))
 	require.Equal(t, "session build stopped\n", out.String(), "the replacement's record says nothing about the session stopped")
 }
 

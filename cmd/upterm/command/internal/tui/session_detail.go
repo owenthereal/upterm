@@ -156,10 +156,6 @@ func guestsRow(p GuestPermissions) string {
 	return strings.Join([]string{typing, files, forwarding}, "; ")
 }
 
-// now is the clock the status text compares a next attempt against. A variable
-// so a test can pin it instead of sleeping.
-var now = time.Now
-
 // tunnelHints say what to do, or what to expect, for each reason a tunnel
 // went down. The values of sessiondir's TunnelReason are a stable contract, so
 // a reason this version doesn't know has no entry and gets no hint rather than
@@ -187,6 +183,10 @@ var tunnelHints = map[string]string{
 // it is already past during every attempt and after a sleeping machine wakes
 // mid-wait, and printing it would promise a retry that has already happened.
 func StatusText(detail SessionDetail) string {
+	return statusTextAt(detail, time.Now())
+}
+
+func statusTextAt(detail SessionDetail, at time.Time) string {
 	if detail.Status != sessiondir.StatusReconnecting {
 		return detail.Status
 	}
@@ -199,7 +199,7 @@ func StatusText(detail SessionDetail) string {
 		parts = append(parts, "since "+ClockTime(detail.TunnelLostAt))
 	}
 	text := strings.Join(parts, " ")
-	if detail.NextAttemptAt.After(now()) {
+	if detail.NextAttemptAt.After(at) {
 		if text != "" {
 			text += ", "
 		}
@@ -238,7 +238,7 @@ func ReconnectNote(detail SessionDetail) string {
 
 // FormatSessionDetail renders a SessionDetail to a string using terminal width
 func FormatSessionDetail(detail SessionDetail) string {
-	return renderSessionDetail(detail, getTermWidth())
+	return renderSessionDetailAt(detail, getTermWidth(), time.Now())
 }
 
 // PrintSessionDetail prints session detail to stdout
@@ -338,6 +338,10 @@ func renderRow(b *strings.Builder, label string, lines []string, labelWidth int,
 
 // renderSessionDetail generates the session detail content for the given width
 func renderSessionDetail(detail SessionDetail, width int) string {
+	return renderSessionDetailAt(detail, width, time.Now())
+}
+
+func renderSessionDetailAt(detail SessionDetail, width int, at time.Time) string {
 	var b strings.Builder
 
 	// Layout constants
@@ -369,7 +373,7 @@ func renderSessionDetail(detail SessionDetail, width int) string {
 	// blank, and it is what distinguishes a session still starting, or running
 	// under another XDG_RUNTIME_DIR, from one that is broken.
 	if detail.Status != "" {
-		renderProseRow(&b, "Status:", StatusText(detail), labelWidth, valueWidth, ValueStyle)
+		renderProseRow(&b, "Status:", statusTextAt(detail, at), labelWidth, valueWidth, ValueStyle)
 	}
 	if hint := StatusHint(detail); hint != "" {
 		renderProseRow(&b, "Hint:", hint, labelWidth, valueWidth, ValueStyle)

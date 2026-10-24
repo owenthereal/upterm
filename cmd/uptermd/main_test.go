@@ -12,6 +12,7 @@ import (
 
 	"github.com/owenthereal/upterm/cmd/uptermd/command"
 	"github.com/stretchr/testify/require"
+	"go.uber.org/goleak"
 )
 
 // clearUptermdEnv removes every variable that can reach a decode, so an ambient
@@ -157,4 +158,8 @@ func TestExecuteContextReturnsNilWhenContextIsCancelled(t *testing.T) {
 	// ExecuteContext returning at all means Server.Shutdown has completed and
 	// every component has released the listener it owned.
 	requireRefused(t, wsAddr)
+}
+
+func TestMain(m *testing.M) {
+	goleak.VerifyTestMain(m)
 }

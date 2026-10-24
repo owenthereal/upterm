@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	"go.uber.org/goleak"
 )
 
 // The bash script is cobra's V2 one, which asks the binary for completions
@@ -102,4 +103,8 @@ func TestCaskListsEveryManPage(t *testing.T) {
 	slices.Sort(listed)
 	slices.Sort(generated)
 	require.Equal(t, generated, listed)
+}
+
+func TestMain(m *testing.M) {
+	goleak.VerifyTestMain(m)
 }

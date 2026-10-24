@@ -12,9 +12,10 @@ upterm join is the simpler way to join such a session: it takes the
 connect string on the host's Join line, and needs no ssh options.
 
 Exit status: 1 when it can't connect to the relay, including a usage or
-configuration error. Once connected, the first result reported decides: 0
-for end-of-input from ssh, 1 when the relay closes the connection or a read
-or write fails.
+configuration error. Once connected, 0 for end-of-input from ssh unless a
+relay close or read or write failure is also reported; those failures take
+precedence and give 1. Errors caused by proxy's own cleanup do not change
+the result.
 
 ```
 upterm proxy [flags] URL

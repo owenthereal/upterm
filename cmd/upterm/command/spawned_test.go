@@ -14,6 +14,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/owenthereal/upterm/attach"
@@ -1039,6 +1040,80 @@ func TestSpawnedSessionAbandonsWhenItsTerminalCannotAttach(t *testing.T) {
 	}
 }
 
+func TestSpawnedSessionTimingDefaults(t *testing.T) {
+	for _, tc := range []struct {
+		name                   string
+		started, drain         time.Duration
+		wantStarted, wantDrain time.Duration
+	}{
+		{"zero", 0, 0, 15 * time.Second, 5 * time.Second},
+		{"negative", -time.Second, -time.Nanosecond, 15 * time.Second, 5 * time.Second},
+		{"positive", 100 * time.Millisecond, 300 * time.Millisecond, 100 * time.Millisecond, 300 * time.Millisecond},
+		{"independent defaults", 100 * time.Millisecond, 0, 100 * time.Millisecond, 5 * time.Second},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := &spawnedSession{startedWaitTimeout: tc.started, localClientDrainTimeout: tc.drain}
+			started, drain := s.waits()
+			require.Equal(t, tc.wantStarted, started)
+			require.Equal(t, tc.wantDrain, drain)
+		})
+	}
+}
+
+// runTimingSession joins the parent even on Fatal. A fake holding terminal
+// restoration must be released (with a later defer) before this cleanup runs.
+func runTimingSession(s *spawnedSession) (<-chan error, func()) {
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	finished := make(chan struct{})
+	go func() {
+		defer close(finished)
+		done <- s.runWithDetachContext(ctx, context.WithCancel)
+	}()
+	return done, func() {
+		cancel()
+		synctest.Wait()
+		<-finished
+	}
+}
+
+func requireSessionPending(t *testing.T, done <-chan error, message string) {
+	t.Helper()
+	select {
+	case err := <-done:
+		t.Fatalf("%s: run returned %v", message, err)
+	default:
+	}
+}
+
+// restoringTerminal separates cancellation from restoration, just as a real
+// attach callback can still hold raw mode after its context is cancelled.
+type restoringTerminal struct {
+	attached  chan string
+	cancelled chan struct{}
+	restore   chan struct{}
+	restored  chan struct{}
+	once      sync.Once
+}
+
+func newRestoringTerminal() *restoringTerminal {
+	return &restoringTerminal{
+		attached: make(chan string, 1), cancelled: make(chan struct{}),
+		restore: make(chan struct{}), restored: make(chan struct{}),
+	}
+}
+
+func (c *restoringTerminal) release() { c.once.Do(func() { close(c.restore) }) }
+
+func (c *restoringTerminal) attach(ctx context.Context, socket string, _ []ssh.PublicKey, _ statusSource) (attach.Result, error) {
+	c.attached <- socket
+	<-ctx.Done()
+	close(c.cancelled)
+	<-c.restore
+	close(c.restored)
+	return attach.Result{Reason: attach.Detached}, nil
+}
+
 // TestSpawnedSessionWaitsForItsTerminalWhenTheSessionFails pins that a parent
 // about to report a failed startup still waits for the client that holds the
 // terminal.
@@ -1049,81 +1124,213 @@ func TestSpawnedSessionAbandonsWhenItsTerminalCannotAttach(t *testing.T) {
 // ordinary way in: the terminal attaches, the gate opens, the exec fails, and
 // the daemon reports failed microseconds later.
 func TestSpawnedSessionWaitsForItsTerminalWhenTheSessionFails(t *testing.T) {
-	oldDrain := localClientDrainTimeout
-	localClientDrainTimeout = 100 * time.Millisecond
-	t.Cleanup(func() { localClientDrainTimeout = oldDrain })
-
-	spawn, d := newScriptedDaemon(t)
-	attached := make(chan string, 1)
-	var clientReturned, clientSawCancel atomic.Bool
-	// A client only a cancellation gets back, which is what a terminal
-	// holding raw mode with nothing left to read looks like.
-	client := func(ctx context.Context, socket string, keys []ssh.PublicKey, _ statusSource) (attach.Result, error) {
-		attached <- socket
-		<-ctx.Done()
-		clientSawCancel.Store(ctx.Err() != nil)
-		clientReturned.Store(true)
-		return attach.Result{Reason: attach.Detached}, nil
-	}
-	var stdout, stderr bytes.Buffer
-	s := newSession(t, spawn, client, &stdout, &stderr)
-	d.startup(t, "s")
-	go func() {
-		<-attached
+	synctest.Test(t, func(t *testing.T) {
+		spawn, d := newScriptedDaemon(t)
+		terminal := newRestoringTerminal()
+		var stdout, stderr bytes.Buffer
+		s := newSession(t, spawn, terminal.attach, &stdout, &stderr)
+		s.localClientDrainTimeout = 100 * time.Millisecond
+		d.startup(t, "s")
+		done, stop := runTimingSession(s)
+		defer stop()
+		defer terminal.release()
+		require.Equal(t, "/run/t.sock", <-terminal.attached)
 		d.await().Failed("exec: no such file", false, false)
-	}()
+		synctest.Wait()
 
-	err := s.run(context.Background())
-	require.ErrorContains(t, err, "session s could not start: exec: no such file")
-	require.True(t, clientReturned.Load(), "run returned while its terminal was still in raw mode")
-	require.True(t, clientSawCancel.Load(), "the client was never cancelled, so nothing would have got it back")
+		time.Sleep(100*time.Millisecond - time.Nanosecond)
+		synctest.Wait()
+		select {
+		case <-terminal.cancelled:
+			t.Fatal("terminal cancelled before the drain boundary")
+		default:
+		}
+		requireSessionPending(t, done, "before the drain boundary")
+		time.Sleep(time.Nanosecond)
+		synctest.Wait()
+		select {
+		case <-terminal.cancelled:
+		default:
+			t.Fatal("terminal was not cancelled at the drain boundary")
+		}
+		requireSessionPending(t, done, "terminal restoration is still pending after cancellation")
+		terminal.release()
+		synctest.Wait()
+		select {
+		case <-terminal.restored:
+		default:
+			t.Fatal("the fake terminal did not restore")
+		}
+		require.ErrorContains(t, <-done, "session s could not start: exec: no such file")
+	})
 }
 
 // A terminal that attached and left before the command started waits for the
 // daemon's verdict, bounded, and never guesses.
 func TestSpawnedSessionWaitsForTheVerdictAfterAnEarlyDetach(t *testing.T) {
-	old := startedWaitTimeout
-	startedWaitTimeout = 300 * time.Millisecond
-	t.Cleanup(func() { startedWaitTimeout = old })
-
-	t.Run("started arrives", func(t *testing.T) {
-		spawn, d := newScriptedDaemon(t)
-		attached := make(chan string, 1)
-		result := make(chan attach.Result, 1)
-		var stdout, stderr bytes.Buffer
-		s := newSession(t, spawn, fakeClient(attached, result), &stdout, &stderr)
-		d.startup(t, "s")
-		go func() {
-			<-attached
-			result <- attach.Result{Reason: attach.Detached} // gone before started
-			time.Sleep(100 * time.Millisecond)
-			d.start()
-		}()
-		require.NoError(t, s.run(context.Background()))
-		require.Contains(t, stderr.String(), "the session continues")
-		select {
-		case <-d.gone:
-			t.Fatal("the parent closed its end before the daemon disarmed")
-		default:
+	for _, started := range []bool{true, false} {
+		name := "nothing arrives"
+		if started {
+			name = "started arrives"
 		}
+		t.Run(name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				spawn, d := newScriptedDaemon(t)
+				attached := make(chan string, 1)
+				result := make(chan attach.Result, 1)
+				var stdout, stderr bytes.Buffer
+				s := newSession(t, spawn, fakeClient(attached, result), &stdout, &stderr)
+				s.startedWaitTimeout = 300 * time.Millisecond
+				d.startup(t, "s")
+				done, stop := runTimingSession(s)
+				defer stop()
+				require.Equal(t, "/run/t.sock", <-attached)
+				result <- attach.Result{Reason: attach.Detached}
+				synctest.Wait() // the client has left and armed its verdict timer
+				requireSessionPending(t, done, "after early detach")
+				if started {
+					time.Sleep(100 * time.Millisecond)
+					d.start()
+					synctest.Wait()
+					require.NoError(t, <-done)
+					require.Contains(t, stderr.String(), "the session continues")
+					select {
+					case <-d.gone:
+						t.Fatal("the parent closed its end before the daemon disarmed")
+					default:
+					}
+					return
+				}
+				time.Sleep(300*time.Millisecond - time.Nanosecond)
+				synctest.Wait()
+				requireSessionPending(t, done, "before the verdict boundary")
+				time.Sleep(time.Nanosecond)
+				synctest.Wait()
+				select {
+				case err := <-done:
+					require.ErrorContains(t, err, "did not report whether the command started within 300ms")
+				default:
+					t.Fatal("missing verdict did not fail at the verdict boundary")
+				}
+				require.NotContains(t, stderr.String(), "the session continues", "never claimed on the strength of the client's result")
+			})
+		})
+	}
+}
+
+func TestSpawnedSessionWaitsAreIndependent(t *testing.T) {
+	t.Run("verdict", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			var done [2]<-chan error
+			for i, bound := range []time.Duration{100 * time.Millisecond, 300 * time.Millisecond} {
+				spawn, d := newScriptedDaemon(t)
+				attached := make(chan string, 1)
+				result := make(chan attach.Result, 1)
+				var stdout, stderr bytes.Buffer
+				s := newSession(t, spawn, fakeClient(attached, result), &stdout, &stderr)
+				s.startedWaitTimeout = bound
+				s.localClientDrainTimeout = bound
+				d.startup(t, "s")
+				var stop func()
+				done[i], stop = runTimingSession(s)
+				defer stop()
+				<-attached
+				result <- attach.Result{Reason: attach.Detached}
+				synctest.Wait()
+			}
+			time.Sleep(100*time.Millisecond - time.Nanosecond)
+			synctest.Wait()
+			requireSessionPending(t, done[0], "short verdict before its boundary")
+			requireSessionPending(t, done[1], "long verdict before the short boundary")
+			time.Sleep(time.Nanosecond)
+			synctest.Wait()
+			select {
+			case err := <-done[0]:
+				require.ErrorContains(t, err, "within 100ms")
+			default:
+				t.Fatal("short verdict did not expire at its own boundary")
+			}
+			requireSessionPending(t, done[1], "long verdict at the short boundary")
+			time.Sleep(200*time.Millisecond - time.Nanosecond)
+			synctest.Wait()
+			requireSessionPending(t, done[1], "long verdict before its own boundary")
+			time.Sleep(time.Nanosecond)
+			synctest.Wait()
+			select {
+			case err := <-done[1]:
+				require.ErrorContains(t, err, "within 300ms")
+			default:
+				t.Fatal("long verdict did not expire at its own boundary")
+			}
+		})
 	})
-	t.Run("nothing arrives", func(t *testing.T) {
-		spawn, d := newScriptedDaemon(t)
-		attached := make(chan string, 1)
-		result := make(chan attach.Result, 1)
-		var stdout, stderr bytes.Buffer
-		s := newSession(t, spawn, fakeClient(attached, result), &stdout, &stderr)
-		d.startup(t, "s")
-		go func() {
-			<-attached
-			result <- attach.Result{Reason: attach.Detached}
-		}()
-		started := time.Now()
-		err := s.run(context.Background())
-		require.Error(t, err)
-		require.ErrorContains(t, err, "did not report")
-		require.Less(t, time.Since(started), 2*time.Second)
-		require.NotContains(t, stderr.String(), "the session continues", "never claimed on the strength of the client's result")
+	t.Run("drain", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			var done [2]<-chan error
+			var terminals [2]*restoringTerminal
+			for i, bound := range []time.Duration{100 * time.Millisecond, 300 * time.Millisecond} {
+				spawn, d := newScriptedDaemon(t)
+				terminal := newRestoringTerminal()
+				terminals[i] = terminal
+				var stdout, stderr bytes.Buffer
+				s := newSession(t, spawn, terminal.attach, &stdout, &stderr)
+				s.startedWaitTimeout = bound
+				s.localClientDrainTimeout = bound
+				d.startup(t, "s")
+				var stop func()
+				done[i], stop = runTimingSession(s)
+				defer stop()
+				defer terminal.release()
+				<-terminal.attached
+				d.await().Failed("exec: no such file", false, false)
+				synctest.Wait()
+			}
+			time.Sleep(100*time.Millisecond - time.Nanosecond)
+			synctest.Wait()
+			for _, terminal := range terminals {
+				select {
+				case <-terminal.cancelled:
+					t.Fatal("a terminal was cancelled before the short drain boundary")
+				default:
+				}
+			}
+			time.Sleep(time.Nanosecond)
+			synctest.Wait()
+			select {
+			case <-terminals[0].cancelled:
+			default:
+				t.Fatal("short drain did not cancel at its own boundary")
+			}
+			select {
+			case <-terminals[1].cancelled:
+				t.Fatal("long drain cancelled at the short boundary")
+			default:
+			}
+			for _, result := range done {
+				requireSessionPending(t, result, "terminal restoration pending")
+			}
+			terminals[0].release()
+			synctest.Wait()
+			require.ErrorContains(t, <-done[0], "exec: no such file")
+			time.Sleep(200*time.Millisecond - time.Nanosecond)
+			synctest.Wait()
+			select {
+			case <-terminals[1].cancelled:
+				t.Fatal("long drain cancelled before its own boundary")
+			default:
+			}
+			time.Sleep(time.Nanosecond)
+			synctest.Wait()
+			select {
+			case <-terminals[1].cancelled:
+			default:
+				t.Fatal("long drain did not cancel at its own boundary")
+			}
+			requireSessionPending(t, done[1], "long terminal restoration pending")
+			terminals[1].release()
+			synctest.Wait()
+			require.ErrorContains(t, <-done[1], "exec: no such file")
+		})
 	})
 }
 

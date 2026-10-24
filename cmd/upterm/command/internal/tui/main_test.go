@@ -1,11 +1,11 @@
 package tui
 
 import (
-	"os"
 	"testing"
 
 	"github.com/charmbracelet/lipgloss"
 	"github.com/muesli/termenv"
+	"go.uber.org/goleak"
 )
 
 // TestMain pins what the package reads from stdout, so the tests see the same
@@ -17,5 +17,5 @@ func TestMain(m *testing.M) {
 	renderer.SetColorProfile(termenv.Ascii)
 	lipgloss.SetColorProfile(termenv.Ascii)
 
-	os.Exit(m.Run())
+	goleak.VerifyTestMain(m)
 }

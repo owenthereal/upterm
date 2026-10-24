@@ -175,26 +175,26 @@ func upgradeAdvice() string {
 // upterm was installed.
 const theWayItWasInstalled = "upgrade it the way it was installed"
 
-// upgradeAdviceTimeout bounds upgradeAdviceWithin's lookup. A var so a test
-// can shorten it.
-var upgradeAdviceTimeout = time.Second
-
-// upgradeAdviceWithin is upgradeAdvice, given upgradeAdviceTimeout to answer.
+// upgradeAdviceWithin gives upgradeAdvice one second to answer.
 // The daemon asks for it before the banner, and the package databases behind
 // it take as long as they take: a lookup that hasn't answered by then gets the
 // advice that claims nothing, and is left to finish on its own, since nothing
 // it does needs undoing.
 func upgradeAdviceWithin(logger *slog.Logger) string {
+	return upgradeAdviceWithinBound(logger, time.Second, upgradeAdvice)
+}
+
+func upgradeAdviceWithinBound(logger *slog.Logger, timeout time.Duration, lookup func() string) string {
 	// Buffered, so a lookup that answers late can still send and exit.
 	answer := make(chan string, 1)
-	go func() { answer <- upgradeAdvice() }()
-	timer := time.NewTimer(upgradeAdviceTimeout)
+	go func() { answer <- lookup() }()
+	timer := time.NewTimer(timeout)
 	defer timer.Stop()
 	select {
 	case advice := <-answer:
 		return advice
 	case <-timer.C:
-		logger.Debug("the upgrade advice lookup timed out; advising to upgrade the way upterm was installed", "timeout", upgradeAdviceTimeout)
+		logger.Debug("the upgrade advice lookup timed out; advising to upgrade the way upterm was installed", "timeout", timeout)
 		return theWayItWasInstalled
 	}
 }
