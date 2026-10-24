@@ -301,7 +301,7 @@ func (p *signalPTY) Wait() error {
 
 func TestTerminateHangsUpBeforeItKills(t *testing.T) {
 	p := newSignalPTY(syscall.SIGHUP)
-	terminateWith(p, p.exited, hangupGrace, time.Second, discardLogger(), "test")
+	terminateWith(p, newPTYCloser(p), p.exited, hangupGrace, time.Second, discardLogger(), "test")
 	require.Equal(t, []syscall.Signal{syscall.SIGHUP}, p.signals, "a command that hangs up is never sent anything else")
 	require.False(t, p.killed)
 }
@@ -309,7 +309,7 @@ func TestTerminateHangsUpBeforeItKills(t *testing.T) {
 func TestTerminateEscalatesThroughTermToKill(t *testing.T) {
 	p := newSignalPTY(0)
 	start := time.Now()
-	terminateWith(p, p.exited, 20*time.Millisecond, 20*time.Millisecond, discardLogger(), "test")
+	terminateWith(p, newPTYCloser(p), p.exited, 20*time.Millisecond, 20*time.Millisecond, discardLogger(), "test")
 	require.Equal(t, []syscall.Signal{syscall.SIGHUP, syscall.SIGTERM, syscall.SIGKILL}, p.signals,
 		"the final step signals the group before killing the leader")
 	require.True(t, p.killed, "a command that ignores both is killed")
@@ -327,7 +327,7 @@ func TestTerminateEscalatesThroughTermToKill(t *testing.T) {
 // only closing the master does.
 func TestTerminateClosesTheMasterBetweenHangupAndTerm(t *testing.T) {
 	p := newSignalPTY(0)
-	terminateWith(p, p.exited, 20*time.Millisecond, 20*time.Millisecond, discardLogger(), "test")
+	terminateWith(p, newPTYCloser(p), p.exited, 20*time.Millisecond, 20*time.Millisecond, discardLogger(), "test")
 	require.Equal(t, []string{syscall.SIGHUP.String(), "close", syscall.SIGTERM.String(), syscall.SIGKILL.String()}, p.sequence)
 	require.True(t, p.killed, "a command that ignores everything, including the close, is still killed")
 }
@@ -336,7 +336,7 @@ func TestTerminateKillsAtOnceWhereSignalsAreUnsupported(t *testing.T) {
 	p := newSignalPTY(0)
 	p.unsupported = true
 	start := time.Now()
-	terminateWith(p, p.exited, hangupGrace, time.Second, discardLogger(), "test")
+	terminateWith(p, newPTYCloser(p), p.exited, hangupGrace, time.Second, discardLogger(), "test")
 	require.Empty(t, p.signals)
 	require.True(t, p.killed)
 	require.Less(t, time.Since(start), 500*time.Millisecond, "no grace is spent on a step the platform cannot take")
@@ -353,7 +353,7 @@ func TestTerminateKeepsEscalatingWhenASignalFailsForItsOwnReasons(t *testing.T) 
 	p := newSignalPTY(0)
 	p.signalErr = syscall.ESRCH
 	p.signalErrOn = syscall.SIGHUP
-	terminateWith(p, p.exited, 20*time.Millisecond, 20*time.Millisecond, discardLogger(), "test")
+	terminateWith(p, newPTYCloser(p), p.exited, 20*time.Millisecond, 20*time.Millisecond, discardLogger(), "test")
 	require.Equal(t,
 		[]string{syscall.SIGHUP.String(), "close", syscall.SIGTERM.String(), syscall.SIGKILL.String()},
 		p.sequence,

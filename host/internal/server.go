@@ -1133,6 +1133,9 @@ func (h *sessionHandler) HandleSession(sess gssh.Session) {
 			return
 		}
 
+		closer := newPTYCloser(ptmx)
+		defer func() { closer.wait(time.Now().Add(time.Second)) }()
+
 		// Waited on outside the group, so the wait actor and terminate can
 		// both watch it. Its end is recorded against the session's shutdown
 		// the moment Wait returns, before exited closes: which branch the
@@ -1206,7 +1209,7 @@ func (h *sessionHandler) HandleSession(sess gssh.Session) {
 					// away would, and escalate only if it stays. Killing it
 					// outright left a full-screen program no chance to put the
 					// guest's terminal back.
-					terminateWith(ptmx, exited, h.timing.hangup, h.timing.forceCommandStop, h.logger, h.forceCommand[0])
+					terminateWith(ptmx, closer, exited, h.timing.hangup, h.timing.forceCommandStop, h.logger, h.forceCommand[0])
 				}
 				// terminate's own waits are bounded, so the command may not be
 				// confirmed gone; waitErr is only safe to read once it is.
@@ -1219,9 +1222,8 @@ func (h *sessionHandler) HandleSession(sess gssh.Session) {
 
 				drainForceCommandOutput(h.logger, output, outputDrained, nil)
 				cancelOut()
-				// Fired, not waited on: see terminate for why a close of the
-				// master can never be relied on to return.
-				closeAsync(ptmx)
+				// Start after output drains; final cleanup joins the same Close.
+				closer.start()
 
 				select {
 				case <-exited:
