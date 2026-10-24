@@ -73,7 +73,7 @@ func TestEveryOutcomeRow(t *testing.T) {
 		})
 	}
 	t.Run("~. leaves", func(t *testing.T) {
-		pr, pw := io.Pipe()
+		pr, pw := testInputPipe(t)
 		out := &syncSink{}
 		done := runJoinAsync(t, context.Background(), config(t, newFakeRelay(t, relayKnobs{output: "READY"}), withInput(pr), withStdout(out)))
 		// The session's output reaches the terminal only once the session has
@@ -704,8 +704,9 @@ func TestNoOutputWhileAStatusLineIsBeingWritten(t *testing.T) {
 	require.True(t, strings.HasPrefix(out.String(), "<JOINED>REPLAY"), "%q", out.String())
 
 	// Ctrl-C while a status write is held still stops the run.
-	pr, pw := io.Pipe()
+	pr, pw := testInputPipe(t)
 	rec2 := &recorder{gate: make(chan struct{})}
+	t.Cleanup(func() { close(rec2.gate) })
 	done2 := runJoinAsync(t, context.Background(),
 		config(t, newFakeRelay(t, relayKnobs{dropAfterReady: true}), withEvents(rec2), withInput(pr), withWait()))
 	for e := recv(t, rec2.held()); e.Kind != Lost; e = recv(t, rec2.held()) {
@@ -729,7 +730,7 @@ func TestCtrlCStopsEveryStalledPhase(t *testing.T) {
 	}
 	t.Run("a stalled handshake on a first join", func(t *testing.T) {
 		// Nothing can prompt, so the keys are the run's before any handshake.
-		pr, pw := io.Pipe()
+		pr, pw := testInputPipe(t)
 		relay := newFakeRelay(t, relayKnobs{stallHandshake: true})
 		cfg := config(t, relay, withInput(pr), withWait())
 		cfg.Timing.Attempt = time.Hour // only Ctrl-C can end it
@@ -738,7 +739,7 @@ func TestCtrlCStopsEveryStalledPhase(t *testing.T) {
 		})
 	})
 	t.Run("a stalled handshake on a rejoin", func(t *testing.T) {
-		pr, pw := io.Pipe()
+		pr, pw := testInputPipe(t)
 		relay := newFakeRelay(t, relayKnobs{dropAfterReady: true}, relayKnobs{stallHandshake: true})
 		cfg := config(t, relay, withInput(pr), withWait())
 		cfg.Timing.Attempt = time.Hour // only Ctrl-C can end it
@@ -747,7 +748,7 @@ func TestCtrlCStopsEveryStalledPhase(t *testing.T) {
 		})
 	})
 	t.Run("a stalled agent on a rejoin", func(t *testing.T) {
-		pr, pw := io.Pipe()
+		pr, pw := testInputPipe(t)
 		good, signing := newSigner(t), make(chan struct{})
 		var joined atomic.Bool
 		id := Identity{
@@ -772,16 +773,18 @@ func TestCtrlCStopsEveryStalledPhase(t *testing.T) {
 		stopsWithin(t, cfg, pw, func() { recv(t, signing) })
 	})
 	t.Run("a blocked Joined line", func(t *testing.T) {
-		pr, pw := io.Pipe()
-		rec := &recorder{gate: make(chan struct{})} // never opened
+		pr, pw := testInputPipe(t)
+		rec := &recorder{gate: make(chan struct{})} // held until fixture cleanup
+		t.Cleanup(func() { close(rec.gate) })
 		relay := newFakeRelay(t, relayKnobs{})
 		stopsWithin(t, config(t, relay, withInput(pr), withEvents(rec), withWait()), pw, func() { require.Equal(t, Joined, recv(t, rec.held()).Kind) })
 		require.Empty(t, relay.input(t, 0), "the Ctrl-C reached a session that wasn't ready")
 	})
 	t.Run("a blocked Joined line with the replay in", func(t *testing.T) {
-		pr, pw := io.Pipe()
-		rec := &recorder{gate: make(chan struct{})} // never opened
-		stuck := newStuckWriter(t)                  // a terminal that isn't taking output, as the Joined line found
+		pr, pw := testInputPipe(t)
+		rec := &recorder{gate: make(chan struct{})} // held until fixture cleanup
+		t.Cleanup(func() { close(rec.gate) })
+		stuck := newStuckWriter(t) // a terminal that isn't taking output, as the Joined line found
 		relay := newFakeRelay(t, relayKnobs{output: "REPLAY", outputFirst: true})
 		cfg := config(t, relay, withInput(pr), withEvents(rec), withStdout(stuck), withWait())
 		stopsWithin(t, cfg, pw, func() { require.Equal(t, Joined, recv(t, rec.held()).Kind) })
@@ -1169,7 +1172,7 @@ var keyWaits = map[string]keyWait{
 // does on the connections after the first; opts apply last.
 func (w keyWait) start(t *testing.T, next relayKnobs, opts ...option) (keys *io.PipeWriter, relay *fakeRelay, done <-chan Outcome) {
 	t.Helper()
-	pr, pw := io.Pipe()
+	pr, pw := testInputPipe(t)
 	relay = newFakeRelay(t, w.first, next)
 	rec := &recorder{}
 	cfg := config(t, relay, withInput(pr), withEvents(rec), withWait())
@@ -1210,7 +1213,7 @@ func TestEnterAsASessionIsLostEndsTheWaitAfterIt(t *testing.T) {
 	// until release, with an Enter that join has acted on by then.
 	lose := func(t *testing.T) (typed *io.PipeWriter, relay *fakeRelay, rec *recorder, release func(), done <-chan Outcome) {
 		t.Helper()
-		keys, typed := io.Pipe()
+		keys, typed := testInputPipe(t)
 		input := newWatchedInput(keys)
 		relay = newFakeRelay(t, relayKnobs{dropAfterReady: true}, relayKnobs{exit: intp(0)})
 		rec = &recorder{gate: make(chan struct{})}
@@ -1306,7 +1309,7 @@ func TestKeysDuringAWaitTakeTheSessionsEscape(t *testing.T) {
 // Once Run has returned, Input is the caller's again. The Read in progress
 // takes one more chunk, which goes nowhere, and nothing reads Input after it.
 func TestNothingReadsInputOnceRunHasReturned(t *testing.T) {
-	keys, typed := io.Pipe()
+	keys, typed := testInputPipe(t)
 	input := newWatchedInput(keys)
 	rec := &recorder{}
 	cfg := config(t, newFakeRelay(t, relayKnobs{}), withInput(input), withEvents(rec))

@@ -808,6 +808,8 @@ func (c *Host) Share(url string) error {
 	// output - reads from stdout and forwards to output channel
 	go func() {
 		defer c.wg.Done()
+		defer close(c.outputCh)
+		defer func() { _ = stdoutr.Close() }()
 		w := writeFunc(func(p []byte) (int, error) {
 			b, err := ansi.Strip(p)
 			if err != nil {
@@ -830,6 +832,7 @@ func (c *Host) Share(url string) error {
 	// input - reads from input channel and forwards to stdin
 	go func() {
 		defer c.wg.Done()
+		defer func() { _ = stdinw.Close() }()
 		for {
 			select {
 			case str, ok := <-c.inputCh:
@@ -1069,6 +1072,7 @@ func (c *Client) JoinWithContext(ctx context.Context, session *api.GetSessionRes
 	c.wg.Add(1)
 	go func() {
 		defer c.wg.Done()
+		defer close(c.outputCh)
 		if err := g.Run(); err != nil {
 			testLogger.Error("error in client run group", "error", err)
 		}
@@ -1081,18 +1085,38 @@ func (c *Client) Join(session *api.GetSessionResponse, clientJoinURL string) err
 	return c.JoinWithContext(context.Background(), session, clientJoinURL)
 }
 
-func scanner(ch chan string) *bufio.Scanner {
+func scanner(t *testing.T, ch chan string) *bufio.Scanner {
+	t.Helper()
 	r, w := io.Pipe()
-	s := bufio.NewScanner(r)
-
-	go func() {
-		for str := range ch {
-			_, _ = w.Write([]byte(str))
+	stop, done := make(chan struct{}), make(chan struct{})
+	t.Cleanup(func() {
+		close(stop)
+		_ = r.Close()
+		_ = w.Close()
+		select {
+		case <-done:
+		case <-time.After(callbackTimeout):
+			t.Error("scanner writer did not stop")
 		}
-
+	})
+	go func() {
+		defer close(done)
+		defer func() { _ = w.Close() }()
+		for {
+			select {
+			case str, ok := <-ch:
+				if !ok {
+					return
+				}
+				if _, err := w.Write([]byte(str)); err != nil {
+					return
+				}
+			case <-stop:
+				return
+			}
+		}
 	}()
-
-	return s
+	return bufio.NewScanner(r)
 }
 
 // stripShellPrompt removes PowerShell prompt prefix and ANSI codes on Windows

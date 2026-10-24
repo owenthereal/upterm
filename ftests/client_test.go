@@ -100,7 +100,7 @@ func testClientNonExistingSession(t *testing.T, hostShareURL, hostNodeAddr, clie
 
 	// verify input/output
 	hostInputCh, hostOutputCh := h.InputOutput()
-	hostScanner := scanner(hostOutputCh)
+	hostScanner := scanner(t, hostOutputCh)
 
 	hostInputCh <- `echo "hello"`
 	expectLine(t, hostScanner, `echo "hello"`)
@@ -138,7 +138,7 @@ func testClientAttachHostWithSameCommand(t *testing.T, hostShareURL, hostNodeAdd
 
 	// verify input/output
 	hostInputCh, hostOutputCh := h.InputOutput()
-	hostScanner := scanner(hostOutputCh)
+	hostScanner := scanner(t, hostOutputCh)
 
 	c := &Client{
 		PrivateKeys: []string{ClientPrivateKey},
@@ -148,7 +148,7 @@ func testClientAttachHostWithSameCommand(t *testing.T, hostShareURL, hostNodeAdd
 	awaitGuestsAttached(t, adminSocketFile, 1)
 
 	remoteInputCh, remoteOutputCh := c.InputOutput()
-	remoteScanner := scanner(remoteOutputCh)
+	remoteScanner := scanner(t, remoteOutputCh)
 
 	// host input
 	hostInputCh <- `echo "hello"`
@@ -192,7 +192,7 @@ func testClientAttachHostWithDifferentCommand(t *testing.T, hostShareURL string,
 
 	// verify input/output
 	hostInputCh, hostOutputCh := h.InputOutput()
-	hostScanner := scanner(hostOutputCh)
+	hostScanner := scanner(t, hostOutputCh)
 
 	hostInputCh <- `echo "hello"`
 
@@ -207,7 +207,7 @@ func testClientAttachHostWithDifferentCommand(t *testing.T, hostShareURL string,
 	require.NoError(err)
 
 	remoteInputCh, remoteOutputCh := c.InputOutput()
-	remoteScanner := scanner(remoteOutputCh)
+	remoteScanner := scanner(t, remoteOutputCh)
 
 	// Wait for ssh stdin/stdout to fully attach - critical for force command isolation
 	time.Sleep(time.Second)
@@ -246,7 +246,7 @@ func testClientAttachReadOnly(t *testing.T, hostShareURL, hostNodeAddr, clientJo
 
 	// verify input/output
 	hostInputCh, hostOutputCh := h.InputOutput()
-	hostScanner := scanner(hostOutputCh)
+	hostScanner := scanner(t, hostOutputCh)
 
 	c := &Client{
 		PrivateKeys: []string{ClientPrivateKey},
@@ -255,7 +255,7 @@ func testClientAttachReadOnly(t *testing.T, hostShareURL, hostNodeAddr, clientJo
 	require.NoError(err)
 
 	remoteInputCh, remoteOutputCh := c.InputOutput()
-	remoteScanner := scanner(remoteOutputCh)
+	remoteScanner := scanner(t, remoteOutputCh)
 
 	// The guest is told the session is read-only.
 	expectLine(t, remoteScanner, "upterm: this session is read-only; what you type isn't sent.", "client should see the read-only notice")
@@ -402,8 +402,10 @@ func testClientLocalPortForward(t *testing.T, hostShareURL, hostNodeAddr, client
 	// The host lists the forward as a jump, apart from the terminal this
 	// client joined with, and says where it went: the destination the guest
 	// asked for, through the relay unchanged.
-	adminClient, err := host.AdminClient(adminSocketFile)
+	conn, err := host.AdminConn(adminSocketFile)
 	require.NoError(err)
+	defer func() { _ = conn.Close() }()
+	adminClient := api.NewAdminServiceClient(conn)
 	want := []string{targetLn.Addr().String()}
 	require.Eventually(func() bool {
 		sess, err := adminClient.GetSession(context.Background(), &api.GetSessionRequest{})
@@ -498,8 +500,10 @@ func testGuestKeepaliveIsAnswered(t *testing.T, hostShareURL, hostNodeAddr, clie
 func getAndVerifySession(t *testing.T, adminSocketFile string, wantHostURL, wantNodeURL string) *api.GetSessionResponse {
 	require := require.New(t)
 
-	adminClient, err := host.AdminClient(adminSocketFile)
+	conn, err := host.AdminConn(adminSocketFile)
 	require.NoError(err)
+	defer func() { _ = conn.Close() }()
+	adminClient := api.NewAdminServiceClient(conn)
 
 	sess, err := adminClient.GetSession(context.Background(), &api.GetSessionRequest{})
 	require.NoError(err)
@@ -517,11 +521,13 @@ const adminClientSessionTimeout = 10 * time.Second
 // adminClientSession asks the admin socket what the session looks like right
 // now. Unlike getAndVerifySession it asserts nothing, so a caller can poll it.
 func adminClientSession(socket string) (*api.GetSessionResponse, error) {
-	adminClient, err := host.AdminClient(socket)
+	conn, err := host.AdminConn(socket)
 	if err != nil {
 		return nil, err
 	}
 
+	defer func() { _ = conn.Close() }()
+	adminClient := api.NewAdminServiceClient(conn)
 	ctx, cancel := context.WithTimeout(context.Background(), adminClientSessionTimeout)
 	defer cancel()
 	return adminClient.GetSession(ctx, &api.GetSessionRequest{})
@@ -540,9 +546,8 @@ func adminClientSession(socket string) (*api.GetSessionResponse, error) {
 // by newlines, so the lines the test scans for never come. The host lists a
 // guest only once its output is attached.
 //
-// It asks over one connection, closed when it returns, rather than through
-// adminClientSession, which opens a connection per question and never closes
-// it.
+// It asks over one connection, closed when it returns, rather than opening
+// a fresh connection for every poll.
 func awaitGuestsAttached(t *testing.T, socket string, n int) {
 	t.Helper()
 	conn, err := host.AdminConn(socket)

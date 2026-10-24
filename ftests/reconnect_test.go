@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -68,6 +70,11 @@ const (
 // can show runs in that mode's suite alone. A scenario that needs a relay set
 // up differently from ts1 and ts2 runs here too, for the relay of its own.
 func (suite *FtestSuite) TestReconnect() {
+	if suite.mode == routing.ModeConsul {
+		client, err := consulTestClient()
+		require.NoError(suite.T(), err)
+		suite.T().Cleanup(client.transport.CloseIdleConnections)
+	}
 	scenarios := []struct {
 		name string
 		// only, when set, is the one routing mode the scenario runs in.
@@ -345,9 +352,10 @@ func shareRedialling(t *testing.T, protocol string, relay *Server, timing host.R
 	}
 	r := &redialHost{Host: h, fwd: fwd}
 	r.first = shareHost(t, h, protocol+"://"+fwd.Addr(), relay.NodeAddr())
-	admin, err := host.AdminClient(h.AdminSocketFile)
+	conn, err := host.AdminConn(h.AdminSocketFile)
 	require.NoError(t, err)
-	r.admin = admin
+	t.Cleanup(func() { _ = conn.Close() })
+	r.admin = api.NewAdminServiceClient(conn)
 	r.awaitStatus(t, sessiondir.StatusReady)
 	return r
 }
@@ -461,7 +469,26 @@ func requireNoHostBanner(t *testing.T, session *api.GetSessionResponse, joinURL 
 // consulTestClient is the one client these tests read Consul with: each client
 // keeps connections of its own open, and Consul refuses a client address that
 // holds too many.
-var consulTestClient = sync.OnceValues(testhelpers.ConsulClient)
+type consulReadClient struct {
+	*consulapi.Client
+	transport *http.Transport
+}
+
+var consulTestClient = sync.OnceValues(func() (consulReadClient, error) {
+	config := consulapi.DefaultConfig()
+	u, err := url.Parse(testhelpers.ConsulURL())
+	if err != nil {
+		config.Transport.CloseIdleConnections()
+		return consulReadClient{}, err
+	}
+	config.Address = u.Host
+	client, err := consulapi.NewClient(config)
+	if err != nil {
+		config.Transport.CloseIdleConnections()
+		return consulReadClient{}, err
+	}
+	return consulReadClient{Client: client, transport: config.Transport}, nil
+})
 
 // consulPair reads id's entry straight from Consul, past every relay's cache;
 // nil if it's absent or can't be read. It doesn't fail the test itself, so it

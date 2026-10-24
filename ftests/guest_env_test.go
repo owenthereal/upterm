@@ -39,7 +39,7 @@ func testForcedCommandSeesTheGuestsConnection(t *testing.T, hostShareURL, hostNo
 			t.Cleanup(c.Close)
 
 			_, out := c.InputOutput()
-			s := scanner(out)
+			s := scanner(t, out)
 			got := map[string]string{}
 			for len(got) < 4 {
 				k, v, ok := strings.Cut(scan(s), "=")

@@ -35,12 +35,24 @@ func (r *outcomeRun) attachInteractive(t *testing.T, ctx context.Context, socket
 		require.NoError(t, err)
 		keys = append(keys, key)
 	}
+	ctx, cancel := context.WithCancel(ctx)
 	inR, inW := io.Pipe()
+	done := make(chan struct{})
+	t.Cleanup(func() {
+		cancel()
+		_ = inR.Close()
+		_ = inW.Close()
+		select {
+		case <-done:
+		case <-time.After(outcomeTimeout):
+			t.Error("interactive attach client did not stop")
+		}
+	})
 	client := &attach.Client{
 		Socket: socket, HostKeys: keys, Stdin: inR, Stdout: io.Discard, Logger: testLogger,
 		Pty: &attach.Pty{Term: "xterm", Size: termsize.Size{Cols: 80, Rows: 24}},
 	}
-	go func() { _, _ = client.Run(ctx) }()
+	go func() { defer close(done); _, _ = client.Run(ctx) }()
 	return inW
 }
 

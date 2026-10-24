@@ -100,7 +100,7 @@ func testClientAgentCertAuthorizedAsItsOwnKey(t *testing.T, hostShareURL, hostNo
 	defer c.Close()
 
 	in, out := c.InputOutput()
-	sc := scanner(out)
+	sc := scanner(t, out)
 	in <- `echo "joined-$((40+2))"`
 	expectLine(t, sc, "joined-42")
 }

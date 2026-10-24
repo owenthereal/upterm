@@ -25,8 +25,8 @@ func takeKey(in *input, k key) waitKey {
 }
 
 func TestKeysTypedDuringAWaitNeverReachTheNextSession(t *testing.T) {
-	pr, pw := io.Pipe()
-	in := newInput(pr, '~')
+	pr, pw := testInputPipe(t)
+	in := testInput(t, pr, '~')
 	in.start()
 	v1 := in.session()
 	v1.activate()
@@ -42,8 +42,8 @@ func TestKeysTypedDuringAWaitNeverReachTheNextSession(t *testing.T) {
 }
 
 func TestAChunkHandedToAClosingViewIsDropped(t *testing.T) {
-	pr, pw := io.Pipe()
-	in := newInput(pr, '~')
+	pr, pw := testInputPipe(t)
+	in := testInput(t, pr, '~')
 	in.handing = make(chan struct{}, 1)
 	in.start()
 	v := in.session()
@@ -68,8 +68,8 @@ func TestAChunkHandedToAClosingViewIsDropped(t *testing.T) {
 }
 
 func TestAnInactiveViewLeavesKeysWithJoin(t *testing.T) {
-	pr, pw := io.Pipe()
-	in := newInput(pr, '~')
+	pr, pw := testInputPipe(t)
+	in := testInput(t, pr, '~')
 	in.start()
 	v := in.session() // setup and the Joined line are still in progress
 	go func() { _, _ = pw.Write([]byte{0x03}) }()
@@ -85,8 +85,8 @@ func TestAnInactiveViewLeavesKeysWithJoin(t *testing.T) {
 // session's view is active, was typed before the session was ready: the key
 // is dropped, and never acts on the session the guest has been told is ready.
 func TestAKeyTypedBeforeASessionWasReadyNeverActsOnIt(t *testing.T) {
-	pr, pw := io.Pipe()
-	in := newInput(pr, '~')
+	pr, pw := testInputPipe(t)
+	in := testInput(t, pr, '~')
 	held, release := make(chan struct{}), make(chan struct{})
 	in.controlling = func() {
 		held <- struct{}{}
@@ -115,8 +115,8 @@ func TestAKeyTypedBeforeASessionWasReadyNeverActsOnIt(t *testing.T) {
 // view has closed, belongs to neither: it never acts on the wait after it. A
 // key typed in that wait does.
 func TestAKeyTypedBeforeASessionNeverActsOnTheWaitAfterIt(t *testing.T) {
-	pr, pw := io.Pipe()
-	in := newInput(pr, '~')
+	pr, pw := testInputPipe(t)
+	in := testInput(t, pr, '~')
 	held, release := make(chan struct{}), make(chan struct{})
 	var once sync.Once
 	in.controlling = func() {
@@ -139,8 +139,8 @@ func TestAKeyTypedBeforeASessionNeverActsOnTheWaitAfterIt(t *testing.T) {
 }
 
 func TestWaitCountsCRLFAsOneEnter(t *testing.T) {
-	pr, pw := io.Pipe()
-	in := newInput(pr, '~')
+	pr, pw := testInputPipe(t)
+	in := testInput(t, pr, '~')
 	in.start()
 	_, _ = pw.Write([]byte("\r\n"))
 	require.Equal(t, keyRetry, next(in))
@@ -153,8 +153,8 @@ func TestWaitCountsCRLFAsOneEnter(t *testing.T) {
 
 func TestWaitKeys(t *testing.T) {
 	for typed, want := range map[string]waitKey{"\x03": keyStop, "~.": keyLeave, "\r": keyRetry, "\n": keyRetry, "x\x03": keyStop} {
-		pr, pw := io.Pipe()
-		in := newInput(pr, '~')
+		pr, pw := testInputPipe(t)
+		in := testInput(t, pr, '~')
 		in.start()
 		// The reader ends once join takes the keyLeave that the EOF becomes.
 		t.Cleanup(func() {
@@ -173,8 +173,8 @@ func TestKeysBeforeAnEscapeInTheSameReadCount(t *testing.T) {
 		"\x03\r~.": {keyStop, keyRetry, keyLeave},
 		"\r~.":     {keyRetry, keyLeave},
 	} {
-		pr, pw := io.Pipe()
-		in := newInput(pr, '~')
+		pr, pw := testInputPipe(t)
+		in := testInput(t, pr, '~')
 		in.start()
 		t.Cleanup(func() {
 			in.stop()
@@ -188,16 +188,16 @@ func TestKeysBeforeAnEscapeInTheSameReadCount(t *testing.T) {
 }
 
 func TestEOFDuringAWaitIsLeaving(t *testing.T) {
-	pr, pw := io.Pipe()
-	in := newInput(pr, '~')
+	pr, pw := testInputPipe(t)
+	in := testInput(t, pr, '~')
 	in.start()
 	require.NoError(t, pw.Close())
 	require.Equal(t, keyLeave, next(in))
 }
 
 func TestAShortReadKeepsTheRestOfTheChunk(t *testing.T) {
-	pr, pw := io.Pipe()
-	in := newInput(pr, '~')
+	pr, pw := testInputPipe(t)
+	in := testInput(t, pr, '~')
 	in.start()
 	v := in.session()
 	v.activate()
@@ -229,8 +229,8 @@ func TestAShortReadKeepsTheRestOfTheChunk(t *testing.T) {
 }
 
 func TestEOFWhileASessionIsActiveReachesIt(t *testing.T) {
-	pr, pw := io.Pipe()
-	in := newInput(pr, '~')
+	pr, pw := testInputPipe(t)
+	in := testInput(t, pr, '~')
 	in.start()
 	v := in.session()
 	v.activate()
@@ -240,8 +240,8 @@ func TestEOFWhileASessionIsActiveReachesIt(t *testing.T) {
 }
 
 func TestEOFTakenByAnAbandonedReadIsStillLeaving(t *testing.T) {
-	pr, pw := io.Pipe()
-	in := newInput(pr, '~')
+	pr, pw := testInputPipe(t)
+	in := testInput(t, pr, '~')
 	in.start()
 	v := in.session()
 	v.activate()
@@ -266,8 +266,8 @@ func TestEOFTakenByAnAbandonedReadIsStillLeaving(t *testing.T) {
 }
 
 func TestEOFASessionNeverTookIsLeaving(t *testing.T) {
-	pr, pw := io.Pipe()
-	in := newInput(pr, '~')
+	pr, pw := testInputPipe(t)
+	in := testInput(t, pr, '~')
 	in.start()
 	v := in.session()
 	v.activate()
@@ -281,8 +281,8 @@ func TestEOFASessionNeverTookIsLeaving(t *testing.T) {
 // is, when a session's view is activated before join acts on it. It comes
 // again as that view closes.
 func TestEOFDroppedAsASessionBecomesReadyIsLeavingOnceItCloses(t *testing.T) {
-	pr, pw := io.Pipe()
-	in := newInput(pr, '~')
+	pr, pw := testInputPipe(t)
+	in := testInput(t, pr, '~')
 	in.start()
 	v := in.session()
 	require.NoError(t, pw.Close())
@@ -299,8 +299,8 @@ func TestEOFDroppedAsASessionBecomesReadyIsLeavingOnceItCloses(t *testing.T) {
 }
 
 func TestEverySessionAfterTheEndSeesItAtOnce(t *testing.T) {
-	pr, pw := io.Pipe()
-	in := newInput(pr, '~')
+	pr, pw := testInputPipe(t)
+	in := testInput(t, pr, '~')
 	in.start()
 	gone := errors.New("the terminal went away")
 	require.NoError(t, pw.CloseWithError(gone))
@@ -315,8 +315,8 @@ func TestEverySessionAfterTheEndSeesItAtOnce(t *testing.T) {
 }
 
 func TestAnEscapeStartedBeforeASessionDoesNotCarryOver(t *testing.T) {
-	pr, pw := io.Pipe()
-	in := newInput(pr, '~')
+	pr, pw := testInputPipe(t)
+	in := testInput(t, pr, '~')
 	in.start()
 	_, _ = pw.Write([]byte("\r~")) // Enter, then the first half of "~."
 	require.Equal(t, keyRetry, next(in))
@@ -332,7 +332,7 @@ func TestAnEscapeStartedBeforeASessionDoesNotCarryOver(t *testing.T) {
 func TestAStoppedReaderDeliversNothing(t *testing.T) {
 	// reader starts a reader of r whose return closes exited.
 	reader := func(r io.Reader, handing chan struct{}) *input {
-		in := newInput(r, '~')
+		in := testInput(t, r, '~')
 		in.exited = make(chan struct{})
 		in.handing = handing
 		in.start()
@@ -349,7 +349,7 @@ func TestAStoppedReaderDeliversNothing(t *testing.T) {
 		}
 	}
 	t.Run("holding a key join didn't take", func(t *testing.T) {
-		pr, pw := io.Pipe()
+		pr, pw := testInputPipe(t)
 		in := reader(pr, nil)
 		// Two Enters in one chunk: join takes the first, and has stopped taking
 		// keys by the second, which the reader holds.
@@ -358,7 +358,7 @@ func TestAStoppedReaderDeliversNothing(t *testing.T) {
 		stop(t, in)
 	})
 	t.Run("holding a chunk a session didn't take", func(t *testing.T) {
-		pr, pw := io.Pipe()
+		pr, pw := testInputPipe(t)
 		handing := make(chan struct{}, 1)
 		in := reader(pr, handing)
 		in.session().activate() // nobody reads it
@@ -367,7 +367,7 @@ func TestAStoppedReaderDeliversNothing(t *testing.T) {
 		stop(t, in)
 	})
 	t.Run("holding the end of the input", func(t *testing.T) {
-		pr, pw := io.Pipe()
+		pr, pw := testInputPipe(t)
 		in := reader(pr, nil)
 		in.session().activate() // nobody reads it, so the reader waits for it to close
 		require.NoError(t, pw.Close())
@@ -375,7 +375,7 @@ func TestAStoppedReaderDeliversNothing(t *testing.T) {
 		stop(t, in)
 	})
 	t.Run("in a Read", func(t *testing.T) {
-		pr, pw := io.Pipe()
+		pr, pw := testInputPipe(t)
 		input := newWatchedInput(pr)
 		in := reader(input, nil)
 		v := in.session()
@@ -394,4 +394,11 @@ func TestAStoppedReaderDeliversNothing(t *testing.T) {
 		require.NoError(t, v.Close())
 		require.Empty(t, <-got, "a stopped reader handed a chunk to a session")
 	})
+}
+
+func testInput(t *testing.T, r io.Reader, escape byte) *input {
+	t.Helper()
+	in := newInput(r, escape)
+	t.Cleanup(in.stop)
+	return in
 }

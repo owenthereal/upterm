@@ -237,6 +237,13 @@ func (a relayAddr) String() string { return a.host }
 
 type option func(*Config)
 
+func testInputPipe(t *testing.T) (*io.PipeReader, *io.PipeWriter) {
+	t.Helper()
+	r, w := io.Pipe()
+	t.Cleanup(func() { _ = r.Close(); _ = w.Close() })
+	return r, w
+}
+
 // config is a Config on relay: a Terminal on a syncSink with escape byte '~',
 // one generated signer, CheckHostKey per the knobs, an Input nobody types on,
 // and timings that a test runs into only if it means to. Waits are short. The

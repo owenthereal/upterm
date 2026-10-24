@@ -65,11 +65,13 @@ func InstallSignalPolicy() {
 	installOnce.Do(func() {
 		sigPipe := make(chan os.Signal, 1)
 		signal.Notify(sigPipe, unix.SIGPIPE)
-		go func() {
-			for range sigPipe {
-			}
-		}()
+		go drainSIGPIPE(sigPipe)
 
 		signal.Ignore(unix.SIGTTIN, unix.SIGTTOU)
 	})
+}
+
+func drainSIGPIPE(ch <-chan os.Signal) {
+	for range ch {
+	}
 }
