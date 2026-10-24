@@ -85,7 +85,10 @@ func TestPTYCloseReleasesParkedIO(t *testing.T) {
 				continue
 			}
 			select {
-			case <-ch:
+			case err := <-ch:
+				if err != nil {
+					t.Logf("PTY %s cleanup completed with shutdown error: %v", name, err)
+				}
 			case <-time.After(100 * time.Millisecond):
 				t.Errorf("cleanup could not release PTY %s", name)
 			}
@@ -263,7 +266,10 @@ func TestPTYCloseDoesNotWaitOnTheMutex(t *testing.T) {
 		_ = p.Close()
 		for _, ch := range []chan error{readDone, closeDone} {
 			select {
-			case <-ch:
+			case err := <-ch:
+				if err != nil {
+					t.Logf("PTY worker cleanup completed with shutdown error: %v", err)
+				}
 			case <-time.After(time.Second):
 				t.Error("PTY worker survived mutex release")
 			}
@@ -320,7 +326,7 @@ func inputCancellationPTY(t *testing.T) (PTY, *exec.Cmd, string) {
 	_, err = io.ReadFull(p, ready)
 	require.NoError(t, err)
 	require.Equal(t, "READY", string(ready))
-	require.NoError(t, p.(*pty).File.SetReadDeadline(time.Now().Add(time.Second)))
+	require.NoError(t, p.(*pty).SetReadDeadline(time.Now().Add(time.Second)))
 	return p, cmd, release
 }
 
@@ -340,7 +346,7 @@ func TestPTYInputCancellationReleasesOnlyItsWriter(t *testing.T) {
 		return
 	}
 	p, cmd, release := inputCancellationPTY(t)
-	require.NoError(t, p.(*pty).File.SetReadDeadline(time.Now().Add(-time.Second)))
+	require.NoError(t, p.(*pty).SetReadDeadline(time.Now().Add(-time.Second)))
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	done := make(chan ptyInputResult, 1)
@@ -354,7 +360,7 @@ func TestPTYInputCancellationReleasesOnlyItsWriter(t *testing.T) {
 	require.NoError(t, cmd.Process.Signal(syscall.Signal(0)))
 	_, readErr := p.Read(make([]byte, 1))
 	require.ErrorIs(t, readErr, os.ErrDeadlineExceeded, "write cancellation must preserve the read deadline")
-	require.NoError(t, p.(*pty).File.SetReadDeadline(time.Now().Add(time.Second)))
+	require.NoError(t, p.(*pty).SetReadDeadline(time.Now().Add(time.Second)))
 	require.NoError(t, os.WriteFile(release, []byte(fmt.Sprint(result.n)), 0600))
 	reader := bufio.NewReader(p)
 	count, err := reader.ReadString('\n')
