@@ -17,6 +17,7 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	ggh "github.com/google/go-github/v48/github"
@@ -413,41 +414,94 @@ func TestUpgradeAdvice(t *testing.T) {
 // that is slow to answer must not hold the banner: past the bound the advice
 // is the one that claims nothing, and the log says why.
 func TestUpgradeAdviceWithinGivesUpOnASlowLookup(t *testing.T) {
-	origTimeout := upgradeAdviceTimeout
-	t.Cleanup(func() { upgradeAdviceTimeout = origTimeout })
-	upgradeAdviceTimeout = 50 * time.Millisecond
+	synctest.Test(t, func(t *testing.T) {
+		const bound = 50 * time.Millisecond
+		release := make(chan struct{})
+		lookupDone := make(chan struct{})
+		var logs bytes.Buffer
+		logger := slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
+		answer := make(chan string, 1)
+		callDone := make(chan struct{})
+		go func() {
+			defer close(callDone)
+			answer <- upgradeAdviceWithinBound(logger, bound, func() string {
+				defer close(lookupDone)
+				<-release
+				return "the late lookup's answer"
+			})
+		}()
+		defer func() {
+			close(release)
+			<-lookupDone
+			<-callDone
+			synctest.Wait()
+		}()
+		synctest.Wait()
 
-	withRunningBinary(t, aStandaloneBinary(t))
-	asked := make(chan struct{})
-	release := make(chan struct{})
-	orig := systemProbes
-	t.Cleanup(func() { systemProbes = orig })
-	systemProbes = probes{dpkgOwns: func(string) (bool, error) {
-		close(asked)
-		<-release
-		// Owned, so the lookup ends here once released, without reading
-		// anything a later cleanup restores.
-		return true, nil
-	}}
-	// Registered last, so it runs first: the lookup has read the package's
-	// vars by the time it is asked, and once released it reads no more.
-	t.Cleanup(func() { close(release) })
+		time.Sleep(bound - time.Nanosecond)
+		synctest.Wait()
+		select {
+		case advice := <-answer:
+			t.Fatalf("lookup returned before the timeout boundary: %q", advice)
+		default:
+		}
+		time.Sleep(time.Nanosecond)
+		synctest.Wait()
+		select {
+		case advice := <-answer:
+			require.Equal(t, theWayItWasInstalled, advice)
+		default:
+			t.Fatal("lookup did not return fallback at the timeout boundary")
+		}
+		require.Contains(t, logs.String(), "level=DEBUG")
+		require.Contains(t, logs.String(), "the upgrade advice lookup timed out; advising to upgrade the way upterm was installed")
+		require.Contains(t, logs.String(), "timeout=50ms")
+	})
+}
 
-	var logs bytes.Buffer
-	logger := slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
-	start := time.Now()
-	advice := upgradeAdviceWithin(logger)
-	elapsed := time.Since(start)
-	select {
-	case <-asked:
-	case <-time.After(5 * time.Second):
-		t.Fatal("the lookup never reached the package database")
-	}
+func TestUpgradeAdviceWithinUsesAnEarlyAnswer(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		const earlyAnswer = "upgrade with the early lookup's answer"
+		release := make(chan struct{})
+		lookupDone := make(chan struct{})
+		var logs bytes.Buffer
+		logger := slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
+		answer := make(chan string, 1)
+		callDone := make(chan struct{})
+		go func() {
+			defer close(callDone)
+			answer <- upgradeAdviceWithinBound(logger, 50*time.Millisecond, func() string {
+				defer close(lookupDone)
+				<-release
+				return earlyAnswer
+			})
+		}()
+		defer func() {
+			close(release)
+			<-lookupDone
+			<-callDone
+			synctest.Wait()
+		}()
+		synctest.Wait()
 
-	require.Equal(t, "upgrade it the way it was installed", advice)
-	require.Less(t, elapsed, upgradeAdviceTimeout+500*time.Millisecond, "the bound didn't hold the lookup to it")
-	require.Contains(t, logs.String(), "level=DEBUG")
-	require.Contains(t, logs.String(), "timed out")
+		time.Sleep(20*time.Millisecond - time.Nanosecond)
+		synctest.Wait()
+		select {
+		case advice := <-answer:
+			t.Fatalf("lookup returned before the early answer: %q", advice)
+		default:
+		}
+		time.Sleep(time.Nanosecond)
+		release <- struct{}{}
+		synctest.Wait()
+		select {
+		case advice := <-answer:
+			require.Equal(t, earlyAnswer, advice)
+		default:
+			t.Fatal("lookup did not return the early answer at 20ms")
+		}
+		require.NotContains(t, logs.String(), "timed out")
+	})
 }
 
 // A lookup that answers within the bound is the answer.
