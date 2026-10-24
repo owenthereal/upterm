@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"os"
 	"testing"
+
+	"go.uber.org/goleak"
 )
 
 // TestMain is the child-side half of the guard around the real spawn.
@@ -40,7 +42,8 @@ func TestMain(m *testing.M) {
 	realSystemProbes, realToolFallbacks = systemProbes, toolFallbacks
 	systemProbes, toolFallbacks = probes{}, nil
 
-	os.Exit(m.Run())
+	// Host runs install this process-wide SIGPIPE drain until process exit.
+	goleak.VerifyTestMain(m, goleak.IgnoreTopFunction("github.com/owenthereal/upterm/host.drainSIGPIPE"))
 }
 
 // realSystemProbes and realToolFallbacks are what the package has before

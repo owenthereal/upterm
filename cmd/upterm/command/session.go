@@ -703,10 +703,12 @@ func stopSessionWithin(ctx context.Context, arg string, out io.Writer, bound tim
 	if err != nil {
 		return err
 	}
-	client, err := host.AdminClient(adminSocket)
+	conn, err := host.AdminConn(adminSocket)
 	if err != nil {
 		return err
 	}
+	defer conn.Close()
+	client := api.NewAdminServiceClient(conn)
 	rpcCtx, cancelRPC := context.WithTimeout(ctx, sessionQueryTimeout)
 	// The launch that was inspected, not just the name: the socket path
 	// belongs to the name, and a session that ended between the read above
@@ -901,10 +903,12 @@ func setSession(ctx context.Context, arg string, joinTimeout time.Duration, out 
 	if err != nil {
 		return err
 	}
-	client, err := host.AdminClient(adminSocket)
+	conn, err := host.AdminConn(adminSocket)
 	if err != nil {
 		return err
 	}
+	defer conn.Close()
+	client := api.NewAdminServiceClient(conn)
 	rpcCtx, cancelRPC := context.WithTimeout(ctx, sessionQueryTimeout)
 	// Dialled before anything is sent. The client connects lazily, so a
 	// request that failed can't say whether it ever left; a dial that failed
@@ -2322,10 +2326,12 @@ func currentAdminSocketFile() string {
 }
 
 func session(ctx context.Context, adminSocket string) (*api.GetSessionResponse, error) {
-	c, err := host.AdminClient(adminSocket)
+	conn, err := host.AdminConn(adminSocket)
 	if err != nil {
 		return nil, err
 	}
+	defer conn.Close()
+	c := api.NewAdminServiceClient(conn)
 
 	return c.GetSession(ctx, &api.GetSessionRequest{})
 }
