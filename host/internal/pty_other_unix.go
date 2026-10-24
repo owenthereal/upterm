@@ -4,6 +4,10 @@ package internal
 
 import "os"
 
+type ptyPlatformState struct {
+	*os.File
+}
+
 func preparePTYMaster(f *os.File) (*os.File, error) { return f, nil }
 
 func readPTY(p *pty, b []byte) (int, error) {

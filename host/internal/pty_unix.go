@@ -135,7 +135,7 @@ func wrapPty(f *os.File, cmd *exec.Cmd, pinned bool, r sizeReporter) *pty {
 		pid = cmd.Process.Pid
 		process = cmd.Process
 	}
-	p := &pty{File: f, cmd: cmd, pinned: pinned, report: r, pid: pid, process: process}
+	p := &pty{ptyPlatformState: ptyPlatformState{File: f}, cmd: cmd, pinned: pinned, report: r, pid: pid, process: process}
 	initPTYInput(p)
 	return p
 }
@@ -146,8 +146,7 @@ func wrapPty(f *os.File, cmd *exec.Cmd, pinned bool, r sizeReporter) *pty {
 // * https://travis-ci.org/owenthereal/upterm/jobs/632489866
 // * https://travis-ci.org/owenthereal/upterm/jobs/632458125
 type pty struct {
-	*os.File
-	input  *ptyInput
+	ptyPlatformState
 	cmd    *exec.Cmd // Process started with this PTY
 	pinned bool
 

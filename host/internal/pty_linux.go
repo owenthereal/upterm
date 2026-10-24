@@ -8,6 +8,11 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+type ptyPlatformState struct {
+	*os.File
+	input *ptyInput
+}
+
 // preparePTYMaster transfers the master to a new Go File whose descriptor is
 // nonblocking when it enters the runtime poller. Fd-based setup has marked the
 // original File blocking; resetting its descriptor flags alone cannot undo that.

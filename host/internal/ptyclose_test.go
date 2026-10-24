@@ -28,7 +28,7 @@ type heldClosePTY struct {
 
 func newHeldClosePTY(t *testing.T) *heldClosePTY {
 	p := &heldClosePTY{signalPTY: newSignalPTY(0), entered: make(chan struct{}), release: make(chan struct{}), returned: make(chan struct{})}
-	t.Cleanup(func() { p.unblock(); _ = p.signalPTY.Kill(); synctest.Wait() })
+	t.Cleanup(func() { p.unblock(); _ = p.Kill(); synctest.Wait() })
 	return p
 }
 func (p *heldClosePTY) unblock() { p.once.Do(func() { close(p.release) }) }
