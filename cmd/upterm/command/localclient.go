@@ -14,13 +14,13 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
-// localClientDrainTimeout bounds how long upterm host waits freely, after
+// defaultLocalClientDrainTimeout bounds how long upterm host waits freely, after
 // the daemon has ended, for its own terminal to finish: the client drains
 // the channel into stdout and restores the terminal on its way out, and a
 // stdout nobody drains must not hold the exit forever. Past it the client is
 // cancelled — and still waited for, since cancellation is what makes it
-// finish. A var so tests can shorten it.
-var localClientDrainTimeout = 5 * time.Second
+// finish.
+const defaultLocalClientDrainTimeout = 5 * time.Second
 
 // attachLocalTerminal attaches the local terminal to a session's attach
 // socket in the shape lt describes, holding raw mode and following resizes

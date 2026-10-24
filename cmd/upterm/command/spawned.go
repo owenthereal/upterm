@@ -34,11 +34,11 @@ type clientFunc func(ctx context.Context, socket string, keys []ssh.PublicKey, s
 
 type displayFunc func(ctx context.Context, sess *api.GetSessionResponse, name string) error
 
-// startedWaitTimeout bounds how long a foreground parent whose terminal has
+// defaultStartedWaitTimeout bounds how long a foreground parent whose terminal has
 // already left waits to be told whether the command started. The daemon's
 // own gate is DefaultInitialClientTimeout (10 s), after which it reports
-// abandonment itself; this is that plus a margin. A var for tests.
-var startedWaitTimeout = 15 * time.Second
+// abandonment itself; this is that plus a margin.
+const defaultStartedWaitTimeout = 15 * time.Second
 
 // spawnedSession is upterm host as the process that starts a session: it
 // spawns the daemon, runs the exchange, and then either attaches its
@@ -66,6 +66,21 @@ type spawnedSession struct {
 	// it: there is no terminal attached to press the keys in.
 	keyHint string
 	hintOut io.Writer
+
+	// Non-positive waits use the production defaults.
+	startedWaitTimeout      time.Duration
+	localClientDrainTimeout time.Duration
+}
+
+func (s *spawnedSession) waits() (started, drain time.Duration) {
+	started, drain = s.startedWaitTimeout, s.localClientDrainTimeout
+	if started <= 0 {
+		started = defaultStartedWaitTimeout
+	}
+	if drain <= 0 {
+		drain = defaultLocalClientDrainTimeout
+	}
+	return started, drain
 }
 
 // loggedTo is the log the daemon's output went to, or "" when the spawn
@@ -92,6 +107,12 @@ type clientOutcome struct {
 }
 
 func (s *spawnedSession) run(ctx context.Context) error {
+	return s.runWithDetachContext(ctx, notifyDetachSignals)
+}
+
+func (s *spawnedSession) runWithDetachContext(ctx context.Context, notify func(context.Context) (context.Context, context.CancelFunc)) error {
+	verdictWait, drainWait := s.waits()
+
 	// A log the spawn can't open is warned about, and the daemon starts
 	// without it: nothing of this session is in it to point at.
 	conn, _, err := s.spawn(spawnOptions{name: s.name, logPath: s.logPath, logOff: func(err error) {
@@ -106,11 +127,6 @@ func (s *spawnedSession) run(ctx context.Context) error {
 	}
 	parent := bootstrap.NewParent(conn, s.stdin, s.stderr, s.readSecret)
 	defer func() { _ = parent.Close() }()
-
-	// Read once, here: the value is used from the client's goroutine and
-	// reported from this one, and a test that shortens the package var must
-	// not be racing a goroutine still finishing the run before it.
-	verdictWait := startedWaitTimeout
 
 	var (
 		claimed    *api.Claimed
@@ -155,7 +171,7 @@ func (s *spawnedSession) run(ctx context.Context) error {
 		if clientDone == nil {
 			return
 		}
-		_ = s.drainClient(clientDone, cancelClientNow)
+		_ = s.drainClient(clientDone, cancelClientNow, drainWait)
 	}()
 
 	handlers := bootstrap.Handlers{
@@ -234,7 +250,7 @@ func (s *spawnedSession) run(ctx context.Context) error {
 			// From here a signal is a detach, exactly as it is for upterm
 			// attach; before here the default disposition ends this process,
 			// which closes the channel, which is abandonment.
-			clientCtx, cancelClient := notifyDetachSignals(ctx)
+			clientCtx, cancelClient := notify(ctx)
 			clientCancel.Store(&cancelClient)
 			go func() {
 				defer cancelClient()
@@ -264,7 +280,7 @@ func (s *spawnedSession) run(ctx context.Context) error {
 
 	switch {
 	case runErr != nil && closedByUs.Load():
-		out := s.drainClient(clientDone, cancelClientNow)
+		out := s.drainClient(clientDone, cancelClientNow, drainWait)
 		clientDone = nil
 		return fmt.Errorf("could not attach the local terminal to session %s: %w", s.name, out.err)
 	case errors.Is(runErr, context.Canceled) && ctx.Err() == nil:
@@ -344,19 +360,19 @@ func (s *spawnedSession) writeEndLine(line string) {
 
 // drainClient waits for the attach client to finish and reports how it did.
 //
-// Freely for localClientDrainTimeout, because the client is draining the
+// Freely for bound, because the client is draining the
 // session's channel into stdout and restoring the terminal on its way out,
 // and a stdout nobody reads must not hold the exit forever; and after
 // cancelling it beyond that, but always until it has returned, since
 // cancellation is what makes it finish and returning before it has is
 // exiting with the terminal in raw mode.
-func (s *spawnedSession) drainClient(done <-chan clientOutcome, cancel context.CancelFunc) clientOutcome {
+func (s *spawnedSession) drainClient(done <-chan clientOutcome, cancel context.CancelFunc, bound time.Duration) clientOutcome {
 	select {
 	case out := <-done:
 		return out
-	case <-time.After(localClientDrainTimeout):
+	case <-time.After(bound):
 	}
-	logging.WarnWithin(s.logger, logging.LogBound, "the local terminal did not finish draining; cancelling it", "timeout", localClientDrainTimeout)
+	logging.WarnWithin(s.logger, logging.LogBound, "the local terminal did not finish draining; cancelling it", "timeout", bound)
 	cancel()
 	return <-done
 }
