@@ -22,7 +22,7 @@ func TestPTYProcessExitReleasesOwnedIO(t *testing.T) {
 	cmd := exec.Command("sh", "-c", "trap '' HUP; stty raw -echo; printf READY; exec sleep 60")
 	p, err := startPty(cmd, termsize.Size{}, false, nil)
 	require.NoError(t, err)
-	waited, readDone, writeDone, closeDone := make(chan struct{}), make(chan struct{}), make(chan struct{}), make(chan struct{})
+	waited, readyDone, readDone, writeDone, closeDone := make(chan struct{}), make(chan struct{}), make(chan struct{}), make(chan struct{}), make(chan struct{})
 	var started, closeStarted bool
 	t.Cleanup(func() {
 		_ = p.Signal(syscall.SIGKILL)
@@ -36,20 +36,33 @@ func TestPTYProcessExitReleasesOwnedIO(t *testing.T) {
 			go func() { defer close(closeDone); _ = p.Close() }()
 		}
 		until := time.Now().Add(2 * time.Second)
-		for name, ch := range map[string]<-chan struct{}{"wait": waited, "read": readDone, "write": writeDone, "close": closeDone} {
+		joined := true
+		for name, ch := range map[string]<-chan struct{}{"wait": waited, "ready": readyDone, "read": readDone, "write": writeDone, "close": closeDone} {
 			timer := time.NewTimer(time.Until(until))
 			select {
 			case <-ch:
 			case <-timer.C:
+				joined = false
 				t.Errorf("cleanup could not join owned PTY %s", name)
 			}
 			timer.Stop()
 		}
+		if joined {
+			t.Log("cleanup joined owned PTY readiness reader, process wait and I/O")
+		}
 	})
 	ready := make([]byte, 5)
-	_, err = io.ReadFull(p, ready)
-	require.NoError(t, err)
-	require.Equal(t, "READY", string(ready))
+	var readyErr error
+	go func() { defer close(readyDone); _, readyErr = io.ReadFull(p, ready) }()
+	readiness := time.NewTimer(time.Second)
+	defer readiness.Stop()
+	select {
+	case <-readyDone:
+		require.NoError(t, readyErr)
+		require.Equal(t, "READY", string(ready))
+	case <-readiness.C:
+		t.Fatal("PTY readiness timed out after 1s waiting for READY")
+	}
 	started = true
 	go func() { defer close(waited); _ = p.Wait() }()
 	go func() { defer close(readDone); _, _ = p.Read(make([]byte, 1)) }()
