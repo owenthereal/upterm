@@ -14,15 +14,6 @@ import (
 // SIGTTOU, so SIGTSTP keeps whatever disposition this process inherited.
 const suspendSupported = true
 
-// suspendContWait bounds stopSelf's wait for the continue. A package var so a
-// test can shorten it.
-var suspendContWait = 2 * time.Second
-
-// suspendContGrace is how much longer stopSelf waits for a continue once
-// suspendContWait has expired; see stopSelf. A package var so a test can
-// lengthen it.
-var suspendContGrace = 250 * time.Millisecond
-
 // tstpIgnored reports whether SIGTSTP is ignored through os/signal.
 // Injectable so the guard's wiring can be tested without changing the
 // process's real disposition, which os/signal cannot undo.
@@ -42,7 +33,7 @@ var tstpIgnored = func() bool { return signal.Ignored(syscall.SIGTSTP) }
 func suspendAvailable() bool { return !tstpIgnored() }
 
 // stopSelf stops this process and returns once it has been continued — or
-// once suspendContWait has gone by without the stop ever landing — and
+// once the two-second wait has gone by without the stop ever landing — and
 // reports which.
 //
 // unless, when not nil, is asked once the continue is being watched and just
@@ -96,13 +87,17 @@ func suspendAvailable() bool { return !tstpIgnored() }
 // therefore not a misfire, but it does come back with the timer expired and
 // the continue arriving at the same instant — ready beside it in a select
 // that may pick either, or still on its way through os/signal. So an expired
-// bound waits suspendContGrace more before reporting that no continue came:
+// bound waits 250ms more before reporting that no continue came:
 // the caller stops again when continued in the background, and a long stop
 // mistaken for a discarded one would have it give up and detach instead.
 // Nothing is printed when the bound expires: the client is holding a
 // terminal the session is drawing on, and ssh's ~^Z is just as silent when
 // its own stop is discarded.
 func stopSelf(unless func() bool) bool {
+	return stopSelfWithin(unless, 2*time.Second, 250*time.Millisecond)
+}
+
+func stopSelfWithin(unless func() bool, wait, grace time.Duration) bool {
 	cont := make(chan os.Signal, 1)
 	signal.Notify(cont, syscall.SIGCONT)
 	defer signal.Stop(cont)
@@ -112,19 +107,19 @@ func stopSelf(unless func() bool) bool {
 	if err := syscall.Kill(os.Getpid(), syscall.SIGTSTP); err != nil {
 		return false
 	}
-	timer := time.NewTimer(suspendContWait)
+	timer := time.NewTimer(wait)
 	defer timer.Stop()
 	select {
 	case <-cont:
 		return true
 	case <-timer.C:
 	}
-	grace := time.NewTimer(suspendContGrace)
-	defer grace.Stop()
+	graceTimer := time.NewTimer(grace)
+	defer graceTimer.Stop()
 	select {
 	case <-cont:
 		return true
-	case <-grace.C:
+	case <-graceTimer.C:
 		return false
 	}
 }

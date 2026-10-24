@@ -462,14 +462,6 @@ Exits 4 when no session has the name, and 1 for any other failure.`,
 	return cmd
 }
 
-// stopWaitTimeout bounds how long `session stop` waits for the name to be
-// released once the daemon has acknowledged. The teardown's worst case is
-// about sixteen seconds -- hangupGrace plus three DefaultStopGraces, as
-// DefaultStopGrace's own comment says -- plus the record's publication;
-// thirty seconds is that with room, and a daemon still holding the name
-// past it is one to name a pid for.
-var stopWaitTimeout = 30 * time.Second
-
 // stopPollInterval is how often the release is checked for.
 const stopPollInterval = 200 * time.Millisecond
 
@@ -670,7 +662,15 @@ Exits 4 when no session has the name, and 1 for any other failure.`,
 }
 
 // stopSession asks the session named to end and waits for it to have ended.
+// The teardown's worst case is about sixteen seconds -- hangupGrace plus
+// three DefaultStopGraces -- plus the record's publication; thirty seconds
+// is that with room, and a daemon still holding the name past it is one to
+// name a pid for.
 func stopSession(ctx context.Context, arg string, out io.Writer) error {
+	return stopSessionWithin(ctx, arg, out, 30*time.Second)
+}
+
+func stopSessionWithin(ctx context.Context, arg string, out io.Writer, bound time.Duration) error {
 	stateRoot := utils.UptermStateDir()
 	lookupCtx, cancelLookup := context.WithTimeout(ctx, sessionQueryTimeout)
 	r, err := resolveSession(lookupCtx, arg)
@@ -750,15 +750,15 @@ func stopSession(ctx context.Context, arg string, out io.Writer) error {
 
 	// Acknowledged. The name is free once this launch has released it, or
 	// once another launch holds it, which is the same thing from here.
-	deadline := time.Now().Add(stopWaitTimeout)
+	deadline := time.Now().Add(bound)
 	var lastInspectErr error
 	for {
 		remaining := time.Until(deadline)
 		if remaining <= 0 {
 			if lastInspectErr != nil {
-				return fmt.Errorf("session %s acknowledged the stop but its completion could not be confirmed after %s: %w", name, shortDuration(stopWaitTimeout), lastInspectErr)
+				return fmt.Errorf("session %s acknowledged the stop but its completion could not be confirmed after %s: %w", name, shortDuration(bound), lastInspectErr)
 			}
-			return fmt.Errorf("session %s acknowledged the stop but is still running after %s (%s)", name, shortDuration(stopWaitTimeout), pidOf(rec))
+			return fmt.Errorf("session %s acknowledged the stop but is still running after %s (%s)", name, shortDuration(bound), pidOf(rec))
 		}
 		pollCtx, cancelPoll := context.WithTimeout(ctx, min(sessionQueryTimeout, remaining))
 		cur, curHeld, err := sessiondir.Inspect(pollCtx, stateRoot, name)

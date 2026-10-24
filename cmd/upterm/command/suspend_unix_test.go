@@ -50,17 +50,13 @@ func TestSuspendAvailableWithholdsTheHookWhenSIGTSTPIsIgnored(t *testing.T) {
 // ignoring for real would leak SIGTSTP SIG_IGN into every later test in this
 // binary. signal.Stop undoes a Notify cleanly.
 func TestStopSelfReturnsWhenTheStopNeverLands(t *testing.T) {
-	// Not parallel: signal dispositions and suspendContWait are process-wide.
+	// Not parallel: signal dispositions are process-wide.
 	tstp := make(chan os.Signal, 1)
 	signal.Notify(tstp, syscall.SIGTSTP)
 	t.Cleanup(func() { signal.Stop(tstp) })
 
-	prev := suspendContWait
-	suspendContWait = 100 * time.Millisecond
-	t.Cleanup(func() { suspendContWait = prev })
-
 	done := make(chan bool, 1)
-	go func() { done <- stopSelf(nil) }()
+	go func() { done <- stopSelfWithin(nil, 100*time.Millisecond, 250*time.Millisecond) }()
 
 	select {
 	case continued := <-done:
@@ -70,7 +66,7 @@ func TestStopSelfReturnsWhenTheStopNeverLands(t *testing.T) {
 	}
 }
 
-// A process stopped for longer than suspendContWait comes back with the
+// A process stopped for longer than the wait bound comes back with the
 // bound expired and the continue on its way through os/signal at the same
 // instant, and it was continued all the same: reported as a stop that never
 // landed, a client continued by bg would give up on stopping again and
@@ -78,17 +74,13 @@ func TestStopSelfReturnsWhenTheStopNeverLands(t *testing.T) {
 // that was never stopped, so a stopSelf that trusts the timer alone reports
 // the wrong one every time rather than on the scheduler's whim.
 func TestStopSelfReportsAContinueThatArrivesAfterTheBound(t *testing.T) {
-	// Not parallel: signal dispositions and the bounds are process-wide.
+	// Not parallel: signal dispositions are process-wide.
 	tstp := make(chan os.Signal, 1)
 	signal.Notify(tstp, syscall.SIGTSTP)
 	t.Cleanup(func() { signal.Stop(tstp) })
 
-	prevWait, prevGrace := suspendContWait, suspendContGrace
-	suspendContWait, suspendContGrace = 10*time.Millisecond, 5*time.Second
-	t.Cleanup(func() { suspendContWait, suspendContGrace = prevWait, prevGrace })
-
 	done := make(chan bool, 1)
-	go func() { done <- stopSelf(nil) }()
+	go func() { done <- stopSelfWithin(nil, 10*time.Millisecond, 5*time.Second) }()
 	// stopSelf raises SIGTSTP only once it is watching SIGCONT, so the raise
 	// arriving is what makes it safe to send the continue.
 	select {
@@ -112,19 +104,15 @@ func TestStopSelfReportsAContinueThatArrivesAfterTheBound(t *testing.T) {
 // it holds, nothing is raised — a foreground job stopped for nothing needs a
 // second fg — and a continue is reported, there being nothing to wait for.
 func TestStopSelfRaisesNothingWhenUnlessHolds(t *testing.T) {
-	// Not parallel: signal dispositions and the bounds are process-wide.
+	// Not parallel: signal dispositions are process-wide.
 	tstp := make(chan os.Signal, 1)
 	signal.Notify(tstp, syscall.SIGTSTP)
 	t.Cleanup(func() { signal.Stop(tstp) })
 
 	// A raise would stop nothing here, and leave stopSelf waiting out the
 	// whole bound for a continue that never comes.
-	prev := suspendContWait
-	suspendContWait = 5 * time.Second
-	t.Cleanup(func() { suspendContWait = prev })
-
 	done := make(chan bool, 1)
-	go func() { done <- stopSelf(func() bool { return true }) }()
+	go func() { done <- stopSelfWithin(func() bool { return true }, 5*time.Second, 250*time.Millisecond) }()
 
 	select {
 	case continued := <-done:
@@ -136,5 +124,6 @@ func TestStopSelfRaisesNothingWhenUnlessHolds(t *testing.T) {
 	case <-tstp:
 		t.Fatal("SIGTSTP was raised although unless held")
 	case <-time.After(100 * time.Millisecond):
+		// Allow time for an erroneous signal to arrive through os/signal.
 	}
 }

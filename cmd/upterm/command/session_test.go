@@ -1841,22 +1841,17 @@ func Test_stopSession(t *testing.T) {
 		require.ErrorContains(t, stopSession(context.Background(), "nope", &out), `no session named "nope"`)
 	})
 	t.Run("a stop the daemon acknowledged but did not finish is reported, bounded", func(t *testing.T) {
-		old := stopWaitTimeout
-		stopWaitTimeout = 300 * time.Millisecond
-		t.Cleanup(func() { stopWaitTimeout = old })
 		setupSessionRoots(t)
 		d := claimSession(t, "stuck-1")
 		releaseAtEnd(t, d)
 		require.NoError(t, d.Update(func(r *sessiondir.Record) { r.Status = sessiondir.StatusReady; r.SessionID = "sid" }))
 		serveStubAdminWithStop(t, d.AdminSocket(), &api.GetSessionResponse{SessionId: "sid", Host: "ssh://127.0.0.1:2222"}, d.LaunchID(), func() {})
 		var out bytes.Buffer
-		err := stopSession(context.Background(), "stuck-1", &out)
-		require.ErrorContains(t, err, "still running after")
+		err := stopSessionWithin(context.Background(), "stuck-1", &out, 300*time.Millisecond)
+		require.ErrorContains(t, err, "still running after 300ms")
+		require.Empty(t, out.String())
 	})
 	t.Run("an acknowledged stop with an unreadable record cannot be confirmed", func(t *testing.T) {
-		old := stopWaitTimeout
-		stopWaitTimeout = 80 * time.Millisecond
-		t.Cleanup(func() { stopWaitTimeout = old })
 		setupSessionRoots(t)
 		d := claimSession(t, "corrupt-after-ack")
 		releaseAtEnd(t, d)
@@ -1865,9 +1860,11 @@ func Test_stopSession(t *testing.T) {
 			_ = os.WriteFile(d.RecordPath(), []byte("{not json"), 0600)
 		})
 		var out bytes.Buffer
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
 		started := time.Now()
-		err := stopSession(context.Background(), "corrupt-after-ack", &out)
-		require.ErrorContains(t, err, "could not be confirmed")
+		err := stopSessionWithin(ctx, "corrupt-after-ack", &out, 80*time.Millisecond)
+		require.ErrorContains(t, err, "could not be confirmed after 80ms")
 		var syntax *json.SyntaxError
 		require.ErrorAs(t, err, &syntax, "the inspection cause must be available to callers")
 		require.Less(t, time.Since(started), time.Second, "stop must remain bounded by its short deadline")
@@ -3679,10 +3676,6 @@ func TestWaitLaunchChangedNamesEachSessionByWhatIdentifiesIt(t *testing.T) {
 // Neither the wait for that nor the look at the record afterwards takes it
 // for the one stopped.
 func TestStopByIDOfARecordWithNoLaunchIDTreatsAReplacementWithNoneAsAnotherSession(t *testing.T) {
-	old := stopWaitTimeout
-	stopWaitTimeout = time.Second
-	t.Cleanup(func() { stopWaitTimeout = old })
-
 	setupSessionRoots(t)
 	a := readyHeldWithoutLaunchID(t, "build", "sid-1")
 	// The launch the daemon answers for is the record's: none. It ends and the
@@ -3694,7 +3687,7 @@ func TestStopByIDOfARecordWithNoLaunchIDTreatsAReplacementWithNoneAsAnotherSessi
 	})
 
 	var out bytes.Buffer
-	require.NoError(t, stopSession(context.Background(), "sid-1", &out))
+	require.NoError(t, stopSessionWithin(context.Background(), "sid-1", &out, time.Second))
 	require.Equal(t, "session build stopped\n", out.String(), "the replacement's record says nothing about the session stopped")
 }
 
