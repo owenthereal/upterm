@@ -43,6 +43,7 @@ func testHostNoAuthorizedKeyAnyClientJoin(t *testing.T, hostShareURL, hostNodeAd
 
 	err = c.Join(session, clientJoinURL)
 	require.NoError(err)
+	defer c.Close()
 }
 
 func testClientAuthorizedKeyNotMatching(t *testing.T, hostShareURL, hostNodeAddr, clientJoinURL string) {
@@ -145,6 +146,7 @@ func testClientAttachHostWithSameCommand(t *testing.T, hostShareURL, hostNodeAdd
 	}
 	err = c.Join(session, clientJoinURL)
 	require.NoError(err)
+	defer c.Close()
 	awaitGuestsAttached(t, adminSocketFile, 1)
 
 	remoteInputCh, remoteOutputCh := c.InputOutput()
@@ -205,6 +207,7 @@ func testClientAttachHostWithDifferentCommand(t *testing.T, hostShareURL string,
 	}
 	err = c.Join(session, clientJoinURL)
 	require.NoError(err)
+	defer c.Close()
 
 	remoteInputCh, remoteOutputCh := c.InputOutput()
 	remoteScanner := scanner(t, remoteOutputCh)
@@ -253,6 +256,7 @@ func testClientAttachReadOnly(t *testing.T, hostShareURL, hostNodeAddr, clientJo
 	}
 	err = c.Join(session, clientJoinURL)
 	require.NoError(err)
+	defer c.Close()
 
 	remoteInputCh, remoteOutputCh := c.InputOutput()
 	remoteScanner := scanner(t, remoteOutputCh)

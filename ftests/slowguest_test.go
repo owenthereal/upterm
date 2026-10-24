@@ -681,13 +681,14 @@ func testHostExitsWhileGuestHoldsConnection(t *testing.T, hostURL, hostNodeAddr,
 
 	c := &Client{PrivateKeys: []string{ClientPrivateKey}}
 	require.NoError(t, c.Join(session, clientJoinURL))
+	defer c.Close()
 	_, guestOutput := c.InputOutput()
 	go func() {
 		for range guestOutput { //nolint:revive // drained, not inspected
 		}
 	}()
-	// Deliberately never closed: the guest keeps its SSH connection while the
-	// host's command exits underneath it.
+	// The deferred close runs after the lifetime assertion: the guest keeps
+	// its SSH connection while the host's command exits underneath it.
 
 	hostInput, _ := h.InputOutput()
 	hostInput <- "" // zero chunks, so this one line lets the helper exit on its own
