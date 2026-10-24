@@ -13,6 +13,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	gliderssh "charm.land/ssh"
@@ -26,6 +27,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/crypto/ssh"
+	"google.golang.org/grpc/test/bufconn"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -121,15 +123,44 @@ type testSSHD struct {
 	signer  ssh.Signer // the relay's own key, which mints the proxy's certificates
 	reg     *prometheus.Registry
 	network *MemoryProvider
+	dialRaw func(context.Context) (net.Conn, error)
+	served  <-chan struct{}
 }
 
 // newTestSSHD starts an sshd, applying options to it before it serves.
 func newTestSSHD(t *testing.T, options ...func(*sshd)) *testSSHD {
 	t.Helper()
-	logger := logging.Must(logging.Console(), logging.Debug()).Logger
-
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
+	dialer := &net.Dialer{}
+	s := newTestSSHDOn(t, ln, func(ctx context.Context) (net.Conn, error) {
+		return dialer.DialContext(ctx, "tcp", ln.Addr().String())
+	}, options...)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	require.NoError(t, utils.WaitForServer(ctx, s.addr))
+	return s
+}
+
+// newBubbleSSHD keeps the listener, dialer and all SSH peers inside the bubble.
+func newBubbleSSHD(t *testing.T, options ...func(*sshd)) *testSSHD {
+	t.Helper()
+	ln := bufconn.Listen(256 * 1024)
+	s := newTestSSHDOn(t, ln, ln.DialContext, options...)
+	t.Cleanup(func() {
+		err := s.sshd.Shutdown()
+		<-s.served
+		synctest.Wait()
+		require.NoError(t, err)
+	})
+	synctest.Wait()
+	return s
+}
+
+func newTestSSHDOn(t *testing.T, ln net.Listener, dial func(context.Context) (net.Conn, error), options ...func(*sshd)) *testSSHD {
+	t.Helper()
+	logger := logging.Must(logging.Console(), logging.Debug()).Logger
+
 	t.Cleanup(func() { _ = ln.Close() })
 	addr := ln.Addr().String()
 
@@ -152,15 +183,13 @@ func newTestSSHD(t *testing.T, options ...func(*sshd)) *testSSHD {
 	for _, option := range options {
 		option(sshd)
 	}
+	served := make(chan struct{})
 	go func() {
+		defer close(served)
 		_ = sshd.Serve(ln)
 	}()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	require.NoError(t, utils.WaitForServer(ctx, addr))
-
-	return &testSSHD{sshd: sshd, addr: addr, signer: signer, reg: reg, network: network}
+	return &testSSHD{sshd: sshd, addr: addr, signer: signer, reg: reg, network: network, dialRaw: dial, served: served}
 }
 
 // withObserverFirst is a newTestSSHD option that registers fn with the sshd's
@@ -185,10 +214,21 @@ func (s *testSSHD) dial(t *testing.T) *ssh.Client {
 // KeyId, and a proof is bound to it.
 func (s *testSSHD) dialAs(t *testing.T, keyID string) *ssh.Client {
 	t.Helper()
-	client, err := ssh.Dial("tcp", s.addr, s.proxyConfig(t, keyID))
+	raw := s.rawConn(t)
+	c, chans, reqs, err := ssh.NewClientConn(raw, s.addr, s.proxyConfig(t, keyID))
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = client.Close() })
+	client := ssh.NewClient(c, chans, reqs)
+	t.Cleanup(func() { _ = client.Close(); _ = client.Wait() })
 	return client
+}
+
+// rawConn owns the transport before authentication or any assertion can fail.
+func (s *testSSHD) rawConn(t *testing.T) net.Conn {
+	t.Helper()
+	raw, err := s.dialRaw(t.Context())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = raw.Close() })
+	return raw
 }
 
 // proxyConfig is the client configuration of a connection made as the proxy
@@ -237,14 +277,14 @@ func (c *freezableConn) Read(p []byte) (int, error) {
 // cleanup thaws it, so the client's read loop can end.
 func (s *testSSHD) dialFreezable(t *testing.T, keyID string) (*ssh.Client, func()) {
 	t.Helper()
-	raw, err := net.Dial("tcp", s.addr)
-	require.NoError(t, err)
+	raw := s.rawConn(t)
 	conn := &freezableConn{Conn: raw, frozen: make(chan struct{}), thawed: make(chan struct{})}
-	t.Cleanup(func() { close(conn.thawed) })
+	thaw := sync.OnceFunc(func() { close(conn.thawed) })
+	t.Cleanup(thaw)
 	c, chans, reqs, err := ssh.NewClientConn(conn, s.addr, s.proxyConfig(t, keyID))
 	require.NoError(t, err)
 	client := ssh.NewClient(c, chans, reqs)
-	t.Cleanup(func() { _ = client.Close() })
+	t.Cleanup(func() { thaw(); _ = client.Close(); _ = client.Wait() })
 	var once sync.Once
 	return client, func() { once.Do(func() { close(conn.frozen) }) }
 }
@@ -258,24 +298,32 @@ func (s *testSSHD) dialFreezable(t *testing.T, keyID string) (*ssh.Client, func(
 // so that the relay can't have read those bytes any earlier.
 func (s *testSSHD) dialMute(t *testing.T, keyID string, every time.Duration) (*ssh.Client, *atomic.Int64, func() time.Time) {
 	t.Helper()
-	raw, err := net.Dial("tcp", s.addr)
-	require.NoError(t, err)
+	raw := s.rawConn(t)
 	c, chans, reqs, err := ssh.NewClientConn(raw, s.addr, s.proxyConfig(t, keyID))
 	require.NoError(t, err)
 	pings := new(atomic.Int64)
-	go func() { // taken and counted, never answered
+	none := make(chan *ssh.Request) // NewClient answers nothing from here
+	client := ssh.NewClient(c, chans, none)
+	quit, ended, drained := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	var lastSent time.Time // read only after the sender has ended
+	quitSending := sync.OnceFunc(func() { close(quit) })
+	stop := func() time.Time { quitSending(); <-ended; return lastSent }
+	t.Cleanup(func() {
+		quitSending()
+		close(none)
+		_ = client.Close() // release a SendRequest before joining the sender
+		<-ended
+		<-drained
+		_ = client.Wait()
+	})
+	go func() {
+		defer close(drained)
 		for req := range reqs {
 			if req.Type == "keepalive@openssh.com" {
 				pings.Add(1)
 			}
 		}
 	}()
-	none := make(chan *ssh.Request) // NewClient answers nothing from here
-	t.Cleanup(func() { close(none) })
-	client := ssh.NewClient(c, chans, none)
-	t.Cleanup(func() { _ = client.Close() })
-	quit, ended := make(chan struct{}), make(chan struct{})
-	var lastSent time.Time // the sender's, to be read once it has ended
 	go func() {
 		defer close(ended)
 		for {
@@ -290,13 +338,6 @@ func (s *testSSHD) dialMute(t *testing.T, keyID string, every time.Duration) (*s
 			}
 		}
 	}()
-	var once sync.Once
-	stop := func() time.Time {
-		once.Do(func() { close(quit) })
-		<-ended
-		return lastSent
-	}
-	t.Cleanup(func() { stop() }) // so a test that fails early doesn't leave it sending
 	return client, pings, stop
 }
 
@@ -1499,11 +1540,34 @@ func Test_sshd_BeforeConfirmRunsBetweenAddAndConfirm(t *testing.T) {
 	require.Equal(t, 0.0, s.gauge(t))
 }
 
-// A reconnect-capable host's connection is pinged, and closed when it goes
-// silent, so its registration doesn't outlive a host that went without a
-// word. A legacy host can't redial, so its connection is left alone however
-// quiet.
+// A reconnect-capable host is closed at its silence deadline. A legacy host
+// cannot redial, so it is left alone even after the capable host is gone.
 func Test_sshd_PingsOnlyCapableHosts(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		s := newBubbleSSHD(t, func(d *sshd) {
+			d.liveness = liveness.Timing{Interval: 50 * time.Millisecond, Bound: 50 * time.Millisecond}
+		})
+		legacy, freezeLegacy := s.dialFreezable(t, "legacy")
+		legacyID := s.createSession(t, legacy)
+		host := newProven(t)
+		capable, freezeCapable := s.dialFreezable(t, "capable")
+		ok, body := host.register(t, capable, "capable", 1)
+		require.True(t, ok, string(body))
+		synctest.Wait()
+		deadline := time.Now().Add(100 * time.Millisecond)
+		freezeLegacy()
+		freezeCapable()
+		synctest.Wait()
+		requireSessionClosesAt(t, s, host.id(), deadline)
+		time.Sleep(500 * time.Millisecond)
+		synctest.Wait()
+		_, err := s.sshd.SessionManager.GetSession(legacyID)
+		require.NoError(t, err, "a legacy host is never pinged")
+	})
+}
+
+// The TCP smoke case stays separate from the fake-time stress manifest.
+func Test_sshd_PingsOnlyCapableHostsOverTCP(t *testing.T) {
 	s := newTestSSHD(t, func(d *sshd) {
 		d.liveness = liveness.Timing{Interval: 50 * time.Millisecond, Bound: 50 * time.Millisecond}
 	})
@@ -1513,7 +1577,6 @@ func Test_sshd_PingsOnlyCapableHosts(t *testing.T) {
 	capable, freezeCapable := s.dialFreezable(t, "capable")
 	ok, body := host.register(t, capable, "capable", 1)
 	require.True(t, ok, string(body))
-
 	freezeLegacy()
 	freezeCapable()
 	require.Eventually(t, func() bool { _, err := s.sshd.SessionManager.GetSession(host.id()); return err != nil },
@@ -1522,142 +1585,139 @@ func Test_sshd_PingsOnlyCapableHosts(t *testing.T) {
 		500*time.Millisecond, 20*time.Millisecond, "a legacy host is never pinged")
 }
 
-// A capable host whose replies queue behind its own output is alive for as long
-// as that output arrives: the relay pings it, and closes it for the silence
-// that follows its last byte, not for a reply that hadn't come.
+// The output arrives every 100 ms, twice Interval, and outlasts a reply's
+// entire Bound. Only the silence after its final byte closes the host.
 func Test_sshd_KeepsACapableHostWhoseRepliesQueueBehindData(t *testing.T) {
-	// The mute client's bytes come every 100 ms, twice Interval, so the relay
-	// has to ping it between them, and no reply ever comes. Bound is long
-	// enough that the 2*Bound window below outlasts a deadline on that reply
-	// but never a silence, which each byte resets.
-	timing := liveness.Timing{Interval: 50 * time.Millisecond, Bound: 300 * time.Millisecond}
-	s := newTestSSHD(t, func(d *sshd) { d.liveness = timing })
-	host := newProven(t)
-	client, pings, stopSending := s.dialMute(t, "mute", 100*time.Millisecond)
-	ok, body := host.register(t, client, "mute", 1)
-	require.True(t, ok, string(body))
-	gone := func() bool { _, err := s.sshd.SessionManager.GetSession(host.id()); return err != nil }
-
-	require.Never(t, gone, 2*timing.Bound, 10*time.Millisecond,
-		"a host whose bytes kept arriving was closed for a reply that hadn't come")
-	require.Positive(t, pings.Load(), "the relay never pinged: nothing here was left waiting for a reply")
-
-	lastSent := stopSending()
-	require.False(t, lastSent.IsZero(), "the client never sent a byte")
-	silent := lastSent.Add(timing.Interval + timing.Bound)
-	limit := silent.Add(2 * lateWake)
-	for !gone() {
-		require.True(t, time.Now().Before(limit), "a silent host was kept")
-		time.Sleep(2 * time.Millisecond)
-	}
-	requireClosedAt(t, time.Now(), silent, "its last byte plus Interval+Bound")
+	synctest.Test(t, func(t *testing.T) {
+		timing := liveness.Timing{Interval: 50 * time.Millisecond, Bound: 300 * time.Millisecond}
+		s := newBubbleSSHD(t, func(d *sshd) { d.liveness = timing })
+		host := newProven(t)
+		client, pings, stopSending := s.dialMute(t, "mute", 100*time.Millisecond)
+		ok, body := host.register(t, client, "mute", 1)
+		require.True(t, ok, string(body))
+		synctest.Wait()
+		time.Sleep(2 * timing.Bound)
+		synctest.Wait()
+		_, err := s.sshd.SessionManager.GetSession(host.id())
+		require.NoError(t, err, "a host whose bytes kept arriving was closed for a reply that hadn't come")
+		require.Positive(t, pings.Load(), "the relay never pinged: nothing here was left waiting for a reply")
+		lastSent := stopSending()
+		synctest.Wait()
+		require.False(t, lastSent.IsZero(), "the client never sent a byte")
+		requireSessionClosesAt(t, s, host.id(), lastSent.Add(timing.Interval+timing.Bound))
+	})
 }
 
-// A host is judged by what it sends the proxy, not by what crosses the
-// proxy-to-sshd connection. With maxSSHConcurrentChannelOpens guest opens
-// pending on a host that answers none of them, the proxy rejects every further
-// open itself, so a silent host whose guests keep retrying would be kept alive
-// forever by the sshd's own connection, and its dead registration with it.
-//
-// The test plays the proxy: it records the reads of the host-facing connection
-// and registers it with the sshd's hostActivity, under the session ID the
-// certificate carries.
+// Proxy-generated channel rejections cannot keep a silent host alive. The
+// registry entry is the actual host-facing connection, under its certificate ID.
 func Test_sshd_ProxyTrafficDoesNotKeepASilentHostAlive(t *testing.T) {
-	timing := liveness.Timing{Interval: 100 * time.Millisecond, Bound: 400 * time.Millisecond}
-	activity := newHostActivity()
-	s := newTestSSHD(t, func(d *sshd) {
-		d.liveness = timing
-		d.hostActivity = activity
-		d.Logger = slog.New(slog.DiscardHandler)
-	})
-	var hostFacing *liveness.Conn // set before forwardTestPairWrapped returns
-	hostPeer, downstream := forwardTestPairWrapped(t, nil, nil, func(c net.Conn) net.Conn {
-		hostFacing = liveness.NewConn(c)
-		return hostFacing
-	})
-	t.Cleanup(activity.track([]byte("outer"), hostFacing))
-
-	raw, err := net.Dial("tcp", s.addr)
-	require.NoError(t, err)
-	c, chans, reqs, err := ssh.NewClientConn(raw, s.addr, s.proxyConfig(t, "outer"))
-	require.NoError(t, err)
-	ctx, cancel := context.WithCancel(context.Background())
-	finished := make(chan struct{})
-	go func() {
-		defer close(finished)
-		_ = forwardSSH(ctx, downstream, sshPeer{conn: c, channels: chans, requests: reqs}, abortChannel, discardCounter, nil)
-	}()
-	t.Cleanup(func() { cancel(); <-finished })
-
-	// The host takes what the relay sends it and answers none of it.
-	var hostOpens, hostPings atomic.Int64
-	go func() {
-		for range hostPeer.channels {
-			hostOpens.Add(1)
-		}
-	}()
-	go func() {
-		for range hostPeer.requests {
-			hostPings.Add(1)
-		}
-	}()
-	noChans := make(chan ssh.NewChannel)
-	noReqs := make(chan *ssh.Request)
-	client := ssh.NewClient(hostPeer.conn, noChans, noReqs)
-	t.Cleanup(func() { close(noChans); close(noReqs); _ = client.Close() })
-	host := newProven(t)
-	ok, body := host.register(t, client, "outer", 1)
-	require.True(t, ok, string(body))
-	ok, reason := forwardRequest(t, client, streamlocalForwardChannelType, host.id())
-	require.True(t, ok, reason)
-	// The host has now said everything it will. The proxy's read of it is the
-	// last byte the silence is counted from: read here, once the reply is in,
-	// it can't be earlier than the host's last write.
-	lastByte := hostFacing.LastRead()
-	silent := lastByte.Add(timing.Interval + timing.Bound)
-
-	gone := func() bool { _, err := s.sshd.SessionManager.GetSession(host.id()); return err != nil }
-	var guests []net.Conn
-	dialGuest := func() {
-		if guest, err := s.network.Session().DialContext(ctx, host.id()); err == nil {
-			guests = append(guests, guest)
-		}
-	}
-	for range maxSSHConcurrentChannelOpens {
-		dialGuest()
-	}
-	require.Eventually(t, func() bool { return hostOpens.Load() == maxSSHConcurrentChannelOpens }, time.Second, time.Millisecond)
-	require.Eventually(t, func() bool { return hostPings.Load() > 0 }, 400*time.Millisecond, time.Millisecond)
-
-	// From here every guest open is one the proxy rejects without a word from
-	// the host, each a read on the sshd's connection, twice per Interval.
-	stop, retried := make(chan struct{}), make(chan struct{})
-	go func() {
-		defer close(retried)
-		for {
-			select {
-			case <-stop:
-				return
-			case <-time.After(50 * time.Millisecond):
-				dialGuest()
+	synctest.Test(t, func(t *testing.T) {
+		timing := liveness.Timing{Interval: 100 * time.Millisecond, Bound: 400 * time.Millisecond}
+		activity := newHostActivity()
+		s := newBubbleSSHD(t, func(d *sshd) {
+			d.liveness = timing
+			d.hostActivity = activity
+			d.Logger = slog.New(slog.DiscardHandler)
+		})
+		listener := bufconn.Listen(256 * 1024)
+		var hostFacing *liveness.Conn
+		hostPeer, downstream := forwardTestPairOn(t, nil, nil, func(c net.Conn) net.Conn {
+			hostFacing = liveness.NewConn(c)
+			return hostFacing
+		}, listener, listener.DialContext)
+		t.Cleanup(activity.track([]byte("outer"), hostFacing))
+		raw := s.rawConn(t)
+		c, chans, reqs, err := ssh.NewClientConn(raw, s.addr, s.proxyConfig(t, "outer"))
+		require.NoError(t, err)
+		ctx, cancel := context.WithCancel(t.Context())
+		finished := make(chan struct{})
+		t.Cleanup(func() {
+			cancel()
+			_ = c.Close()
+			_ = downstream.conn.Close()
+			<-finished
+			_ = c.Wait()
+		})
+		go func() {
+			defer close(finished)
+			_ = forwardSSH(ctx, downstream, sshPeer{conn: c, channels: chans, requests: reqs}, abortChannel, discardCounter, nil)
+		}()
+		// The host takes every open and ping but answers none of them.
+		var hostOpens, hostPings atomic.Int64
+		opensDone, pingsDone := make(chan struct{}), make(chan struct{})
+		noChans, noReqs := make(chan ssh.NewChannel), make(chan *ssh.Request)
+		client := ssh.NewClient(hostPeer.conn, noChans, noReqs)
+		t.Cleanup(func() {
+			close(noChans)
+			close(noReqs)
+			_ = client.Close()
+			<-opensDone
+			<-pingsDone
+			_ = client.Wait()
+		})
+		go func() {
+			defer close(opensDone)
+			for range hostPeer.channels {
+				hostOpens.Add(1)
 			}
+		}()
+		go func() {
+			defer close(pingsDone)
+			for range hostPeer.requests {
+				hostPings.Add(1)
+			}
+		}()
+		host := newProven(t)
+		ok, body := host.register(t, client, "outer", 1)
+		require.True(t, ok, string(body))
+		ok, reason := forwardRequest(t, client, streamlocalForwardChannelType, host.id())
+		require.True(t, ok, reason)
+		synctest.Wait()
+		lastByte := hostFacing.LastRead()
+		silent := lastByte.Add(timing.Interval + timing.Bound)
+		dialGuest := func() net.Conn {
+			guest, err := s.network.Session().DialContext(ctx, host.id())
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = guest.Close() })
+			return guest
 		}
-	}()
-	t.Cleanup(func() {
-		for _, guest := range guests {
-			_ = guest.Close()
+		for range maxSSHConcurrentChannelOpens {
+			dialGuest()
 		}
+		synctest.Wait()
+		require.Equal(t, int64(maxSSHConcurrentChannelOpens), hostOpens.Load())
+		time.Sleep(timing.Interval)
+		synctest.Wait()
+		require.Positive(t, hostPings.Load(), "the host never received a probe")
+		// Every further open is rejected by the proxy without involving the host.
+		// Acknowledging EOF proves the rejection traversed the node connection.
+		for next := time.Now().Add(50 * time.Millisecond); next.Before(silent); next = next.Add(50 * time.Millisecond) {
+			time.Sleep(time.Until(next))
+			guest := dialGuest()
+			var b [1]byte
+			n, err := guest.Read(b[:])
+			synctest.Wait()
+			require.Zero(t, n)
+			require.ErrorIs(t, err, io.EOF)
+			require.Equal(t, next, time.Now(), "a retry waited for the host's silence deadline instead of being rejected")
+			require.Equal(t, int64(maxSSHConcurrentChannelOpens), hostOpens.Load(), "the proxy sent an excess open to the silent host")
+		}
+		requireSessionClosesAt(t, s, host.id(), silent)
+		require.Equal(t, lastByte, hostFacing.LastRead(), "the host sent something after its last byte, so the silence was not its own")
 	})
-	defer func() { close(stop); <-retried }()
+}
 
-	limit := silent.Add(lateWake)
-	for !gone() {
-		require.True(t, time.Now().Before(limit),
-			"proxy-generated channel rejections kept a host that sent nothing alive past its silence budget")
-		time.Sleep(time.Millisecond)
-	}
-	requireClosedAt(t, time.Now(), silent, "the host's last byte plus Interval+Bound")
-	require.Equal(t, lastByte, hostFacing.LastRead(), "the host sent something after its last byte, so the silence was not its own")
+func requireSessionClosesAt(t *testing.T, s *testSSHD, id string, deadline time.Time) {
+	t.Helper()
+	require.Greater(t, time.Until(deadline), time.Nanosecond, "the close deadline was already reached")
+	time.Sleep(time.Until(deadline) - time.Nanosecond)
+	synctest.Wait()
+	_, err := s.sshd.SessionManager.GetSession(id)
+	require.NoError(t, err, "closed before the host's last byte plus Interval+Bound")
+	time.Sleep(time.Nanosecond)
+	synctest.Wait()
+	_, err = s.sshd.SessionManager.GetSession(id)
+	require.Error(t, err, "kept a silent host past its last byte plus Interval+Bound")
 }
 
 // advancingConn is a liveness.Conn whose reads advance every interval until
@@ -1668,12 +1728,20 @@ func advancingConn(t *testing.T, interval time.Duration) (*liveness.Conn, func()
 	t.Helper()
 	feed, fed := net.Pipe()
 	conn := liveness.NewConn(fed)
-	read := make(chan struct{})
+	read, quit, ended := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	quitSending := sync.OnceFunc(func() { close(quit) })
+	stop := func() { quitSending(); <-ended }
+	t.Cleanup(func() {
+		quitSending()
+		_ = feed.Close() // release a blocked write before waiting for the sender
+		_ = fed.Close()
+		<-ended
+		<-read
+	})
 	go func() {
 		defer close(read)
 		_, _ = io.Copy(io.Discard, conn)
 	}()
-	quit, ended := make(chan struct{}), make(chan struct{})
 	go func() {
 		defer close(ended)
 		for {
@@ -1687,99 +1755,79 @@ func advancingConn(t *testing.T, interval time.Duration) (*liveness.Conn, func()
 			}
 		}
 	}()
-	var once sync.Once
-	stop := func() { once.Do(func() { close(quit) }); <-ended }
-	t.Cleanup(func() {
-		stop()
-		_ = feed.Close()
-		_ = fed.Close()
-		<-read
-	})
 	return conn, stop
 }
 
-// Without an entry in the hostActivity, a host's connection to the sshd is the
-// only one there is to judge it by: it is the host-facing connection when no
-// proxy sits in between, as when a WebSocket-only relay hands the host straight
-// to the sshd. And when there is an entry, it is the one the sshd goes by, so a
-// host the proxy still hears from is not closed for the silence of the
-// connection the proxy keeps to the sshd.
+// Without a registry entry, the node connection is the host-facing one. When
+// there is an entry, its activity wins over a silent node connection.
 func Test_sshd_PingsFallBackToTheNodeConnectionWithoutAProxy(t *testing.T) {
 	t.Run("no entry", func(t *testing.T) {
-		timing := liveness.Timing{Interval: 100 * time.Millisecond, Bound: 200 * time.Millisecond}
-		// A registry with nothing in it, which is what a relay with no SSH
-		// listener has: Server makes one either way.
-		s := newTestSSHD(t, func(d *sshd) {
-			d.liveness = timing
-			d.hostActivity = newHostActivity()
+		synctest.Test(t, func(t *testing.T) {
+			timing := liveness.Timing{Interval: 100 * time.Millisecond, Bound: 200 * time.Millisecond}
+			s := newBubbleSSHD(t, func(d *sshd) {
+				d.liveness = timing
+				d.hostActivity = newHostActivity()
+			})
+			host := newProven(t)
+			client, _, stopSending := s.dialMute(t, "direct", 30*time.Millisecond)
+			ok, body := host.register(t, client, "direct", 1)
+			require.True(t, ok, string(body))
+			synctest.Wait()
+			time.Sleep(2 * (timing.Interval + timing.Bound))
+			synctest.Wait()
+			_, err := s.sshd.SessionManager.GetSession(host.id())
+			require.NoError(t, err, "a host whose own connection kept delivering bytes was closed")
+			lastSent := stopSending()
+			synctest.Wait()
+			require.False(t, lastSent.IsZero(), "the client never sent a byte")
+			requireSessionClosesAt(t, s, host.id(), lastSent.Add(timing.Interval+timing.Bound))
 		})
-		host := newProven(t)
-		client, _, stopSending := s.dialMute(t, "direct", 30*time.Millisecond)
-		ok, body := host.register(t, client, "direct", 1)
-		require.True(t, ok, string(body))
-		gone := func() bool { _, err := s.sshd.SessionManager.GetSession(host.id()); return err != nil }
-
-		// Its bytes keep it, as they would on any connection.
-		require.Never(t, gone, 2*(timing.Interval+timing.Bound), 10*time.Millisecond,
-			"a host whose own connection kept delivering bytes was closed")
-		lastSent := stopSending()
-		require.False(t, lastSent.IsZero(), "the client never sent a byte")
-		silent := lastSent.Add(timing.Interval + timing.Bound)
-		limit := silent.Add(2 * lateWake)
-		for !gone() {
-			require.True(t, time.Now().Before(limit), "a silent host on a direct connection was kept")
-			time.Sleep(time.Millisecond)
-		}
-		requireClosedAt(t, time.Now(), silent, "its last byte plus Interval+Bound")
 	})
-
 	t.Run("an entry wins", func(t *testing.T) {
-		timing := liveness.Timing{Interval: 200 * time.Millisecond, Bound: 200 * time.Millisecond}
-		activity := newHostActivity()
-		s := newTestSSHD(t, func(d *sshd) {
-			d.liveness = timing
-			d.hostActivity = activity
+		synctest.Test(t, func(t *testing.T) {
+			timing := liveness.Timing{Interval: 200 * time.Millisecond, Bound: 200 * time.Millisecond}
+			activity := newHostActivity()
+			s := newBubbleSSHD(t, func(d *sshd) {
+				d.liveness = timing
+				d.hostActivity = activity
+			})
+			hostFacing, stopSending := advancingConn(t, 20*time.Millisecond)
+			t.Cleanup(activity.track([]byte("proxied"), hostFacing))
+			host := newProven(t)
+			client, freeze := s.dialFreezable(t, "proxied")
+			ok, body := host.register(t, client, "proxied", 1)
+			require.True(t, ok, string(body))
+			synctest.Wait()
+			freeze()
+			synctest.Wait()
+			time.Sleep(3 * (timing.Interval + timing.Bound))
+			synctest.Wait()
+			_, err := s.sshd.SessionManager.GetSession(host.id())
+			require.NoError(t, err, "a host the proxy still hears from was closed for its node connection's silence")
+			stopSending()
+			synctest.Wait()
+			requireSessionClosesAt(t, s, host.id(), hostFacing.LastRead().Add(timing.Interval+timing.Bound))
 		})
-		// The host-facing connection is in the registry before the host
-		// registers, as the proxy puts it there once the host's handshake is
-		// done, and the node connection is as silent as one can be.
-		hostFacing, stopSending := advancingConn(t, 20*time.Millisecond)
-		t.Cleanup(activity.track([]byte("proxied"), hostFacing))
-		host := newProven(t)
-		client, freeze := s.dialFreezable(t, "proxied")
-		ok, body := host.register(t, client, "proxied", 1)
-		require.True(t, ok, string(body))
-		freeze()
-		gone := func() bool { _, err := s.sshd.SessionManager.GetSession(host.id()); return err != nil }
-
-		require.Never(t, gone, 3*(timing.Interval+timing.Bound), 10*time.Millisecond,
-			"a host the proxy still hears from was closed for its node connection's silence")
-
-		stopSending()
-		silent := hostFacing.LastRead().Add(timing.Interval + timing.Bound)
-		limit := silent.Add(2 * lateWake)
-		for !gone() {
-			require.True(t, time.Now().Before(limit), "a host the proxy no longer hears from was kept")
-			time.Sleep(time.Millisecond)
-		}
-		requireClosedAt(t, time.Now(), silent, "the host-facing connection's last byte plus Interval+Bound")
 	})
 }
 
-// A capable host that answers its pings keeps its connection, and with it its
-// registration, however many pings go by.
+// Answering pings keeps a capable host and its registration for many budgets.
 func Test_sshd_KeepsACapableHostThatAnswers(t *testing.T) {
-	interval := 50 * time.Millisecond
-	s := newTestSSHD(t, func(d *sshd) {
-		d.liveness = liveness.Timing{Interval: interval, Bound: 4 * interval}
+	synctest.Test(t, func(t *testing.T) {
+		interval := 50 * time.Millisecond
+		s := newBubbleSSHD(t, func(d *sshd) {
+			d.liveness = liveness.Timing{Interval: interval, Bound: 4 * interval}
+		})
+		host := newProven(t)
+		capable := s.dialAs(t, "capable")
+		ok, body := host.register(t, capable, "capable", 1)
+		require.True(t, ok, string(body))
+		synctest.Wait()
+		time.Sleep(12 * interval)
+		synctest.Wait()
+		_, err := s.sshd.SessionManager.GetSession(host.id())
+		require.NoError(t, err, "a capable host that answers is kept")
 	})
-	host := newProven(t)
-	capable := s.dialAs(t, "capable")
-	ok, body := host.register(t, capable, "capable", 1)
-	require.True(t, ok, string(body))
-
-	require.Never(t, func() bool { _, err := s.sshd.SessionManager.GetSession(host.id()); return err != nil },
-		12*interval, interval/5, "a capable host that answers is kept")
 }
 
 // heldReleaseStore holds every Release until open is closed, and counts the
