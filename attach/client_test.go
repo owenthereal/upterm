@@ -1978,7 +1978,10 @@ func testDoorStopClosesHeldConnection(t *testing.T, authenticated bool) {
 		}
 		if stopDone != nil {
 			select {
-			case <-stopDone:
+			case err := <-stopDone:
+				if err != nil {
+					t.Errorf("fallback stop: %v", err)
+				}
 			case <-time.After(testTimeout):
 				t.Error("fallback did not join stop caller")
 			}
