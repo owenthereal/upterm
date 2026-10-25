@@ -459,7 +459,10 @@ type consulSessionStore struct {
 	// Hybrid cache for instant lookups with fallback to Consul
 	cache *sessionCache
 	// Watch management
-	watchPlan          *watch.Plan
+	watchPlan   *watch.Plan
+	watchCancel context.CancelFunc
+	// beforeWatchQuery is fixed before launch and runs just before query setup.
+	beforeWatchQuery   func()
 	apiHTTP, watchHTTP *http.Client
 	watchDone          chan struct{}
 	closeOnce          sync.Once
@@ -1235,18 +1238,54 @@ func (c *consulSessionStore) startSessionWatch(cfg *api.Config) error {
 		},
 	}
 	c.watchHTTP = watchConfig.HttpClient
+	// Match RunWithConfig's plan-specific configuration before creating the client.
+	watchConfig.Address = cfg.Address
+	watchConfig.Datacenter = watchPlan.Datacenter
+	watchConfig.Token = watchPlan.Token
+	watchClient, err := api.NewClient(&watchConfig)
+	if err != nil {
+		c.watchHTTP.CloseIdleConnections()
+		return fmt.Errorf("failed to create watch client: %w", err)
+	}
+	watchCtx, cancel := context.WithCancel(context.Background())
+	c.watchCancel = cancel
+	watcher := consulSessionWatcher(watchCtx, watchClient, c.SessionsKey())
+	beforeQuery := c.beforeWatchQuery
+	watchPlan.Watcher = func(p *watch.Plan) (watch.BlockingParamVal, interface{}, error) {
+		if beforeQuery != nil {
+			beforeQuery()
+		}
+		return watcher(p)
+	}
 	c.watchDone = make(chan struct{})
 
 	// Start watching in background
 	go func() {
 		defer close(c.watchDone)
 		c.logger.Info("starting session watch for full replication")
-		if err := watchPlan.RunWithConfig(watchConfig.Address, &watchConfig); err != nil {
+		if err := watchPlan.RunWithClientAndHclog(watchClient, watchPlan.Logger); err != nil {
 			c.logger.Error("session watch failed", "error", err)
 		}
 	}()
 
 	return nil
+}
+
+// consulSessionWatcher owns query cancellation independently of Plan's lazy
+// cancellation field. Its index state is used only by the watch goroutine.
+func consulSessionWatcher(ctx context.Context, client *api.Client, prefix string) watch.WatcherFunc {
+	var nextIndex uint64
+	return func(_ *watch.Plan) (watch.BlockingParamVal, interface{}, error) {
+		queryCtx, cancel := context.WithCancel(ctx)
+		defer cancel()
+		pairs, meta, err := client.KV().List(prefix, (&api.QueryOptions{WaitIndex: nextIndex}).WithContext(queryCtx))
+		if err != nil {
+			nextIndex = 0
+			return nil, nil, err
+		}
+		nextIndex = meta.LastIndex
+		return watch.WaitIndexVal(meta.LastIndex), pairs, nil
+	}
 }
 
 // updateSessionReplica updates the local session replica based on Consul
@@ -1304,6 +1343,9 @@ func (c *consulSessionStore) Observe(fn func(epoch, index uint64, entries map[st
 func (c *consulSessionStore) stopWatch(ctx context.Context) error {
 	if c.watchPlan != nil {
 		c.watchPlan.Stop()
+	}
+	if c.watchCancel != nil {
+		c.watchCancel()
 	}
 	if c.watchDone == nil {
 		return nil
