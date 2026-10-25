@@ -1809,6 +1809,11 @@ func newFakeConsulStore(t *testing.T, f *fakeConsul) *consulSessionStore {
 // client's own transport. The store's calls are its only traffic: with no
 // watch running, rt holds nothing a delivery needs.
 func newFakeConsulStoreWith(t *testing.T, f *fakeConsul, rt http.RoundTripper) *consulSessionStore {
+	return newFakeConsulStoreWithCleanup(t, f, rt, nil)
+}
+
+// The callback observes the actual store cleanup boundary, before Close.
+func newFakeConsulStoreWithCleanup(t *testing.T, f *fakeConsul, rt http.RoundTripper, beforeClose func()) *consulSessionStore {
 	cfg := api.DefaultConfig()
 	cfg.Address = f.URL
 	if rt == nil {
@@ -1820,7 +1825,12 @@ func newFakeConsulStoreWith(t *testing.T, f *fakeConsul, rt http.RoundTripper) *
 	logger := slog.New(slog.DiscardHandler)
 	store := &consulSessionStore{client: client, apiHTTP: cfg.HttpClient, logger: logger, ttl: time.Minute, keyPrefix: "fake",
 		cache: newSessionCache(logger), held: make(map[string]map[string]struct{})}
-	t.Cleanup(func() { assert.NoError(t, store.Close()) })
+	t.Cleanup(func() {
+		if beforeClose != nil {
+			beforeClose()
+		}
+		assert.NoError(t, store.Close())
+	})
 	return store
 }
 

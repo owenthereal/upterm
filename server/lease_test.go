@@ -123,21 +123,26 @@ func newKeeperFixture(t *testing.T, store *leaseStore, gen uint64) (*localSessio
 // newKeeperFixtureWith adopts a registration of generation gen on store, whose
 // keeper is paced by timing, and ends it in a cleanup. The keeper copies its
 // timing when the registration is adopted, so timing is set before that.
-func newKeeperFixtureWith(t *testing.T, store *leaseStore, gen uint64, timing leaseTiming) (*localSessions, *Registration, *closer) {
+func newKeeperFixtureWith(t *testing.T, store *leaseStore, gen uint64, timing leaseTiming, rescue ...func()) (*localSessions, *Registration, *closer) {
 	t.Helper()
 	logger := logging.Must(logging.Console(), logging.Debug()).Logger
 	store.t = t
 	store.memorySessionStore = newMemorySessionStore(logger)
 	sm := newSessionManagerWithStore(store, routing.NewEncodeDecoder(routing.ModeEmbedded))
 	mp, _ := newTestMetrics(t)
-	sessions := newLocalSessions(mp, sm, logger)
+	sessions := newLocalSessions(newTestSSHWork(t, rescue...).owner, mp, sm, logger)
 	sessions.timing = timing
 	reg, err := store.Register(context.Background(), &Session{ID: "id", NodeAddr: "node", Generation: gen})
 	require.NoError(t, err)
 	conn := newCloser()
-	_, err = sessions.add(reg, conn)
+	_, err = sessions.add(testSSHWork(t, sessions.work), reg, conn)
 	require.NoError(t, err)
-	t.Cleanup(func() { sessions.end(reg) })
+	t.Cleanup(func() {
+		for _, release := range rescue {
+			release()
+		}
+		sessions.end(reg)
+	})
 	return sessions, reg, conn
 }
 
@@ -183,7 +188,7 @@ func TestLeaseKeeperBudgetHoldsAcrossASlowRenewal(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
-				never, _ := newGate(t)
+				never, open := newGate(t)
 				store := &leaseStore{ttl: keeperTTL, renew: func(ctx context.Context, _ *Registration) error {
 					if tc.honours {
 						return blockUntil(ctx, never)
@@ -191,7 +196,7 @@ func TestLeaseKeeperBudgetHoldsAcrossASlowRenewal(t *testing.T) {
 					<-never
 					return nil
 				}}
-				_, reg, conn := newKeeperFixtureWith(t, store, tc.gen, defaultLeaseTiming)
+				_, reg, conn := newKeeperFixtureWith(t, store, tc.gen, defaultLeaseTiming, open)
 				if !tc.closes {
 					time.Sleep(20 * time.Second)
 					synctest.Wait() // every wake due in the first 20 s has run
@@ -276,12 +281,12 @@ func TestLeaseKeeperClosesAtTheRebuildBoundWhateverCleanupIsDoing(t *testing.T) 
 		base.memorySessionStore = newMemorySessionStore(logger)
 		sm := newSessionManagerWithStore(store, routing.NewEncodeDecoder(routing.ModeEmbedded))
 		mp, _ := newTestMetrics(t)
-		sessions := newLocalSessions(mp, sm, logger)
+		sessions := newLocalSessions(newTestSSHWork(t, openRebuild, openRelease).owner, mp, sm, logger)
 		sessions.timing = defaultLeaseTiming
 		reg, err := base.Register(context.Background(), &Session{ID: "id", NodeAddr: "node", Generation: 1})
 		require.NoError(t, err)
 		conn := newCloser()
-		_, err = sessions.add(reg, conn)
+		_, err = sessions.add(testSSHWork(t, sessions.work), reg, conn)
 		require.NoError(t, err)
 		// Ending the registration releases it, which waits on the release
 		// gate, so the gates open first.
@@ -444,7 +449,7 @@ func TestLeaseKeeperNeverResurrectsAnEndedRegistration(t *testing.T) {
 			<-release
 			return store.memorySessionStore.Reregister(context.Background(), reg)
 		}
-		sessions, reg, _ := newKeeperFixtureWith(t, store, 1, defaultLeaseTiming)
+		sessions, reg, _ := newKeeperFixtureWith(t, store, 1, defaultLeaseTiming, open)
 		select {
 		case <-entered:
 		case <-time.After(keeperTTL): // the rebuild is due at the first renewal, at half of it
@@ -477,7 +482,7 @@ func newConsulLeaseFixture(t *testing.T) (*localSessions, *consulSessionStore, *
 	client, err := testhelpers.ConsulClient()
 	require.NoError(t, err)
 	mp, _ := newTestMetrics(t)
-	return newLocalSessions(mp, sm, logger), store, client
+	return newLocalSessions(newTestSSHWork(t).owner, mp, sm, logger), store, client
 }
 
 // consulHolder returns the lock session holding id's entry in Consul, and
@@ -499,7 +504,7 @@ func TestLeaseKeeperKeepsAConsulEntryPastItsTTL(t *testing.T) {
 	reg, _, err := sessions.sessionManager.Register(context.Background(), &Session{ID: id, NodeAddr: "a:22", Generation: 1})
 	require.NoError(t, err)
 	conn := newCloser()
-	_, err = sessions.add(reg, conn)
+	_, err = sessions.add(testSSHWork(t, sessions.work), reg, conn)
 	require.NoError(t, err)
 
 	time.Sleep(25 * time.Second)
@@ -524,7 +529,7 @@ func TestLeaseKeeperClosesARegistrationTakenOverFromAnotherNode(t *testing.T) {
 	reg, _, err := sessions.sessionManager.Register(ctx, &Session{ID: id, NodeAddr: "a:22", Generation: 1})
 	require.NoError(t, err)
 	conn := newCloser()
-	_, err = sessions.add(reg, conn)
+	_, err = sessions.add(testSSHWork(t, sessions.work), reg, conn)
 	require.NoError(t, err)
 	t.Cleanup(func() { sessions.end(reg) })
 
@@ -555,7 +560,7 @@ func TestLeaseKeeperRebuiltEntryGoesWithItsRegistration(t *testing.T) {
 	reg, _, err := sessions.sessionManager.Register(context.Background(), &Session{ID: id, NodeAddr: "a:22", Generation: 1})
 	require.NoError(t, err)
 	conn := newCloser()
-	_, err = sessions.add(reg, conn)
+	_, err = sessions.add(testSSHWork(t, sessions.work), reg, conn)
 	require.NoError(t, err)
 
 	// Lost behind the keeper's back: the entry goes with the lease, and the

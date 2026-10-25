@@ -64,12 +64,14 @@ func isExpectedShutdownError(err error) bool {
 }
 
 func newStreamlocalForwardHandler(
+	work *sshSessionWork,
 	sessionManager *SessionManager,
 	sessionDialListener SessionDialListener,
 	sessions *localSessions,
 	logger *slog.Logger,
 ) *streamlocalForwardHandler {
 	return &streamlocalForwardHandler{
+		work:                work,
 		sessionManager:      sessionManager,
 		sessionDialListener: sessionDialListener,
 		sessions:            sessions,
@@ -79,6 +81,7 @@ func newStreamlocalForwardHandler(
 }
 
 type streamlocalForwardHandler struct {
+	work                *sshSessionWork
 	sessionManager      *SessionManager
 	sessionDialListener SessionDialListener
 	sessions            *localSessions
@@ -178,6 +181,15 @@ func (h *streamlocalForwardHandler) handleConnection(ctx ssh.Context, conn *goss
 }
 
 func (h *streamlocalForwardHandler) Handler(ctx ssh.Context, srv *ssh.Server, req *gossh.Request) (bool, []byte) {
+	work, ok := h.work.enter()
+	if !ok {
+		return false, nil
+	}
+	defer work.done()
+	return h.handle(work, ctx, srv, req)
+}
+
+func (h *streamlocalForwardHandler) handle(work *sshWorkRef, ctx ssh.Context, srv *ssh.Server, req *gossh.Request) (bool, []byte) {
 	switch req.Type {
 	case streamlocalForwardChannelType:
 		var reqPayload streamlocalChannelForwardMsg
@@ -212,7 +224,11 @@ func (h *streamlocalForwardHandler) Handler(ctx ssh.Context, srv *ssh.Server, re
 			return false, []byte(err.Error())
 		}
 
-		ln, err := h.bind(reg)
+		groupWork := work.child()
+		ln, err := h.bind(groupWork, reg)
+		if err != nil {
+			groupWork.done()
+		}
 		if errors.Is(err, errForwardEnded) {
 			logger.Warn("rejected forward for ended session")
 			return false, []byte("session has ended")
@@ -240,6 +256,7 @@ func (h *streamlocalForwardHandler) Handler(ctx ssh.Context, srv *ssh.Server, re
 		}
 
 		go func(sessionID string) {
+			defer groupWork.done()
 			if err := g.Run(); err != nil {
 				// Log expected shutdown errors at debug level, critical errors at error level
 				if isExpectedShutdownError(err) {
@@ -291,7 +308,7 @@ var errForwardEnded = errors.New("session has ended")
 // listener would otherwise keep the socket's name from the registration this
 // node now serves. A listener of the registration this node serves is never
 // closed here, so a second forward from it still fails.
-func (h *streamlocalForwardHandler) bind(reg *Registration) (net.Listener, error) {
+func (h *streamlocalForwardHandler) bind(work *sshWorkRef, reg *Registration) (net.Listener, error) {
 	h.Lock()
 	if !h.sessions.active(reg) {
 		h.Unlock()
@@ -316,7 +333,8 @@ func (h *streamlocalForwardHandler) bind(reg *Registration) (net.Listener, error
 	// the reply to reg's forward. The release is conditional, so it leaves
 	// reg's entry alone.
 	if evicted != nil {
-		go h.sessions.end(evicted)
+		child := work.child()
+		go func() { defer child.done(); h.sessions.end(evicted) }()
 	}
 	if err != nil {
 		return nil, err
@@ -369,8 +387,9 @@ func (h *streamlocalForwardHandler) closeListener(reg *Registration) {
 // registration's reply or the close of the old connection, which takes its
 // guests with it. The release is conditional, so it leaves the successor's
 // entry alone.
-func (h *streamlocalForwardHandler) evict(reg *Registration) {
+func (h *streamlocalForwardHandler) evict(work *sshWorkRef, reg *Registration) {
 	if h.untrack(reg) {
-		go h.sessions.end(reg)
+		child := work.child()
+		go func() { defer child.done(); h.sessions.end(reg) }()
 	}
 }

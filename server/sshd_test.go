@@ -147,13 +147,7 @@ func newBubbleSSHD(t *testing.T, options ...func(*sshd)) *testSSHD {
 	t.Helper()
 	ln := bufconn.Listen(256 * 1024)
 	s := newTestSSHDOn(t, ln, ln.DialContext, options...)
-	t.Cleanup(func() {
-		err := s.sshd.Shutdown()
-		<-s.served
-		synctest.Wait()
-		require.NoError(t, err)
-	})
-	synctest.Wait()
+	synctest.Wait() // Serve has published its listener and admission owner.
 	return s
 }
 
@@ -184,6 +178,12 @@ func newTestSSHDOn(t *testing.T, ln net.Listener, dial func(context.Context) (ne
 		option(sshd)
 	}
 	served := make(chan struct{})
+	t.Cleanup(func() {
+		if err := sshd.Shutdown(); err != nil {
+			t.Errorf("sshd fixture Shutdown: %v", err)
+		}
+		ownershipJoin(t, served, "fixture Serve")
+	})
 	go func() {
 		defer close(served)
 		_ = sshd.Serve(ln)
@@ -601,29 +601,40 @@ func Test_localSessions_SlowReleaseDoesNotBlockAdd(t *testing.T) {
 		entered:      make(chan struct{}),
 		release:      make(chan struct{}),
 	}
+	release := sync.OnceFunc(func() { close(store.release) })
+	t.Cleanup(release)
 	sm := newSessionManagerWithStore(store, routing.NewEncodeDecoder(routing.ModeEmbedded))
 	mp, metrics := newTestMetrics(t)
-	sessions := newLocalSessions(mp, sm, logger)
+	sessions := newLocalSessions(newTestSSHWork(t).owner, mp, sm, logger)
 
 	slow, _, err := sm.Register(context.Background(), NewSession("slow", "node", "owen", nil, nil))
 	require.NoError(t, err)
-	_, err = sessions.add(slow, newCloser())
+	_, err = sessions.add(testSSHWork(t, sessions.work), slow, newCloser())
 	require.NoError(t, err)
 	other, _, err := sm.Register(context.Background(), NewSession("other", "node", "owen", nil, nil))
 	require.NoError(t, err)
 
-	ended := make(chan struct{})
+	ended, added := make(chan struct{}), make(chan struct{})
+	addWork := testSSHWork(t, sessions.work) // Admission must happen on the test goroutine.
+	addedStarted := false
+	t.Cleanup(func() {
+		release()
+		ownershipJoin(t, ended, "slow end caller")
+		if addedStarted {
+			ownershipJoin(t, added, "concurrent add caller")
+		}
+	})
 	go func() {
 		sessions.end(slow)
 		close(ended)
 	}()
-	<-store.entered // end is now inside the store release
+	receiveWithin(t, store.entered, "end never reached the held Release")
 
 	// A Consul release can take a while; other hosts creating sessions must
 	// not queue behind it.
-	added := make(chan struct{})
+	addedStarted = true
 	go func() {
-		_, _ = sessions.add(other, newCloser())
+		_, _ = sessions.add(addWork, other, newCloser())
 		close(added)
 	}()
 	select {
@@ -632,7 +643,7 @@ func Test_localSessions_SlowReleaseDoesNotBlockAdd(t *testing.T) {
 		t.Fatal("add blocked behind a slow release")
 	}
 
-	close(store.release)
+	release()
 	<-ended
 	v, ok := gatherValue(t, metrics, "test_server_sessions_active_count", nil)
 	require.True(t, ok)
@@ -670,7 +681,7 @@ func newTestLocalSessions(t *testing.T) (*localSessions, *SessionManager, func()
 	logger := logging.Must(logging.Console(), logging.Debug()).Logger
 	sm := newEmbeddedSessionManager(logger)
 	mp, metrics := newTestMetrics(t)
-	return newLocalSessions(mp, sm, logger), sm, func() float64 {
+	return newLocalSessions(newTestSSHWork(t).owner, mp, sm, logger), sm, func() float64 {
 		v, _ := gatherValue(t, metrics, "test_server_sessions_active_count", nil)
 		return v
 	}
@@ -681,12 +692,12 @@ func Test_localSessions_TakeoverKeepsOneCount(t *testing.T) {
 	ctx := context.Background()
 	gen1, _, err := sm.Register(ctx, &Session{ID: "id", NodeAddr: "node", Generation: 1})
 	require.NoError(t, err)
-	prev, err := sessions.add(gen1, newCloser())
+	prev, err := sessions.add(testSSHWork(t, sessions.work), gen1, newCloser())
 	require.NoError(t, err)
 	require.Nil(t, prev)
 	gen2, _, err := sm.Register(ctx, &Session{ID: "id", NodeAddr: "node", Generation: 2})
 	require.NoError(t, err)
-	prev, err = sessions.add(gen2, newCloser())
+	prev, err = sessions.add(testSSHWork(t, sessions.work), gen2, newCloser())
 	require.NoError(t, err)
 	require.True(t, prev.reg.Same(gen1))
 	require.Equal(t, 1.0, gauge())
@@ -706,9 +717,9 @@ func Test_localSessions_OlderAdoptionIsRefused(t *testing.T) {
 	gen1 := &Registration{Session: &Session{ID: "id", NodeAddr: "node", Generation: 1}}
 	gen2 := &Registration{Session: &Session{ID: "id", NodeAddr: "node", Generation: 2}}
 	conn2 := newCloser()
-	_, err := sessions.add(gen2, conn2)
+	_, err := sessions.add(testSSHWork(t, sessions.work), gen2, conn2)
 	require.NoError(t, err)
-	prev, err := sessions.add(gen1, newCloser())
+	prev, err := sessions.add(testSSHWork(t, sessions.work), gen1, newCloser())
 	require.ErrorIs(t, err, ErrSuperseded)
 	require.Nil(t, prev)
 	require.True(t, sessions.active(gen2))
@@ -721,7 +732,7 @@ func Test_localSessions_OlderAdoptionIsRefused(t *testing.T) {
 func Test_localSessions_ReplaceKeepsTheSlot(t *testing.T) {
 	sessions, _, _ := newTestLocalSessions(t)
 	reg := &Registration{Session: &Session{ID: "id", NodeAddr: "node", Generation: 1}, lease: "lost"}
-	_, err := sessions.add(reg, newCloser())
+	_, err := sessions.add(testSSHWork(t, sessions.work), reg, newCloser())
 	require.NoError(t, err)
 	slot := func() *localRegistration {
 		sessions.mu.Lock()
@@ -741,15 +752,15 @@ func Test_forwards_OldRegistrationCannotCloseTheNew(t *testing.T) {
 	sessions, sm, _ := newTestLocalSessions(t)
 	network := &MemoryProvider{}
 	require.NoError(t, network.SetOpts(nil))
-	h := newStreamlocalForwardHandler(sm, network.Session(), sessions, slog.New(slog.DiscardHandler))
+	h := newStreamlocalForwardHandler(sessions.work, sm, network.Session(), sessions, slog.New(slog.DiscardHandler))
 	ctx := context.Background()
 	gen1, _, _ := sm.Register(ctx, &Session{ID: "id", NodeAddr: "node", Generation: 1})
-	_, _ = sessions.add(gen1, newCloser())
+	_, _ = sessions.add(testSSHWork(t, sessions.work), gen1, newCloser())
 	ln1, err := network.Session().Listen("id")
 	require.NoError(t, err)
 	h.trackListener(gen1, ln1)
 	gen2, _, _ := sm.Register(ctx, &Session{ID: "id", NodeAddr: "node", Generation: 2})
-	_, _ = sessions.add(gen2, newCloser())
+	_, _ = sessions.add(testSSHWork(t, sessions.work), gen2, newCloser())
 	h.closeListener(gen1) // the takeover frees the socket name
 	ln2, err := network.Session().Listen("id")
 	require.NoError(t, err)
@@ -784,14 +795,14 @@ func Test_forwards_OverlappingTakeoversBindTheLatest(t *testing.T) {
 	store := &releaseRecordingStore{SessionStore: newMemorySessionStore(logger)}
 	sm := newSessionManagerWithStore(store, routing.NewEncodeDecoder(routing.ModeEmbedded))
 	mp, metrics := newTestMetrics(t)
-	sessions := newLocalSessions(mp, sm, logger)
+	sessions := newLocalSessions(newTestSSHWork(t).owner, mp, sm, logger)
 	gauge := func() float64 {
 		v, _ := gatherValue(t, metrics, "test_server_sessions_active_count", nil)
 		return v
 	}
 	network := &MemoryProvider{}
 	require.NoError(t, network.SetOpts(nil))
-	h := newStreamlocalForwardHandler(sm, network.Session(), sessions, logger)
+	h := newStreamlocalForwardHandler(sessions.work, sm, network.Session(), sessions, logger)
 	register := func(gen uint64) *Registration {
 		reg, _, err := sm.Register(context.Background(), &Session{ID: "id", NodeAddr: "node", Generation: gen})
 		require.NoError(t, err)
@@ -799,24 +810,24 @@ func Test_forwards_OverlappingTakeoversBindTheLatest(t *testing.T) {
 	}
 
 	gen1 := register(1)
-	_, err := sessions.add(gen1, newCloser())
+	_, err := sessions.add(testSSHWork(t, sessions.work), gen1, newCloser())
 	require.NoError(t, err)
-	ln1, err := h.bind(gen1)
+	ln1, err := h.bind(testSSHWork(t, h.work), gen1)
 	require.NoError(t, err)
 
 	// Generation 2 adopts, and is held up before it closes generation 1's
 	// listener.
 	gen2 := register(2)
-	prev1, err := sessions.add(gen2, newCloser())
+	prev1, err := sessions.add(testSSHWork(t, sessions.work), gen2, newCloser())
 	require.NoError(t, err)
 
 	// Generation 3 adopts in full, and its host forwards.
 	gen3 := register(3)
-	prev2, err := sessions.add(gen3, newCloser())
+	prev2, err := sessions.add(testSSHWork(t, sessions.work), gen3, newCloser())
 	require.NoError(t, err)
 	h.closeListener(prev2.reg)
 	require.NoError(t, prev2.conn.Close())
-	ln3, err := h.bind(gen3)
+	ln3, err := h.bind(testSSHWork(t, h.work), gen3)
 	require.NoError(t, err, "an older takeover's listener kept the socket from the latest registration")
 	defer h.closeListener(gen3)
 
@@ -843,7 +854,7 @@ func Test_forwards_OverlappingTakeoversBindTheLatest(t *testing.T) {
 
 	// A second forward from the registration this node serves still fails,
 	// rather than closing its own listener.
-	_, err = h.bind(gen3)
+	_, err = h.bind(testSSHWork(t, h.work), gen3)
 	require.Error(t, err)
 	require.True(t, sessions.active(gen3))
 
@@ -938,12 +949,14 @@ func Test_forwards_ATakeoverRefusesAnOldForwardInFlight(t *testing.T) {
 		entered:      make(chan struct{}),
 		release:      make(chan struct{}),
 	}
+	release := sync.OnceFunc(func() { close(store.release) })
+	t.Cleanup(release)
 	sm := newSessionManagerWithStore(store, routing.NewEncodeDecoder(routing.ModeEmbedded))
 	mp, _ := newTestMetrics(t)
-	sessions := newLocalSessions(mp, sm, logger)
+	sessions := newLocalSessions(newTestSSHWork(t).owner, mp, sm, logger)
 	network := &MemoryProvider{}
 	require.NoError(t, network.SetOpts(nil))
-	h := newStreamlocalForwardHandler(sm, network.Session(), sessions, logger)
+	h := newStreamlocalForwardHandler(sessions.work, sm, network.Session(), sessions, logger)
 	srv := &gliderssh.Server{ReversePortForwardingCallback: func(gliderssh.Context, string, uint32) bool { return true }}
 	forward := func(conn gliderssh.Context) (bool, []byte) {
 		return h.Handler(conn, srv, &ssh.Request{
@@ -955,12 +968,19 @@ func Test_forwards_ATakeoverRefusesAnOldForwardInFlight(t *testing.T) {
 
 	gen1, _, err := sm.Register(ctx, &Session{ID: "id", NodeAddr: "node", Generation: 1})
 	require.NoError(t, err)
-	_, err = sessions.add(gen1, newCloser())
+	_, err = sessions.add(testSSHWork(t, sessions.work), gen1, newCloser())
 	require.NoError(t, err)
 	conn1, closeConn1 := newTestConnContext(t)
 	ownSession(conn1, gen1)
 	old := make(chan bool, 1)
+	oldDone := make(chan struct{})
+	t.Cleanup(func() {
+		release()
+		closeConn1()
+		ownershipJoin(t, oldDone, "paused forward caller")
+	})
 	go func() {
+		defer close(oldDone)
 		ok, _ := forward(conn1)
 		old <- ok
 	}()
@@ -973,12 +993,12 @@ func Test_forwards_ATakeoverRefusesAnOldForwardInFlight(t *testing.T) {
 	// The takeover, in adopt's order.
 	gen2, _, err := sm.Register(ctx, &Session{ID: "id", NodeAddr: "node", Generation: 2})
 	require.NoError(t, err)
-	prev, err := sessions.add(gen2, newCloser())
+	prev, err := sessions.add(testSSHWork(t, sessions.work), gen2, newCloser())
 	require.NoError(t, err)
-	h.evict(prev.reg)
+	h.evict(testSSHWork(t, h.work), prev.reg)
 	closeConn1()
 
-	close(store.release)
+	release()
 	select {
 	case ok := <-old:
 		require.False(t, ok, "the old forward bound the socket after the takeover")
@@ -1032,25 +1052,25 @@ func Test_sshd_TakeoverReleasesARebuiltLease(t *testing.T) {
 	store := &releaseRecordingStore{SessionStore: newMemorySessionStore(logger)}
 	sm := newSessionManagerWithStore(store, routing.NewEncodeDecoder(routing.ModeEmbedded))
 	mp, _ := newTestMetrics(t)
-	sessions := newLocalSessions(mp, sm, logger)
+	sessions := newLocalSessions(newTestSSHWork(t).owner, mp, sm, logger)
 	network := &MemoryProvider{}
 	require.NoError(t, network.SetOpts(nil))
 	s := &sshd{
 		SessionManager: sm,
 		Logger:         logger,
 		sessions:       sessions,
-		forwardHandler: newStreamlocalForwardHandler(sm, network.Session(), sessions, logger),
+		forwardHandler: newStreamlocalForwardHandler(sessions.work, sm, network.Session(), sessions, logger),
 	}
 
 	adopted := &Registration{Session: &Session{ID: "id", NodeAddr: "node", Generation: 1}, lease: "adopted"}
 	oldConn := newCloser()
-	_, err := sessions.add(adopted, oldConn)
+	_, err := sessions.add(testSSHWork(t, sessions.work), adopted, oldConn)
 	require.NoError(t, err)
 	require.True(t, sessions.replace(&Registration{Session: adopted.Session, lease: "rebuilt"}))
 
 	next := &Registration{Session: &Session{ID: "id", NodeAddr: "node", Generation: 2}, lease: "next"}
 	conn, _ := newTestConnContext(t)
-	ok, refusal := s.adopt(conn, next, nil)
+	ok, refusal := s.adopt(testSSHWork(t, sessions.work), conn, next, nil)
 	require.True(t, ok, string(refusal))
 	require.True(t, oldConn.isClosed())
 	require.Eventually(t, func() bool { return store.released("rebuilt") }, 2*time.Second, 10*time.Millisecond,
@@ -1350,15 +1370,15 @@ func Test_localSessions_SameGenerationFromAnotherConnectionIsRefused(t *testing.
 	sessions, _, gauge := newTestLocalSessions(t)
 	reg := &Registration{Session: &Session{ID: "id", NodeAddr: "node", Generation: 1}}
 	conn := newCloser()
-	_, err := sessions.add(reg, conn)
+	_, err := sessions.add(testSSHWork(t, sessions.work), reg, conn)
 	require.NoError(t, err)
 	again := &Registration{Session: &Session{ID: "id", NodeAddr: "node", Generation: 1}}
-	prev, err := sessions.add(again, newCloser())
+	prev, err := sessions.add(testSSHWork(t, sessions.work), again, newCloser())
 	require.ErrorIs(t, err, ErrSuperseded)
 	require.Nil(t, prev)
 	require.True(t, sessions.active(reg))
 	require.False(t, conn.isClosed())
-	prev, err = sessions.add(again, conn)
+	prev, err = sessions.add(testSSHWork(t, sessions.work), again, conn)
 	require.NoError(t, err, "the connection that holds the slot")
 	require.Same(t, reg, prev.reg)
 	require.Equal(t, 1.0, gauge())
@@ -1834,11 +1854,14 @@ func Test_sshd_KeepsACapableHostThatAnswers(t *testing.T) {
 // ones that went through.
 type heldReleaseStore struct {
 	SessionStore
-	open chan struct{}
-	done atomic.Int32
+	open      chan struct{}
+	entered   chan struct{}
+	enterOnce sync.Once
+	done      atomic.Int32
 }
 
 func (s *heldReleaseStore) Release(ctx context.Context, reg *Registration) error {
+	s.enterOnce.Do(func() { close(s.entered) })
 	select {
 	case <-s.open:
 	case <-ctx.Done():
@@ -1853,10 +1876,24 @@ func (s *heldReleaseStore) Release(ctx context.Context, reg *Registration) error
 // which takes its guests with it, waits on the store's release.
 func Test_sshd_TakeoverDoesNotWaitOnTheStore(t *testing.T) {
 	logger := logging.Must(logging.Console(), logging.Debug()).Logger
-	store := &heldReleaseStore{SessionStore: newMemorySessionStore(logger), open: make(chan struct{})}
-	s := newTestSSHD(t, func(d *sshd) {
+	store := &heldReleaseStore{SessionStore: newMemorySessionStore(logger), open: make(chan struct{}), entered: make(chan struct{})}
+	release := sync.OnceFunc(func() { close(store.open) })
+	var s *testSSHD
+	t.Cleanup(func() {
+		if err := store.Close(); err != nil {
+			t.Errorf("takeover store Close: %v", err)
+		}
+		if s != nil && s.sshd.Shutdown() == nil && ownershipDone(s.served) {
+			t.Log("takeover store.Close after fixture producer drain")
+		} else {
+			t.Log("takeover store.Close after incomplete fixture cleanup")
+		}
+	})
+	t.Cleanup(release) // Installed at acquisition, before fixture setup can fail.
+	s = newTestSSHD(t, func(d *sshd) {
 		d.SessionManager = newSessionManagerWithStore(store, routing.NewEncodeDecoder(routing.ModeEmbedded))
 	})
+	t.Cleanup(release) // Before the later fixture shutdown waits on held releases.
 	host := newProven(t)
 	first := s.dialAs(t, "conn-1")
 	ok, body := host.register(t, first, "conn-1", 1)
@@ -1864,6 +1901,7 @@ func Test_sshd_TakeoverDoesNotWaitOnTheStore(t *testing.T) {
 	ok, reason := forwardRequest(t, first, streamlocalForwardChannelType, host.id())
 	require.True(t, ok, reason)
 	firstClosed := make(chan struct{})
+	t.Cleanup(func() { _ = first.Close(); ownershipJoin(t, firstClosed, "takeover first client Wait") })
 	go func() { _ = first.Wait(); close(firstClosed) }()
 
 	// Dialed before the clock starts: the budget below times the reply, not
@@ -1879,7 +1917,8 @@ func Test_sshd_TakeoverDoesNotWaitOnTheStore(t *testing.T) {
 		t.Fatal("the superseded connection waited on the store")
 	}
 
-	close(store.open)
+	receiveWithin(t, store.entered, "takeover Release never entered its hold")
+	release()
 	// Two releases of generation 1 happen: evict's, and the old connection's
 	// own when its context ends. The memory store has no lease, so nothing
 	// else releases it. Waiting for both means the check below runs after

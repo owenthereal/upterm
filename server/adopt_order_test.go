@@ -223,7 +223,11 @@ func TestAdoptionHandRows(t *testing.T) {
 	// refused with its connection closed; generation 2 then adopts. The gauge
 	// counts only generation 2's connection.
 	t.Run("one node: A R C S F, then generation 2 adopts", func(t *testing.T) {
-		h := newAdoptRace(t, adoptRaceConfig{hold: []uint64{1, 2}})
+		releases := newReleaseWitnessStore()
+		h := newAdoptRace(t, adoptRaceConfig{hold: []uint64{1, 2}, configure: func(h *adoptRace, d *sshd) {
+			releases.SessionStore = h.store
+			d.SessionManager = newSessionManagerWithStore(releases, routing.NewEncodeDecoder(routing.ModeConsul))
+		}})
 		h.begin()
 		h.returned1()
 		second, secondEnded := h.dial("conn-2")
@@ -235,6 +239,11 @@ func TestAdoptionHandRows(t *testing.T) {
 		h.registered[1].release()
 		r := receiveWithin(h.t, h.firstReply, "generation 1 never had a reply")
 		require.False(t, r.ok && r.err == nil, "generation 1 was adopted though this node's store had generation 2")
+		retired := releases.call(t, 1)
+		receiveWithin(t, retired.returned, "confirm refusal's Release delegate never returned")
+		require.True(t, retired.reg.Same(h.reg1))
+		require.NoError(t, retired.err)
+		// A request error remains permitted: this is not a guaranteed handler reply witness.
 		h.registered[2].release()
 		r = receiveWithin(h.t, secondReply, "generation 2 never had a reply")
 		require.NoError(t, r.err)
@@ -250,7 +259,11 @@ func TestAdoptionHandRows(t *testing.T) {
 	// the ID here and refuses it before confirm, releasing lease 1. The host
 	// reads a Superseded reply on a connection left open for it.
 	t.Run("one node: A R C, generation 2 adopts, then S", func(t *testing.T) {
-		h := newAdoptRace(t, adoptRaceConfig{hold: []uint64{1, 2}})
+		releases := newReleaseWitnessStore()
+		h := newAdoptRace(t, adoptRaceConfig{hold: []uint64{1, 2}, configure: func(h *adoptRace, d *sshd) {
+			releases.SessionStore = h.store
+			d.SessionManager = newSessionManagerWithStore(releases, routing.NewEncodeDecoder(routing.ModeConsul))
+		}})
 		h.begin()
 		h.returned1()
 		second, secondEnded := h.dial("conn-2")
@@ -266,6 +279,12 @@ func TestAdoptionHandRows(t *testing.T) {
 		require.NoError(t, r.err, "the refused registration's connection was closed before its reply")
 		require.False(t, r.ok)
 		require.Equal(t, registration.Superseded, string(r.body))
+		refused := releases.call(t, 1)
+		receiveWithin(t, refused.returned, "add refusal's Release delegate never returned")
+		require.True(t, refused.reg.Same(h.reg1))
+		require.NoError(t, refused.err)
+		// Together, this actual nil-error Superseded reply and delegate return
+		// cover the live handler invocation; EOF would not supply that boundary.
 		h.awaitEnd("generation 1's refusal left something behind", nil, func() []string {
 			return h.supersededUnmet(supersededState{here: secondEnded})
 		})
@@ -396,6 +415,10 @@ type adoptRaceConfig struct {
 	// hold names the generations onRegistered holds, and confirm those
 	// beforeConfirm holds.
 	hold, confirm []uint64
+	// Optional per-instance ownership diagnostics, installed before Serve.
+	transport   func(http.RoundTripper) http.RoundTripper
+	beforeClose func()
+	configure   func(*adoptRace, *sshd)
 }
 
 // hostReply is the host's reply to its registration.
@@ -476,7 +499,13 @@ func newAdoptRace(t *testing.T, cfg adoptRaceConfig) *adoptRace {
 		h.delay = newDelayedTxnReply(rt, holds...)
 		rt = h.delay
 	}
-	h.store = newFakeConsulStoreWith(t, consul, rt)
+	if cfg.transport != nil {
+		if rt == nil {
+			rt = ownedHTTPTransport(t)
+		}
+		rt = cfg.transport(rt)
+	}
+	h.store = newFakeConsulStoreWithCleanup(t, consul, rt, cfg.beforeClose)
 	for _, gen := range cfg.hold {
 		h.registered[gen] = newCheckpoint()
 	}
@@ -487,6 +516,9 @@ func newAdoptRace(t *testing.T, cfg adoptRaceConfig) *adoptRace {
 		d.SessionManager = newSessionManagerWithStore(h.store, routing.NewEncodeDecoder(routing.ModeConsul))
 		d.onRegistered = func(_ context.Context, reg *Registration) { h.registered[reg.Generation()].stop(reg) }
 		d.beforeConfirm = func(reg *Registration) { h.confirming[reg.Generation()].stop(reg) }
+		if cfg.configure != nil {
+			cfg.configure(h, d)
+		}
 	}, withObserverFirst(h.observe))
 	// However the run ends, nothing is left held. dial registers this again,
 	// so it runs before each connection's own cleanup closes it.

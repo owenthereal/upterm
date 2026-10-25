@@ -100,8 +100,8 @@ func newReconcileNode(t *testing.T, addr string) *reconcileNode {
 	gated := &gatedStore{SessionStore: store}
 	sm := newSessionManagerWithStore(gated, routing.NewEncodeDecoder(routing.ModeConsul))
 	mp, metrics := newTestMetrics(t)
-	sessions := newLocalSessions(mp, sm, logger)
-	sm.Observe(sessions.reconcile)
+	sessions := newLocalSessions(newTestSSHWork(t).owner, mp, sm, logger)
+	sm.Observe(sessions.observe)
 	return &reconcileNode{sm: sm, sessions: sessions, gated: gated, store: store, metrics: metrics, addr: addr}
 }
 
@@ -115,9 +115,9 @@ func (n *reconcileNode) register(t *testing.T, id string, gen uint64) (*Registra
 	require.NoError(t, err)
 	t.Cleanup(func() { n.sessions.end(reg) })
 	conn := newCloser()
-	_, err = n.sessions.add(reg, conn)
+	_, err = n.sessions.add(testSSHWork(t, n.sessions.work), reg, conn)
 	require.NoError(t, err)
-	require.NoError(t, n.sessions.confirm(reg))
+	require.NoError(t, n.sessions.confirm(testSSHWork(t, n.sessions.work), reg))
 	return reg, conn
 }
 
@@ -245,9 +245,9 @@ func TestAdoptionRefusesARegistrationAlreadySuperseded(t *testing.T) {
 	require.Equal(t, uint64(2), cachedGeneration(a.store, id), "node A's cache never took generation 2")
 
 	conn := newCloser()
-	_, err = a.sessions.add(reg, conn)
+	_, err = a.sessions.add(testSSHWork(t, a.sessions.work), reg, conn)
 	require.NoError(t, err)
-	require.ErrorIs(t, a.sessions.confirm(reg), ErrSuperseded)
+	require.ErrorIs(t, a.sessions.confirm(testSSHWork(t, a.sessions.work), reg), ErrSuperseded)
 	require.True(t, conn.isClosed(), "the superseded registration's connection was left open")
 	require.False(t, a.sessions.active(reg))
 	require.Equal(t, 0.0, a.gauge(t))
@@ -338,14 +338,14 @@ func TestReconcileAcrossAnIndexDrop(t *testing.T) {
 	store := newFakeConsulStore(t, consul)
 	sm := newSessionManagerWithStore(store, routing.NewEncodeDecoder(routing.ModeConsul))
 	mp, _ := newTestMetrics(t)
-	sessions := newLocalSessions(mp, sm, slog.New(slog.DiscardHandler))
-	sm.Observe(sessions.reconcile)
+	sessions := newLocalSessions(newTestSSHWork(t).owner, mp, sm, slog.New(slog.DiscardHandler))
+	sm.Observe(sessions.observe)
 
 	reg, _, err := sm.Register(context.Background(), &Session{ID: "id", NodeAddr: "node-a:22", Generation: 1})
 	require.NoError(t, err)
 	t.Cleanup(func() { sessions.end(reg) })
 	conn := newCloser()
-	_, err = sessions.add(reg, conn)
+	_, err = sessions.add(testSSHWork(t, sessions.work), reg, conn)
 	require.NoError(t, err)
 	store.updateSessionReplica(reg.index, api.KVPairs{consul.entry()})
 	require.False(t, conn.isClosed(), "a delivery showing the registration itself closed it")
@@ -413,15 +413,15 @@ func TestAForeignValueInAKeyItsOwnLeaseHoldsIsALoss(t *testing.T) {
 			store := newFakeConsulStore(t, consul)
 			sm := newSessionManagerWithStore(store, routing.NewEncodeDecoder(routing.ModeConsul))
 			mp, metrics := newTestMetrics(t)
-			sessions := newLocalSessions(mp, sm, slog.New(slog.DiscardHandler))
-			sm.Observe(sessions.reconcile)
+			sessions := newLocalSessions(newTestSSHWork(t).owner, mp, sm, slog.New(slog.DiscardHandler))
+			sm.Observe(sessions.observe)
 
 			own := &Session{ID: "id", NodeAddr: "node-a:22", Generation: tc.gen}
 			reg, _, err := sm.Register(context.Background(), own)
 			require.NoError(t, err)
 			t.Cleanup(func() { sessions.end(reg) })
 			conn := newCloser()
-			_, err = sessions.add(reg, conn)
+			_, err = sessions.add(testSSHWork(t, sessions.work), reg, conn)
 			require.NoError(t, err)
 
 			// A higher generation from another node.
@@ -449,8 +449,8 @@ func TestAdoptionTakesAForeignValueItsOwnLeaseHoldsAsALoss(t *testing.T) {
 	store := newFakeConsulStore(t, consul)
 	sm := newSessionManagerWithStore(store, routing.NewEncodeDecoder(routing.ModeConsul))
 	mp, _ := newTestMetrics(t)
-	sessions := newLocalSessions(mp, sm, slog.New(slog.DiscardHandler))
-	sm.Observe(sessions.reconcile)
+	sessions := newLocalSessions(newTestSSHWork(t).owner, mp, sm, slog.New(slog.DiscardHandler))
+	sm.Observe(sessions.observe)
 
 	own := &Session{ID: "id", NodeAddr: "node-a:22"} // legacy
 	reg, _, err := sm.Register(context.Background(), own)
@@ -460,9 +460,9 @@ func TestAdoptionTakesAForeignValueItsOwnLeaseHoldsAsALoss(t *testing.T) {
 	store.updateSessionReplica(pair.ModifyIndex, api.KVPairs{pair})
 
 	conn := newCloser()
-	_, err = sessions.add(reg, conn)
+	_, err = sessions.add(testSSHWork(t, sessions.work), reg, conn)
 	require.NoError(t, err)
-	require.NoError(t, sessions.confirm(reg), "adoption took a foreign value in the key its own lease holds as a supersession")
+	require.NoError(t, sessions.confirm(testSSHWork(t, sessions.work), reg), "adoption took a foreign value in the key its own lease holds as a supersession")
 	require.False(t, conn.isClosed())
 	require.Eventually(t, func() bool { return restored(consul, reg, own) },
 		5*time.Second, 10*time.Millisecond, "the keeper never restored the entry under a new lease")
@@ -500,7 +500,7 @@ func TestANewerEntrySupersedesARegistrationWithoutALease(t *testing.T) {
 	sessions, reg, conn := newKeeperFixture(t, &leaseStore{ttl: time.Hour}, 1)
 	require.Empty(t, reg.lease)
 
-	sessions.reconcile(0, 0, map[string]StoreEntry{"id": {Session: &Session{ID: "id", NodeAddr: "elsewhere:22", Generation: 2}}})
+	sessions.reconcile(testSSHWork(t, sessions.work), 0, 0, map[string]StoreEntry{"id": {Session: &Session{ID: "id", NodeAddr: "elsewhere:22", Generation: 2}}})
 
 	require.True(t, conn.isClosed(), "a newer unlocked entry didn't supersede a registration without a lease")
 	require.False(t, sessions.active(reg))
@@ -526,7 +526,7 @@ func TestLeaseKeeperRebuildsALossTheWatchReports(t *testing.T) {
 		store := &leaseStore{ttl: time.Hour} // the first renewal falls due in 30 minutes
 		rebuilt := rebuilding(store)
 		sessions, _, conn := newKeeperFixture(t, store, 1)
-		sessions.reconcile(0, 0, absent)
+		sessions.reconcile(testSSHWork(t, sessions.work), 0, 0, absent)
 		select {
 		case <-rebuilt:
 		case <-time.After(5 * time.Second):
@@ -543,7 +543,7 @@ func TestLeaseKeeperRebuildsALossTheWatchReports(t *testing.T) {
 		rebuilt := rebuilding(store)
 		sessions, _, _ := newKeeperFixture(t, store, 0)
 		require.Eventually(t, func() bool { return store.renews.Load() > 0 }, 5*time.Second, 10*time.Millisecond)
-		sessions.reconcile(0, 0, absent)
+		sessions.reconcile(testSSHWork(t, sessions.work), 0, 0, absent)
 		select {
 		case <-rebuilt:
 		case <-time.After(5 * time.Second):
@@ -571,13 +571,13 @@ func TestALossReportedDuringARebuildIsNotRebuiltAgain(t *testing.T) {
 	sessions, reg, conn := newKeeperFixture(t, store, 0)
 	absent := map[string]StoreEntry{}
 
-	sessions.reconcile(0, 0, absent)
+	sessions.reconcile(testSSHWork(t, sessions.work), 0, 0, absent)
 	select {
 	case <-entered:
 	case <-time.After(5 * time.Second):
 		t.Fatal("the keeper never rebuilt the loss")
 	}
-	sessions.reconcile(0, 0, absent) // the same loss, delivered again mid-rebuild
+	sessions.reconcile(testSSHWork(t, sessions.work), 0, 0, absent) // the same loss, delivered again mid-rebuild
 	close(release)
 
 	require.Eventually(t, func() bool {
@@ -624,13 +624,13 @@ func TestALossTheRebuildDidNotAnswerIsRebuiltAgain(t *testing.T) {
 			sessions, _, conn := newKeeperFixture(t, store, 0)
 			absent := map[string]StoreEntry{}
 
-			sessions.reconcile(0, 0, absent)
+			sessions.reconcile(testSSHWork(t, sessions.work), 0, 0, absent)
 			select {
 			case <-entered:
 			case <-time.After(5 * time.Second):
 				t.Fatal("the keeper never rebuilt the loss")
 			}
-			sessions.reconcile(tc.epoch, tc.index, absent)
+			sessions.reconcile(testSSHWork(t, sessions.work), tc.epoch, tc.index, absent)
 			close(release)
 
 			require.Eventually(t, func() bool { return rebuilds.Load() == 2 }, 5*time.Second, 10*time.Millisecond,
