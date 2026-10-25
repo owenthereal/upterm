@@ -38,19 +38,47 @@ func repaintsOnWinch(first, ready string) []string {
 	return []string{"sh", "-c", `trap 'printf "REPAINT %s\n" "$(stty size)"' WINCH; printf '` + first + `'; : > "$1"; while :; do sleep 0.05; done`, "sh", ready}
 }
 
+type repaintingReadiness struct {
+	childReady bool
+	published  bool
+	ready      bool
+}
+
 // startRepainting is startHost for a session whose command is
-// repaintsOnWinch(first), returned once the command has printed first. Every
-// client that joins is nudged, but a nudge that reaches the shell before it
-// has set its trap is lost, so a client joining while the command starts is
-// repainted or not by how fast the shell gets to its trap. A client joining
-// after this returns always is.
-func startRepainting(t *testing.T, first string, srv *Server) *hostHarness {
+// repaintsOnWinch(first). It returns after the child has installed its trap
+// and signalled ready, and after the real PTY has been published. A join then
+// nudges the installed trap through that PTY and receives its repaint.
+func startRepainting(t *testing.T, first string, srv *Server, observe ...chan<- repaintingReadiness) *hostHarness {
 	t.Helper()
 	ready := filepath.Join(t.TempDir(), "ready")
 	srv.Command = repaintsOnWinch(first, ready)
+	published := make(chan struct{})
+	prior := srv.OnCommandStarted
+	srv.OnCommandStarted = func() {
+		if prior != nil {
+			prior()
+		}
+		close(published)
+	}
 	h := startHost(t, srv)
-	require.Eventually(t, func() bool { _, err := os.Stat(ready); return err == nil },
-		harnessTimeout, time.Millisecond, "the command never signalled ready")
+	require.Eventually(t, func() bool {
+		_, err := os.Stat(ready)
+		childReady := err == nil
+		var isPublished bool
+		select {
+		case <-published:
+			isPublished = true
+		default:
+		}
+		isReady := childReady && isPublished
+		if len(observe) != 0 && childReady && !isPublished {
+			select {
+			case observe[0] <- repaintingReadiness{childReady, isPublished, isReady}:
+			default:
+			}
+		}
+		return isReady
+	}, harnessTimeout, time.Millisecond, "the command never signalled ready")
 	return h
 }
 
@@ -267,6 +295,114 @@ func TestAnIneligibleJoinFallsBackAndSaysWhy(t *testing.T) {
 	got := replayed(t, out, desktop)
 	require.Equal(t, ring, got, "the guest wasn't handed the raw ring")
 
+	var fellBack []string
+	for line := range strings.Lines(logs.await(t, "replay fell back")) {
+		if strings.Contains(line, `msg="replay fell back to the raw ring"`) {
+			fellBack = append(fellBack, line)
+		}
+	}
+	require.Len(t, fellBack, 1)
+	require.Contains(t, fellBack[0], "level=INFO")
+	require.Contains(t, fellBack[0], "origin mode")
+}
+
+// A ready child can still be waiting for its PTY to be published. The
+// fixture must not return while that real publication boundary is held.
+func TestStartRepaintingWaitsForPublishedPTY(t *testing.T) {
+	logs := newSessionLog()
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	stop := make(chan struct{})
+	controllerDone := make(chan struct{})
+	observations := make(chan repaintingReadiness, 1)
+	type boundaryResult struct {
+		state repaintingReadiness
+		err   error
+	}
+	results := make(chan boundaryResult, 1)
+	var releaseOnce sync.Once
+	releaseGate := func() { releaseOnce.Do(func() { close(release) }) }
+	defer func() {
+		releaseGate()
+		close(stop)
+		select {
+		case <-controllerDone:
+		case <-time.After(harnessTimeout):
+			t.Error("publication controller did not stop")
+		}
+	}()
+
+	go func() {
+		defer close(controllerDone)
+		timer := time.NewTimer(harnessTimeout)
+		defer timer.Stop()
+		report := func(result boundaryResult) {
+			select {
+			case results <- result:
+			case <-stop:
+			case <-t.Context().Done():
+			}
+		}
+		select {
+		case <-entered:
+		case <-timer.C:
+			report(boundaryResult{err: fmt.Errorf("command never entered prepublication gate")})
+			releaseGate()
+			return
+		case <-stop:
+			return
+		case <-t.Context().Done():
+			return
+		}
+		select {
+		case state := <-observations:
+			report(boundaryResult{state: state})
+		case <-timer.C:
+			report(boundaryResult{err: fmt.Errorf("fixture never observed held publication boundary")})
+		case <-stop:
+			return
+		case <-t.Context().Done():
+			return
+		}
+		releaseGate()
+	}()
+
+	priorStarted := make(chan struct{}, 1)
+	srv := &Server{
+		Logger:           slog.New(slog.NewTextHandler(logs, nil)),
+		OnCommandStarted: func() { priorStarted <- struct{}{} },
+	}
+	srv.beforePublishPTY = func() {
+		close(entered)
+		select {
+		case <-release:
+		case <-t.Context().Done():
+		}
+	}
+	h := startRepainting(t, `\033[?6hORIGIN-MARK`, srv, observations)
+	select {
+	case result := <-results:
+		if result.err != nil {
+			t.Fatalf("publication boundary setup failed: %v", result.err)
+		}
+		if !result.state.childReady || result.state.published || result.state.ready {
+			t.Fatalf("fixture became ready before PTY publication: %+v", result.state)
+		}
+	default:
+		t.Fatal("fixture became ready before PTY publication: missing boundary record")
+	}
+	select {
+	case <-priorStarted:
+	default:
+		t.Fatal("prior OnCommandStarted callback was not called")
+	}
+
+	_, viewer, _ := h.connectHost(t, nil)
+	ring := replayed(t, viewer, desktop)
+	require.Contains(t, ring, "ORIGIN-MARK")
+	_, out := h.connectGuest(t, withWindow(desktop))
+	got := replayed(t, out, desktop)
+	require.Equal(t, ring, got, "the guest wasn't handed the raw ring")
 	var fellBack []string
 	for line := range strings.Lines(logs.await(t, "replay fell back")) {
 		if strings.Contains(line, `msg="replay fell back to the raw ring"`) {
