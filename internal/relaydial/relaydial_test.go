@@ -5,7 +5,9 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/http/httptrace"
 	"net/url"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -68,11 +70,12 @@ func TestDialWSSendsUserAsCredentials(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
 			server := &url.URL{Scheme: "ws", Host: srv.Listener.Addr().String()}
-			conn, _, err := relaydial.Dial(ctx, server, tt.user, tt.guest, nil)
+			conn, addr, err := relaydial.Dial(ctx, server, tt.user, tt.guest, nil)
 			if conn != nil {
 				_ = conn.Close()
 			}
 			require.Error(t, err, "the server refused the upgrade")
+			assert.Equal(t, srv.Listener.Addr().String(), addr)
 
 			select {
 			case h := <-seen:
@@ -90,8 +93,8 @@ func TestDialWSSendsUserAsCredentials(t *testing.T) {
 // TestDialReturnsHostPort checks the address a host-key check is shown: always
 // host:port, with the scheme's default port when the server URL has none.
 // known_hosts keys an entry by host:port, so a bare host would never match one.
-// The context is cancelled, so nothing is dialed: the address is returned with
-// the dial's error.
+// An already-canceled context returns its error and the address without
+// starting a dial.
 func TestDialReturnsHostPort(t *testing.T) {
 	tests := []struct {
 		server string
@@ -118,7 +121,8 @@ func TestDialReturnsHostPort(t *testing.T) {
 				_ = conn.Close()
 			}
 
-			require.Error(t, err, "a cancelled context dials nothing")
+			assert.Nil(t, conn)
+			assert.ErrorIs(t, err, context.Canceled)
 			assert.Equal(t, tt.want, addr)
 			assert.Equal(t, tt.server, server.String(), "the caller's URL is not modified")
 		})
@@ -153,5 +157,78 @@ func TestDialSSHOpensTCP(t *testing.T) {
 		_ = c.Close()
 	case <-time.After(10 * time.Second):
 		t.Fatal("the server never accepted the connection")
+	}
+}
+
+// TestDialDoneContextDoesNotStartDNS checks that known cancellation prevents
+// resolver work for both relay and explicit proxy hostnames.
+func TestDialDoneContextDoesNotStartDNS(t *testing.T) {
+	transports := []struct {
+		scheme string
+		want   string
+	}{
+		{"ssh", "relay.test:22"},
+		{"ws", "relay.test:80"},
+		{"wss", "relay.test:443"},
+	}
+	routes := []struct {
+		name  string
+		proxy string
+	}{
+		{"direct", ""},
+		{"http_proxy", "http://proxy.test:3128"},
+	}
+	contexts := []struct {
+		name string
+		new  func() (context.Context, context.CancelFunc)
+		want error
+	}{
+		{"canceled", func() (context.Context, context.CancelFunc) {
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+			return ctx, cancel
+		}, context.Canceled},
+		{"expired", func() (context.Context, context.CancelFunc) {
+			return context.WithDeadline(context.Background(), time.Unix(1, 0))
+		}, context.DeadlineExceeded},
+	}
+
+	for _, transport := range transports {
+		for _, route := range routes {
+			for _, done := range contexts {
+				t.Run(transport.scheme+"/"+route.name+"/"+done.name, func(t *testing.T) {
+					originalServer := transport.scheme + "://relay.test"
+					server, err := url.Parse(originalServer)
+					require.NoError(t, err)
+					var proxy *url.URL
+					if route.proxy != "" {
+						proxy, err = url.Parse(route.proxy)
+						require.NoError(t, err)
+					}
+
+					ctx, cancel := done.new()
+					defer cancel()
+					var dnsStarts atomic.Int32
+					ctx = httptrace.WithClientTrace(ctx, &httptrace.ClientTrace{
+						DNSStart: func(httptrace.DNSStartInfo) { dnsStarts.Add(1) },
+					})
+					conn, addr, err := relaydial.Dial(ctx, server, "abc", true, proxy)
+					if conn != nil {
+						_ = conn.Close()
+					}
+
+					assert.Nil(t, conn)
+					assert.ErrorIs(t, err, done.want)
+					assert.Equal(t, transport.want, addr)
+					assert.Equal(t, originalServer, server.String(), "the caller's server URL is not modified")
+					if proxy != nil {
+						assert.Equal(t, route.proxy, proxy.String(), "the caller's proxy URL is not modified")
+					}
+					// On the pinned standard library DNSStart runs at resolver
+					// entry, so checking after Dial observes every lookup it started.
+					assert.Zero(t, dnsStarts.Load(), "a done context must not start DNS")
+				})
+			}
+		}
 	}
 }
