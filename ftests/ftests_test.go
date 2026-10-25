@@ -47,6 +47,72 @@ var (
 	testLogger = logging.Must(logging.Console(), logging.Debug()).Logger
 )
 
+func logFixtureRunError(logger *slog.Logger, message string, err error) {
+	if err == nil {
+		return
+	}
+	if isFixtureCancellation(err) {
+		logger.Debug(message, "error", err)
+	} else {
+		logger.Error(message, "error", err)
+	}
+}
+
+func isFixtureCancellation(err error) bool {
+	if err == context.Canceled {
+		return true
+	}
+	switch err := err.(type) {
+	case interface{ Unwrap() error }:
+		return isFixtureCancellation(err.Unwrap())
+	case interface{ Unwrap() []error }:
+		children := err.Unwrap()
+		if len(children) == 0 {
+			return false
+		}
+		for _, child := range children {
+			if !isFixtureCancellation(child) {
+				return false
+			}
+		}
+		return true
+	default:
+		return false
+	}
+}
+
+func stripFixtureOutput(logger *slog.Logger, byteKey string, input []byte) []byte {
+	output, err := ansi.Strip(input)
+	if err != nil {
+		level := slog.LevelWarn
+		if isKnownFixtureANSIError(err) {
+			level = slog.LevelDebug
+		}
+		logger.Log(context.Background(), level, "failed to strip ANSI codes", byteKey, input, "error", err)
+		// Preserve the entire original input when any sequence cannot be stripped.
+		return input
+	}
+	return output
+}
+
+func isKnownFixtureANSIError(err error) bool {
+	if err == nil {
+		return false
+	}
+	// The pinned parser exposes no wrapped cause; match only its observed lines.
+	for _, line := range strings.Split(err.Error(), "\n") {
+		switch line {
+		case "\x1b7: unknown escape sequence", "\x1b8: unknown escape sequence",
+			"\x1b>: unknown escape sequence", "\x1b(: unknown escape sequence",
+			"\x1b): unknown escape sequence", "\x1b*: unknown escape sequence",
+			"\x1b+: unknown escape sequence":
+		default:
+			return false
+		}
+	}
+	return true
+}
+
 // getTestShell returns platform-appropriate shell command for tests
 func getTestShell() []string {
 	if runtime.GOOS == "windows" {
@@ -762,7 +828,7 @@ func (c *Host) Share(url string) error {
 		err := c.Run(c.ctx)
 		close(c.done)
 		if err != nil {
-			testLogger.Error("error running host", "error", err)
+			logFixtureRunError(testLogger, "error running host", err)
 			errCh <- err
 		}
 	}()
@@ -811,13 +877,7 @@ func (c *Host) Share(url string) error {
 		defer close(c.outputCh)
 		defer func() { _ = stdoutr.Close() }()
 		w := writeFunc(func(p []byte) (int, error) {
-			b, err := ansi.Strip(p)
-			if err != nil {
-				// Ignore ANSI parsing errors (e.g., malformed OSC sequences)
-				// and use the original bytes instead
-				testLogger.Warn("failed to strip ANSI codes", "p", p, "error", err)
-				b = p
-			}
+			b := stripFixtureOutput(testLogger, "p", p)
 			// Use select to respect context cancellation when sending to channel
 			select {
 			case c.outputCh <- string(b):
@@ -1017,13 +1077,7 @@ func (c *Client) JoinWithContext(ctx context.Context, session *api.GetSessionRes
 		// output
 		g.Add(func() error {
 			w := writeFunc(func(pp []byte) (int, error) {
-				b, err := ansi.Strip(pp)
-				if err != nil {
-					// Ignore ANSI parsing errors (e.g., malformed OSC sequences)
-					// and use the original bytes instead
-					testLogger.Warn("failed to strip ANSI codes", "pp", pp, "error", err)
-					b = pp
-				}
+				b := stripFixtureOutput(testLogger, "pp", pp)
 				// Use select to respect context cancellation
 				select {
 				case c.outputCh <- string(b):
@@ -1074,7 +1128,7 @@ func (c *Client) JoinWithContext(ctx context.Context, session *api.GetSessionRes
 		defer c.wg.Done()
 		defer close(c.outputCh)
 		if err := g.Run(); err != nil {
-			testLogger.Error("error in client run group", "error", err)
+			logFixtureRunError(testLogger, "error in client run group", err)
 		}
 	}()
 
