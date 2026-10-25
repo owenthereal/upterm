@@ -101,6 +101,8 @@ type Server struct {
 	// rests on: until this fires, "ready" would mean a command that may still
 	// fail to start.
 	OnCommandStarted func()
+	// beforePublishPTY holds the real command-start/publication boundary for tests.
+	beforePublishPTY func()
 
 	// OnGuestServerStopped is called when the guest listener stops serving,
 	// which behind a TunnelListener means the tunnel is lost for good. The
@@ -275,6 +277,9 @@ func (s *Server) ServeWithContext(ctx context.Context, guest, host net.Listener)
 			if err != nil {
 				shared.abandon()
 				return fmt.Errorf("error starting command: %w", err)
+			}
+			if s.beforePublishPTY != nil {
+				s.beforePublishPTY()
 			}
 			shared.set(ptmx)
 			if s.OnCommandStarted != nil {
