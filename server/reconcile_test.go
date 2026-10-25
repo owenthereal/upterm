@@ -127,20 +127,10 @@ func (n *reconcileNode) gauge(t *testing.T) float64 {
 	return v
 }
 
-// consulTestClient is the one client these tests read and write Consul with
-// directly: each client keeps connections of its own open, and Consul refuses
-// a client address that holds too many.
-var consulTestClient = sync.OnceValues(testhelpers.ConsulClient)
-
 // consulEntry reads id's entry straight from Consul, past every cache; nil if
 // it's absent or can't be read. It doesn't fail the test itself, because
 // require.Eventually runs its condition on another goroutine.
-func consulEntry(t *testing.T, id string) *Session {
-	client, err := consulTestClient()
-	if err != nil {
-		t.Logf("consul client: %v", err)
-		return nil
-	}
+func consulEntry(t *testing.T, client *api.Client, id string) *Session {
 	pair, _, err := client.KV().Get(fmt.Sprintf("%s/sessions/%s", DefaultKeyPrefix, id), nil)
 	if err != nil {
 		t.Logf("reading %s: %v", id, err)
@@ -170,8 +160,7 @@ func waitClosedCloser(t *testing.T, c *closer, what string) {
 func TestReconcileAcrossNodes(t *testing.T) {
 	a, b := newReconcileNode(t, "node-a:22"), newReconcileNode(t, "node-b:22")
 	id := fmt.Sprintf("reconcile-%d", time.Now().UnixNano())
-	client, err := consulTestClient()
-	require.NoError(t, err)
+	client := ownedConsulTestClient(t)
 	key := fmt.Sprintf("%s/sessions/%s", DefaultKeyPrefix, id)
 	t.Cleanup(func() { _, _ = client.KV().Delete(key, nil) })
 
@@ -180,9 +169,9 @@ func TestReconcileAcrossNodes(t *testing.T) {
 	waitClosedCloser(t, connA, "node A's superseded registration")
 
 	// Deleted behind B's back: B re-asserts.
-	_, err = client.KV().Delete(key, nil)
+	_, err := client.KV().Delete(key, nil)
 	require.NoError(t, err)
-	require.Eventually(t, func() bool { s := consulEntry(t, id); return s != nil && s.Generation == 2 }, 5*time.Second, 50*time.Millisecond)
+	require.Eventually(t, func() bool { s := consulEntry(t, client, id); return s != nil && s.Generation == 2 }, 5*time.Second, 50*time.Millisecond)
 
 	// A stale write landing on the absent entry, made deterministic: hold B's
 	// re-assertion, delete, let A's stale generation 1 land, then release B.
@@ -193,7 +182,7 @@ func TestReconcileAcrossNodes(t *testing.T) {
 	b.gated.open()
 	waitClosedCloser(t, connA1, "the stale registration")
 	require.Eventually(t, func() bool {
-		s := consulEntry(t, id)
+		s := consulEntry(t, client, id)
 		return s != nil && s.Generation == 2 && s.NodeAddr == "node-b:22"
 	}, 5*time.Second, 50*time.Millisecond)
 }
@@ -230,8 +219,7 @@ func TestReplicaObserverIsRaceFree(t *testing.T) {
 func TestAdoptionRefusesARegistrationAlreadySuperseded(t *testing.T) {
 	a, b := newReconcileNode(t, "node-a:22"), newReconcileNode(t, "node-b:22")
 	ctx, id := context.Background(), fmt.Sprintf("late-adoption-%d", time.Now().UnixNano())
-	client, err := consulTestClient()
-	require.NoError(t, err)
+	client := ownedConsulTestClient(t)
 	t.Cleanup(func() { _, _ = client.KV().Delete(fmt.Sprintf("%s/sessions/%s", DefaultKeyPrefix, id), nil) })
 
 	reg, _, err := a.sm.Register(ctx, &Session{ID: id, NodeAddr: a.addr, Generation: 1})
@@ -257,7 +245,7 @@ func TestAdoptionRefusesARegistrationAlreadySuperseded(t *testing.T) {
 		se, _, err := client.Session().Info(reg.lease, nil)
 		return err == nil && se == nil
 	}, 5*time.Second, 10*time.Millisecond, "the superseded registration's lease was never released")
-	s := consulEntry(t, id)
+	s := consulEntry(t, client, id)
 	require.NotNil(t, s, "releasing the superseded registration removed its successor's entry")
 	require.Equal(t, uint64(2), s.Generation)
 	require.Equal(t, b.addr, s.NodeAddr)
@@ -476,8 +464,7 @@ func TestAdoptionTakesAForeignValueItsOwnLeaseHoldsAsALoss(t *testing.T) {
 func TestAPlainWriteIntoAHeldKeyLeavesTheHostConnected(t *testing.T) {
 	a := newReconcileNode(t, "node-a:22")
 	id := fmt.Sprintf("plain-write-%d", time.Now().UnixNano())
-	client, err := consulTestClient()
-	require.NoError(t, err)
+	client := ownedConsulTestClient(t)
 	key := fmt.Sprintf("%s/sessions/%s", DefaultKeyPrefix, id)
 	t.Cleanup(func() { _, _ = client.KV().Delete(key, nil) })
 
@@ -487,7 +474,7 @@ func TestAPlainWriteIntoAHeldKeyLeavesTheHostConnected(t *testing.T) {
 	_, err = client.KV().Put(&api.KVPair{Key: key, Value: forged}, nil)
 	require.NoError(t, err)
 
-	require.Eventually(t, func() bool { s := consulEntry(t, id); return s != nil && sameIdentity(s, reg.Session) },
+	require.Eventually(t, func() bool { s := consulEntry(t, client, id); return s != nil && sameIdentity(s, reg.Session) },
 		5*time.Second, 50*time.Millisecond, "the keeper never restored the entry")
 	require.False(t, conn.isClosed(), "a plain write into the host's own key closed it")
 	require.True(t, a.sessions.active(reg))
