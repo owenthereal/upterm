@@ -37,7 +37,7 @@ func ptyTestProcess(t *testing.T) bool {
 	cmd := exec.Command(exe, "-test.v", "-test.timeout=10s", "-test.cpu="+fmt.Sprint(runtime.GOMAXPROCS(0)), "-test.run=^"+regexp.QuoteMeta(t.Name())+"$")
 	cmd.Env = append(os.Environ(), "UPTERM_PTY_TEST_PROCESS="+t.Name())
 	out, err := cmd.CombinedOutput()
-	t.Logf("fixture process:\n%s", out)
+	t.Logf("fixture process:\n%s", bytes.ReplaceAll(out, []byte("coverage: "), []byte("fixture coverage = ")))
 	require.NoError(t, err, "PTY fixture process failed")
 	return false
 }

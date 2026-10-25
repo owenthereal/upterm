@@ -13,6 +13,7 @@ import (
 func TestDiscardWritesNothing(t *testing.T) {
 	r, w, err := os.Pipe()
 	require.NoError(t, err)
+	t.Cleanup(func() { _ = r.Close(); _ = w.Close() })
 	orig := os.Stderr
 	os.Stderr = w
 	t.Cleanup(func() { os.Stderr = orig })
