@@ -7,8 +7,10 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"net"
 	"os"
 	"path/filepath"
@@ -75,12 +77,27 @@ func TestClientErrorsCarryNoPackagePrefix(t *testing.T) {
 	require.EqualError(t, err, dialErr.Error())
 }
 
-// fakeDoor is a charm ssh server on a unix socket whose handler is the test's.
-// It accepts any public key, as the host door does. key is its own host key,
-// in the form a Client pins.
+// fakeDoor owns the raw connections accepted by this test's SSH server.
+// Closing those originals also covers connections still in the handshake.
 type fakeDoor struct {
-	socket string
-	key    ssh.PublicKey
+	socket     string
+	key        ssh.PublicKey
+	listener   net.Listener
+	server     *gssh.Server
+	acceptDone chan struct{}
+	accepted   chan *doorConn
+	mu         sync.Mutex
+	records    []*doorConn
+	byRaw      map[net.Conn]*doorConn
+	acceptErr  error
+	stopOnce   sync.Once
+	stopErr    error
+}
+
+type doorConn struct {
+	raw     net.Conn
+	entered chan struct{}
+	done    chan struct{} // closed only after HandleConn returns
 }
 
 func serveDoor(t *testing.T, handler func(gssh.Session)) *fakeDoor {
@@ -89,23 +106,160 @@ func serveDoor(t *testing.T, handler func(gssh.Session)) *fakeDoor {
 	require.NoError(t, err)
 	signer, err := ssh.NewSignerFromKey(key)
 	require.NoError(t, err)
+	return serveDoorWithSigners(t, "a.sock", []gssh.Signer{signer}, handler)
+}
 
-	socket := filepath.Join(shortTempDir(t), "a.sock")
-	ln, err := net.Listen("unix", socket)
-	require.NoError(t, err)
-
-	srv := &gssh.Server{
-		HostSigners:      []gssh.Signer{signer},
-		Handler:          handler,
-		PublicKeyHandler: func(gssh.Context, gssh.PublicKey) bool { return true },
+func serveDoorWithSigners(t *testing.T, name string, signers []gssh.Signer, handler func(gssh.Session)) *fakeDoor {
+	t.Helper()
+	require.NotEmpty(t, signers)
+	if handler == nil {
+		handler = gssh.DefaultHandler
 	}
-	go func() { _ = srv.Serve(ln) }()
+	socket := filepath.Join(shortTempDir(t), name)
+	listener, err := net.Listen("unix", socket)
+	require.NoError(t, err)
+	door := &fakeDoor{
+		socket: socket, key: signers[0].PublicKey(), listener: listener,
+		acceptDone: make(chan struct{}), accepted: make(chan *doorConn, 1),
+		byRaw: make(map[net.Conn]*doorConn),
+	}
+	door.server = &gssh.Server{
+		HostSigners:       signers,
+		Handler:           handler,
+		PublicKeyHandler:  func(gssh.Context, gssh.PublicKey) bool { return true },
+		ChannelHandlers:   maps.Clone(gssh.DefaultChannelHandlers),
+		RequestHandlers:   maps.Clone(gssh.DefaultRequestHandlers),
+		SubsystemHandlers: maps.Clone(gssh.DefaultSubsystemHandlers),
+		ConnCallback: func(_ gssh.Context, raw net.Conn) net.Conn {
+			door.mu.Lock()
+			record := door.byRaw[raw]
+			door.mu.Unlock()
+			if record != nil {
+				select {
+				case record.entered <- struct{}{}:
+				default:
+				}
+			}
+			return raw
+		},
+	}
 	t.Cleanup(func() {
-		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-		defer cancel()
-		_ = srv.Shutdown(ctx)
+		if err := door.stop(); err != nil {
+			t.Errorf("door stop: %v", err)
+		}
 	})
-	return &fakeDoor{socket: socket, key: signer.PublicKey()}
+	go door.accept()
+	return door
+}
+
+func (d *fakeDoor) accept() {
+	defer close(d.acceptDone)
+	for {
+		raw, err := d.listener.Accept()
+		if err != nil {
+			if !errors.Is(err, net.ErrClosed) {
+				d.mu.Lock()
+				d.acceptErr = err
+				d.mu.Unlock()
+			}
+			return
+		}
+		record := &doorConn{raw: raw, entered: make(chan struct{}, 1), done: make(chan struct{})}
+		d.mu.Lock()
+		d.records = append(d.records, record)
+		d.byRaw[raw] = record
+		d.mu.Unlock()
+		select {
+		case d.accepted <- record:
+		default:
+		}
+		go func() {
+			d.server.HandleConn(raw)
+			close(record.done)
+		}()
+	}
+}
+
+func (d *fakeDoor) stop() error {
+	d.stopOnce.Do(func() { d.stopErr = d.stopDoor() })
+	return d.stopErr
+}
+
+func (d *fakeDoor) stopDoor() error {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	var result error
+	if err := d.listener.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+		result = errors.Join(result, fmt.Errorf("close door listener: %w", err))
+	}
+	select {
+	case <-d.acceptDone:
+	case <-ctx.Done():
+		return errors.Join(result, fmt.Errorf("door accept did not return: %w", ctx.Err()))
+	}
+	d.mu.Lock()
+	records := slices.Clone(d.records)
+	acceptErr := d.acceptErr
+	d.mu.Unlock()
+	if acceptErr != nil {
+		result = errors.Join(result, fmt.Errorf("door accept: %w", acceptErr))
+	}
+	for i, record := range records {
+		if err := record.raw.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+			result = errors.Join(result, fmt.Errorf("close original %d: %w", i, err))
+		}
+	}
+	for i, record := range records {
+		select {
+		case <-record.done:
+		case <-ctx.Done():
+			result = errors.Join(result, fmt.Errorf("door handler %d did not return: %w", i, ctx.Err()))
+		}
+	}
+	return result
+}
+
+// fallbackClose is independent of stopOnce, so a failed or mutated stop cannot
+// strand a held original. The regression tests install it before assertions.
+func (d *fakeDoor) fallbackClose(t *testing.T, peer net.Conn) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
+	defer cancel()
+	var result error
+	if err := d.listener.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+		result = errors.Join(result, fmt.Errorf("fallback listener close: %w", err))
+	}
+	select {
+	case <-d.acceptDone:
+	case <-ctx.Done():
+		result = errors.Join(result, fmt.Errorf("fallback accept did not return: %w", ctx.Err()))
+	}
+	d.mu.Lock()
+	records := slices.Clone(d.records)
+	d.mu.Unlock()
+	for _, record := range records {
+		if err := record.raw.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+			result = errors.Join(result, fmt.Errorf("fallback original close: %w", err))
+		}
+	}
+	if peer != nil {
+		if err := peer.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+			result = errors.Join(result, fmt.Errorf("fallback peer close: %w", err))
+		}
+	}
+	joined := 0
+	for _, record := range records {
+		select {
+		case <-record.done:
+			joined++
+		case <-ctx.Done():
+			result = errors.Join(result, fmt.Errorf("fallback handler did not return: %w", ctx.Err()))
+		}
+	}
+	t.Logf("door fallback: originals=%d handlers-returned=%d", len(records), joined)
+	if result != nil {
+		t.Errorf("door fallback: %v", result)
+	}
 }
 
 // pin is the HostKeys a Client needs to attach to door.
@@ -1779,20 +1933,9 @@ func TestClientAttachesToADaemonWithSeveralSignersWhenAllAreParsedAndPinned(t *t
 		pinned = append(pinned, key)
 	}
 
-	socket := filepath.Join(shortTempDir(t), "multi.sock")
-	ln, err := net.Listen("unix", socket)
-	require.NoError(t, err)
-	srv := &gssh.Server{
-		HostSigners:      []gssh.Signer{edSigner, rsaSigner},
-		Handler:          func(s gssh.Session) { _ = s.Exit(0) },
-		PublicKeyHandler: func(gssh.Context, gssh.PublicKey) bool { return true },
-	}
-	go func() { _ = srv.Serve(ln) }()
-	t.Cleanup(func() {
-		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-		defer cancel()
-		_ = srv.Shutdown(ctx)
-	})
+	door := serveDoorWithSigners(t, "multi.sock", []gssh.Signer{edSigner, rsaSigner},
+		func(s gssh.Session) { _ = s.Exit(0) })
+	socket := door.socket
 
 	c := &Client{Socket: socket, HostKeys: pinned, Stdout: io.Discard}
 	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
@@ -1800,6 +1943,106 @@ func TestClientAttachesToADaemonWithSeveralSignersWhenAllAreParsedAndPinned(t *t
 	res, err := c.Run(ctx)
 	require.NoError(t, err)
 	require.Equal(t, Result{Reason: Exited, Status: 0}, res)
+}
+
+// The completed request proves this connection reached the post-auth request
+// loop. It remains live until the door itself stops.
+func TestDoorStopClosesHeldAuthenticatedConnection(t *testing.T) {
+	testDoorStopClosesHeldConnection(t, true)
+}
+
+// A peer that sends no handshake bytes is absent from charm's connWg.
+func TestDoorStopClosesHeldPreAuthConnection(t *testing.T) {
+	testDoorStopClosesHeldConnection(t, false)
+}
+
+func testDoorStopClosesHeldConnection(t *testing.T, authenticated bool) {
+	t.Helper()
+	door := serveDoor(t, nil)
+	peer, err := net.Dial("unix", door.socket)
+	require.NoError(t, err)
+	var clientConn ssh.Conn
+	var peerDone chan struct{}
+	var stopDone chan error
+	t.Cleanup(func() {
+		door.fallbackClose(t, peer)
+		if clientConn != nil {
+			_ = clientConn.Close()
+		}
+		if peerDone != nil {
+			select {
+			case <-peerDone:
+			case <-time.After(testTimeout):
+				t.Error("fallback did not join peer waiter")
+			}
+		}
+		if stopDone != nil {
+			select {
+			case err := <-stopDone:
+				if err != nil {
+					t.Errorf("fallback stop: %v", err)
+				}
+			case <-time.After(testTimeout):
+				t.Error("fallback did not join stop caller")
+			}
+		}
+	})
+
+	var original *doorConn
+	select {
+	case original = <-door.accepted:
+	case <-time.After(testTimeout):
+		t.Fatal("door did not register the original accepted connection")
+	}
+	select {
+	case <-original.entered:
+	case <-time.After(testTimeout):
+		t.Fatal("original did not enter HandleConn")
+	}
+
+	if authenticated {
+		_, key, err := ed25519.GenerateKey(rand.Reader)
+		require.NoError(t, err)
+		signer, err := ssh.NewSignerFromKey(key)
+		require.NoError(t, err)
+		config := &ssh.ClientConfig{User: "fixture", Auth: []ssh.AuthMethod{ssh.PublicKeys(signer)},
+			HostKeyCallback: ssh.FixedHostKey(door.key)}
+		conn, _, _, err := ssh.NewClientConn(peer, door.socket, config)
+		require.NoError(t, err)
+		clientConn = conn
+		ok, _, err := conn.SendRequest("door-ownership-probe", true, nil)
+		require.NoError(t, err)
+		require.False(t, ok)
+		peerDone = make(chan struct{})
+		go func() { _ = conn.Wait(); close(peerDone) }()
+	} else {
+		// Reading the server's banner sends no handshake bytes back to it.
+		peerDone = make(chan struct{})
+		go func() { _, _ = io.Copy(io.Discard, peer); close(peerDone) }()
+	}
+
+	stopDone = make(chan error, 1)
+	go func() { stopDone <- door.stop() }()
+	var stopErr error
+	select {
+	case stopErr = <-stopDone:
+		stopDone = nil
+	case <-time.After(testTimeout):
+		t.Error("door stop exceeded the emergency guard")
+	}
+	if stopErr != nil {
+		t.Errorf("door stop did not complete: %v", stopErr)
+	}
+	select {
+	case <-peerDone:
+	case <-time.After(time.Second):
+		t.Error("original accepted connection remained open after door stop")
+	}
+	select {
+	case <-original.done:
+	default:
+		t.Error("original HandleConn did not return before door stop")
+	}
 }
 
 func TestClientContextCancellationDetaches(t *testing.T) {
