@@ -28,6 +28,8 @@ type servingTestServer struct {
 	sshAddr string
 	wsAddr  string
 	served  <-chan error
+	sshln   *closeObservedListener
+	wsln    *closeObservedListener
 }
 
 // newServingTestServer starts a Server and does not return until it is proven
@@ -55,10 +57,20 @@ func newServingTestServer(t *testing.T, logger *slog.Logger) *servingTestServer 
 	}
 
 	served := make(chan error, 1)
-	go func() { served <- s.ServeWithContext(context.Background(), sshln, wsln) }()
-	t.Cleanup(func() { _ = s.Shutdown() })
+	done := make(chan struct{})
+	t.Cleanup(func() {
+		// Emergency closes bypass the observation and run after the assertions.
+		_ = sshln.Listener.Close()
+		_ = wsln.Listener.Close()
+		_ = s.Shutdown()
+		requireFixtureDone(t, done)
+	})
+	go func() {
+		served <- s.ServeWithContext(context.Background(), sshln, wsln)
+		close(done)
+	}()
 
-	ts := &servingTestServer{Server: s, sshAddr: sshln.Addr().String(), wsAddr: wsln.Addr().String(), served: served}
+	ts := &servingTestServer{Server: s, sshAddr: sshln.Addr().String(), wsAddr: wsln.Addr().String(), served: served, sshln: sshln, wsln: wsln}
 	requireServing(t, ts.wsAddr)
 
 	return ts
@@ -129,27 +141,88 @@ func TestServerSharesHostActivityBetweenProxyAndSSHD(t *testing.T) {
 	require.NotContains(t, logs.String(), `"connection":"node"`)
 }
 
-func requireRefused(t *testing.T, addr string) {
-	t.Helper()
+// closeObservedListener records successful completion of the original listener's
+// Close. Every call still delegates and returns its own underlying result.
+// Emergency fixture cleanup closes Listener directly, never this observation.
+type closeObservedListener struct {
+	net.Listener
+	mu        sync.Mutex
+	calls     int
+	completed int
+	errors    []error
+	success   chan struct{}
+}
 
-	conn, err := net.DialTimeout("tcp", addr, 5*time.Second)
+func observeListener(ln net.Listener) *closeObservedListener {
+	return &closeObservedListener{Listener: ln, success: make(chan struct{})}
+}
+
+func (l *closeObservedListener) Close() error {
+	l.mu.Lock()
+	l.calls++
+	l.mu.Unlock()
+
+	err := l.Listener.Close()
+
+	l.mu.Lock()
+	l.completed++
+	l.errors = append(l.errors, err)
 	if err == nil {
-		_ = conn.Close()
-		t.Fatalf("%s still accepts connections after Shutdown returned", addr)
+		select {
+		case <-l.success:
+		default:
+			close(l.success)
+		}
+	}
+	l.mu.Unlock()
+	return err
+}
+
+func (l *closeObservedListener) closedSuccessfully() bool {
+	select {
+	case <-l.success:
+		return true
+	default:
+		return false
+	}
+}
+
+func (l *closeObservedListener) closeCalls() int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.calls
+}
+
+func requireListenerClosed(t *testing.T, ln *closeObservedListener) {
+	t.Helper()
+	if ln.closedSuccessfully() {
+		return
+	}
+	ln.mu.Lock()
+	defer ln.mu.Unlock()
+	t.Fatalf("original listener has no acknowledged successful Close completion: calls=%d completed=%d errors=%v", ln.calls, ln.completed, ln.errors)
+}
+
+func requireFixtureDone(t *testing.T, done <-chan struct{}) {
+	t.Helper()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Error("fixture serving goroutine did not stop during cleanup")
 	}
 }
 
 // Shutdown no longer closes sshln and wsln itself -- each component closes the
-// listener it serves -- so this pins the guarantee that gave up nothing: once
-// Shutdown returns, nothing is still bound. Anything restarting a node in
-// process, or rebinding the port, depends on it.
+// listener it serves -- so this pins the guarantee that once Shutdown returns,
+// both original listeners have completed a successful Close. Their former
+// addresses may already belong to another listener.
 func TestServerShutdownReleasesListenersBeforeReturning(t *testing.T) {
 	ts := newServingTestServer(t, slog.New(slog.DiscardHandler))
 
 	require.NoError(t, ts.Shutdown())
 
-	requireRefused(t, ts.sshAddr)
-	requireRefused(t, ts.wsAddr)
+	requireListenerClosed(t, ts.sshln)
+	requireListenerClosed(t, ts.wsln)
 }
 
 // A Serve that fails before it reaches its accept loop never takes ownership of
@@ -210,7 +283,17 @@ func TestServerReleasesListenersAfterEarlyServeFailure(t *testing.T) {
 			tt.apply(t, s)
 
 			served := make(chan error, 1)
-			go func() { served <- s.ServeWithContext(context.Background(), sshln, wsln) }()
+			done := make(chan struct{})
+			t.Cleanup(func() {
+				_ = sshln.Listener.Close()
+				_ = wsln.Listener.Close()
+				_ = s.Shutdown()
+				requireFixtureDone(t, done)
+			})
+			go func() {
+				served <- s.ServeWithContext(context.Background(), sshln, wsln)
+				close(done)
+			}()
 
 			select {
 			case err := <-served:
@@ -221,8 +304,8 @@ func TestServerReleasesListenersAfterEarlyServeFailure(t *testing.T) {
 
 			require.NoError(t, s.Shutdown())
 
-			requireRefused(t, sshln.Addr().String())
-			requireRefused(t, wsln.Addr().String())
+			requireListenerClosed(t, sshln)
+			requireListenerClosed(t, wsln)
 		})
 	}
 }
@@ -273,24 +356,30 @@ func TestServeAfterShutdownStopsImmediately(t *testing.T) {
 		{"SSHRouting", rt.Shutdown, rt.Serve},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			ln, err := net.Listen("tcp", "127.0.0.1:0")
-			require.NoError(t, err)
-			t.Cleanup(func() { _ = ln.Close() })
-			addr := ln.Addr().String()
+			ln := listenLoopback(t)
 
 			require.NoError(t, tt.shutdown())
 
-			done := make(chan error, 1)
-			go func() { done <- tt.serve(ln) }()
+			served := make(chan error, 1)
+			done := make(chan struct{})
+			t.Cleanup(func() {
+				_ = ln.Listener.Close()
+				_ = tt.shutdown()
+				requireFixtureDone(t, done)
+			})
+			go func() {
+				served <- tt.serve(ln)
+				close(done)
+			}()
 
 			select {
-			case err := <-done:
+			case err := <-served:
 				require.True(t, isRequestedStop(err), "Serve after Shutdown must report the stop it was asked for, got %v", err)
 			case <-time.After(10 * time.Second):
 				t.Fatal("Serve kept running after Shutdown; nothing is left to stop it")
 			}
 
-			requireRefused(t, addr)
+			requireListenerClosed(t, ln)
 		})
 	}
 }
@@ -309,10 +398,7 @@ func TestServeAfterShutdownStopsImmediately(t *testing.T) {
 // trying to hit a few instructions by timing.
 func TestSSHDShutdownClosesTheListenerItWasHanded(t *testing.T) {
 	logger := slog.New(slog.DiscardHandler)
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = ln.Close() })
-	addr := ln.Addr().String()
+	ln := listenLoopback(t)
 
 	s := &sshd{
 		SessionManager: newEmbeddedSessionManager(logger),
@@ -324,7 +410,7 @@ func TestSSHDShutdownClosesTheListenerItWasHanded(t *testing.T) {
 
 	require.NoError(t, s.Shutdown())
 
-	requireRefused(t, addr)
+	requireListenerClosed(t, ln)
 }
 
 // The end-state check above cannot see the ordering: serving stops so quickly
@@ -439,14 +525,14 @@ func TestServerShutdownIsIdempotent(t *testing.T) {
 	require.NoError(t, ts.Shutdown())
 }
 
-func listenLoopback(t *testing.T) net.Listener {
+func listenLoopback(t *testing.T) *closeObservedListener {
 	t.Helper()
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = ln.Close() })
 
-	return ln
+	return observeListener(ln)
 }
 
 // ssh.Server closes the listener from its own bookkeeping after sshd has
@@ -455,13 +541,124 @@ func listenLoopback(t *testing.T) net.Listener {
 // logs that at Error -- turning the fix for one piece of shutdown noise into
 // another piece of it.
 func TestCloseOnceListenerReportsTheFirstResult(t *testing.T) {
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	require.NoError(t, err)
-	addr := ln.Addr().String()
+	ln := listenLoopback(t)
 
 	once := &closeOnceListener{Listener: ln}
 
 	require.NoError(t, once.Close())
 	require.NoError(t, once.Close(), "a repeated close must not report ErrClosed")
-	requireRefused(t, addr)
+	requireListenerClosed(t, ln)
+	require.Equal(t, 1, ln.closeCalls(), "closeOnceListener must delegate only once")
+}
+
+// A controlled underlying Close acknowledges entry, then waits for permission
+// to return. Publishing success before that return must fail the held check.
+type listenerCloseFunc struct {
+	net.Listener
+	close func() error
+}
+
+func (l listenerCloseFunc) Close() error { return l.close() }
+
+func TestListenerCloseObservationRequiresSuccessfulCompletion(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		err  error
+	}{
+		{"successful Close", nil},
+		{"failed Close", net.ErrClosed},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				entered := make(chan struct{})
+				release := make(chan struct{})
+				unblock := sync.OnceFunc(func() { close(release) })
+				ln := observeListener(listenerCloseFunc{close: func() error {
+					close(entered)
+					<-release
+					return tt.err
+				}})
+				require.False(t, ln.closedSuccessfully(), "an open listener is not closed")
+				done := make(chan struct{})
+				var closeErr error
+				t.Cleanup(func() {
+					unblock()
+					requireFixtureDone(t, done)
+				})
+				go func() {
+					closeErr = ln.Close()
+					close(done)
+				}()
+				<-entered
+				require.False(t, ln.closedSuccessfully(), "Close entry is not successful completion")
+				unblock()
+				<-done
+				if tt.err != nil {
+					require.ErrorIs(t, closeErr, tt.err)
+					require.False(t, ln.closedSuccessfully(), "a failed Close is not successful completion")
+				} else {
+					require.NoError(t, closeErr)
+					requireListenerClosed(t, ln)
+				}
+				require.Equal(t, 1, ln.closeCalls())
+			})
+		})
+	}
+
+	t.Run("concurrent error completes before success", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			entered := make(chan struct{})
+			release := make(chan struct{})
+			unblock := sync.OnceFunc(func() { close(release) })
+			var mu sync.Mutex
+			calls := 0
+			ln := observeListener(listenerCloseFunc{close: func() error {
+				mu.Lock()
+				calls++
+				call := calls
+				mu.Unlock()
+				if call == 1 {
+					close(entered)
+					<-release
+					return nil
+				}
+				return net.ErrClosed
+			}})
+			firstDone := make(chan struct{})
+			secondDone := make(chan struct{})
+			startSecond := make(chan struct{})
+			unblockSecond := sync.OnceFunc(func() { close(startSecond) })
+			var firstErr, secondErr error
+			t.Cleanup(func() {
+				unblock()
+				unblockSecond()
+				requireFixtureDone(t, firstDone)
+				requireFixtureDone(t, secondDone)
+			})
+			go func() {
+				firstErr = ln.Close()
+				close(firstDone)
+			}()
+			go func() {
+				<-startSecond
+				secondErr = ln.Close()
+				close(secondDone)
+			}()
+			<-entered
+			unblockSecond()
+			synctest.Wait() // the second Close has returned while the first is held
+			select {
+			case <-secondDone:
+				require.ErrorIs(t, secondErr, net.ErrClosed)
+			default:
+				t.Fatal("concurrent Close did not delegate while the first call was held")
+			}
+			require.False(t, ln.closedSuccessfully(), "the completed error must not acknowledge success")
+			unblock()
+			<-firstDone
+			require.NoError(t, firstErr)
+			requireListenerClosed(t, ln)
+			require.Equal(t, 2, ln.closeCalls(), "each concurrent Close must delegate")
+		})
+	})
 }
