@@ -872,6 +872,13 @@ func Test_guardedSpawn_RefusesInsideATestBinary(t *testing.T) {
 func runHostInProcess(t *testing.T, argv ...string) error {
 	t.Helper()
 
+	origKeys, origRunning, origSupplied := flagAuthorizedKeys, runningCmd, suppliedFlags
+	// Registered before the daemon cleanup, so its readers have joined before
+	// the incoming flag destination and command metadata are restored.
+	t.Cleanup(func() {
+		flagAuthorizedKeys, runningCmd, suppliedFlags = origKeys, origRunning, origSupplied
+	})
+
 	var command []string
 	for i, a := range argv {
 		if a == "--" {
@@ -886,6 +893,29 @@ func runHostInProcess(t *testing.T, argv ...string) error {
 	root.SetErr(io.Discard)
 	root.SetArgs(argv)
 	return root.Execute()
+}
+
+func TestHostAuthorizedKeysFlagIsScopedToItsFixture(t *testing.T) {
+	origKeys, origRunning, origSupplied := flagAuthorizedKeys, runningCmd, suppliedFlags
+	t.Cleanup(func() {
+		flagAuthorizedKeys, runningCmd, suppliedFlags = origKeys, origRunning, origSupplied
+	})
+	flagAuthorizedKeys, runningCmd, suppliedFlags = "", nil, map[string]bool{}
+
+	t.Run("host writer", func(t *testing.T) {
+		dir := inProcessHostEnv(t)
+		missing := filepath.Join(dir, "nope")
+		err := runHostInProcess(t, "host", "--accept", "--authorized-keys", missing, "--", "true")
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "error reading authorized keys file "+missing)
+	})
+
+	require.Empty(t, flagAuthorizedKeys)
+	require.Nil(t, runningCmd)
+	require.Empty(t, suppliedFlags)
+	keys, err := resolveAuthorizedKeys(context.Background(), hostOptions{}, discardLogger())
+	require.NoError(t, err)
+	require.Empty(t, keys)
 }
 
 // inProcessDaemons is runHostInProcess's daemon: hostSpawn, until the test

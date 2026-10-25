@@ -39,12 +39,13 @@ func runCLI(t *testing.T, args ...string) (stdout, stderr string, code int) {
 func runCLICmd(t *testing.T, args ...string) (stdout, stderr string, code int, cmd *cobra.Command) {
 	t.Helper()
 
-	// A run leaves the command it ran and the flags it applied in package
-	// state; the real binary exits with them. Put them back, so that a later
-	// test asking whether CI hides addresses doesn't inherit a flag this
-	// run set.
-	origRunning, origSupplied := runningCmd, suppliedFlags
-	t.Cleanup(func() { runningCmd, suppliedFlags = origRunning, origSupplied })
+	// The real binary exits with the parsed flags and command metadata.
+	// Restore the incoming values when this fixture ends, so direct readers
+	// in later tests do not inherit its output format or address policy.
+	origOutput, origRunning, origSupplied := flagOutput, runningCmd, suppliedFlags
+	t.Cleanup(func() {
+		flagOutput, runningCmd, suppliedFlags = origOutput, origRunning, origSupplied
+	})
 
 	stdinR, stdinW, err := os.Pipe()
 	require.NoError(t, err)
@@ -97,6 +98,39 @@ func withArgs(t *testing.T, args ...string) {
 	orig := os.Args
 	os.Args = append([]string{"upterm"}, args...)
 	t.Cleanup(func() { os.Args = orig })
+}
+
+func TestCLIOutputFlagIsScopedToItsFixture(t *testing.T) {
+	origOutput := flagOutput
+	t.Cleanup(func() { flagOutput = origOutput })
+
+	for _, tc := range []struct {
+		name     string
+		incoming string
+	}{
+		{name: "text", incoming: ""},
+		{name: "json", incoming: "json"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			flagOutput = tc.incoming
+			setupSessionRoots(t)
+			withConfig(t, "")
+			const name = "scoped-output"
+			buildReady(t, name)
+
+			t.Run("CLI writer", func(t *testing.T) {
+				stdout, stderr, code := runCLI(t, "session", "info", name, "-o", "json")
+				require.Equal(t, 0, code, stderr)
+				require.True(t, json.Valid([]byte(stdout)), stdout)
+				require.Empty(t, stderr)
+			})
+
+			require.Equal(t, tc.incoming, flagOutput)
+			if tc.incoming == "" {
+				require.Contains(t, runInfo(t, name), viewRow("Name:", name))
+			}
+		})
+	}
 }
 
 func TestAnErrorIsOneLineOnce(t *testing.T) {
