@@ -2112,6 +2112,29 @@ func TestWaitCobraLosesObservedRecord(t *testing.T) {
 	}
 }
 
+func TestSignalInfoOutputFlagIsScopedToItsFixture(t *testing.T) {
+	origOutput := flagOutput
+	t.Cleanup(func() { flagOutput = origOutput })
+
+	for _, tc := range []struct {
+		name     string
+		incoming string
+	}{
+		{name: "text", incoming: ""},
+		{name: "json", incoming: "json"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			flagOutput = tc.incoming
+			withConfig(t, "")
+			t.Run("signal info writer", TestSignalInfoAndWaitUseRecordedNumber)
+			require.Equal(t, tc.incoming, flagOutput)
+			if tc.incoming == "" {
+				t.Run("text reader", TestLiveInfoHasTheJoinRowAboveTheConnectedGuests)
+			}
+		})
+	}
+}
+
 func TestSignalInfoAndWaitUseRecordedNumber(t *testing.T) {
 	setupSessionRoots(t)
 	number := 7
@@ -2119,16 +2142,14 @@ func TestSignalInfoAndWaitUseRecordedNumber(t *testing.T) {
 		Name: "signal-info", LaunchID: "L1", Reason: sessiondir.ReasonSignaled,
 		Signal: "bus error", SignalNumber: &number,
 	})
-	root := Root()
-	root.SetArgs([]string{"session", "info", "signal-info", "-o", "json"})
-	var err error
-	output := captureStdout(t, func() { err = root.Execute() })
-	require.NoError(t, err)
+	output, stderr, code := runCLI(t, "session", "info", "signal-info", "-o", "json")
+	require.Equal(t, 0, code, stderr)
+	require.Empty(t, stderr)
 	var fields map[string]any
 	require.NoError(t, json.Unmarshal([]byte(output), &fields))
 	require.Equal(t, float64(7), fields["signalNumber"])
 	require.Equal(t, "bus error", fields["signal"])
-	_, stderr, code := runCLI(t, "session", "wait", "signal-info")
+	_, stderr, code = runCLI(t, "session", "wait", "signal-info")
 	require.Equal(t, 135, code)
 	require.Empty(t, stderr)
 }
