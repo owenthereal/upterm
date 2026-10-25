@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	gssh "charm.land/ssh"
@@ -16,7 +17,9 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// A read-only guest that is not draining must not hold up its own handler.
+// A read-only guest that is not draining must not block its own handler. The
+// handler waits on such a guest only under bounds -- for what was queued for
+// it to be flushed, for its close to be answered -- and then returns.
 //
 // The banner is the handler's own write to the guest, and it has to travel the
 // same path as everything else the guest receives. Written straight to the
@@ -100,8 +103,8 @@ func (f *fakeGuestSession) SendRequest(string, bool, []byte) (bool, error) { ret
 
 // fakeGuestContext supplies what HandleSession asks of a session's context,
 // the session ID and a Done for the departure of a client with a terminal to
-// wait on, and leaves the rest nil for the same reason. This client never goes:
-// a nil Done is one that is never closed.
+// wait on, with the Err a pacer asks first, and leaves the rest nil for the
+// same reason. This client never goes: a nil Done is one that is never closed.
 type fakeGuestContext struct {
 	gssh.Context
 
@@ -109,6 +112,7 @@ type fakeGuestContext struct {
 }
 
 func (c fakeGuestContext) Done() <-chan struct{} { return nil }
+func (c fakeGuestContext) Err() error            { return nil }
 
 func (c fakeGuestContext) Value(key any) any {
 	if key == gssh.ContextKeySessionID {
@@ -258,6 +262,147 @@ type exitRecordingGuest struct {
 
 func (g *exitRecordingGuest) Exit(code int) error {
 	g.exited <- code
+	return nil
+}
+
+// A guest whose input ends at once -- `ssh -tt door < /dev/null`, or an
+// x/crypto client with no Stdin -- is leaving, and its group ends moments
+// after its attach. What was queued for it by then is still its own: the
+// replay handed to its sink during the attach is delivered by the sink's
+// goroutine afterwards, and a status sent ahead of that, with the sink closed
+// behind it, left the guest a clean exit and nothing on its screen. The
+// guest's terminal is slow on purpose here, so that the status always gets
+// there first unless the handler waits for the sink. What the session goes on
+// writing once the guest has left is not its own, and is not waited for. The
+// wait is bounded as the session's own flush is, and by the session: a guest
+// that has stopped reading is sent its status without what it never took, at
+// the bound or as the session ends, whichever comes first -- the session's
+// end waits for this handler under a bound of its own.
+func TestALeavingGuestIsSentWhatWasQueuedForItBeforeItsStatus(t *testing.T) {
+	const replay = "output from before this guest joined"
+	for _, tc := range []struct {
+		name string
+		// delay is how long the guest's terminal takes to take a write, end
+		// is when the session ends, if it does, and due is when the status
+		// is sent; shown is what the terminal has taken by then.
+		delay, end, due time.Duration
+		shown           string
+	}{
+		{"slow terminal", 100 * time.Millisecond, 0, 100 * time.Millisecond, replay},
+		{"terminal that has stopped reading", time.Hour, 0, guestFlushTimeout, ""},
+		{"session ending as a guest that has stopped reading leaves", time.Hour, 300 * time.Millisecond, 300 * time.Millisecond, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				session, end := context.WithCancel(t.Context())
+				defer end()
+				if tc.end > 0 {
+					time.AfterFunc(tc.end, end)
+				}
+
+				writers := uio.NewMultiWriter(uio.DefaultReplayBytes)
+				_, err := writers.Write([]byte(replay))
+				require.NoError(t, err)
+
+				terminal := &slowTerminal{delay: tc.delay, letGo: make(chan struct{})}
+				guest := &shownAtExitGuest{
+					fakeGuestSession: fakeGuestSession{ctx: fakeGuestContext{sessionID: "leaving"}, winCh: make(chan gssh.Window), out: terminal},
+					terminal:         terminal,
+					exited:           make(chan guestExit, 1),
+				}
+				// No primary, as in a detached session: the guest attaches
+				// through the pacer, and the command's output passes it.
+				pacer := newGuestPacer(t.Context(), writers, 0)
+				h := &sessionHandler{
+					kind:              kindGuest,
+					writers:           writers,
+					pacer:             pacer,
+					eventEmmiter:      emitter.New(1),
+					terminals:         newTerminalWindows(discardLogger()),
+					keepAliveDuration: time.Hour,
+					ctx:               session,
+					logger:            discardLogger(),
+				}
+				done := make(chan struct{})
+				go func() { defer close(done); h.HandleSession(guest) }()
+				// Whatever fails first, the far side answers the close and the
+				// terminal takes what it was handed, so that the handler and
+				// the sink's goroutine have both returned before the bubble
+				// ends.
+				answer := sync.OnceFunc(func() { close(guest.winCh) })
+				defer func() {
+					answer()
+					<-done
+					close(terminal.letGo)
+					synctest.Wait()
+				}()
+
+				// The guest's input has ended by now, and the command writes
+				// on.
+				synctest.Wait()
+				_, err = pacer.Write([]byte("output after the guest left"))
+				require.NoError(t, err)
+
+				time.Sleep(tc.due - time.Nanosecond)
+				synctest.Wait()
+				select {
+				case exit := <-guest.exited:
+					t.Fatalf("the guest was sent its status %d before %v, having been shown %q", exit.code, tc.due, exit.shown)
+				default:
+				}
+
+				time.Sleep(time.Nanosecond)
+				synctest.Wait()
+				select {
+				case exit := <-guest.exited:
+					assert.Equal(t, guestExit{code: 0, shown: tc.shown}, exit)
+				default:
+					t.Fatalf("the guest was not sent its status %v after it left", tc.due)
+				}
+
+				answer()
+				synctest.Wait()
+				select {
+				case <-done:
+				default:
+					t.Fatal("the handler did not return once its close was answered")
+				}
+			})
+		})
+	}
+}
+
+// slowTerminal takes delay to take each write, or until it is let go, and
+// keeps what it took.
+type slowTerminal struct {
+	delay time.Duration
+	letGo chan struct{}
+	shown recordingWriter
+}
+
+func (s *slowTerminal) Write(p []byte) (int, error) {
+	select {
+	case <-time.After(s.delay):
+	case <-s.letGo:
+	}
+	return s.shown.Write(p)
+}
+
+type guestExit struct {
+	code  int
+	shown string
+}
+
+// shownAtExitGuest is a fakeGuestSession that reports, with the status it is
+// sent, what its terminal had taken by then.
+type shownAtExitGuest struct {
+	fakeGuestSession
+	terminal *slowTerminal
+	exited   chan guestExit
+}
+
+func (g *shownAtExitGuest) Exit(code int) error {
+	g.exited <- guestExit{code: code, shown: string(g.terminal.shown.bytes())}
 	return nil
 }
 

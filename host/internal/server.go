@@ -1100,6 +1100,11 @@ func (h *sessionHandler) HandleSession(sess gssh.Session) {
 	// started yet.
 	guestOutput := io.Writer(sess)
 
+	// What a guest that leaves on its own is sent before its status: what
+	// is already queued for it (see the end of this handler). Only a guest
+	// with a sink has a queue.
+	flushLeaving := func() {}
+
 	if h.kind == kindGuest && len(h.forceCommand) > 0 {
 		if h.ctx.Err() != nil {
 			// The session is already tearing down. This guest arrived a moment
@@ -1450,6 +1455,20 @@ func (h *sessionHandler) HandleSession(sess gssh.Session) {
 				_ = sink.Close()
 			}()
 
+			// Out of the fan-out and the pacer's order first, so nothing
+			// more joins the queue and a guest on its way out paces no one;
+			// then flushed, for as long as the session's own flush is given
+			// and no longer than the session lasts: a guest that has stopped
+			// reading is still sent its status, and a session that is ending
+			// waits for this handler under a bound of its own. A sink that
+			// has dropped its guest has nothing left to flush.
+			flushLeaving = func() {
+				h.detachGuest(sink)
+				ctx, cancel := context.WithTimeout(h.ctx, guestFlushTimeout)
+				defer cancel()
+				_ = sink.Flush(ctx)
+			}
+
 			guestOutput = sink
 		}
 
@@ -1666,6 +1685,14 @@ func (h *sessionHandler) HandleSession(sess gssh.Session) {
 	case runErr != nil:
 		_ = sess.Exit(1)
 	default:
+		// Nothing ended this client's session but the end of its input:
+		// it is leaving. A guest's EOF can follow its shell request at
+		// once -- `ssh -tt door < /dev/null`, an x/crypto client with no
+		// Stdin -- while its replay is still in its sink, which the sink's
+		// goroutine delivers after the attach. Sent its status first, with
+		// the sink closed behind it, such a guest got a clean exit and
+		// nothing on its screen.
+		flushLeaving()
 		_ = sess.Exit(0)
 	}
 }
