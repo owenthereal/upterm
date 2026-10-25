@@ -1,7 +1,7 @@
 package command
 
 import (
-	"io"
+	"bytes"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -202,22 +202,35 @@ func Test_bindFlagsToEnv_unknownConfigKeyAcrossWholeCommandTree(t *testing.T) {
 	// non-host command must still recognize it as a known key, or every config
 	// containing it would be rejected by commands other than "host".
 	withConfig(t, "authorized-user:\n  - github:alice\n")
+	withBuildInfo(t)
 
 	root := Root()
-	root.SetOut(io.Discard)
-	root.SetErr(io.Discard)
+	var out, stderr bytes.Buffer
+	root.SetOut(&out)
+	root.SetErr(&stderr)
 	root.SetArgs([]string{"version"})
-	assert.NoError(t, root.Execute())
+	var err error
+	stdout := captureStdout(t, func() { err = root.Execute() })
+	assert.NoError(t, err)
+	require.Equal(t, "Upterm version 1.2.3\nGit commit: abc1234\nBuild date: 2026-10-13T00:00:00Z\n", stdout)
+	require.Empty(t, out.String())
+	require.Empty(t, stderr.String())
 }
 
 func Test_bindFlagsToEnv_unknownConfigKeySparesConfigPath(t *testing.T) {
 	withConfig(t, "authorized_user:\n  - github:alice\n")
 
 	root := Root()
-	root.SetOut(io.Discard)
-	root.SetErr(io.Discard)
+	var out, stderr bytes.Buffer
+	root.SetOut(&out)
+	root.SetErr(&stderr)
 	root.SetArgs([]string{"config", "path"})
-	assert.NoError(t, root.Execute())
+	var err error
+	stdout := captureStdout(t, func() { err = root.Execute() })
+	assert.NoError(t, err)
+	require.Equal(t, utils.UptermConfigFilePath()+"\n", stdout)
+	require.Empty(t, out.String())
+	require.Empty(t, stderr.String())
 }
 
 func Test_bindFlagsToEnv_yamlListIsNotFlattened(t *testing.T) {
@@ -451,6 +464,7 @@ func Test_isConfigCommand(t *testing.T) {
 
 func Test_persistentPreRun_malformedConfigSpares_configCommands(t *testing.T) {
 	withConfig(t, "authorized-user: [unclosed\n")
+	withBuildInfo(t)
 
 	// `config edit` launches $VISUAL. `true` exits 0 without touching the file,
 	// which keeps the test from opening an editor while still exercising the
@@ -461,16 +475,25 @@ func Test_persistentPreRun_malformedConfigSpares_configCommands(t *testing.T) {
 	// repair a broken config file. view and edit are the ones that read or
 	// rewrite its contents, so losing either leaves a user with a bricked file
 	// and no way to see or fix it from upterm.
-	for _, args := range [][]string{
-		{"config", "path"},
-		{"config", "view"},
+	for _, tc := range []struct {
+		args []string
+		want string
+	}{
+		{[]string{"config", "path"}, utils.UptermConfigFilePath() + "\n"},
+		{[]string{"config", "view"}, "authorized-user: [unclosed\n"},
 	} {
-		t.Run(strings.Join(args, " "), func(t *testing.T) {
+		t.Run(strings.Join(tc.args, " "), func(t *testing.T) {
 			root := Root()
-			root.SetOut(io.Discard)
-			root.SetErr(io.Discard)
-			root.SetArgs(args)
-			assert.NoError(t, root.Execute())
+			var out, stderr bytes.Buffer
+			root.SetOut(&out)
+			root.SetErr(&stderr)
+			root.SetArgs(tc.args)
+			var err error
+			stdout := captureStdout(t, func() { err = root.Execute() })
+			assert.NoError(t, err)
+			require.Equal(t, tc.want, stdout)
+			require.Empty(t, out.String())
+			require.Empty(t, stderr.String())
 		})
 	}
 
@@ -478,30 +501,46 @@ func Test_persistentPreRun_malformedConfigSpares_configCommands(t *testing.T) {
 	// with it: its own report, not the refusal other commands give.
 	t.Run("config edit", func(t *testing.T) {
 		root := Root()
-		root.SetOut(io.Discard)
-		root.SetErr(io.Discard)
+		var out, stderr bytes.Buffer
+		root.SetOut(&out)
+		root.SetErr(&stderr)
 		root.SetArgs([]string{"config", "edit"})
-		err := root.Execute()
-		assert.ErrorContains(t, err, "; run upterm config edit to fix it")
+		var err error
+		stdout := captureStdout(t, func() { err = root.Execute() })
+		require.ErrorContains(t, err, "; run upterm config edit to fix it")
 		assert.NotContains(t, err.Error(), "failed to read config file")
+		require.Empty(t, stdout)
+		require.Empty(t, out.String())
+		require.Empty(t, stderr.String())
 	})
 
 	// version reads no config, so it doesn't fail on one either.
 	root2 := Root()
-	root2.SetOut(io.Discard)
-	root2.SetErr(io.Discard)
+	var out2, stderr2 bytes.Buffer
+	root2.SetOut(&out2)
+	root2.SetErr(&stderr2)
 	root2.SetArgs([]string{"version"})
-	assert.NoError(t, root2.Execute())
+	var err error
+	stdout := captureStdout(t, func() { err = root2.Execute() })
+	assert.NoError(t, err)
+	require.Equal(t, "Upterm version 1.2.3\nGit commit: abc1234\nBuild date: 2026-10-13T00:00:00Z\n", stdout)
+	require.Empty(t, out2.String())
+	require.Empty(t, stderr2.String())
 
 	// A command that reads it must refuse, rather than silently dropping a
 	// requested authorization restriction. Not `host --help`: cobra
 	// short-circuits --help without running PersistentPreRunE, so a help
 	// invocation would never reach ingestion.
 	root3 := Root()
-	root3.SetOut(io.Discard)
-	root3.SetErr(io.Discard)
+	var out3, stderr3 bytes.Buffer
+	root3.SetOut(&out3)
+	root3.SetErr(&stderr3)
 	root3.SetArgs([]string{"session", "list"})
-	assert.ErrorContains(t, root3.Execute(), "failed to read config file")
+	stdout = captureStdout(t, func() { err = root3.Execute() })
+	assert.ErrorContains(t, err, "failed to read config file")
+	require.Empty(t, stdout)
+	require.Empty(t, out3.String())
+	require.Empty(t, stderr3.String())
 }
 
 // Exactly these flags are per-run; every other flag stays bound, host's

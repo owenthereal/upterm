@@ -1,6 +1,7 @@
 package command
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
@@ -8,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	stdlog "log"
 	"log/slog"
 	"net"
 	"os"
@@ -502,10 +504,13 @@ func Test_runWithGeneratedNameRetry(t *testing.T) {
 		// what this case needs is a collision reaching the log line with no
 		// logger behind it.
 		//
-		// Where that record lands is deliberately not asserted. Capturing it
-		// would mean swapping slog's default, which is process-global and
-		// backs the standard log package too — a test that reaches that far
-		// out to check a nil check is worse than the nil check.
+		// The default handler writes through the standard logger. Capture its
+		// destination while keeping the real nil-logger path, and restore the
+		// incoming writer even if an assertion stops the test.
+		originalWriter := stdlog.Writer()
+		t.Cleanup(func() { stdlog.SetOutput(originalWriter) })
+		var logs bytes.Buffer
+		stdlog.SetOutput(&logs)
 		var names []string
 		err := runWithNameRetry(nil, "", generatedNames(), func(name string) error {
 			names = append(names, name)
@@ -518,6 +523,7 @@ func Test_runWithGeneratedNameRetry(t *testing.T) {
 		require.NoError(t, err)
 		require.Len(t, names, 2,
 			"the collision was redrawn, so the log line ran with no logger to run it on")
+		require.Regexp(t, `^[0-9]{4}/[0-9]{2}/[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2} INFO session name is taken, drawing another name=bash-0001\n$`, logs.String())
 	})
 
 	t.Run("the wrapper draws from the real generator", func(t *testing.T) {
