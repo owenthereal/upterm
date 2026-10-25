@@ -37,7 +37,7 @@ func TestConsulCloseDuringFirstWatchQuerySetup(t *testing.T) {
 		<-entered
 		closed := make(chan error, 1)
 		go func() { closed <- store.Close() }()
-		synctest.Wait()
+		synctest.Wait() // Close has stopped Plan and is waiting for held query setup.
 		require.True(t, store.watchPlan.IsStopped())
 		select {
 		case err := <-closed:
@@ -45,7 +45,7 @@ func TestConsulCloseDuringFirstWatchQuerySetup(t *testing.T) {
 		default:
 		}
 		release()
-		synctest.Wait()
+		synctest.Wait() // The released query has returned and Close has joined the watch.
 		require.NoError(t, <-closed)
 		select {
 		case <-store.watchDone:
@@ -129,13 +129,19 @@ func TestConsulSessionWatcherHonorsCancellation(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
 				ctx, cancel := context.WithCancel(context.Background())
 				t.Cleanup(cancel)
-				entered := make(chan struct{})
+				entered, released := make(chan struct{}), make(chan struct{})
+				release := sync.OnceFunc(func() { close(released) })
+				t.Cleanup(release)
 				cfg := api.DefaultConfig()
 				cfg.Address = "127.0.0.1:1"
 				cfg.HttpClient = &http.Client{Timeout: 0, Transport: closeRoundTripFunc(func(r *http.Request) (*http.Response, error) {
 					close(entered)
-					<-r.Context().Done()
-					return nil, r.Context().Err()
+					select {
+					case <-r.Context().Done():
+						return nil, r.Context().Err()
+					case <-released:
+						return nil, errors.New("watch request released by fixture cleanup")
+					}
 				})}
 				client, err := api.NewClient(cfg)
 				require.NoError(t, err)
@@ -152,7 +158,7 @@ func TestConsulSessionWatcherHonorsCancellation(t *testing.T) {
 				}()
 				if !before {
 					<-entered
-					synctest.Wait()
+					synctest.Wait() // The entered fake request is blocked before cancellation.
 					select {
 					case err := <-finished:
 						t.Fatalf("query returned before cancellation: %v", err)
@@ -160,8 +166,13 @@ func TestConsulSessionWatcherHonorsCancellation(t *testing.T) {
 					}
 					cancel()
 				}
-				synctest.Wait()
-				require.ErrorIs(t, <-finished, context.Canceled)
+				synctest.Wait() // Settle work made ready by parent cancellation before checking completion.
+				select {
+				case err := <-finished:
+					require.ErrorIs(t, err, context.Canceled)
+				default:
+					t.Fatal("watch query did not finish after parent cancellation")
+				}
 			})
 		})
 	}
