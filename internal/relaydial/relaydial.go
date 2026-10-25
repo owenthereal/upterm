@@ -27,6 +27,7 @@ var defaultPorts = map[string]string{
 // requires host:port and keys the entry as [host]:443 for wss. Only the dial
 // URL inside ws drops a default port, so that the Host header stays "host". The
 // address is returned with the dial's error too.
+// An already-ended ctx returns its error and the address without dialing.
 //
 // For ssh:// the connection is plain TCP. For ws:// and wss:// it is a
 // WebSocket, which carries user as its credentials: user is split at its first
@@ -35,6 +36,9 @@ var defaultPorts = map[string]string{
 // when non-nil, is the HTTP proxy to dial through. server is not modified.
 func Dial(ctx context.Context, server *url.URL, user string, guest bool, proxy *url.URL) (net.Conn, string, error) {
 	addr := hostPort(server)
+	if err := ctx.Err(); err != nil {
+		return nil, addr, err
+	}
 
 	switch server.Scheme {
 	case "ws", "wss":
