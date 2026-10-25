@@ -514,3 +514,90 @@ func receiveWithin[T any](t *testing.T, ch <-chan T, what string) T {
 	}
 	return v
 }
+
+// X is Release on this same store. W2 is captured once after T2 returns;
+// WX is captured only after X. W2<WX excludes overlapping watch queries.
+func TestSameStoreReleaseRejectsLateRegisterReply(t *testing.T) {
+	generated := orders([]string{"X", "D", "W2", "WX"}, map[string][]string{"X": {"D", "WX"}, "W2": {"WX"}})
+	require.Len(t, generated, 5)
+	rows := append([][]string{{"X", "D"}}, generated...)
+	for _, order := range rows {
+		t.Run(strings.Join(order, " "), func(t *testing.T) {
+			h := newLateReply(t, true)
+			// Install the join after begin has installed store.Close, but before any
+			// asynchronous checkpoint assertion. This is commitHeld's A/B sequence.
+			h.begin(h.delay)
+			var firstConsumed, secondConsumed bool
+			t.Cleanup(func() {
+				h.releaseReplies()
+				if h.first != nil && !firstConsumed {
+					r := receiveWithin(t, h.first, "cleanup T1 did not join")
+					firstConsumed = true
+					h.reg1 = r.reg
+					assert.NoError(t, r.err)
+				}
+				if h.second != nil && !secondConsumed {
+					r := receiveWithin(t, h.second, "cleanup T2 did not join")
+					secondConsumed = true
+					h.reg2 = r.reg
+					assert.NoError(t, r.err)
+				}
+				if h.reg1 == nil {
+					return
+				}
+				successor, err := h.store.Register(context.Background(), &Session{ID: h.id, NodeAddr: "node-a:22", Generation: 3})
+				if !assert.NoError(t, err) {
+					return
+				}
+				defer func() { assert.NoError(t, h.store.Release(context.Background(), successor)) }()
+				assert.NoError(t, h.store.Release(context.Background(), h.reg1))
+				pair := h.consul.entry()
+				if assert.NotNil(t, pair, "cleanup T1 release removed successor") {
+					assert.Equal(t, successor.lease, pair.Session)
+				}
+				entry, ok := h.store.cache.lookup(h.id)
+				if assert.True(t, ok, "cleanup T1 release removed successor cache") {
+					assert.Equal(t, successor.lease, entry.lease)
+				}
+				if h.reg2 != nil {
+					assert.NoError(t, h.store.Release(context.Background(), h.reg2))
+				}
+			})
+			receiveWithin(t, h.delay.entered(1), "T1 never committed")
+			h.lease1 = h.committed(1)
+			h.commit2(true)
+			h.release2()
+			second := receiveWithin(t, h.second, "T2's Register never returned")
+			secondConsumed = true // Record receipt before any fatal assertion.
+			h.reg2 = second.reg
+			require.NoError(t, second.err, "T2 wasn't registered")
+			index, pairs := h.consul.snapshot()
+			deleted := false
+			for ordinal, step := range order {
+				switch step {
+				case "X":
+					require.NoError(t, h.store.Release(context.Background(), h.reg2))
+					deleted = true
+					require.Nil(t, h.consul.entry())
+					h.requireNotCached("same-store release left its cache entry")
+				case "D":
+					h.delay.release(1)
+					first := receiveWithin(t, h.first, "T1's Register never returned")
+					firstConsumed = true // A failed result has still been consumed.
+					h.reg1 = first.reg
+					require.NoError(t, first.err, "T1 wasn't registered")
+				case "W2":
+					h.store.updateSessionReplica(index, pairs)
+				case "WX":
+					h.deliver()
+				}
+				t.Logf("checkpoint=%s ordinal=%d captured_index=%d lease1=%s lease2=%s epoch=%d deleted=%t", step, ordinal+1, index, h.lease1, h.lease2, h.store.cache.Epoch(), deleted)
+				if deleted && (step == "D" || step == "W2") {
+					h.requireNotCached("late reply or captured snapshot resurrected a same-store removal before later delivery/Get")
+				}
+			}
+			require.Nil(t, h.consul.entry())
+			h.requireNotFound()
+		})
+	}
+}

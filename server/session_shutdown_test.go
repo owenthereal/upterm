@@ -241,7 +241,7 @@ func TestConsulShutdownCancelsCleanupRequests(t *testing.T) {
 			cfg.Address, cfg.HttpClient = srv.URL, client
 			apiClient, err := api.NewClient(cfg)
 			require.NoError(t, err)
-			store := &consulSessionStore{client: apiClient, apiHTTP: client, logger: logger, keyPrefix: DefaultKeyPrefix, cache: newSessionCache(logger), held: map[string]map[string]struct{}{"owned": {"owned-lease": {}}}}
+			store := &consulSessionStore{client: apiClient, apiHTTP: client, logger: logger, keyPrefix: DefaultKeyPrefix, cache: newSessionCache(logger), held: map[string]map[string]heldWrite{"owned": {"owned-lease": {}}}}
 			t.Cleanup(func() { release(); assert.NoError(t, store.Close()); transport.CloseIdleConnections() })
 			require.NoError(t, store.startSessionWatch(cfg))
 			receiveWithin(t, watchEntered, "watch never entered")
@@ -516,7 +516,7 @@ func newShutdownSocketStore(t *testing.T, roundTrip closeRoundTripFunc) *consulS
 	client, err := api.NewClient(cfg)
 	require.NoError(t, err)
 	logger := slog.New(slog.DiscardHandler)
-	return &consulSessionStore{client: client, apiHTTP: cfg.HttpClient, logger: logger, keyPrefix: DefaultKeyPrefix, cache: newSessionCache(logger), held: make(map[string]map[string]struct{})}
+	return &consulSessionStore{client: client, apiHTTP: cfg.HttpClient, logger: logger, keyPrefix: DefaultKeyPrefix, cache: newSessionCache(logger), held: make(map[string]map[string]heldWrite)}
 }
 
 func shutdownSocketResponse(status int, body string) *http.Response {
@@ -547,7 +547,7 @@ func TestConsulShutdownStopsCleanupRetries(t *testing.T) {
 					// nonblocking. Production's bounded retry loop owns its waits.
 					return nil, errors.New("retryable cleanup request failure")
 				})
-				store.held["owned"] = map[string]struct{}{"owned-lease": {}}
+				store.held["owned"] = map[string]heldWrite{"owned-lease": {}}
 				probe := &shutdownCleanupProbe{consulSessionStore: store, closeEntered: make(chan struct{})}
 				manager := newSessionManagerWithStore(probe, routing.NewEncodeDecoder(routing.ModeEmbedded))
 				var result error
@@ -620,7 +620,7 @@ func TestConsulShutdownStopsNextBatch(t *testing.T) {
 			for i := range 33 {
 				id := fmt.Sprintf("owned-%02d", i)
 				ids = append(ids, id)
-				store.held[id] = map[string]struct{}{"owned-lease": {}}
+				store.held[id] = map[string]heldWrite{"owned-lease": {}}
 				store.cache.Set(id, cachedSession{session: &Session{ID: id, NodeAddr: "node"}, index: 1, lease: "owned-lease"}, store.cache.Epoch())
 			}
 			err := store.batchDelete(ctx, ids)
