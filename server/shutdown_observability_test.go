@@ -2,18 +2,22 @@ package server
 
 import (
 	"context"
+	"errors"
+	"io"
 	"log/slog"
 	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"testing/synctest"
 	"time"
 
 	"github.com/owenthereal/upterm/routing"
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -21,10 +25,12 @@ import (
 // until the test releases it, and records whether a delete followed.
 type hangingListStore struct {
 	SessionStore
-	entered chan struct{}
-	gate    chan struct{}
-	release func() // opens gate; safe to call more than once
-	deleted chan []string
+	entered     chan struct{}
+	gate        chan struct{}
+	release     func() // opens gate; safe to call more than once
+	deleted     chan []string
+	closed      chan struct{}
+	closeSignal func()
 }
 
 func (s hangingListStore) List() ([]*Session, error) {
@@ -41,23 +47,27 @@ func (s hangingListStore) BatchDelete(sessionIDs []string) error {
 	return s.SessionStore.BatchDelete(sessionIDs)
 }
 
+func (s hangingListStore) Close() error {
+	s.closeSignal()
+	return s.SessionStore.Close()
+}
+
 func newHangingListStore(logger *slog.Logger) hangingListStore {
-	gate := make(chan struct{})
+	gate, closed := make(chan struct{}), make(chan struct{})
 	return hangingListStore{
 		SessionStore: newMemorySessionStore(logger),
 		entered:      make(chan struct{}),
 		gate:         gate,
 		release:      sync.OnceFunc(func() { close(gate) }),
 		deleted:      make(chan []string, 1),
+		closed:       closed,
+		closeSignal:  sync.OnceFunc(func() { close(closed) }),
 	}
 }
 
-// Session cleanup reaches Consul over the network and carries no deadline of
-// its own: List walks every session in the store, BatchDelete deletes this
-// node's in serial 32-key transactions, and Close stops the watches. Shutdown
-// therefore has to bound it. Until it did, the whole of Shutdown had a floor
-// but no ceiling, and a supervisor's grace period cannot be set against an
-// unbounded shutdown -- fly.toml's kill_timeout is set against this one.
+// A legacy contextless List can remain parked after cleanup cancellation.
+// Shutdown must bound its wait even though the call cannot be interrupted;
+// a supervisor's grace period is set against that bound.
 //
 // It runs in a synctest bubble, where time is fake, with the cleanup's bound
 // set to 50 ms. The bound is checked on both sides of it, and against the
@@ -173,6 +183,12 @@ func TestAbandonedSessionCleanupDoesNotDelete(t *testing.T) {
 			t.Fatal("Shutdown was still waiting on the stuck cleanup at its deadline")
 		}
 
+		select {
+		case <-store.closed:
+		default:
+			t.Fatal("abandoned legacy cleanup did not enter Close before List release")
+		}
+
 		// Shutdown has given up. Unblock the cleanup and stand in for the server
 		// that took this node address next: its session must survive.
 		store.release()
@@ -191,26 +207,11 @@ func TestAbandonedSessionCleanupDoesNotDelete(t *testing.T) {
 	})
 }
 
-// run.Group's interrupt signature is func(error), so a failing Shutdown had
-// nowhere to report to: it was logged and dropped, Start returned g.Run's
-// error -- nil on a requested stop -- and the process exited 0. A deploy that
-// could not delete this node's sessions looked successful to the supervisor,
-// which is the blind spot #573 was about, one layer in.
-//
-// The failure has to be the session cleanup rather than the wait for serving to
-// stop. An earlier version of this test raced the two actors so that Shutdown's
-// wait would time out, and Windows CI showed why that cannot be relied on: when
-// the interrupt runs before ServeWithContext has recorded its channel, Shutdown
-// finds a nil served, skips the wait and reports nothing. The cleanup runs on
-// every path, so failing it is the arrangement with no ordering in it.
-//
-// A Consul that answers during startup and is gone by shutdown produces exactly
-// that: registration succeeds, so Start comes up, and the deletes afterwards
-// have nowhere to go.
+// Start must retain the cleanup failure that its run.Group interrupt observes.
+// Catalog success and a real WS health response establish that startup finished
+// before the test makes the later cleanup List fail. The first watch request
+// remains held until cancellation so it cannot consume the cleanup responses.
 func TestStartReportsAShutdownThatFailed(t *testing.T) {
-	// Start registers its metrics on prometheus.DefaultRegisterer with
-	// MustRegister, which panics on a duplicate. A registry of our own keeps
-	// this test hermetic and lets it run under -count=2.
 	restoreReg := prometheus.DefaultRegisterer
 	prometheus.DefaultRegisterer = prometheus.NewRegistry()
 	t.Cleanup(func() { prometheus.DefaultRegisterer = restoreReg })
@@ -219,27 +220,53 @@ func TestStartReportsAShutdownThatFailed(t *testing.T) {
 	keyPath := filepath.Join(t.TempDir(), "host_key")
 	require.NoError(t, os.WriteFile(keyPath, []byte(TestPrivateKeyContent), 0600))
 
-	// Enough of Consul's HTTP API for newConsulSessionStore to come up: an
-	// empty JSON array reads as "no sessions", which every call this makes
-	// during startup accepts.
-	consul := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	const cleanupFailure = "injected cleanup List failure"
+	catalogDone := make(chan struct{})
+	watchEntered, watchCancelled, watchDone := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	watchGate := make(chan struct{})
+	releaseWatch := sync.OnceFunc(func() { close(watchGate) })
+	var kvRequests, cleanupRequests atomic.Int64
+	var failCleanup atomic.Bool
+	consul, connections := newCloseServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("X-Consul-Index", "1")
-		_, _ = w.Write([]byte("[]"))
-	}))
-	consulStopped := false
-	t.Cleanup(func() {
-		if !consulStopped {
-			consul.Close()
+		switch {
+		case r.Method == http.MethodPut && r.URL.Path == "/v1/catalog/register":
+			_, _ = io.WriteString(w, "true")
+			close(catalogDone)
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/v1/kv/"):
+			if kvRequests.Add(1) == 1 {
+				defer close(watchDone)
+				close(watchEntered)
+				select {
+				case <-r.Context().Done():
+					close(watchCancelled)
+				case <-watchGate:
+				}
+				return
+			}
+			if failCleanup.Load() {
+				cleanupRequests.Add(1)
+				http.Error(w, cleanupFailure, http.StatusInternalServerError)
+				return
+			}
+			_, _ = io.WriteString(w, "[]")
+		default:
+			t.Errorf("unexpected Consul request: %s %s", r.Method, r.URL)
+			http.Error(w, "unexpected request", http.StatusBadRequest)
 		}
-	})
+	}))
+	t.Cleanup(releaseWatch)
 
+	logs := make(proxyProtocolTestLogs, 128)
+	logger := slog.New(slog.NewJSONHandler(logs, nil))
 	ctx, cancel := context.WithCancel(context.Background())
-	t.Cleanup(cancel)
-
-	done := make(chan error, 1)
+	// The closed channel publishes this one stored result to both the test and
+	// cleanup; neither observer consumes the other's completion notification.
+	done := make(chan struct{})
+	var result error
 	go func() {
-		done <- Start(ctx, Opt{
+		result = Start(ctx, Opt{
 			SSHAddr:          "127.0.0.1:0",
 			WSAddr:           "127.0.0.1:0",
 			HandshakeTimeout: 4 * time.Second,
@@ -247,33 +274,165 @@ func TestStartReportsAShutdownThatFailed(t *testing.T) {
 			Network:          "mem",
 			Routing:          routing.ModeConsul,
 			ConsulURL:        consul.URL,
-		}, slog.New(slog.DiscardHandler))
+		}, logger)
+		close(done)
 	}()
+	t.Cleanup(func() {
+		// Release held handlers before joining even when an assertion failed.
+		// Keep the endpoint alive until Start and the remote handler are joined.
+		releaseWatch()
+		cancel()
+		receiveWithin(t, done, "Start survived failure cleanup")
+		if kvRequests.Load() != 0 {
+			receiveWithin(t, watchDone, "remote watch survived failure cleanup")
+		}
+		awaitShutdownConnectionsClosed(t, connections)
+	})
 
-	// Fail fast if startup itself failed, rather than reading a startup error
-	// as the shutdown error under test.
-	select {
-	case err := <-done:
-		t.Fatalf("Start returned before it was asked to stop: %v", err)
-	case <-time.After(time.Second):
+	receiveWithin(t, catalogDone, "catalog registration never succeeded")
+	receiveWithin(t, watchEntered, "first watch request never entered")
+	var wsAddr string
+	startupGuard := time.NewTimer(5 * time.Second)
+	defer startupGuard.Stop()
+	for wsAddr == "" {
+		select {
+		case record := <-logs:
+			if record["msg"] == "starting server" {
+				wsAddr, _ = record["ws_addr"].(string)
+				require.NotEmpty(t, wsAddr, "startup log omitted WS address")
+			}
+		case <-done:
+			t.Fatalf("Start returned before its startup witness: %v", result)
+		case <-startupGuard.C:
+			t.Fatal("Start never published its startup address")
+		}
 	}
 
-	// Take Consul away, then ask for the stop the cleanup will fail during.
-	consul.Close()
-	consulStopped = true
+	healthTransport := &http.Transport{}
+	t.Cleanup(healthTransport.CloseIdleConnections)
+	healthClient := &http.Client{Transport: healthTransport, Timeout: 5 * time.Second}
+	response, err := healthClient.Get("http://" + wsAddr + "/health")
+	require.NoError(t, err, "WS listener never served its health response")
+	body, readErr := io.ReadAll(response.Body)
+	closeErr := response.Body.Close()
+	require.NoError(t, readErr)
+	require.NoError(t, closeErr)
+	require.Equal(t, http.StatusOK, response.StatusCode)
+	require.Equal(t, "OK", string(body))
+	healthTransport.CloseIdleConnections()
+
+	// The positive serving witness precedes both the injected failure and stop.
+	failCleanup.Store(true)
 	cancel()
+	receiveWithin(t, done, "Start did not return after cancellation")
+	require.Positive(t, cleanupRequests.Load(), "Shutdown never attempted the failing cleanup List")
+	require.Error(t, result, "Start reported success for a shutdown that could not clean up")
+	require.ErrorContains(t, result, "session cleanup", "Start dropped its Shutdown error")
+	require.ErrorContains(t, result, cleanupFailure, "Start did not retain the actual cleanup failure")
+	// Client completion and remote request cancellation are separate joins; the
+	// fixture requires both without assuming which is observed first.
+	receiveWithin(t, watchCancelled, "remote watch context was not cancelled")
+	receiveWithin(t, watchDone, "remote watch handler did not finish")
+	awaitShutdownConnectionsClosed(t, connections)
+}
 
-	select {
-	case err := <-done:
-		require.Error(t, err, "Start reported success for a shutdown that could not clean up")
-		// Matches both ways the cleanup can fail here, so which one a platform
-		// produces does not matter: Shutdown's own wrapper ("session cleanup:
-		// ...") when the deletes are refused outright, and
-		// errSessionCleanupTimeout ("session cleanup did not finish within its
-		// deadline") if they hang until the bound instead.
-		require.Contains(t, err.Error(), "session cleanup",
-			"Start dropped the error from a Shutdown that did not complete")
-	case <-time.After(30 * time.Second):
-		t.Fatal("Start did not return after its context was cancelled")
+func TestServerShutdownPreservesAvailableCleanupErrors(t *testing.T) {
+	for _, row := range []struct {
+		name                                           string
+		expired, published, nilResult, managerDeadline bool
+	}{
+		{name: "both_ready", expired: true, published: true},
+		{name: "expired_nil_result", expired: true, published: true, nilResult: true},
+		{name: "expired_no_result", expired: true},
+		{name: "live_result", published: true},
+		{name: "live_nil_result", published: true, nilResult: true},
+		{name: "manager_deadline_with_live_server", published: true, managerDeadline: true},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				ctx := context.Background()
+				if row.expired {
+					var cancel context.CancelFunc
+					ctx, cancel = context.WithDeadline(ctx, time.Now().Add(-time.Nanosecond))
+					t.Cleanup(cancel)
+				}
+				cleanupErr, closeErr := errors.New("cleanup failed"), errors.New("close failed")
+				cleaned := make(chan error, 1)
+				if row.published {
+					switch {
+					case row.nilResult:
+						cleaned <- nil
+					case row.managerDeadline:
+						cleaned <- context.DeadlineExceeded
+					default:
+						cleaned <- errors.Join(cleanupErr, closeErr)
+					}
+				}
+				before := time.Now()
+				err := waitForServerSessionCleanup(ctx, cleaned)
+				assert.Equal(t, before, time.Now(), "Server added a grace wait for cleanup")
+				if row.expired {
+					assert.ErrorIs(t, err, errSessionCleanupTimeout)
+				} else {
+					assert.NotErrorIs(t, err, errSessionCleanupTimeout)
+				}
+				if row.published && !row.nilResult {
+					assert.ErrorContains(t, err, "session cleanup:")
+					if row.managerDeadline {
+						assert.ErrorIs(t, err, context.DeadlineExceeded)
+					} else {
+						assert.ErrorIs(t, err, cleanupErr)
+						assert.ErrorIs(t, err, closeErr)
+					}
+				} else if !row.expired {
+					assert.NoError(t, err)
+				}
+			})
+		})
 	}
+}
+
+func TestServerShutdownJoinsServingAndCleanupErrors(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		const deadline = 50 * time.Millisecond
+		listErr, closeErr := errors.New("List failed during shutdown"), errors.New("Close failed during shutdown")
+		served, done := make(chan struct{}), make(chan struct{})
+		release := sync.OnceFunc(func() { close(served) })
+		store := &shutdownProbeStore{
+			listFn:   func() ([]*Session, error) { return nil, listErr },
+			closeErr: closeErr,
+		}
+		s := &Server{NodeAddr: "node", SessionManager: newSessionManagerWithStore(store, routing.NewEncodeDecoder(routing.ModeEmbedded)), Logger: slog.New(slog.DiscardHandler), served: served, serveStopDeadline: deadline}
+		var result error
+		go func() { result = s.Shutdown(); close(done) }()
+		t.Cleanup(func() {
+			release()
+			synctest.Wait() // Releasing serving lets even a broken deadline path finish before the join.
+			receiveWithin(t, done, "Server survived released serving fixture")
+			if store.closeCalls.Load() == 0 {
+				_ = store.Close()
+			}
+		})
+		synctest.Wait() // Server is waiting for the held serving completion channel.
+		// 50ms - 1ns < the instance deadline < the unchanged production default.
+		time.Sleep(deadline - time.Nanosecond)
+		synctest.Wait() // Every wake before the instance serving deadline has settled.
+		select {
+		case <-done:
+			t.Fatal("Server returned before its serving deadline")
+		default:
+		}
+		time.Sleep(time.Nanosecond)
+		synctest.Wait() // Serving timeout and immediate cleanup/Close errors have completed.
+		select {
+		case <-done:
+			assert.ErrorIs(t, result, errShutdownIncomplete)
+			assert.ErrorIs(t, result, listErr)
+			assert.ErrorIs(t, result, closeErr)
+			assert.ErrorContains(t, result, "session cleanup:")
+			assert.Equal(t, int64(1), store.closeCalls.Load())
+		default:
+			t.Fatal("Server did not return serving and cleanup failures at its deadline")
+		}
+	})
 }

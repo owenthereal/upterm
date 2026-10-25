@@ -359,8 +359,31 @@ type Server struct {
 	// defaultSessionCleanupDeadline, so uptermd, which sets neither, gets
 	// those. Shutdown reads each once, as it starts; tests set them to shorten
 	// a wait.
+	stopResult             *serverServeStopResult
 	serveStopDeadline      time.Duration
 	sessionCleanupDeadline time.Duration
+}
+
+// serverServeStopResult belongs to one Serve invocation. Shutdown retains the
+// same result even if another invocation replaces the Server's current fields.
+type serverServeStopResult struct {
+	mu      sync.Mutex
+	stopErr error
+}
+
+func (r *serverServeStopResult) add(err error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.stopErr = errors.Join(r.stopErr, err)
+}
+
+func (r *serverServeStopResult) err() error {
+	if r == nil {
+		return nil
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.stopErr
 }
 
 // errShutdownIncomplete reports that serving did not finish inside the
@@ -386,34 +409,35 @@ const defaultServeStopDeadline = routingShutdownDeadline + 3*serverShutDownDeadl
 // until the entries reach their TTL.
 var errSessionCleanupTimeout = errors.New("session cleanup did not finish within its deadline")
 
-// defaultSessionCleanupDeadline bounds the session cleanup that follows the
-// wait for serving to stop, unless the Server's sessionCleanupDeadline is
-// positive.
-//
-// Without it Shutdown had a floor but no ceiling: SessionManager.Shutdown lists
-// every session in the store, deletes this node's in serial 32-key Consul
-// transactions and closes the store, none of which carries a deadline of its
-// own. A supervisor's grace period cannot be set against an unbounded shutdown,
-// and uptermd's is set against this one -- fly.toml's kill_timeout has to clear
-// defaultServeStopDeadline + defaultSessionCleanupDeadline.
-//
-// The in-flight store calls are not cancelled when this expires, because List
-// and BatchDelete take no context; threading one through them is the better fix
-// and the one to reach for if this becomes load-bearing. What expiry does
-// revoke is the cleanup's permission to delete: SessionManager.Shutdown
-// re-checks the context before the deletes, so a cleanup that unblocks later
-// cannot act on a listing that has gone stale. Without that it would delete by
-// node address, which names the node, not the process. Consul's deletes are
-// conditional on this process's leases, so whichever server took that address
-// next keeps its sessions there; a store without that check would be emptied
-// under it.
-//
-// What is left is a goroutine outliving Shutdown until its call returns. In
-// production that is the exit path and it dies with the process moments later;
-// an embedder calling Shutdown against a store that keeps overrunning would
-// accumulate them. A cleanup that half-finished still beats one the supervisor
-// killed outright, with the session TTL catching whatever is left.
+// defaultSessionCleanupDeadline bounds Server's wait for cleanup after serving
+// stops, unless the instance has a positive sessionCleanupDeadline. Consul's
+// requests and retry waits carry this context and finish before store Close.
+// Legacy contextless calls can outlive it; their worker checks cancellation
+// before deleting a listing returned later. Close retains its separate bound,
+// so a timeout here does not promise that finalization has already finished.
 const defaultSessionCleanupDeadline = 3 * time.Second
+
+// waitForServerSessionCleanup retains a published manager result without a
+// grace wait, and reports this Server deadline independently of a store's own
+// cancellation or Close deadline.
+func waitForServerSessionCleanup(ctx context.Context, cleaned <-chan error) error {
+	var err error
+	select {
+	case err = <-cleaned:
+	case <-ctx.Done():
+		select {
+		case err = <-cleaned:
+		default:
+		}
+	}
+	if err != nil {
+		err = fmt.Errorf("session cleanup: %w", err)
+	}
+	if ctx.Err() != nil {
+		err = errors.Join(err, errSessionCleanupTimeout)
+	}
+	return err
+}
 
 // Shutdown cancels serving and waits for it to finish. It deliberately does not
 // close sshln or wsln: each is owned by the component serving it, which closes
@@ -432,7 +456,7 @@ func (s *Server) Shutdown() error {
 	}
 
 	s.mux.Lock()
-	cancel, served := s.cancel, s.served
+	cancel, served, stopResult := s.cancel, s.served, s.stopResult
 	s.mux.Unlock()
 
 	var err error
@@ -454,36 +478,27 @@ func (s *Server) Shutdown() error {
 		}
 	}
 
-	// Clean up sessions created by this node, under a deadline of its own so
-	// the whole of Shutdown is bounded and a supervisor's grace period can be
-	// set against it. See defaultSessionCleanupDeadline for why the work is
-	// abandoned rather than cancelled on expiry.
-	//
-	// The deadline is a context rather than a timer so that giving up also
-	// revokes the abandoned cleanup's permission to delete anything: the defer
-	// cancels it the moment this returns, and SessionManager.Shutdown checks it
-	// before the deletes. Otherwise a cleanup that unblocked after a
-	// replacement server had taken this node address would still delete, and
-	// only Consul's lease checks, which not every store has, would stand
-	// between it and that server's live sessions.
+	if stopErr := stopResult.err(); stopErr != nil {
+		err = errors.Join(err, errShutdownIncomplete, stopErr)
+	}
+
+	// Giving up cancels Consul cleanup work and revokes a legacy worker's
+	// permission to delete a listing returned after this deadline.
 	cleanupCtx, cancelCleanup := context.WithTimeout(context.Background(), cleanupDeadline)
 	defer cancelCleanup()
 
 	cleaned := make(chan error, 1)
 	go func() { cleaned <- s.SessionManager.Shutdown(cleanupCtx, s.NodeAddr) }()
 
-	select {
-	case sessionErr := <-cleaned:
-		if sessionErr != nil {
-			s.Logger.Error("failed to cleanup sessions during shutdown", "error", sessionErr)
-			err = errors.Join(err, fmt.Errorf("session cleanup: %w", sessionErr))
-		} else {
-			s.Logger.Debug("cleaned up sessions during shutdown")
-		}
-	case <-cleanupCtx.Done():
-		s.Logger.Error("timed out cleaning up sessions during shutdown", "deadline", cleanupDeadline)
-		err = errors.Join(err, errSessionCleanupTimeout)
+	sessionErr := waitForServerSessionCleanup(cleanupCtx, cleaned)
+	if errors.Is(sessionErr, errSessionCleanupTimeout) {
+		s.Logger.Error("timed out cleaning up sessions during shutdown", "deadline", cleanupDeadline, "error", sessionErr)
+	} else if sessionErr != nil {
+		s.Logger.Error("failed to cleanup sessions during shutdown", "error", sessionErr)
+	} else {
+		s.Logger.Debug("cleaned up sessions during shutdown")
 	}
+	err = errors.Join(err, sessionErr)
 
 	if err == nil {
 		s.Logger.Debug("server shutdown completed")
@@ -499,6 +514,8 @@ func (s *Server) ServeWithContext(ctx context.Context, sshln net.Listener, wsln 
 	// fresh one rather than reusing whatever is there.
 	s.served = make(chan struct{})
 	served := s.served
+	stopResult := &serverServeStopResult{}
+	s.stopResult = stopResult
 	s.mux.Unlock()
 	defer close(served)
 
@@ -611,6 +628,7 @@ func (s *Server) ServeWithContext(ctx context.Context, sshln net.Listener, wsln 
 			return sshd.Serve(ln)
 		}, func(err error) {
 			if err := sshd.Shutdown(); err != nil {
+				stopResult.add(err)
 				sshd.Logger.Error("error during sshd shutdown", "error", err)
 			}
 		})
@@ -622,11 +640,11 @@ func (s *Server) ServeWithContext(ctx context.Context, sshln net.Listener, wsln 
 	// hands back whichever happened to return first, so without this the same
 	// clean shutdown surfaced a different error run to run and every caller,
 	// the ftests harness included, logged it.
-	if err := g.Run(); !isRequestedStop(err) {
-		return err
+	err := g.Run()
+	if isRequestedStop(err) {
+		err = nil
 	}
-
-	return nil
+	return errors.Join(err, stopResult.err())
 }
 
 // closeListeners releases listeners that no component has taken over, for the

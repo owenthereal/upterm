@@ -988,6 +988,10 @@ type heldEntry struct {
 // lease losing its hold when it hadn't. Each ID's nth lease is therefore
 // tried in the nth round.
 func (c *consulSessionStore) BatchDelete(sessionIDs []string) error {
+	return c.batchDelete(context.Background(), sessionIDs)
+}
+
+func (c *consulSessionStore) batchDelete(ctx context.Context, sessionIDs []string) error {
 	c.heldMu.Lock()
 	var rounds [][]heldEntry
 	seen := make(map[string]bool, len(sessionIDs))
@@ -1015,12 +1019,20 @@ func (c *consulSessionStore) BatchDelete(sessionIDs []string) error {
 		for i := 0; i < len(entries); i += maxBatchSize {
 			end := min(i+maxBatchSize, len(entries))
 
-			done, err := c.deleteBatch(entries[i:end])
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			done, err := c.deleteBatch(ctx, entries[i:end])
 			for _, e := range done {
 				c.forget(e.id, e.lease)
 			}
 			deleted += len(done)
 			if err != nil {
+				return err
+			}
+			// A successful transaction committed these deletes even when its
+			// reply coincided with cancellation. Forget them before stopping.
+			if err := ctx.Err(); err != nil {
 				return err
 			}
 		}
@@ -1036,8 +1048,11 @@ func (c *consulSessionStore) BatchDelete(sessionIDs []string) error {
 // session, is dropped and the rest are tried again. Any other failure, such as
 // a permission denial, is returned, as is a rollback that names nothing that
 // can be dropped: retrying it would loop.
-func (c *consulSessionStore) deleteBatch(entries []heldEntry) ([]heldEntry, error) {
+func (c *consulSessionStore) deleteBatch(ctx context.Context, entries []heldEntry) ([]heldEntry, error) {
 	for len(entries) > 0 {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		ops := make(api.KVTxnOps, 0, 2*len(entries))
 		for _, e := range entries {
 			kvStoreKey := c.SessionKey(e.id)
@@ -1054,12 +1069,13 @@ func (c *consulSessionStore) deleteBatch(entries []heldEntry) ([]heldEntry, erro
 		err := retry.Do(
 			func() error {
 				var err error
-				ok, resp, _, err = c.client.KV().Txn(ops, nil)
+				ok, resp, _, err = c.client.KV().Txn(ops, (&api.QueryOptions{}).WithContext(ctx))
 				if err != nil {
 					return fmt.Errorf("failed to execute batch delete transaction: %w", err)
 				}
 				return nil
 			},
+			retry.Context(ctx),
 			retry.Attempts(DefaultMaxRetries),
 			retry.Delay(DefaultRetryDelay),
 			retry.OnRetry(func(n uint, err error) {
@@ -1082,7 +1098,16 @@ func (c *consulSessionStore) deleteBatch(entries []heldEntry) ([]heldEntry, erro
 		for _, e := range resp.Errors {
 			// Each entry is a session check followed by its delete.
 			i := e.OpIndex / 2
-			if e.OpIndex < 0 || e.OpIndex%2 != 0 || i >= len(entries) || !c.lostHold(entries[i]) {
+			if e.OpIndex < 0 || e.OpIndex%2 != 0 || i >= len(entries) {
+				return nil, fmt.Errorf("batch delete transaction failed: %s", describeTxnErrors(resp.Errors))
+			}
+			lost := c.lostHold(ctx, entries[i])
+			// A canceled lookup is uncertainty, not a lost hold or a generic
+			// transaction failure. Do not drop an entry or retry the rollback.
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+			if !lost {
 				return nil, fmt.Errorf("batch delete transaction failed: %s", describeTxnErrors(resp.Errors))
 			}
 			failed[i] = true
@@ -1110,18 +1135,22 @@ func (c *consulSessionStore) deleteBatch(entries []heldEntry) ([]heldEntry, erro
 // session check fails that makes the entry not this instance's to delete. It
 // reads Consul rather than the failure's text, and a read that fails reports
 // false.
-func (c *consulSessionStore) lostHold(e heldEntry) bool {
-	pair, _, err := c.client.KV().Get(c.SessionKey(e.id), nil)
+func (c *consulSessionStore) lostHold(ctx context.Context, e heldEntry) bool {
+	pair, _, err := c.client.KV().Get(c.SessionKey(e.id), (&api.QueryOptions{}).WithContext(ctx))
 	return err == nil && (pair == nil || pair.Session != e.lease)
 }
 
 // List all sessions from Consul
 func (c *consulSessionStore) List() ([]*Session, error) {
+	return c.list(context.Background())
+}
+
+func (c *consulSessionStore) list(ctx context.Context) ([]*Session, error) {
 	var sessions []*Session
 
 	err := retry.Do(
 		func() error {
-			pairs, _, err := c.client.KV().List(c.SessionsKey(), nil)
+			pairs, _, err := c.client.KV().List(c.SessionsKey(), (&api.QueryOptions{}).WithContext(ctx))
 			if err != nil {
 				return fmt.Errorf("failed to list sessions: %w", err)
 			}
@@ -1138,6 +1167,7 @@ func (c *consulSessionStore) List() ([]*Session, error) {
 			}
 			return nil
 		},
+		retry.Context(ctx),
 		retry.Attempts(DefaultMaxRetries),
 		retry.Delay(DefaultRetryDelay),
 		retry.OnRetry(func(n uint, err error) {
@@ -1814,50 +1844,84 @@ func (sm *SessionManager) GetStore() SessionStore {
 	return sm.store
 }
 
-// Shutdown cleans up sessions created by this node during server shutdown
-// Shutdown deletes the sessions this node created and closes the store.
-//
-// ctx does not cancel the store calls -- List and BatchDelete take no context --
-// but it does decide whether the deletes are still allowed to happen. A caller
-// that has stopped waiting cancels it, and the listing this was about to delete
-// from is then already stale: List reports whatever the store holds when it
-// returns, and the node address it filters on identifies the node, not the
-// process. Left unchecked, a cleanup abandoned by one server and unblocked
-// after another had taken the same address would go on to delete the
-// replacement's live sessions. Consul's BatchDelete deletes only entries this
-// instance still holds, which spares them there; a store without that check
-// would not.
-func (sm *SessionManager) Shutdown(ctx context.Context, nodeAddr string) error {
-	// Get all sessions
-	sessions, err := sm.store.List()
+// sessionCleanupStore lets shutdown cancel Consul work without changing the
+// exported, contextless store API used by ordinary calls and legacy stores.
+type sessionCleanupStore interface {
+	list(context.Context) ([]*Session, error)
+	batchDelete(context.Context, []string) error
+}
+
+// Shutdown deletes this node's sessions and finalizes the store once per call.
+// Consul cleanup finishes before Close. A legacy call cannot be interrupted;
+// cancellation instead lets this caller reach Close while that worker unwinds.
+func (sm *SessionManager) Shutdown(ctx context.Context, nodeAddr string) (err error) {
+	defer func() {
+		if closeErr := sm.store.Close(); closeErr != nil {
+			err = errors.Join(err, fmt.Errorf("failed to close session store: %w", closeErr))
+		}
+	}()
+
+	if _, ok := sm.store.(sessionCleanupStore); ok {
+		cleanupErr := sm.cleanupSessions(ctx, nodeAddr)
+		return errors.Join(cleanupErr, ctx.Err())
+	}
+
+	cleaned := make(chan error, 1)
+	go func() { cleaned <- sm.cleanupSessions(ctx, nodeAddr) }()
+	return waitForSessionCleanup(ctx, cleaned)
+}
+
+// waitForSessionCleanup retains a result published when it checks the channel,
+// including when cancellation is also ready. It never waits for a later result.
+func waitForSessionCleanup(ctx context.Context, cleaned <-chan error) error {
+	var err error
+	select {
+	case err = <-cleaned:
+	case <-ctx.Done():
+		select {
+		case err = <-cleaned:
+		default:
+		}
+	}
+	return errors.Join(err, ctx.Err())
+}
+
+func (sm *SessionManager) cleanupSessions(ctx context.Context, nodeAddr string) error {
+	var sessions []*Session
+	var err error
+	cleanupStore, cancellable := sm.store.(sessionCleanupStore)
+	if cancellable {
+		sessions, err = cleanupStore.list(ctx)
+	} else {
+		sessions, err = sm.store.List()
+	}
 	if err != nil {
 		return fmt.Errorf("failed to list sessions for cleanup: %w", err)
 	}
 
-	if len(sessions) > 0 {
-		// Collect session IDs for this node
-		var sessionIDsToDelete []string
-		for _, session := range sessions {
-			if session.NodeAddr == nodeAddr {
-				sessionIDsToDelete = append(sessionIDsToDelete, session.ID)
-			}
-		}
-
-		// Batch delete sessions for this node
-		if len(sessionIDsToDelete) > 0 {
-			if err := ctx.Err(); err != nil {
-				return fmt.Errorf("abandoned before deleting %d sessions: %w", len(sessionIDsToDelete), err)
-			}
-			if err := sm.store.BatchDelete(sessionIDsToDelete); err != nil {
-				return fmt.Errorf("failed to batch delete sessions during shutdown: %w", err)
-			}
+	var sessionIDsToDelete []string
+	for _, session := range sessions {
+		if session.NodeAddr == nodeAddr {
+			sessionIDsToDelete = append(sessionIDsToDelete, session.ID)
 		}
 	}
-
-	// Close the store to clean up resources (e.g., stop watch goroutines)
-	if err := sm.store.Close(); err != nil {
-		return fmt.Errorf("failed to close session store: %w", err)
+	if len(sessionIDsToDelete) == 0 {
+		return nil
 	}
 
+	// A listing returned after cancellation is stale. This fence cannot make
+	// entering an arbitrary contextless BatchDelete atomic with cancellation,
+	// or interrupt a legacy BatchDelete already in progress.
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("abandoned before deleting %d sessions: %w", len(sessionIDsToDelete), err)
+	}
+	if cancellable {
+		err = cleanupStore.batchDelete(ctx, sessionIDsToDelete)
+	} else {
+		err = sm.store.BatchDelete(sessionIDsToDelete)
+	}
+	if err != nil {
+		return fmt.Errorf("failed to batch delete sessions during shutdown: %w", err)
+	}
 	return nil
 }

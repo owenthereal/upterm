@@ -78,6 +78,7 @@ type sshd struct {
 	// gone. The other calls to end don't run it.
 	onEnded func(reg *Registration)
 
+	work           *sshSessionWork
 	server         *ssh.Server
 	sessions       *localSessions
 	forwardHandler *streamlocalForwardHandler
@@ -87,21 +88,12 @@ type sshd struct {
 	// starting up misses its shutdown entirely and would then serve forever
 	// with nobody left to stop it.
 	stopped bool
-	// ln is the listener Serve was handed, recorded under mux so Shutdown can
-	// close it whatever the library is doing. ssh.Server only starts tracking a
-	// listener inside its own Serve, and it clears its done channel when it
-	// takes the first one -- so a Shutdown landing between this struct being
-	// populated and that tracking finds nothing to close, closes a done channel
-	// that is then discarded, and leaves Accept blocked forever. Owning the
-	// listener here closes that window: the flag decides what Serve reports,
-	// and this decides that it stops at all.
+	// ln is owned before Accept starts, so Shutdown also stops a Serve
+	// which has not entered its accept loop yet.
 	ln *closeOnceListener
 }
 
-// closeOnceListener makes Close idempotent, reporting the first result to every
-// later caller. sshd closes the listener itself and ssh.Server closes it again
-// from its own bookkeeping; without this the second close reports ErrClosed,
-// and ssh.Server hands that back as a failed shutdown.
+// closeOnceListener makes listener cleanup idempotent and retains its result.
 type closeOnceListener struct {
 	net.Listener
 	once sync.Once
@@ -124,6 +116,7 @@ func (l *closeOnceListener) Close() error {
 // registered on another node are never touched. It is not persisted; a crash
 // loses the count along with the sessions.
 type localSessions struct {
+	work           *sshSessionWork
 	gauge          metrics.Gauge
 	sessionManager *SessionManager
 	logger         *slog.Logger
@@ -153,10 +146,11 @@ type localRegistration struct {
 	lostEpoch, lostIndex uint64
 }
 
-func newLocalSessions(p provider.Provider, sessionManager *SessionManager, logger *slog.Logger) *localSessions {
+func newLocalSessions(work *sshSessionWork, p provider.Provider, sessionManager *SessionManager, logger *slog.Logger) *localSessions {
 	gauge := p.NewGauge("sessions_active_count")
 	gauge.Set(0) // export the series from startup rather than from the first session
 	return &localSessions{
+		work:           work,
 		gauge:          gauge,
 		sessionManager: sessionManager,
 		logger:         logger,
@@ -178,7 +172,7 @@ func newLocalSessions(p provider.Provider, sessionManager *SessionManager, logge
 // reg's lease keeper starts only once reg is accepted, so a refused
 // registration is never renewed or rebuilt, and the one it replaced stops
 // being kept at the moment it's replaced.
-func (l *localSessions) add(reg *Registration, conn io.Closer) (*localRegistration, error) {
+func (l *localSessions) add(work *sshWorkRef, reg *Registration, conn io.Closer) (*localRegistration, error) {
 	ttl := l.sessionManager.LeaseTTL()
 
 	l.mu.Lock()
@@ -189,11 +183,13 @@ func (l *localSessions) add(reg *Registration, conn io.Closer) (*localRegistrati
 	}
 	lr := &localRegistration{reg: reg, conn: conn, lost: make(chan struct{}, 1)}
 	var (
-		keeper    *leaseKeeper
-		keeperCtx context.Context
+		keeper     *leaseKeeper
+		keeperCtx  context.Context
+		keeperWork *sshWorkRef
 	)
 	if ttl > 0 {
-		keeperCtx, lr.stopLease = context.WithCancel(context.Background())
+		keeperWork = work.child()
+		keeperCtx, lr.stopLease = context.WithCancel(l.work.keeperContext)
 		keeper = &leaseKeeper{
 			sm:        l.sessionManager,
 			ttl:       ttl,
@@ -213,7 +209,7 @@ func (l *localSessions) add(reg *Registration, conn io.Closer) (*localRegistrati
 	l.mu.Unlock()
 
 	if keeper != nil {
-		go keeper.run(keeperCtx, reg)
+		go func() { defer keeperWork.done(); keeper.run(keeperWork, keeperCtx, reg) }()
 	}
 	if !ok {
 		return nil, nil
@@ -273,7 +269,7 @@ func (l *localSessions) replace(next *Registration) bool {
 //
 // It runs on the watch's goroutine, so it makes no store calls, and the
 // releases and closes it causes happen after the lock is let go.
-func (l *localSessions) reconcile(epoch, index uint64, entries map[string]StoreEntry) {
+func (l *localSessions) reconcile(work *sshWorkRef, epoch, index uint64, entries map[string]StoreEntry) {
 	type superseded struct {
 		conn io.Closer
 		reg  *Registration
@@ -302,8 +298,19 @@ func (l *localSessions) reconcile(epoch, index uint64, entries map[string]StoreE
 		l.logger.Warn("closing a superseded registration's connection",
 			"session-id", s.reg.ID(), "generation", s.reg.Generation(),
 			"by-generation", s.by.Generation, "by-node", s.by.NodeAddr)
-		l.retire(s.conn, s.reg)
+		l.retire(work, s.conn, s.reg)
 	}
+}
+
+// observe is the watch callback. Cache delivery may continue until store Close,
+// but after sealing it cannot start another daemon retirement or rebuild.
+func (l *localSessions) observe(epoch, index uint64, entries map[string]StoreEntry) {
+	work, ok := l.work.enter()
+	if !ok {
+		return
+	}
+	defer work.done()
+	l.reconcile(work, epoch, index, entries)
 }
 
 // confirm checks reg, which add has just accepted, against the store's view
@@ -316,7 +323,7 @@ func (l *localSessions) reconcile(epoch, index uint64, entries map[string]StoreE
 // store's view is updated before reconcile runs, so checking it after add
 // covers that order. A lookup that fails leaves reg adopted: the next
 // delivery, or its keeper's next renewal, still finds it out.
-func (l *localSessions) confirm(reg *Registration) error {
+func (l *localSessions) confirm(work *sshWorkRef, reg *Registration) error {
 	cur, err := l.sessionManager.GetEntry(reg.ID())
 	if err != nil || sameIdentity(cur.Session, reg.Session) {
 		return nil
@@ -344,7 +351,7 @@ func (l *localSessions) confirm(reg *Registration) error {
 	l.mu.Unlock()
 	// Otherwise reconcile, or a takeover on this node, has already ended it.
 	if handle != nil {
-		l.retire(lr.conn, handle)
+		l.retire(work, lr.conn, handle)
 	}
 	return supersededError(reg.Session, cur.Session)
 }
@@ -383,8 +390,10 @@ func (l *localSessions) removeLocked(id string, lr *localRegistration) {
 // ends the handle it was adopted with and finds no slot, so a lease the keeper
 // rebuilt would otherwise last until it expired. The release is conditional,
 // and leaves the successor's entry alone.
-func (l *localSessions) retire(conn io.Closer, reg *Registration) {
+func (l *localSessions) retire(work *sshWorkRef, conn io.Closer, reg *Registration) {
+	child := work.child()
 	go func() {
+		defer child.done()
 		ctx, cancel := context.WithTimeout(context.Background(), DefaultConsulTimeout)
 		defer cancel()
 		if err := l.sessionManager.Release(ctx, reg); err != nil {
@@ -471,29 +480,13 @@ func ownedRegistration(ctx ssh.Context, sessionID string) *Registration {
 
 func (s *sshd) Shutdown() error {
 	s.mux.Lock()
-	defer s.mux.Unlock()
-
 	s.stopped = true
-
-	// Close first, before handing the shutdown to ssh.Server. It only stops
-	// what it has already tracked, and it begins waiting on its listener wait
-	// group after tracking -- so a listener tracked between its close pass and
-	// that wait is never closed by it, and the wait then runs to its deadline
-	// while Accept sits on an open listener. Closing here ends Accept whatever
-	// the library has seen yet, and the close is idempotent, so the library's
-	// own close pass reports success rather than ErrClosed.
-	if s.ln != nil {
-		_ = s.ln.Close()
+	if s.work == nil {
+		s.work = newSSHSessionWork()
 	}
-
-	if s.server != nil {
-		ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(serverShutDownDeadline))
-		defer cancel()
-
-		return s.server.Shutdown(ctx)
-	}
-
-	return nil
+	work, ln := s.work, s.ln
+	s.mux.Unlock()
+	return work.stop(ln)
 }
 
 func (s *sshd) Serve(ln net.Listener) error {
@@ -502,23 +495,21 @@ func (s *sshd) Serve(ln net.Listener) error {
 		signers = append(signers, signer)
 	}
 
-	sessions := newLocalSessions(s.MetricsProvider, s.SessionManager, s.Logger)
-	s.SessionManager.Observe(sessions.reconcile)
-	sh := newStreamlocalForwardHandler(
-		s.SessionManager,
-		s.SessionDialListener,
-		sessions,
-		s.Logger.With("com", "stream-local-handler"),
-	)
 	once := &closeOnceListener{Listener: ln}
 	s.mux.Lock()
+	if s.work == nil {
+		s.work = newSSHSessionWork()
+	}
 	if s.stopped {
 		s.mux.Unlock()
-		// Shutdown already ran and found no server to stop, so nothing else
-		// will close ln or end this call.
 		_ = once.Close()
 		return ErrListnerClosed
 	}
+	work := s.work
+	acceptWork, _ := work.enter()
+	sessions := newLocalSessions(work, s.MetricsProvider, s.SessionManager, s.Logger)
+	sh := newStreamlocalForwardHandler(work, s.SessionManager, s.SessionDialListener, sessions,
+		s.Logger.With("com", "stream-local-handler"))
 	s.sessions = sessions
 	s.forwardHandler = sh
 	s.ln = once
@@ -560,20 +551,12 @@ func (s *sshd) Serve(ln net.Listener) error {
 	srv := s.server
 	s.mux.Unlock()
 
-	err := srv.Serve(once)
-
-	// ssh.Server reports its own sentinel when it sees the shutdown itself. In
-	// the window where Shutdown closed the listener before the library tracked
-	// it, the library misses that and hands back the raw closed-listener error
-	// instead -- the same stop, named differently by an accident of timing.
-	s.mux.Lock()
-	stopped := s.stopped
-	s.mux.Unlock()
-	if stopped && errors.Is(err, net.ErrClosed) {
-		return ssh.ErrServerClosed
-	}
-
-	return err
+	// Observe can deliver independently of accepted SSH peers. Its callback
+	// must participate in the same admission cutoff as request handlers.
+	s.SessionManager.Observe(sessions.observe)
+	err := work.serveSSH(acceptWork, srv, once)
+	stopErr := s.Shutdown()
+	return errors.Join(err, stopErr)
 }
 
 // handlePublicKey admits a peer on the internal node door. Everything that
@@ -645,8 +628,8 @@ func (s *sshd) isOwnAuthority(key gossh.PublicKey) bool {
 // store already shows another registration with such a generation (conn is
 // then closed too), and false with no reply when conn closed while
 // registering. A capable registration that is kept also has conn pinged.
-func (s *sshd) adopt(ctx ssh.Context, reg *Registration, conn *gossh.ServerConn) (ok bool, refusal []byte) {
-	prev, err := s.sessions.add(reg, conn)
+func (s *sshd) adopt(work *sshWorkRef, ctx ssh.Context, reg *Registration, conn *gossh.ServerConn) (ok bool, refusal []byte) {
+	prev, err := s.sessions.add(work, reg, conn)
 	if err != nil {
 		// The store took reg, but the registration adopted here first outranks
 		// it. The release is conditional, so it can't touch that one's entry.
@@ -665,7 +648,7 @@ func (s *sshd) adopt(ctx ssh.Context, reg *Registration, conn *gossh.ServerConn)
 		// store: evict ends prev.reg in the background, so a slow release
 		// holds up neither the old connection's close nor the reply that
 		// tells the host its new registration is in.
-		s.forwardHandler.evict(prev.reg)
+		s.forwardHandler.evict(work, prev.reg)
 		_ = prev.conn.Close()
 		// A lease the old registration's keeper rebuilt is known only to its
 		// slot. The old connection's cleanup releases the handle it was adopted
@@ -673,7 +656,8 @@ func (s *sshd) adopt(ctx ssh.Context, reg *Registration, conn *gossh.ServerConn)
 		// release it here. It holds nothing now the new registration holds the
 		// entry, and a store with no leases has nothing to release.
 		if prev.reg.lease != "" && prev.reg.lease != reg.lease {
-			go s.releaseReplaced(prev.reg)
+			child := work.child()
+			go func() { defer child.done(); s.releaseReplaced(prev.reg) }()
 		}
 	}
 	if s.beforeConfirm != nil {
@@ -681,7 +665,7 @@ func (s *sshd) adopt(ctx ssh.Context, reg *Registration, conn *gossh.ServerConn)
 	}
 	// Another node's newer registration may have reached this node's view of
 	// the store before reg had a slot here to reconcile.
-	if err := s.sessions.confirm(reg); err != nil {
+	if err := s.sessions.confirm(work, reg); err != nil {
 		s.Logger.Warn("refused a registration the store already shows superseded", "error", err, "session-id", reg.ID())
 		return false, []byte(registration.Superseded)
 	}
@@ -690,7 +674,9 @@ func (s *sshd) adopt(ctx ssh.Context, reg *Registration, conn *gossh.ServerConn)
 	// The tunnel handler ends the registration when the host cancels its
 	// forward. A host that disconnects before forwarding never reaches that
 	// path, so also end it when the owning connection does.
+	child := work.child()
 	go func() {
+		defer child.done()
 		<-ctx.Done()
 		s.sessions.end(reg)
 		if s.onEnded != nil {
@@ -770,6 +756,15 @@ func (s *sshd) releaseReplaced(reg *Registration) {
 }
 
 func (s *sshd) createSessionHandler(ctx ssh.Context, srv *ssh.Server, req *gossh.Request) (bool, []byte) {
+	work, ok := s.work.enter()
+	if !ok {
+		return false, nil
+	}
+	defer work.done()
+	return s.handleCreateSession(work, ctx, srv, req)
+}
+
+func (s *sshd) handleCreateSession(work *sshWorkRef, ctx ssh.Context, srv *ssh.Server, req *gossh.Request) (bool, []byte) {
 	conn := ctx.Value(ssh.ContextKeyConn).(*gossh.ServerConn)
 
 	var sessReq CreateSessionRequest
@@ -809,7 +804,7 @@ func (s *sshd) createSessionHandler(ctx ssh.Context, srv *ssh.Server, req *gossh
 	if s.onRegistered != nil {
 		s.onRegistered(ctx, reg)
 	}
-	if ok, refusal := s.adopt(ctx, reg, conn); !ok {
+	if ok, refusal := s.adopt(work, ctx, reg, conn); !ok {
 		return false, refusal
 	}
 
