@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"net/url"
 	"sync"
 	"sync/atomic"
@@ -479,21 +480,54 @@ func newConsulLeaseFixture(t *testing.T) (*localSessions, *consulSessionStore, *
 	require.NoError(t, err)
 	store := sm.GetStore().(*consulSessionStore)
 	t.Cleanup(func() { _ = store.Close() })
-	client, err := testhelpers.ConsulClient()
+	// The direct client has a transport of its own, which the store's Close
+	// doesn't reach, so its connections close in a cleanup of their own: after
+	// the sessions' work has drained, and before the store closes. This is the
+	// client ownedConsulTestClient builds, without asking Consul again if it's
+	// up.
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	t.Cleanup(transport.CloseIdleConnections)
+	cfg := api.DefaultConfig()
+	cfg.Address, cfg.Scheme = consulURL.Host, consulURL.Scheme
+	cfg.HttpClient = &http.Client{Timeout: DefaultConsulTimeout, Transport: transport}
+	client, err := api.NewClient(cfg)
 	require.NoError(t, err)
 	mp, _ := newTestMetrics(t)
 	return newLocalSessions(newTestSSHWork(t).owner, mp, sm, logger), store, client
 }
 
 // consulHolder returns the lock session holding id's entry in Consul, and
-// whether the entry exists. It doesn't fail the test itself, because
-// require.Eventually runs its condition on another goroutine.
-func consulHolder(client *api.Client, store *consulSessionStore, id string) (holder string, exists bool, err error) {
-	pair, _, err := client.KV().Get(store.SessionKey(id), nil)
+// whether the entry exists, reading it under ctx. It returns an error rather
+// than failing the test, so that a poll can try again.
+func consulHolder(ctx context.Context, client *api.Client, store *consulSessionStore, id string) (holder string, exists bool, err error) {
+	pair, _, err := client.KV().Get(store.SessionKey(id), (&api.QueryOptions{}).WithContext(ctx))
 	if err != nil || pair == nil {
 		return "", false, err
 	}
 	return pair.Session, true, nil
+}
+
+// requireConsulLeaseCondition fails the test unless condition holds within
+// waitFor, checking at once and then every 50 ms. Unlike require.Eventually,
+// it calls condition on the test's goroutine, under a context that ends at
+// the deadline, and fails only once that call has returned: a request still
+// in flight as the test failed would outlive the cleanup that closes the
+// direct client's idle connections.
+func requireConsulLeaseCondition(t *testing.T, waitFor time.Duration, condition func(context.Context) bool, message string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(t.Context(), waitFor)
+	defer cancel()
+	tick := time.NewTicker(50 * time.Millisecond)
+	defer tick.Stop()
+	for !condition(ctx) {
+		select {
+		case <-tick.C:
+		case <-ctx.Done():
+		}
+		if ctx.Err() != nil {
+			require.Fail(t, "Condition never satisfied", message)
+		}
+	}
 }
 
 // Consul expires an unrenewed entry within twice its TTL. A kept one outlives
@@ -508,16 +542,16 @@ func TestLeaseKeeperKeepsAConsulEntryPastItsTTL(t *testing.T) {
 	require.NoError(t, err)
 
 	time.Sleep(25 * time.Second)
-	_, exists, err := consulHolder(client, store, id)
+	_, exists, err := consulHolder(t.Context(), client, store, id)
 	require.NoError(t, err)
 	require.True(t, exists, "the entry expired while its registration lived")
 	require.False(t, conn.isClosed())
 
 	sessions.end(reg)
-	require.Eventually(t, func() bool {
-		_, exists, err := consulHolder(client, store, id)
+	requireConsulLeaseCondition(t, 2*time.Second, func(ctx context.Context) bool {
+		_, exists, err := consulHolder(ctx, client, store, id)
 		return err == nil && !exists
-	}, 2*time.Second, 50*time.Millisecond, "the entry outlived its registration")
+	}, "the entry outlived its registration")
 }
 
 // A capable registration taken over from another node is closed by its own
@@ -578,16 +612,16 @@ func TestLeaseKeeperRebuiltEntryGoesWithItsRegistration(t *testing.T) {
 		}
 		return ""
 	}
-	require.Eventually(t, func() bool {
-		holder, exists, err := consulHolder(client, store, id)
+	requireConsulLeaseCondition(t, 10*time.Second, func(ctx context.Context) bool {
+		holder, exists, err := consulHolder(ctx, client, store, id)
 		lease := slotLease()
 		return err == nil && exists && lease != "" && lease != reg.lease && holder == lease
-	}, 10*time.Second, 50*time.Millisecond, "the lost lease was never rebuilt")
+	}, "the lost lease was never rebuilt")
 	require.False(t, conn.isClosed())
 
 	sessions.end(reg)
-	require.Eventually(t, func() bool {
-		_, exists, err := consulHolder(client, store, id)
+	requireConsulLeaseCondition(t, 2*time.Second, func(ctx context.Context) bool {
+		_, exists, err := consulHolder(ctx, client, store, id)
 		return err == nil && !exists
-	}, 2*time.Second, 50*time.Millisecond, "the rebuilt entry outlived its registration")
+	}, "the rebuilt entry outlived its registration")
 }

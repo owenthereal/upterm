@@ -12,8 +12,10 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/gorilla/websocket"
@@ -58,9 +60,59 @@ func (l *testSessionDialListener) Listen(id string) (net.Listener, error) {
 
 func Test_WebSocketProxy_Host(t *testing.T) {
 	testLogger := logging.Must(logging.Console(), logging.Debug()).Logger
+	// httptest.Server.Close neither closes nor waits for an upgraded
+	// connection, so the test owns every end it opens: the handler and both
+	// copies would otherwise stay blocked on one past the test. The cleanup
+	// closes them all, then the server, after which no handler can start, and
+	// only then waits for both copies and every handler that did start.
+	var (
+		owned                       []func()
+		ts                          *httptest.Server
+		clientCopied, backendCopied chan struct{}
+		handlers                    sync.WaitGroup
+	)
+	own := func(name string, c io.Closer) {
+		owned = append(owned, func() {
+			if err := c.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+				t.Errorf("close %s: %v", name, err)
+			}
+		})
+	}
+	t.Cleanup(func() {
+		for _, closeOwned := range owned {
+			closeOwned()
+		}
+		if ts != nil {
+			ts.Close()
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		join := func(name string, done <-chan struct{}) {
+			if done == nil {
+				return // never started
+			}
+			select {
+			case <-done:
+			case <-ctx.Done():
+				t.Errorf("%s did not return", name)
+			}
+		}
+		join("client copy", clientCopied)
+		join("backend copy", backendCopied)
+		handled := make(chan struct{})
+		go func() {
+			handlers.Wait()
+			close(handled)
+		}()
+		join("handler", handled)
+	})
+
+	sshdLn, sessionLn := bufconn.Listen(1024), bufconn.Listen(1024)
+	own("sshd listener", sshdLn)
+	own("session listener", sessionLn)
 	cd := sidewayConnDialer{
-		SSHDDialListener:    &testSshdDialListener{bufconn.Listen(1024)},
-		SessionDialListener: &testSessionDialListener{bufconn.Listen(1024)},
+		SSHDDialListener:    &testSshdDialListener{sshdLn},
+		SessionDialListener: &testSessionDialListener{sessionLn},
 		Logger:              testLogger,
 	}
 	logger := testLogger
@@ -69,8 +121,11 @@ func Test_WebSocketProxy_Host(t *testing.T) {
 		SessionManager: newEmbeddedSessionManager(logger),
 		Logger:         logger,
 	}
-	ts := httptest.NewServer(wsh)
-	defer ts.Close()
+	ts = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		handlers.Add(1)
+		defer handlers.Done()
+		wsh.ServeHTTP(w, r)
+	}))
 
 	u, err := url.Parse(ts.URL)
 	if err != nil {
@@ -83,10 +138,15 @@ func Test_WebSocketProxy_Host(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	own("client WebSocket", wsc)
 
 	rr, rw := io.Pipe()
+	own("client pipe reader", rr)
+	own("client pipe writer", rw)
 	rs := bufio.NewScanner(rr)
+	clientCopied = make(chan struct{})
 	go func(wsc net.Conn, w io.Writer) {
+		defer close(clientCopied)
 		_, _ = io.Copy(w, wsc)
 	}(wsc, rw)
 
@@ -98,10 +158,15 @@ func Test_WebSocketProxy_Host(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	own("accepted backend connection", conn)
 
 	wr, ww := io.Pipe()
+	own("backend pipe reader", wr)
+	own("backend pipe writer", ww)
 	ws := bufio.NewScanner(wr)
+	backendCopied = make(chan struct{})
 	go func() {
+		defer close(backendCopied)
 		_, _ = io.Copy(ww, conn)
 	}()
 

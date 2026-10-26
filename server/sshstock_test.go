@@ -301,8 +301,12 @@ func TestStockSSHUpstreamFailureReportsReason(t *testing.T) {
 
 	t.Run("client channel open", func(t *testing.T) {
 		_, addr, _, signer := stockTestProxy(t, time.Second, stalledDialer(t))
-		_, err := ssh.Dial("tcp", addr, &ssh.ClientConfig{User: "session", ClientVersion: upterm.HostSSHClientVersion, Auth: []ssh.AuthMethod{ssh.PublicKeys(signer)}, HostKeyCallback: ssh.InsecureIgnoreHostKey()})
+		first, err := ssh.Dial("tcp", addr, &ssh.ClientConfig{User: "session", ClientVersion: upterm.HostSSHClientVersion, Auth: []ssh.AuthMethod{ssh.PublicKeys(signer)}, HostKeyCallback: ssh.InsecureIgnoreHostKey()})
 		require.NoError(t, err)
+		defer func() {
+			_ = first.Close()
+			_ = first.Wait()
+		}()
 		client, err := ssh.Dial("tcp", addr, &ssh.ClientConfig{User: "session", ClientVersion: upterm.HostSSHClientVersion, Auth: []ssh.AuthMethod{ssh.PublicKeys(signer)}, HostKeyCallback: ssh.InsecureIgnoreHostKey()})
 		require.NoError(t, err)
 		defer func() { _ = client.Close() }()
@@ -340,12 +344,27 @@ func TestStockSSHUpstreamFailureReportsReason(t *testing.T) {
 		t.Run("stalled transport", func(t *testing.T) {
 			ln, err := net.Listen("tcp", "127.0.0.1:0")
 			require.NoError(t, err)
-			defer func() { _ = ln.Close() }()
-			go func() {
-				if c, err := ln.Accept(); err == nil {
-					<-time.After(time.Minute)
-					_ = c.Close()
+			// It holds the connection it accepts until the cleanup releases it,
+			// and closes it before reporting done, which the cleanup waits for
+			// whether or not anything was accepted.
+			release, done := make(chan struct{}), make(chan struct{})
+			t.Cleanup(func() {
+				close(release)
+				_ = ln.Close()
+				select {
+				case <-done:
+				case <-time.After(time.Second):
+					t.Error("stalled upstream did not stop")
 				}
+			})
+			go func() {
+				defer close(done)
+				c, err := ln.Accept()
+				if err != nil {
+					return
+				}
+				defer func() { _ = c.Close() }()
+				<-release
 			}()
 			_, addr, _, signer := stockTestProxy(t, time.Second, &stockTestDialer{addr: ln.Addr().String()})
 			client, err := ssh.Dial("tcp", addr, &ssh.ClientConfig{User: "session", ClientVersion: upterm.HostSSHClientVersion, Auth: []ssh.AuthMethod{ssh.PublicKeys(signer)}, HostKeyCallback: ssh.InsecureIgnoreHostKey()})
