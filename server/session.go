@@ -272,6 +272,9 @@ type SessionStore interface {
 // drops.
 type sessionCache struct {
 	sessions map[string]cachedSession
+	// removed is what this instance's successful releases exclude, by session
+	// ID. See cacheRemoval for when a record goes.
+	removed map[string]cacheRemoval
 	// watched is the index of the last watch snapshot applied. That snapshot
 	// held every entry written at or before it that still stood, so one it
 	// left out had been removed or superseded by then.
@@ -297,10 +300,67 @@ type cachedSession struct {
 	lease   string
 }
 
+// heldWrite is the index and cache epoch of a registration this instance
+// wrote. It is kept even when the cache declines the fill, so a later release
+// can still exclude that write and anything it superseded.
+type heldWrite struct {
+	index, epoch uint64
+}
+
+// cacheRemoval is what this instance's successful releases of one ID exclude:
+// every write at or below index, the highest a released lease's write or
+// cached value had in this epoch, and every value a lease in leases or
+// unordered holds. A reply, or a delivery read before a release, can still
+// carry what that release removed.
+//
+// A delivery's index bounds the state it was read from: that state held every
+// write at or below the index that still stood, and nothing removed at or
+// below it. No upterm path writes a session key without locking it under a
+// lease of its own, so a lease's only value is the write that locked it; once that
+// write has an index in this epoch, that value lies at or below index.
+// A delivery past index that shows nothing the record excludes was therefore
+// read once all of that had gone, and index and leases go. Only a delivery
+// reclaims, so records stay while the watch has nothing new to deliver or has
+// stalled. A response still
+// carrying a value they excluded was read before that, at an index below the
+// one now watched: delivered, it is an index drop and starts a new epoch; as a
+// reply, Set drops it, as a write the last delivery covered, or one older than
+// the entry cached since.
+//
+// That rests on the index, so it can't catch what the index doesn't show: a
+// restore or reset whose deliveries never fall below the last one, bringing
+// an old value back at a higher index; or a read from before a removal that
+// arrives after a watch outage long enough for Consul to reap the removal's
+// tombstone, when the delivery that drops the record can be indexed below the
+// removal. A lease whose write has no index in this epoch, one from before
+// the last drop whose value isn't cached, can't be placed against a delivery
+// at all: it goes into unordered, which no delivery reclaims and only the next
+// drop clears. Each held lease is released once, so unordered holds no more
+// than the leases held across that drop, however often the ID is registered
+// and released since. A release of a lease this instance doesn't hold, such as
+// a second release of one handle, has no write to place either; its lease
+// goes into leases instead, because leases kept until a drop would pile up
+// between drops.
+type cacheRemoval struct {
+	index  uint64
+	leases map[string]struct{}
+	// unordered holds the released leases no delivery can place.
+	unordered map[string]struct{}
+}
+
+// excludes reports whether entry is at or below the record's index floor, or
+// is held by a released lease, ordered or not.
+func (r cacheRemoval) excludes(entry cachedSession) bool {
+	_, released := r.leases[entry.lease]
+	_, unordered := r.unordered[entry.lease]
+	return entry.index <= r.index || (entry.lease != "" && (released || unordered))
+}
+
 // newSessionCache creates a new session cache
 func newSessionCache(logger *slog.Logger) *sessionCache {
 	return &sessionCache{
 		sessions: make(map[string]cachedSession),
+		removed:  make(map[string]cacheRemoval),
 		logger:   logger,
 	}
 }
@@ -348,12 +408,17 @@ func (c *sessionCache) Epoch() uint64 {
 // watch, or a later registration, has delivered something newer. With no entry
 // cached, a write the last watch snapshot already covered is dropped too: that
 // snapshot left it out, so it had been removed or superseded, and nothing else
-// would correct it before the next delivery.
+// would correct it before the next delivery. A local release's record drops
+// whatever it excludes; once a delivery has dropped a release's part of it,
+// the rules above drop a reply from before that release instead.
 func (c *sessionCache) Set(sessionID string, entry cachedSession, epoch uint64) {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
 
 	if epoch != c.epoch {
+		return
+	}
+	if removal, ok := c.removed[sessionID]; ok && removal.excludes(entry) {
 		return
 	}
 	if cur, ok := c.sessions[sessionID]; ok {
@@ -367,18 +432,42 @@ func (c *sessionCache) Set(sessionID string, entry cachedSession, epoch uint64) 
 	c.logger.Debug("cached session", "session", sessionID)
 }
 
-// Delete removes sessionID's entry if lease holds it. Releasing a lease
-// removes what that lease held, never an entry a rebuild or a later
-// registration holds under another.
-func (c *sessionCache) Delete(sessionID, lease string) {
+// Delete records a successful local release of lease, whose write is write,
+// and removes the current entry if that record now excludes it. Within an
+// epoch, an entry at or below the released write's index was superseded on
+// the key by that write, whatever lease holds it; a newer entry under another
+// lease survives. A held write from an earlier epoch has no index in this one,
+// and unless lease's value is cached, nothing places the release here: lease
+// goes into the record's unordered leases rather than its leases.
+func (c *sessionCache) Delete(sessionID, lease string, write heldWrite) {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
 
-	if cur, ok := c.sessions[sessionID]; !ok || cur.lease != lease {
-		return
+	removal := c.removed[sessionID]
+	if removal.leases == nil {
+		removal.leases = make(map[string]struct{})
 	}
-	delete(c.sessions, sessionID)
-	c.logger.Debug("removed session from cache", "session", sessionID)
+	if write.epoch == c.epoch {
+		removal.index = max(removal.index, write.index)
+	}
+	released := removal.leases
+	cur, present := c.sessions[sessionID]
+	if present && cur.lease == lease {
+		removal.index = max(removal.index, cur.index)
+	} else if write.index != 0 && write.epoch != c.epoch {
+		if removal.unordered == nil {
+			removal.unordered = make(map[string]struct{})
+		}
+		released = removal.unordered
+	}
+	if lease != "" {
+		released[lease] = struct{}{}
+	}
+	c.removed[sessionID] = removal
+	if present && removal.excludes(cur) {
+		delete(c.sessions, sessionID)
+		c.logger.Debug("removed session from cache", "session", sessionID)
+	}
 }
 
 // Evict removes sessionID's entry, which a read of Consul at index, begun in
@@ -400,19 +489,45 @@ func (c *sessionCache) Evict(sessionID string, index, epoch uint64) {
 }
 
 // ReplaceAll replaces the cache with snapshot, the watch's view of every
-// session as of index, and takes ownership of snapshot. An entry a later write
-// stored stays: the watch hasn't caught up with that write, and the snapshot
-// that does will include it, or its removal. An index below the last
-// snapshot's starts a new epoch: no index from before the drop orders against
-// one after it, so the snapshot is then taken whole. It returns the epoch it
-// applied the snapshot in.
+// session as of index, and takes ownership of snapshot. Within an epoch, what
+// local releases exclude is left out, and once a snapshot past a record's
+// index shows nothing the record excludes, its index and leases go, and the
+// record with them unless it holds unordered leases, which stay until a drop.
+// An entry a later write stored stays: the watch hasn't caught up with that
+// write, and the snapshot that does will include it, or its removal. An index
+// below the last snapshot's starts a new epoch: no index from before the drop
+// orders against one after it, so the snapshot is then taken whole, and every
+// record goes. It returns the epoch it applied the snapshot in.
 func (c *sessionCache) ReplaceAll(index uint64, snapshot map[string]cachedSession) (epoch uint64) {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
 
 	if index < c.watched {
 		c.epoch++
+		clear(c.removed)
 	} else {
+		// This decides on the snapshot as delivered, before the loops below
+		// take out what the records exclude and put back later local writes:
+		// either would hide an excluded value the delivery still carries.
+		for sessionID, removal := range c.removed {
+			if index <= removal.index {
+				continue
+			}
+			if entry, ok := snapshot[sessionID]; ok && removal.excludes(entry) {
+				continue
+			}
+			// Unordered leases have no index a delivery could pass.
+			if len(removal.unordered) == 0 {
+				delete(c.removed, sessionID)
+			} else {
+				c.removed[sessionID] = cacheRemoval{unordered: removal.unordered}
+			}
+		}
+		for sessionID, entry := range snapshot {
+			if removal, ok := c.removed[sessionID]; ok && removal.excludes(entry) {
+				delete(snapshot, sessionID)
+			}
+		}
 		for sessionID, cur := range c.sessions {
 			if cur.index > index {
 				snapshot[sessionID] = cur
@@ -473,8 +588,9 @@ type consulSessionStore struct {
 	// reply or a rebuilt registration's old lease is outstanding. Delete and
 	// BatchDelete act only through it, so neither can remove an entry another
 	// node registered or took over. The leases aren't ordered, since Consul's
-	// index can go backwards; each release drops only its own.
-	held   map[string]map[string]struct{}
+	// index can go backwards; each release drops only its own. Each lease keeps
+	// the index and cache epoch of its write for the cache's release record.
+	held   map[string]map[string]heldWrite
 	heldMu sync.Mutex
 	// observers are called with each watch delivery, on the watch's goroutine.
 	observers   []func(epoch, index uint64, entries map[string]StoreEntry)
@@ -529,7 +645,7 @@ func newConsulSessionStore(consulURL *url.URL, ttl time.Duration, logger *slog.L
 		ttl:       ttl,
 		keyPrefix: keyPrefix,
 		cache:     newSessionCache(logger),
-		held:      make(map[string]map[string]struct{}),
+		held:      make(map[string]map[string]heldWrite),
 	}
 	ready := false
 	defer func() {
@@ -699,9 +815,9 @@ func (c *consulSessionStore) register(ctx context.Context, session *Session, may
 	// a superseded registration.
 	c.heldMu.Lock()
 	if c.held[session.ID] == nil {
-		c.held[session.ID] = make(map[string]struct{})
+		c.held[session.ID] = make(map[string]heldWrite)
 	}
-	c.held[session.ID][lease] = struct{}{}
+	c.held[session.ID][lease] = heldWrite{index: index, epoch: epoch}
 	c.cache.Set(session.ID, cachedSession{session: session, index: index, lease: lease}, epoch)
 	c.heldMu.Unlock()
 
@@ -788,21 +904,20 @@ func (c *consulSessionStore) release(ctx context.Context, sessionID, lease strin
 	return nil
 }
 
-// forget drops lease from this instance's record of sessionID, and the cache
-// entry only if lease holds it. Any other lease it holds the ID under, such as
-// a rebuild's, stays tracked, and the cache still describes the entry it
-// holds; an entry another registration holds, such as another node's
-// takeover, stays too: the release didn't touch it.
+// forget drops lease from this instance's held registrations and records its
+// successful release in the cache. Other held leases remain tracked; a newer
+// different-lease cache entry remains admissible.
 func (c *consulSessionStore) forget(sessionID, lease string) {
 	c.heldMu.Lock()
 	defer c.heldMu.Unlock()
+	write := c.held[sessionID][lease]
 	if leases, ok := c.held[sessionID]; ok {
 		delete(leases, lease)
 		if len(leases) == 0 {
 			delete(c.held, sessionID)
 		}
 	}
-	c.cache.Delete(sessionID, lease)
+	c.cache.Delete(sessionID, lease, write)
 }
 
 // Renew renews reg's lock session, and checks that it still holds reg's
@@ -1348,7 +1463,8 @@ func (c *consulSessionStore) updateSessionReplica(index uint64, kvPairs api.KVPa
 
 	// Atomically replace cache contents. The cache takes the view before the
 	// observers see it, so a read of the cache made after an observer has
-	// acted on the view finds that view, or a later one.
+	// acted on the view finds that view, less what local releases exclude, or a
+	// later one.
 	epoch := c.cache.ReplaceAll(index, newSessions)
 
 	c.observersMu.Lock()

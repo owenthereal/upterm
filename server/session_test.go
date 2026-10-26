@@ -1537,7 +1537,8 @@ func (suite *ConsulStoreTestSuite) TestLeaseExpiryAndRenewal() {
 // The cache takes writes in whatever order they reach it, and keeps the
 // latest. A watch snapshot older than a write made here leaves that write in
 // place, and one that has caught up with it decides, including by leaving it
-// out. A release removes only an entry its own lease holds.
+// out. A release removes its own lease's entry and anything that lease's write
+// superseded, never a newer entry another lease holds.
 func TestSessionCacheKeepsTheLatestWrite(t *testing.T) {
 	c := newSessionCache(sessionTestLogger)
 	gen := func() uint64 {
@@ -1565,9 +1566,9 @@ func TestSessionCacheKeepsTheLatestWrite(t *testing.T) {
 	c.ReplaceAll(25, snapshot(3, 25))
 	assert.Equal(t, uint64(3), gen(), "a snapshot past the write didn't replace it")
 
-	c.Delete("id", "lease-2")
+	c.Delete("id", "lease-2", heldWrite{index: 20, epoch: c.Epoch()})
 	assert.Equal(t, uint64(3), gen(), "releasing a lease removed an entry another lease holds")
-	c.Delete("id", "lease-3")
+	c.Delete("id", "lease-3", heldWrite{index: 25, epoch: c.Epoch()})
 	assert.Zero(t, gen())
 
 	set(3, 28)
@@ -1824,7 +1825,7 @@ func newFakeConsulStoreWithCleanup(t *testing.T, f *fakeConsul, rt http.RoundTri
 	require.NoError(t, err)
 	logger := slog.New(slog.DiscardHandler)
 	store := &consulSessionStore{client: client, apiHTTP: cfg.HttpClient, logger: logger, ttl: time.Minute, keyPrefix: "fake",
-		cache: newSessionCache(logger), held: make(map[string]map[string]struct{})}
+		cache: newSessionCache(logger), held: make(map[string]map[string]heldWrite)}
 	t.Cleanup(func() {
 		if beforeClose != nil {
 			beforeClose()
@@ -2080,4 +2081,105 @@ func TestMemoryStoreTestSuite(t *testing.T) {
 
 func TestConsulStoreTestSuite(t *testing.T) {
 	suite.Run(t, new(ConsulStoreTestSuite))
+}
+
+// A delayed reply for B still warms B's cache after an unrelated A release.
+// This store has no watch, so the immediate cache assertion isolates Set.
+func (suite *ConsulStoreTestSuite) TestReleaseLeavesAnUnrelatedRegistrationReadable() {
+	t := suite.T()
+	transport := ownedHTTPTransport(t)
+	delay := newDelayedTxnReply(transport, 2)
+	cfg := api.DefaultConfig()
+	cfg.Address, cfg.Scheme = suite.consulURL.Host, suite.consulURL.Scheme
+	if u := suite.consulURL.User; u != nil {
+		cfg.Token, _ = u.Password()
+	}
+	cfg.HttpClient = &http.Client{Transport: delay}
+	client, err := api.NewClient(cfg)
+	require.NoError(t, err)
+	store := &consulSessionStore{client: client, apiHTTP: cfg.HttpClient, logger: sessionTestLogger,
+		ttl: 5 * time.Minute, keyPrefix: suite.store1.keyPrefix,
+		cache: newSessionCache(sessionTestLogger), held: make(map[string]map[string]heldWrite)}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	var a, b *Registration
+	var pending chan registered
+	consumed := false
+	// Cleanup runs in reverse registration order: unblock/join, release all
+	// acquired handles, then close. A failed join cannot skip the latter two.
+	t.Cleanup(func() {
+		assert.NoError(t, store.Close())
+		transport.CloseIdleConnections()
+	})
+	t.Cleanup(func() {
+		for _, reg := range []*Registration{a, b} {
+			if reg != nil {
+				cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 5*time.Second)
+				assert.NoError(t, store.Release(cleanupCtx, reg))
+				cleanupCancel()
+			}
+		}
+	})
+	t.Cleanup(func() {
+		delay.release(2)
+		cancel()
+		if pending != nil && !consumed {
+			// Cancellation can still be followed by destroyUnusedLease's own
+			// DefaultConsulTimeout. Reserve a separate allowance for that work.
+			timer := time.NewTimer(2 * DefaultConsulTimeout)
+			defer timer.Stop()
+			select {
+			case result := <-pending:
+				consumed = true
+				b = result.reg
+				assert.NoError(t, result.err)
+			case <-timer.C:
+				t.Error("unrelated registration cleanup did not join after cancellation and lease cleanup allowance")
+			}
+		}
+	})
+	a, err = store.Register(ctx, &Session{ID: suite.uniq("unrelated-a"), NodeAddr: "a:22", Generation: 1})
+	require.NoError(t, err)
+	bSession := &Session{ID: suite.uniq("unrelated-b"), NodeAddr: "b:22", Generation: 2}
+	pending = make(chan registered, 1)
+	go func() { reg, err := store.Register(ctx, bSession); pending <- registered{reg, err} }()
+	receiveWithin(t, delay.entered(2), "B transaction reply was not held")
+	committed, _, err := client.KV().Get(store.SessionKey(bSession.ID), (&api.QueryOptions{}).WithContext(ctx))
+	require.NoError(t, err)
+	require.NotNil(t, committed)
+	require.NotEmpty(t, committed.Session)
+	require.NoError(t, store.Release(ctx, a))
+	delay.release(2)
+	result := receiveWithin(t, pending, "B registration did not return")
+	consumed = true
+	b = result.reg
+	require.NoError(t, result.err)
+	require.NotNil(t, b)
+	require.Equal(t, bSession, b.Session)
+	require.Equal(t, committed.Session, b.lease)
+	store.heldMu.Lock()
+	write, held := store.held[b.ID()][b.lease]
+	store.heldMu.Unlock()
+	require.True(t, held)
+	require.Equal(t, heldWrite{index: b.index, epoch: b.epoch}, write)
+	cached, ok := store.cache.lookup(b.ID())
+	require.True(t, ok, "unrelated release suppressed B cache fill before any Get")
+	require.Equal(t, b.lease, cached.lease)
+	require.Equal(t, bSession, cached.session)
+	require.Equal(t, b.index, cached.index)
+	backend, _, err := client.KV().Get(store.SessionKey(b.ID()), (&api.QueryOptions{}).WithContext(ctx))
+	require.NoError(t, err)
+	require.NotNil(t, backend)
+	require.Equal(t, b.lease, backend.Session)
+	var decoded Session
+	require.NoError(t, json.Unmarshal(backend.Value, &decoded))
+	require.Equal(t, *bSession, decoded)
+	gone, _, err := client.KV().Get(store.SessionKey(a.ID()), (&api.QueryOptions{}).WithContext(ctx))
+	require.NoError(t, err)
+	require.Nil(t, gone)
+	got, err := store.Get(b.ID())
+	require.NoError(t, err)
+	require.Equal(t, bSession, got)
+	got, err = store.GetFresh(ctx, b.ID())
+	require.NoError(t, err)
+	require.Equal(t, bSession, got)
 }
