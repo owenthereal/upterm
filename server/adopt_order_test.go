@@ -336,20 +336,28 @@ func TestAdoptionHandRows(t *testing.T) {
 	})
 }
 
-// TestAdoptionOfAnAbsentEntryToday is the order where a delivery shows the
-// entry absent before S. After A R, the fake loses the entry, as a restore can,
-// and a delivery of that, at an index past generation 1's write, empties this
-// node's cache. confirm's lookup then reads through to Consul and finds no
-// entry.
+// TestAdoptionTakesAnAbsentEntryAsALoss is the order where a delivery shows
+// the entry absent before S. After A R, the fake loses the entry, as a restore
+// can, and a delivery of that, at an index past generation 1's write, empties
+// this node's cache. confirm's lookup then reads through to Consul and finds
+// no entry.
 //
-// This is today's behaviour, pinned as it stands: confirm returns nil, the
-// slot stays active, and no loss is reported to the keeper. A definitive
-// not-found is meant to become a known loss that keeps the host adopted, as
-// reconcile already takes a missing entry; when that follow-up lands, it
-// rewrites this test. The report is read from the slot's record of the last
-// one, not from the keeper's channel, which the keeper drains at once.
-func TestAdoptionOfAnAbsentEntryToday(t *testing.T) {
-	h := newAdoptRace(t, adoptRaceConfig{hold: []uint64{1}, confirm: []uint64{1}})
+// confirm takes that not-found as reconcile takes a missing entry: the host is
+// adopted, and its keeper is told of the loss as of generation 1's write, at
+// index 100, and rebuilds the entry. The report is read from the slot's record
+// of the last one, not from the keeper's channel, which the keeper drains at
+// once, and it is read as soon as the host has its reply: without it, the
+// keeper would wait for its renewal at half the TTL to find the loss out. Its
+// epoch is 0 whether or not one was reported, since no delivery's index drops
+// here, so only the index tells.
+//
+// The rebuild's transaction is then held before Consul sees it, with the
+// entry still absent and the original handle installed. Let go, it commits
+// the entry under a new lease, whose reply is held while the original handle
+// stays installed. Once that reply is let go, the keeper installs the rebuilt
+// handle and destroys lease 1; the end state is awaited whole.
+func TestAdoptionTakesAnAbsentEntryAsALoss(t *testing.T) {
+	h := newAdoptRace(t, adoptRaceConfig{hold: []uint64{1}, confirm: []uint64{1}, holdRebuild: true})
 	h.begin()
 	h.returned1()
 	h.consul.reset()
@@ -359,18 +367,22 @@ func TestAdoptionOfAnAbsentEntryToday(t *testing.T) {
 	require.NoError(t, r.err, "generation 1's connection ended before its reply")
 	require.True(t, r.ok, "confirm refused a registration whose entry it found absent: %s", r.body)
 
-	// confirm runs before the reply, so all of this is settled.
-	require.True(t, h.served().Same(h.reg1), "generation 1 lost its slot")
-	require.Equal(t, 1.0, h.s.gauge(t))
-	require.False(t, isDone(h.firstEnded), "generation 1's connection was closed")
-	// A loss confirm reported would record generation 1's write, at index 100.
-	// Its epoch is 0 whether or not one was reported, since no delivery's
-	// index drops here, so only the index tells.
-	_, index := h.lostReport()
-	require.Zero(t, index, "a loss was reported")
-	_, err := h.s.sshd.SessionManager.GetEntry(h.id)
-	var missing *ErrSessionNotFound
-	require.ErrorAs(t, err, &missing, "a lookup now isn't a not-found, as confirm's should have been")
+	// confirm runs before the reply, and the rebuild can't commit before its
+	// release, so all of this is settled.
+	h.requireOriginalSlot()
+	require.NotZero(t, h.reg1.index, "generation 1's write has no index")
+	epoch, index := h.lostReport()
+	require.Equal(t, h.reg1.index, index, "confirm didn't report the absent entry as a loss of generation 1's write")
+	require.Equal(t, h.reg1.epoch, epoch, "confirm reported the loss in another epoch than generation 1's write")
+
+	receiveWithin(t, h.rebuild.entered, "the keeper never entered its rebuild transaction")
+	h.requireOriginalSlot()
+	require.Nil(t, h.consul.entry(), "the entry came back before the rebuild's release")
+	h.rebuild.release()
+	receiveWithin(t, h.delay.entered(2), "the rebuild never committed")
+	receiveWithin(t, h.rebuild.left, "the rebuild transport never returned")
+	h.requireCommittedRebuild()
+	h.returnRebuild()
 }
 
 // adoptRace is one run's fixture: an sshd over a fakeConsul in monotonic mode,
