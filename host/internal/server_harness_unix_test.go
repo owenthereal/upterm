@@ -213,6 +213,9 @@ func (h *hostHarness) dialGuest(t *testing.T, opts ...dialOption) (io.Writer, io
 		return nil, nil, nil, err
 	}
 	t.Cleanup(func() { _ = sess.Close() })
+	if cfg.end != nil {
+		*cfg.end = guestEnd{conn: raw, client: client, sess: sess}
+	}
 	window := termsize.Default
 	if cfg.window.Valid() {
 		window = cfg.window
@@ -333,6 +336,9 @@ type dialConfig struct {
 	// requests, when set, answers the connection's global requests in place
 	// of x/crypto's own loop, and keeps what the daemon sent.
 	requests *requestLog
+	// end, when set, is given a guest's connection and session, so a test
+	// can say what ended them.
+	end *guestEnd
 }
 
 // withRekeyThreshold forces key renegotiation early, so a test can watch what
@@ -345,6 +351,13 @@ func withRekeyThreshold(n uint64) dialOption {
 // the order given.
 func withGuestSigners(signers ...ssh.Signer) dialOption {
 	return func(c *dialConfig) { c.signers = signers }
+}
+
+// withGuestEnd keeps the guest's connection and session in e, so that a test
+// whose read of the session's output fails can say what ended it (see
+// guestEnd.cause).
+func withGuestEnd(e *guestEnd) dialOption {
+	return func(c *dialConfig) { c.end = e }
 }
 
 // withWindow has a guest arrive with a terminal of this size rather than
