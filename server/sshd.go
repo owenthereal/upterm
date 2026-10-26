@@ -316,19 +316,24 @@ func (l *localSessions) observe(epoch, index uint64, entries map[string]StoreEnt
 // confirm checks reg, which add has just accepted, against the store's view
 // of its entry. If that shows another registration with a generation at least
 // reg's, held by another lease, reg is superseded: it ends as reconcile would
-// end it, and confirm returns an error wrapping ErrSuperseded. If it shows
-// another value in the key reg's own lease holds, reg's keeper is told of the
-// loss, as reconcile would tell it. The delivery showing either can be
-// processed before add, when there is no slot yet for reconcile to find; the
-// store's view is updated before reconcile runs, so checking it after add
-// covers that order. A lookup that fails leaves reg adopted: the next
+// end it, and confirm returns an error wrapping ErrSuperseded. If it shows no
+// entry, or another value in the key reg's own lease holds, reg stays adopted
+// and its keeper is told of the loss, as reconcile would tell it. The delivery
+// showing any of these can be processed before add, when there is no slot yet
+// for reconcile to find; the store's view is updated before reconcile runs, so
+// checking it after add covers that order. A lookup that fails otherwise says
+// nothing of the entry, and leaves reg adopted with nothing reported: the next
 // delivery, or its keeper's next renewal, still finds it out.
 func (l *localSessions) confirm(work *sshWorkRef, reg *Registration) error {
 	cur, err := l.sessionManager.GetEntry(reg.ID())
-	if err != nil || sameIdentity(cur.Session, reg.Session) {
+	// The store's answer that the entry is absent, however it is wrapped: a
+	// Consul read that retried reports it after its earlier attempts' errors.
+	var missing *ErrSessionNotFound
+	absent := errors.As(err, &missing)
+	if !absent && (err != nil || sameIdentity(cur.Session, reg.Session)) {
 		return nil
 	}
-	if heldByOwnLease(cur, reg) {
+	if absent || heldByOwnLease(cur, reg) {
 		// The view is no earlier than reg's own write, and a rebuild that
 		// answers it writes later still.
 		l.mu.Lock()
