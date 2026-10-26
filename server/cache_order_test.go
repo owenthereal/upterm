@@ -102,10 +102,19 @@ func TestLocalDeleteRejectsCapturedSnapshot(t *testing.T) {
 }
 
 // A read-through reply that completed before a local delete, but reaches the
-// cache after it, must not bring the entry back.
+// cache after it, must not bring the entry back, including once a delivery
+// that shows the delete has dropped the release's record.
 func TestLocalDeleteRejectsHeldReadReply(t *testing.T) {
-	for _, uncached := range []bool{false, true} {
-		t.Run(fmt.Sprintf("uncached=%t", uncached), func(t *testing.T) {
+	for _, variant := range []struct {
+		name              string
+		uncached, covered bool
+	}{
+		{name: "uncached=false"},
+		{name: "uncached=true", uncached: true},
+		{name: "covering-delivery", covered: true},
+	} {
+		uncached := variant.uncached
+		t.Run(variant.name, func(t *testing.T) {
 			f := newFakeConsul(t, monotonicIndexes)
 			next := ownedHTTPTransport(t)
 			entered, resume := make(chan struct{}), make(chan struct{})
@@ -153,6 +162,14 @@ func TestLocalDeleteRejectsHeldReadReply(t *testing.T) {
 			require.Nil(t, f.entry())
 			require.False(t, store.HasInCache(reg.ID()), "local deletion boundary")
 			t.Logf("checkpoint=read-held-after-delete index=%d lease=%s epoch=%d uncached=%t", reg.index, reg.lease, store.cache.Epoch(), uncached)
+			if variant.covered {
+				index, pairs := f.snapshot()
+				require.Nil(t, pairs)
+				require.Greater(t, index, reg.index)
+				store.updateSessionReplica(index, pairs)
+				require.Empty(t, store.cache.removed, "a delivery that shows the delete kept the release record")
+				require.False(t, store.HasInCache(reg.ID()))
+			}
 			release()
 			receiveWithin(t, done, "held GetFresh never returned")
 			require.NoError(t, readErr)
@@ -178,14 +195,14 @@ func TestConsulCacheWatchDeliveryBoundaries(t *testing.T) {
 				require.NoError(t, err)
 				present, err := json.Marshal(api.KVPairs{&api.KVPair{Key: "fake/sessions/watch", Value: value, ModifyIndex: 100, Session: "lease-watch"}})
 				require.NoError(t, err)
-				// Query 1 is captured before the local delete. Query 2 is empty. Queries
-				// 3 and 4 exercise healthy dedup. Query 5 is a later-started stale changed
-				// response, as a default read may return during a leader election.
-				indexes := []uint64{100, 101, 101, 101, 104}
+				// Query 1 is captured before the local delete, at the release floor.
+				// Query 2 is empty, past the floor. Queries 3 and 4 exercise healthy
+				// dedup.
+				indexes := []uint64{100, 101, 101, 101}
 				if !equalIndex {
-					indexes = []uint64{100, 101, 102, 103, 104}
+					indexes = []uint64{100, 101, 102, 103}
 				}
-				bodies := []string{string(present), "[]", "[]", "[]", string(present)}
+				bodies := []string{string(present), "[]", "[]", "[]"}
 				entered := make(chan int, 8)
 				returned := make(chan int, 8)
 				captured := make(chan int, 8)
@@ -259,12 +276,15 @@ func TestConsulCacheWatchDeliveryBoundaries(t *testing.T) {
 				store.forget(session.ID, "lease-watch")
 				require.False(t, store.HasInCache(session.ID))
 				require.Empty(t, store.held)
+				record := cacheRemoval{index: 100, leases: map[string]struct{}{"lease-watch": {}}}
+				require.Equal(t, record, store.cache.removed[session.ID])
 				releases[0]()
 				require.Equal(t, 1, <-returned)
 				<-observerEntered
 				synctest.Wait()
 				require.Equal(t, 1, queries, "query 2 entered while synchronous observer was held")
 				require.False(t, store.HasInCache(session.ID), "captured snapshot crossed local deletion before observer entry")
+				require.Equal(t, record, store.cache.removed[session.ID], "a delivery at the release floor dropped its record")
 				require.Equal(t, "lease-watch", rawViews[0][session.ID].Lease)
 				require.Equal(t, uint64(1), rawViews[0][session.ID].Session.Generation)
 				releaseObserver()
@@ -278,17 +298,12 @@ func TestConsulCacheWatchDeliveryBoundaries(t *testing.T) {
 					require.Equal(t, 2, handlers, "healthy unchanged result unexpectedly delivered")
 					require.Equal(t, 2, observers, "healthy unchanged result unexpectedly notified")
 					require.False(t, store.HasInCache(session.ID))
+					require.Empty(t, store.cache.removed, "an empty delivery past the floor kept the release record; query=%d", ordinal)
 				}
-				require.Equal(t, 5, <-captured)
-				releases[4]()
-				require.Equal(t, 5, <-returned)
-				require.Equal(t, 6, <-entered)
-				synctest.Wait()
-				require.Equal(t, 3, handlers)
-				require.Equal(t, 3, observers)
-				require.False(t, store.HasInCache(session.ID), "changed stale content crossed local deletion")
-				require.Equal(t, "lease-watch", rawViews[2][session.ID].Lease)
-				require.Equal(t, uint64(1), rawViews[2][session.ID].Session.Generation)
+				// The released write's own reply, read before the release, now falls to
+				// the watched index that the empty delivery left.
+				store.cache.Set(session.ID, cachedSession{session: session, index: 100, lease: "lease-watch"}, store.cache.Epoch())
+				require.False(t, store.HasInCache(session.ID), "a reply from before the release crossed the delivery that dropped its record")
 			})
 		})
 	}
@@ -296,6 +311,9 @@ func TestConsulCacheWatchDeliveryBoundaries(t *testing.T) {
 
 // Each row distinguishes the local release floor from the released lease.
 // The two insertion paths use independent caches, so one cannot repair the other.
+// Set leaves the record as it is; the snapshot, delivered past the floor, drops
+// it exactly when the snapshot shows nothing it excludes, which here is when
+// the candidate is admitted.
 func TestSessionCacheLocalDeleteFiltering(t *testing.T) {
 	rows := []struct {
 		name, id, lease   string
@@ -329,6 +347,8 @@ func TestSessionCacheLocalDeleteFiltering(t *testing.T) {
 					c.Set("A", cachedSession{session: &Session{ID: "A", Generation: 3}, index: 120, lease: "L3"}, epoch)
 				}
 				c.Delete("A", "L2", heldWrite{index: 101, epoch: epoch})
+				record := cacheRemoval{index: floor, leases: map[string]struct{}{"L2": {}}}
+				require.Equal(t, record, c.removed["A"], "snapshot=%t", snapshot)
 				if row.name == "foreign-cache-does-not-strengthen-floor" {
 					entry, ok := c.lookup("A")
 					if assert.True(t, ok, "release removed newer different lease") {
@@ -350,8 +370,11 @@ func TestSessionCacheLocalDeleteFiltering(t *testing.T) {
 				if row.present {
 					require.Equal(t, candidate, entry, "snapshot=%t", snapshot)
 				}
-				require.Equal(t, floor, c.removed["A"].index)
-				require.Contains(t, c.removed["A"].leases, "L2")
+				if snapshot && row.present {
+					require.NotContains(t, c.removed, "A", "a snapshot past the floor without excluded content kept the record")
+				} else {
+					require.Equal(t, record, c.removed["A"], "snapshot=%t", snapshot)
+				}
 			}
 		})
 	}
@@ -367,14 +390,27 @@ func TestSessionCacheLocalDeleteFiltering(t *testing.T) {
 	})
 }
 
-// A release record lasts until an observed index drop starts a new epoch:
-// ordinary deliveries, Evict and a first low snapshot keep it, and a held
-// write from an older epoch contributes no floor.
+// A release record lasts until a delivery past its floor shows nothing it
+// excludes, or an observed index drop starts a new epoch. Deliveries at or
+// below the floor, or showing an excluded value as delivered, Set and Evict
+// keep it; each ID's record is decided on its own; a lease released with no
+// index in the epoch stays until a drop, however often the ID is released
+// since, while the rest of its record goes as usual; and a held write from an
+// older epoch contributes no floor.
 func TestSessionCacheDeletionEvidenceLifecycle(t *testing.T) {
 	entry := func(lease string, index, generation uint64) cachedSession {
 		return cachedSession{session: &Session{ID: "A", Generation: generation}, index: index, lease: lease}
 	}
-	for _, name := range []string{"first-low-absence", "ordinary-deliveries-retain", "coalesced-leases", "observed-drop", "old-epoch-held-index", "evict-retains", "unknown-held-write"} {
+	leases := func(names ...string) map[string]struct{} {
+		set := make(map[string]struct{}, len(names))
+		for _, name := range names {
+			set[name] = struct{}{}
+		}
+		return set
+	}
+	// Unless a row says otherwise, A's L2 is released with its write held at 101.
+	released := cacheRemoval{index: 101, leases: leases("L2")}
+	for _, name := range []string{"first-low-absence", "reclaim-on-covering-absence", "retain-at-floor", "retain-raw-released-lease", "retain-raw-floor-excluded", "reclaim-raw-newer-other-lease", "retain-pre-carry-over", "per-id-independence", "reclaim-then-fresh-record", "bounded-growth", "unordered-release", "unordered-bounce", "coalesced-leases", "observed-drop", "old-epoch-held-index", "evict-retains", "unknown-held-write"} {
 		t.Run(name, func(t *testing.T) {
 			c := newSessionCache(slog.New(slog.DiscardHandler))
 			epoch := c.Epoch()
@@ -386,16 +422,155 @@ func TestSessionCacheDeletionEvidenceLifecycle(t *testing.T) {
 				require.Len(t, c.removed, 1)
 				c.Set("A", entry("L1", 100, 1), epoch)
 				require.False(t, c.Has("A"))
-			case "ordinary-deliveries-retain":
+			case "reclaim-on-covering-absence":
 				c.Delete("A", "L2", heldWrite{index: 101, epoch: epoch})
-				for i := 0; i < 2; i++ {
-					c.ReplaceAll(102, map[string]cachedSession{})
-					require.Len(t, c.removed, 1)
-					require.Contains(t, c.removed["A"].leases, "L2")
+				c.ReplaceAll(102, map[string]cachedSession{})
+				require.Empty(t, c.removed, "an empty delivery past the floor kept the record")
+				// The delivery covered every write the record excluded.
+				for _, candidate := range []cachedSession{entry("L1", 100, 1), entry("L2", 102, 2)} {
+					c.Set("A", candidate, epoch)
+					require.False(t, c.Has("A"), "%s@%d crossed the delivery that dropped the record", candidate.lease, candidate.index)
 				}
-				c.ReplaceAll(111, map[string]cachedSession{"A": entry("L2", 110, 2)})
+				candidate := entry("L3", 103, 3)
+				c.Set("A", candidate, epoch)
+				got, ok := c.lookup("A")
+				require.True(t, ok, "a write past the delivery was dropped")
+				require.Equal(t, candidate, got)
+			case "retain-at-floor":
+				c.Delete("A", "L2", heldWrite{index: 101, epoch: epoch})
+				c.ReplaceAll(101, map[string]cachedSession{})
+				require.Equal(t, map[string]cacheRemoval{"A": released}, c.removed, "a delivery at the floor dropped the record")
+				c.Set("A", entry("L2", 105, 2), epoch)
+				require.False(t, c.Has("A"), "the released lease crossed a delivery at the floor")
+			case "retain-raw-released-lease":
+				c.Delete("A", "L2", heldWrite{index: 101, epoch: epoch})
+				c.ReplaceAll(110, map[string]cachedSession{"A": entry("L2", 109, 2)})
 				require.False(t, c.Has("A"))
-				require.Len(t, c.removed, 1)
+				require.Equal(t, map[string]cacheRemoval{"A": released}, c.removed, "a delivery showing the released lease dropped the record")
+				c.Set("A", entry("L2", 111, 2), epoch)
+				require.False(t, c.Has("A"), "the released lease crossed a delivery that still showed it")
+			case "retain-raw-floor-excluded":
+				c.Delete("A", "L2", heldWrite{index: 101, epoch: epoch})
+				c.ReplaceAll(110, map[string]cachedSession{"A": entry("L1", 100, 1)})
+				require.False(t, c.Has("A"))
+				require.Equal(t, map[string]cacheRemoval{"A": released}, c.removed, "a delivery showing a write at the floor dropped the record")
+				c.Set("A", entry("L2", 111, 2), epoch)
+				require.False(t, c.Has("A"), "the released lease crossed a delivery that showed a superseded write")
+			case "reclaim-raw-newer-other-lease":
+				c.Delete("A", "L2", heldWrite{index: 101, epoch: epoch})
+				newer := entry("L3", 105, 3)
+				c.ReplaceAll(110, map[string]cachedSession{"A": newer})
+				require.Empty(t, c.removed, "a delivery showing only a newer lease kept the record")
+				got, ok := c.lookup("A")
+				require.True(t, ok)
+				require.Equal(t, newer, got)
+			case "retain-pre-carry-over":
+				c.Delete("A", "L2", heldWrite{index: 101, epoch: epoch})
+				later := entry("L3", 120, 3)
+				c.Set("A", later, epoch)
+				c.ReplaceAll(110, map[string]cachedSession{"A": entry("L2", 109, 2)})
+				require.Equal(t, map[string]cacheRemoval{"A": released}, c.removed, "the carried-over later write hid the released lease the delivery showed")
+				got, ok := c.lookup("A")
+				require.True(t, ok)
+				require.Equal(t, later, got)
+			case "per-id-independence":
+				c.Delete("A", "L2", heldWrite{index: 101, epoch: epoch})
+				c.Delete("B", "LB", heldWrite{index: 105, epoch: epoch})
+				c.ReplaceAll(103, map[string]cachedSession{})
+				require.Equal(t, map[string]cacheRemoval{"B": {index: 105, leases: leases("LB")}}, c.removed)
+			case "reclaim-then-fresh-record":
+				c.Delete("A", "L2", heldWrite{index: 101, epoch: epoch})
+				c.ReplaceAll(102, map[string]cachedSession{})
+				require.Empty(t, c.removed)
+				c.Delete("A", "L3", heldWrite{index: 103, epoch: epoch})
+				require.Equal(t, map[string]cacheRemoval{"A": {index: 103, leases: leases("L3")}}, c.removed, "a dropped record carried into the next release")
+			case "bounded-growth":
+				const rounds = 1000
+				index := uint64(100)
+				// Distinct IDs, each registered, released, and delivered gone.
+				for i := range rounds {
+					id, lease := fmt.Sprintf("id-%d", i), fmt.Sprintf("lease-%d", i)
+					index++
+					c.Set(id, cachedSession{session: &Session{ID: id, Generation: 1}, index: index, lease: lease}, epoch)
+					c.Delete(id, lease, heldWrite{index: index, epoch: epoch})
+					require.Len(t, c.removed, 1)
+					index++ // the release's delete
+					c.ReplaceAll(index, map[string]cachedSession{})
+					require.Empty(t, c.removed, "distinct ID round %d", i)
+				}
+				// One ID taken over again and again: each old lease is released once
+				// its successor holds the entry, and the delivery shows the successor.
+				index++
+				holder := entry("L0", index, 1)
+				c.Set("A", holder, epoch)
+				for i := 1; i <= rounds; i++ {
+					index++
+					next := entry(fmt.Sprintf("L%d", i), index, uint64(i)+1)
+					c.Set("A", next, epoch)
+					c.Delete("A", holder.lease, heldWrite{index: holder.index, epoch: epoch})
+					require.Len(t, c.removed, 1)
+					c.ReplaceAll(index, map[string]cachedSession{"A": next})
+					require.Empty(t, c.removed, "takeover round %d", i)
+					got, ok := c.lookup("A")
+					require.True(t, ok)
+					require.Equal(t, next, got)
+					holder = next
+				}
+			case "unordered-release":
+				c.ReplaceAll(200, map[string]cachedSession{})
+				c.ReplaceAll(5, map[string]cachedSession{})
+				now := c.Epoch()
+				require.Equal(t, epoch+1, now)
+				// A write held from before the drop, not cached since, has no index here.
+				c.Delete("A", "L2", heldWrite{index: 200, epoch: epoch})
+				require.Equal(t, cacheRemoval{leases: leases(), unordered: leases("L2")}, c.removed["A"])
+				// A lease never held here places nothing either, but stays ordered.
+				c.Delete("B", "LB", heldWrite{})
+				require.Equal(t, cacheRemoval{leases: leases("LB")}, c.removed["B"])
+				// A cached value of the lease places a write from before the drop.
+				c.Set("C", cachedSession{session: &Session{ID: "C", Generation: 1}, index: 6, lease: "LC"}, now)
+				require.True(t, c.Has("C"))
+				c.Delete("C", "LC", heldWrite{index: 200, epoch: epoch})
+				require.False(t, c.Has("C"))
+				require.Equal(t, cacheRemoval{index: 6, leases: leases("LC")}, c.removed["C"])
+				// A later release in this epoch is ordered, beside the unordered lease.
+				c.Delete("A", "L3", heldWrite{index: 7, epoch: now})
+				require.Equal(t, cacheRemoval{index: 7, leases: leases("L3"), unordered: leases("L2")}, c.removed["A"])
+				c.ReplaceAll(10, map[string]cachedSession{})
+				require.Equal(t, map[string]cacheRemoval{"A": {unordered: leases("L2")}}, c.removed, "a covering delivery dropped an unordered lease, or kept an ordered part")
+				c.Set("A", entry("L2", 11, 2), now)
+				require.False(t, c.Has("A"), "the unordered lease crossed a covering delivery")
+				c.ReplaceAll(3, map[string]cachedSession{})
+				require.Equal(t, epoch+2, c.Epoch())
+				require.Empty(t, c.removed, "an observed drop kept an unordered lease")
+			case "unordered-bounce":
+				c.ReplaceAll(200, map[string]cachedSession{})
+				c.ReplaceAll(5, map[string]cachedSession{})
+				now := c.Epoch()
+				require.Equal(t, epoch+1, now)
+				// The one lease held across the drop, released with nothing cached.
+				c.Delete("A", "L0", heldWrite{index: 200, epoch: epoch})
+				const rounds = 1000
+				index := uint64(5)
+				// The ID is registered and released again and again in this epoch,
+				// each release covered by a delivery.
+				for i := 1; i <= rounds; i++ {
+					lease := fmt.Sprintf("L%d", i)
+					index++
+					c.Set("A", entry(lease, index, uint64(i)), now)
+					c.Delete("A", lease, heldWrite{index: index, epoch: now})
+					index++ // the release's delete
+					c.ReplaceAll(index, map[string]cachedSession{})
+					record := c.removed["A"]
+					require.Empty(t, record.leases, "round %d", i)
+					require.Zero(t, record.index, "round %d", i)
+					require.Equal(t, leases("L0"), record.unordered, "round %d", i)
+					c.Set("A", entry("L0", index+1, 0), now)
+					require.False(t, c.Has("A"), "the lease held across the drop crossed a covering delivery; round %d", i)
+				}
+				c.ReplaceAll(3, map[string]cachedSession{})
+				require.Equal(t, epoch+2, c.Epoch())
+				require.Empty(t, c.removed, "an observed drop kept an unordered lease")
 			case "coalesced-leases":
 				c.Delete("A", "L2", heldWrite{index: 101, epoch: epoch})
 				c.Delete("A", "L3", heldWrite{index: 103, epoch: epoch})
@@ -468,8 +643,10 @@ func TestSessionCacheDeletionEvidenceLifecycle(t *testing.T) {
 // Releasing an older lease keeps a newer registration cached and held.
 // Releases made while nothing is cached coalesce into one record that still
 // excludes a captured older snapshot, and a failed release records nothing.
+// However many registrations come and go, each release's record goes with
+// the first delivery that shows its exclusions gone.
 func TestLocalDeletePreservesSuccessor(t *testing.T) {
-	for _, name := range []string{"release-older-held-lease", "coalesce-uncached-releases", "failed-release"} {
+	for _, name := range []string{"release-older-held-lease", "coalesce-uncached-releases", "failed-release", "records-stay-bounded"} {
 		t.Run(name, func(t *testing.T) {
 			f := newFakeConsul(t, monotonicIndexes)
 			store := newFakeConsulStore(t, f)
@@ -542,13 +719,51 @@ func TestLocalDeletePreservesSuccessor(t *testing.T) {
 				require.Equal(t, first.Session, cached.session)
 				require.Equal(t, pairs[0], f.entry())
 				require.Empty(t, store.cache.removed)
+			case "records-stay-bounded":
+				// The pure cache test runs a thousand rounds; these run the same two
+				// shapes through Register, Release and a delivery of the fake's state.
+				const rounds = 10
+				// The ID is taken over again and again; each old lease is released once
+				// its successor holds the entry.
+				holder := first
+				for generation := uint64(2); generation <= rounds+1; generation++ {
+					next := register(generation)
+					require.NoError(t, store.Release(context.Background(), holder))
+					require.Len(t, store.cache.removed, 1)
+					store.updateSessionReplica(f.snapshot())
+					require.Empty(t, store.cache.removed, "a delivery of the successor kept the old lease's record; generation=%d", generation)
+					cached, ok := store.cache.lookup(next.ID())
+					require.True(t, ok)
+					require.Equal(t, next.lease, cached.lease)
+					holder = next
+				}
+				require.NoError(t, store.Release(context.Background(), holder))
+				require.Nil(t, f.entry())
+				store.updateSessionReplica(f.snapshot())
+				require.Empty(t, store.cache.removed)
+				// Distinct IDs, each registered, released, and delivered gone.
+				for i := range rounds {
+					reg, err := store.Register(context.Background(), &Session{ID: fmt.Sprintf("bounded-%d", i), NodeAddr: "node:22", Generation: 1})
+					if reg != nil {
+						regs = append(regs, reg)
+					}
+					require.NoError(t, err)
+					require.NoError(t, store.Release(context.Background(), reg))
+					require.Nil(t, f.entry())
+					require.Len(t, store.cache.removed, 1)
+					store.updateSessionReplica(f.snapshot())
+					require.Empty(t, store.cache.removed, "a delivery without the ID kept its record; round=%d", i)
+				}
 			}
 		})
 	}
 }
 
-// Equal results suppress Plan callbacks even as successful local releases
-// accumulate. A later changed result must still pass through those exclusions.
+// Equal results suppress Plan callbacks, so successful local releases keep
+// their records until the next changed result. That result must still pass
+// through those exclusions; it drops each record whose exclusions it shows
+// gone, and keeps one whose released lease it still shows, until a later
+// changed result without it.
 func TestLocalDeleteRetainsEvidenceThroughDeduplicatedQueries(t *testing.T) {
 	for _, equalIndex := range []bool{true, false} {
 		t.Run(fmt.Sprintf("equal-index=%t", equalIndex), func(t *testing.T) {
@@ -562,15 +777,16 @@ func TestLocalDeleteRetainsEvidenceThroughDeduplicatedQueries(t *testing.T) {
 					return &api.KVPair{Key: "fake/sessions/" + id, Value: value, ModifyIndex: index, Session: lease}
 				}
 				stale := api.KVPairs{pair("A", "LA1", 1, 190), pair("C", "LC", 3, 191)}
+				later := api.KVPairs{pair("C", "LC", 3, 191)}
 				low := api.KVPairs{pair("A", "LA1", 1, 4)}
-				results := []api.KVPairs{{}, {}, {}, stale, low}
+				results := []api.KVPairs{{}, {}, {}, stale, later, low}
 				bodies := make([]string, len(results))
 				for i, result := range results {
 					body, err := json.Marshal(result)
 					require.NoError(t, err)
 					bodies[i] = string(body)
 				}
-				indexes := []uint64{100, 100, 100, 200, 5}
+				indexes := []uint64{100, 100, 100, 200, 201, 5}
 				if !equalIndex {
 					indexes[1], indexes[2] = 101, 102
 				}
@@ -686,13 +902,30 @@ func TestLocalDeleteRetainsEvidenceThroughDeduplicatedQueries(t *testing.T) {
 				require.Equal(t, "LA1", views[1]["A"].Lease)
 				require.Equal(t, uint64(1), views[1]["A"].Session.Generation)
 				require.Equal(t, StoreEntry{Session: cached.session, Lease: "LC"}, views[1]["C"])
-				require.Len(t, store.cache.removed, 2)
+				// The result as delivered still shows A under released LA1, so A's
+				// record stays; it shows nothing of B, past B's floor, so B's goes.
+				require.Equal(t, map[string]cacheRemoval{"A": {index: 112, leases: map[string]struct{}{"LA1": {}, "LA2": {}}}}, store.cache.removed)
 				releases[4]()
 				require.Equal(t, 6, <-entered)
-				synctest.Wait() // The drop result and its new-epoch observer delivery are complete.
+				synctest.Wait() // The later changed result and its observer delivery are complete.
 				require.Equal(t, 3, handlers)
 				require.Len(t, views, 3)
-				require.Equal(t, []uint64{0, 0, 1}, epochs)
+				require.Empty(t, store.cache.removed, "a later changed result without A kept A's record")
+				require.False(t, store.HasInCache("A"))
+				cached, ok = store.cache.lookup("C")
+				require.True(t, ok)
+				require.Equal(t, "LC", cached.lease)
+				require.Equal(t, map[string]StoreEntry{"C": {Session: cached.session, Lease: "LC"}}, views[2])
+				// A's released registration's reply, read before its release, now falls
+				// to the watched index that result left.
+				store.cache.Set("A", cachedSession{session: &Session{ID: "A", Generation: 1}, index: 110, lease: "LA1"}, store.cache.Epoch())
+				require.False(t, store.HasInCache("A"), "a reply from before the release crossed the result that dropped its record")
+				releases[5]()
+				require.Equal(t, 7, <-entered)
+				synctest.Wait() // The drop result and its new-epoch observer delivery are complete.
+				require.Equal(t, 4, handlers)
+				require.Len(t, views, 4)
+				require.Equal(t, []uint64{0, 0, 0, 1}, epochs)
 				require.Equal(t, uint64(1), store.cache.Epoch())
 				require.Empty(t, store.cache.removed)
 				cached, ok = store.cache.lookup("A")
@@ -700,8 +933,8 @@ func TestLocalDeleteRetainsEvidenceThroughDeduplicatedQueries(t *testing.T) {
 				require.Equal(t, "LA1", cached.lease)
 				require.Equal(t, uint64(1), cached.session.Generation)
 				require.Equal(t, uint64(4), cached.index)
-				require.Len(t, views[2], 1)
-				require.Equal(t, StoreEntry{Session: cached.session, Lease: "LA1"}, views[2]["A"])
+				require.Len(t, views[3], 1)
+				require.Equal(t, StoreEntry{Session: cached.session, Lease: "LA1"}, views[3]["A"])
 			})
 		})
 	}

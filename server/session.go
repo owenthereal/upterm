@@ -272,7 +272,8 @@ type SessionStore interface {
 // drops.
 type sessionCache struct {
 	sessions map[string]cachedSession
-	// removed retains successful local releases until the next observed epoch.
+	// removed is what this instance's successful releases exclude, by session
+	// ID. See cacheRemoval for when a record goes.
 	removed map[string]cacheRemoval
 	// watched is the index of the last watch snapshot applied. That snapshot
 	// held every entry written at or before it that still stood, so one it
@@ -306,19 +307,53 @@ type heldWrite struct {
 	index, epoch uint64
 }
 
-// cacheRemoval excludes superseded writes and every value held by a released
-// lease. Records persist within an epoch: a later default read or absent watch
-// result does not prove that an older response cannot still arrive.
+// cacheRemoval is what this instance's successful releases of one ID exclude:
+// every write at or below index, the highest a released lease's write or
+// cached value had in this epoch, and every value a lease in leases or
+// unordered holds. A reply, or a delivery read before a release, can still
+// carry what that release removed.
+//
+// A delivery's index bounds the state it was read from: that state held every
+// write at or below the index that still stood, and nothing removed at or
+// below it. No upterm path writes a session key without locking it under a
+// lease of its own, so a lease's only value is the write that locked it; once that
+// write has an index in this epoch, that value lies at or below index.
+// A delivery past index that shows nothing the record excludes was therefore
+// read once all of that had gone, and index and leases go. Only a delivery
+// reclaims, so records stay while the watch has nothing new to deliver or has
+// stalled. A response still
+// carrying a value they excluded was read before that, at an index below the
+// one now watched: delivered, it is an index drop and starts a new epoch; as a
+// reply, Set drops it, as a write the last delivery covered, or one older than
+// the entry cached since.
+//
+// That rests on the index, so it can't catch what the index doesn't show: a
+// restore or reset whose deliveries never fall below the last one, bringing
+// an old value back at a higher index; or a read from before a removal that
+// arrives after a watch outage long enough for Consul to reap the removal's
+// tombstone, when the delivery that drops the record can be indexed below the
+// removal. A lease whose write has no index in this epoch, one from before
+// the last drop whose value isn't cached, can't be placed against a delivery
+// at all: it goes into unordered, which no delivery reclaims and only the next
+// drop clears. Each held lease is released once, so unordered holds no more
+// than the leases held across that drop, however often the ID is registered
+// and released since. A release of a lease this instance doesn't hold, such as
+// a second release of one handle, has no write to place either; its lease
+// goes into leases instead, because leases kept until a drop would pile up
+// between drops.
 type cacheRemoval struct {
 	index  uint64
 	leases map[string]struct{}
+	// unordered holds the released leases no delivery can place.
+	unordered map[string]struct{}
 }
 
 // excludes reports whether entry is at or below the record's index floor, or
-// is held by a released lease.
+// is held by a released lease, ordered or not.
 func (r cacheRemoval) excludes(entry cachedSession) bool {
 	_, released := r.leases[entry.lease]
-	return entry.index <= r.index || (entry.lease != "" && released)
+	_, unordered := r.unordered[entry.lease]
+	return entry.index <= r.index || (entry.lease != "" && (released || unordered))
 }
 
 // newSessionCache creates a new session cache
@@ -373,8 +408,9 @@ func (c *sessionCache) Epoch() uint64 {
 // watch, or a later registration, has delivered something newer. With no entry
 // cached, a write the last watch snapshot already covered is dropped too: that
 // snapshot left it out, so it had been removed or superseded, and nothing else
-// would correct it before the next delivery. Successful local releases also
-// exclude earlier writes and values held by their released leases.
+// would correct it before the next delivery. A local release's record drops
+// whatever it excludes; once a delivery has dropped a release's part of it,
+// the rules above drop a reply from before that release instead.
 func (c *sessionCache) Set(sessionID string, entry cachedSession, epoch uint64) {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
@@ -400,7 +436,9 @@ func (c *sessionCache) Set(sessionID string, entry cachedSession, epoch uint64) 
 // and removes the current entry if that record now excludes it. Within an
 // epoch, an entry at or below the released write's index was superseded on
 // the key by that write, whatever lease holds it; a newer entry under another
-// lease survives.
+// lease survives. A held write from an earlier epoch has no index in this one,
+// and unless lease's value is cached, nothing places the release here: lease
+// goes into the record's unordered leases rather than its leases.
 func (c *sessionCache) Delete(sessionID, lease string, write heldWrite) {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
@@ -412,12 +450,18 @@ func (c *sessionCache) Delete(sessionID, lease string, write heldWrite) {
 	if write.epoch == c.epoch {
 		removal.index = max(removal.index, write.index)
 	}
+	released := removal.leases
 	cur, present := c.sessions[sessionID]
 	if present && cur.lease == lease {
 		removal.index = max(removal.index, cur.index)
+	} else if write.index != 0 && write.epoch != c.epoch {
+		if removal.unordered == nil {
+			removal.unordered = make(map[string]struct{})
+		}
+		released = removal.unordered
 	}
 	if lease != "" {
-		removal.leases[lease] = struct{}{}
+		released[lease] = struct{}{}
 	}
 	c.removed[sessionID] = removal
 	if present && removal.excludes(cur) {
@@ -445,13 +489,15 @@ func (c *sessionCache) Evict(sessionID string, index, epoch uint64) {
 }
 
 // ReplaceAll replaces the cache with snapshot, the watch's view of every
-// session as of index, and takes ownership of snapshot. Within an epoch local
-// release evidence filters out excluded entries. An entry a later write
-// stored stays: the watch hasn't caught up with that write, and the snapshot
-// that does will include it, or its removal. An index below the last
-// snapshot's starts a new epoch: no index from before the drop orders against
-// one after it, so the snapshot is then taken whole. It returns the epoch it
-// applied the snapshot in.
+// session as of index, and takes ownership of snapshot. Within an epoch, what
+// local releases exclude is left out, and once a snapshot past a record's
+// index shows nothing the record excludes, its index and leases go, and the
+// record with them unless it holds unordered leases, which stay until a drop.
+// An entry a later write stored stays: the watch hasn't caught up with that
+// write, and the snapshot that does will include it, or its removal. An index
+// below the last snapshot's starts a new epoch: no index from before the drop
+// orders against one after it, so the snapshot is then taken whole, and every
+// record goes. It returns the epoch it applied the snapshot in.
 func (c *sessionCache) ReplaceAll(index uint64, snapshot map[string]cachedSession) (epoch uint64) {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
@@ -460,6 +506,23 @@ func (c *sessionCache) ReplaceAll(index uint64, snapshot map[string]cachedSessio
 		c.epoch++
 		clear(c.removed)
 	} else {
+		// This decides on the snapshot as delivered, before the loops below
+		// take out what the records exclude and put back later local writes:
+		// either would hide an excluded value the delivery still carries.
+		for sessionID, removal := range c.removed {
+			if index <= removal.index {
+				continue
+			}
+			if entry, ok := snapshot[sessionID]; ok && removal.excludes(entry) {
+				continue
+			}
+			// Unordered leases have no index a delivery could pass.
+			if len(removal.unordered) == 0 {
+				delete(c.removed, sessionID)
+			} else {
+				c.removed[sessionID] = cacheRemoval{unordered: removal.unordered}
+			}
+		}
 		for sessionID, entry := range snapshot {
 			if removal, ok := c.removed[sessionID]; ok && removal.excludes(entry) {
 				delete(snapshot, sessionID)
