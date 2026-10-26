@@ -163,6 +163,13 @@ type sessionLog struct {
 
 func newSessionLog() *sessionLog { return &sessionLog{more: make(chan struct{})} }
 
+// String is everything logged so far.
+func (l *sessionLog) String() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return string(l.buf)
+}
+
 func (l *sessionLog) Write(p []byte) (int, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -512,12 +519,18 @@ func (r *slowReplayer) Start(ctx context.Context, deadline time.Time, c *uio.Cap
 // starts with sequences. A missing hold fails the bounded readiness wait.
 // A fallback would hand over the raw ring, in which a command printing only
 // "y" lines puts no sequence at all.
+//
+// This test once failed with nothing read and EOF. A first read that fails
+// says what ended the guest's session, and what the session logged up to
+// then.
 func TestAGuestJoiningAFloodGetsItsScreenReconstructed(t *testing.T) {
 	// Keep a ten-second replay budget, independently of the one-second
 	// readiness guard, and require a reconstruction rather than a fallback.
 	held := make(chan struct{}, 1)
 	r := &slowReplayer{Replayer: replay.New(), held: held, ready: make(chan error, 1)}
-	srv := &Server{Command: []string{"yes"}, replayBudget: 10 * time.Second}
+	logs := newSessionLog()
+	srv := &Server{Command: []string{"yes"}, replayBudget: 10 * time.Second,
+		Logger: slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelDebug}))}
 	srv.onGuestPacer = func(p *guestPacer) {
 		r.pacer = p
 		p.onWait = func() {
@@ -537,7 +550,8 @@ func TestAGuestJoiningAFloodGetsItsScreenReconstructed(t *testing.T) {
 	readUntil(t, viewer, "y\r\ny\r\n")
 	go func() { _, _ = io.Copy(io.Discard, viewer) }()
 
-	_, out := h.connectGuest(t, withWindow(desktop))
+	var end guestEnd
+	_, out := h.connectGuest(t, withWindow(desktop), withGuestEnd(&end))
 	select {
 	case err := <-r.ready:
 		require.NoError(t, err, "the slow replayer did not observe backpressure")
@@ -545,8 +559,9 @@ func TestAGuestJoiningAFloodGetsItsScreenReconstructed(t *testing.T) {
 		t.Fatal("the slow replayer never reported readiness")
 	}
 	first := make([]byte, 64)
-	_, err := io.ReadFull(out, first)
-	require.NoError(t, err)
+	if n, err := io.ReadFull(out, first); err != nil {
+		t.Fatalf("the guest's first read ended after %d bytes with %v: %s; the session logged:\n%s", n, err, end.cause(), logs)
+	}
 	require.Contains(t, string(first), "\x1b[", "the guest was handed the raw ring")
 }
 
