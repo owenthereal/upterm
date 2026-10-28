@@ -106,7 +106,7 @@ func TestPlanPicksCreds(t *testing.T) {
 					cfg.Timeout = 3 * time.Second
 					client, err := ssh.Dial("tcp", upstream, &cfg)
 					require.NoError(t, err)
-					defer client.Close()
+					defer func() { _ = client.Close() }()
 					select {
 					case peer := <-peers:
 						key, err := ssh.ParsePublicKey([]byte(peer.Permissions.Extensions["cert"]))
@@ -170,12 +170,12 @@ func TestHopKeyStartup(t *testing.T) {
 			require.NoError(t, err)
 			raw, err := net.Dial("tcp", addr)
 			require.NoError(t, err)
-			defer raw.Close()
+			defer func() { _ = raw.Close() }()
 			require.NoError(t, raw.SetDeadline(time.Now().Add(5*time.Second)))
 			c, ch, req, err := ssh.NewClientConn(raw, addr, &ssh.ClientConfig{User: "host", ClientVersion: upterm.HostSSHClientVersion, Auth: []ssh.AuthMethod{ssh.PublicKeys(relay)}, HostKeyCallback: ssh.InsecureIgnoreHostKey()})
 			require.NoError(t, err)
 			client := ssh.NewClient(c, ch, req)
-			defer client.Close()
+			defer func() { _ = client.Close() }()
 			request, err := proto.Marshal(&CreateSessionRequest{HostUser: "host", HostPublicKeys: [][]byte{ssh.MarshalAuthorizedKey(relay.PublicKey())}, ClientAuthorizedKeys: [][]byte{ssh.MarshalAuthorizedKey(relay.PublicKey())}})
 			require.NoError(t, err)
 			ok, body, err := client.SendRequest(upterm.ServerCreateSessionRequestType, true, request)
@@ -220,7 +220,7 @@ func TestPlanPicksCredsRelayRotation(t *testing.T) {
 	} {
 		ln, err := net.Listen("tcp4", "127.0.0.1:0")
 		require.NoError(t, err)
-		defer ln.Close()
+		defer func() { _ = ln.Close() }()
 		cfg := &ssh.ServerConfig{PublicKeyCallback: func(c ssh.ConnMetadata, key ssh.PublicKey) (*ssh.Permissions, error) {
 			checker := UserCertChecker{IsUserAuthority: func(key ssh.PublicKey) bool { return utils.KeysEqual(key, second.PublicKey()) }}
 			_, _, err := checker.Authenticate(c.User(), key)
@@ -234,7 +234,7 @@ func TestPlanPicksCredsRelayRotation(t *testing.T) {
 				done <- err
 				return
 			}
-			defer raw.Close()
+			defer func() { _ = raw.Close() }()
 			_ = raw.SetDeadline(time.Now().Add(5 * time.Second))
 			sc, _, _, err := ssh.NewServerConn(raw, cfg)
 			if sc != nil {

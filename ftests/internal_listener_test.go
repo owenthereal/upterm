@@ -462,7 +462,7 @@ func TestHopKeyRotationPhases(t *testing.T) {
 		require.NoError(t, err)
 		client, err := ssh.Dial("tcp", old.SSHAddr(), &ssh.ClientConfig{User: session.SshUser, ClientVersion: upterm.JoinSSHClientVersion, Auth: auths, HostKeyCallback: ssh.InsecureIgnoreHostKey(), Timeout: 5 * time.Second})
 		require.NoError(t, err)
-		defer client.Close()
+		defer func() { _ = client.Close() }()
 		_, _, err = client.OpenChannel("echo@upterm.test", nil)
 		var refusal *ssh.OpenChannelError
 		require.ErrorAs(t, err, &refusal)
@@ -765,7 +765,7 @@ func requireRotationRouteRefused(t *testing.T, entry, target *Server, want strin
 	require.NoError(t, err)
 	client, err := ssh.Dial("tcp", entry.SSHAddr(), &ssh.ClientConfig{User: session.SshUser, ClientVersion: upterm.JoinSSHClientVersion, Auth: auths, HostKeyCallback: ssh.InsecureIgnoreHostKey(), Timeout: 5 * time.Second})
 	require.NoError(t, err)
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 	_, _, err = client.OpenChannel("echo@upterm.test", nil)
 	var refusal *ssh.OpenChannelError
 	require.ErrorAs(t, err, &refusal)

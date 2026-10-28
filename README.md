@@ -704,6 +704,104 @@ networks:
 
 For more details on Traefik TCP and HTTP routing, see the [Traefik documentation](https://doc.traefik.io/traefik/routing/overview/).
 
+### Hardening a multi-node relay
+
+Use `--ssh-proxy-protocol-required` to require a PROXY protocol v2 header on
+the public SSH listener. Only trusted proxies may be able to reach that
+listener: a valid header from any peer is believed. The strict listener
+requires `--internal-addr` for node hops and bridged WebSocket guests, which
+do not send PROXY headers.
+
+On Fly, `--ssh-network tcp4 --ssh-addr 0.0.0.0:2222` is one way to isolate
+the public listener. Fly's proxy reaches machines over private IPv4, while
+other apps in the organization reach them over IPv6 (6PN); binding IPv4 keeps
+those apps off this listener. Elsewhere, use your network's own isolation or
+firewall rules to admit only trusted proxies.
+
+Bind `--internal-addr` where only relay nodes can reach it. On Fly, use
+`[fly-local-6pn]:2223` and isolate that port from other apps in the
+organization. The 6PN address alone does not restrict access to relay nodes.
+Set `--node-addr` to this node's reachable internal address when it differs
+from the bound address; it is the address neighbours dial. With an internal
+listener configured, the public SSH listener refuses relay certificates.
+
+#### Hop keys
+
+A dedicated `--hop-key` signs connections between relay nodes. Hosts always
+receive certificates signed with the server's own keys. `--hop-key` takes
+private key files; `HOP_KEY` takes private key PEM content. `--hop-trusted-key`
+takes comma-separated public keys in `authorized_keys` format. A node trusts
+its own hop signing keys implicitly. By default it also accepts hops signed
+with its own server keys; `--hop-refuse-host-key` disables that fallback and
+requires a hop key or trusted hop key.
+
+To migrate from server-key signing to a dedicated hop key H1, complete each
+step on every node before starting the next:
+
+1. Add H1's public key to `--hop-trusted-key` everywhere, still signing with
+   the server key.
+2. Set `--hop-key` to H1's private key everywhere, keeping H1 trusted and
+   continuing to accept server-key hops during the rollout.
+3. Enable `--hop-refuse-host-key` everywhere.
+
+To rotate H1 to H2, keep the outgoing key explicitly trusted until no node
+signs with it:
+
+1. Set `--hop-trusted-key` to H1,H2 everywhere, still signing with H1.
+2. Switch `--hop-key` to H2, keeping `--hop-trusted-key` at H1,H2 on every
+   node throughout the rollout. Nodes already on H2 need H1 listed to accept
+   hops from nodes still on H1.
+3. Once every node signs with H2, remove H1. Keep H2 listed, or clear the
+   trust list because each node trusts its own H2 signing key implicitly.
+
+#### Server-key rotation
+
+`--node-trusted-key` lists additional public keys accepted from a neighbour
+when hopping to it, in comma-separated `authorized_keys` format. A node also
+trusts its own current server keys. Keep the outgoing server key explicitly
+listed until no node presents it.
+
+Server-key rotation also needs a hop authority that remains trusted during
+the rollout. Prefer a dedicated hop key with the migration above complete;
+server-key rotation then leaves hop trust unchanged. If hops still use the
+server key, list both server public keys K1,K2 in `--hop-trusted-key` on every
+node for the entire rollout, alongside `--node-trusted-key`. Switching a
+node's server key to K2 removes its implicit trust in K1, so K1 must stay
+explicitly trusted for hops from nodes still on K1. Without either approach,
+mixed nodes can refuse each other's hops.
+
+These are the complete key settings at each step; K1 and K2 in trust lists
+mean public keys, while the presented key is private key material:
+
+| Step | Presents (`PRIVATE_KEY` / `--private-key`) | `--node-trusted-key` | `--hop-trusted-key`, if hops are still signed with the server key | `--hop-trusted-key`, with a dedicated hop key |
+| --- | --- | --- | --- | --- |
+| 0. Before | K1 | none | none | unchanged |
+| 1. Trust, on every node | K1 | K1,K2 | K1,K2 | unchanged |
+| 2. Present (rolling; mixed while it runs) | K2 on rolled nodes, K1 on the rest | K1,K2 | K1,K2 | unchanged |
+| 3. Retire, after every node presents K2 | K2 | none, or K2 | none, or K2 | unchanged |
+
+Listing a node's current key is harmless. Keep both keys listed on every node
+throughout the rollout, then retire K1 from both trust lists together when
+hops use the server key. Existing hosts pin their relay's server key; these
+settings control trust between relay nodes.
+
+For example, these environment variables configure a Fly node after the
+dedicated hop-key migration, alongside your session routing configuration.
+Every node uses the same hop key; the files below contain private keys.
+Keep the internal port reachable only by relay nodes and configure the
+public proxy to send PROXY v2 headers:
+
+```bash
+export UPTERMD_SSH_ADDR='0.0.0.0:2222'
+export UPTERMD_SSH_NETWORK='tcp4'
+export UPTERMD_SSH_PROXY_PROTOCOL_REQUIRED='true'
+export UPTERMD_INTERNAL_ADDR='[fly-local-6pn]:2223'
+export UPTERMD_NODE_ADDR='${FLY_MACHINE_ID}.vm.${FLY_APP_NAME}.internal:2223'
+export UPTERMD_PRIVATE_KEY='/etc/uptermd/server.key'
+export UPTERMD_HOP_KEY='/etc/uptermd/hop.key'
+export UPTERMD_HOP_REFUSE_HOST_KEY='true'
+```
+
 ### Restricting Host Registration
 
 By default, any SSH client that can reach `uptermd` can register a session as a host.
