@@ -548,8 +548,8 @@ type Server struct {
 	// see withInternalListener.
 	internalListener bool
 	internalln       net.Listener
-	mode           routing.Mode
-	logger         *slog.Logger
+	mode             routing.Mode
+	logger           *slog.Logger
 
 	// authorizedKeysFiles restricts which identities may register as hosts,
 	// uptermd's --authorized-keys.

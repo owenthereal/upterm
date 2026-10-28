@@ -143,7 +143,10 @@ func (p *SSHRouting) serveStock(ln net.Listener) error {
 		_ = ln.Close()
 		return ErrListnerClosed
 	}
-	inst := newSSHRoutingInstruments(p.MetricsProvider)
+	inst := p.instruments
+	if inst == nil {
+		inst = newSSHRoutingInstruments(p.MetricsProvider)
+	}
 	defer p.joinWorkers()
 	defer cancel()
 	var retryDelay time.Duration // how long to sleep on accept failure

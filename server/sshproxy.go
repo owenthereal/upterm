@@ -40,6 +40,10 @@ type sshProxy struct {
 	// value, the shared listener, establishes no entry point.
 	listener listenerKind
 
+	// instruments are the routing metrics this proxy counts into, shared by
+	// every SSH proxy of a Server. Nil has the proxy register its own.
+	instruments *routingInstruments
+
 	routing *SSHRouting
 	mux     sync.Mutex
 	// stopped records a Shutdown that arrived before Serve; see sshd.stopped.
@@ -91,6 +95,7 @@ func (r *sshProxy) Serve(ln net.Listener) error {
 		MetricsProvider: r.MetricsProvider,
 		Logger:          r.Logger,
 		hostActivity:    r.hostActivity,
+		instruments:     r.instruments,
 	}
 	r.mux.Unlock()
 
@@ -172,6 +177,40 @@ func bannerSessionID(sessionID string) string {
 		return fmt.Sprintf("%q", sessionID)
 	}
 	return sessionID
+}
+
+var (
+	// errHostOnInternalListener refuses a host on the internal listener. Only
+	// other relay nodes are meant to reach it, and hosts register on the public
+	// one, so this node's sshd takes none from there.
+	errHostOnInternalListener = errors.New("hosts register on the public listener")
+
+	// errRelayCertOnPublicListener refuses a relay certificate on the public
+	// listener or the bridge. With an internal listener a hop arrives there and
+	// nowhere else, so a relay certificate here is no hop, whoever signed it.
+	// Authorizing its key instead, as the shared listener does, would admit a
+	// hop sent to the wrong listener, on a session open to any key, as the
+	// relay's key rather than the guest's.
+	errRelayCertOnPublicListener = errors.New("relay certificate on a public listener")
+
+	// errRelayCertFromUntrustedSigner refuses, on the internal listener, a relay
+	// certificate that no hop authority signed. Such a certificate there claims
+	// to be a hop, and a hop whose signer isn't trusted is refused, not
+	// authorized as the certificate's key: on a session open to any key, that
+	// would let it join as an ordinary guest.
+	errRelayCertFromUntrustedSigner = errors.New("relay certificate from an untrusted signer")
+)
+
+// isRelayCertificate reports whether pk is a certificate carrying an
+// AuthRequest, the kind a relay node mints for a hop. It is judged from the
+// certificate alone, before and apart from who signed it.
+func isRelayCertificate(pk ssh.PublicKey) bool {
+	cert, ok := pk.(*ssh.Certificate)
+	if !ok {
+		return false
+	}
+	_, ok = cert.Extensions[upterm.SSHCertExtension]
+	return ok
 }
 
 // errUpstreamHostKeyMismatch is returned by the upstream HostKeyCallback below.
@@ -297,13 +336,18 @@ func (t *upstreamTarget) admits(key ssh.PublicKey) bool {
 }
 
 // authenticate decides who an offered key speaks for, without reading the
-// session store: the user's format, the authorized_keys gate on hosts, and the
-// identity a certificate this relay minted carries. The key it returns is the
-// one a session's authorized keys are checked against. The flag reports that
-// such a certificate carried it: the mark of another relay node, presenting a
-// guest's key. A guest's own agent certificate is not one.
+// session store: the user's format, the authorized_keys gate on hosts, which of
+// the node's listeners may take a host or a relay certificate, and the identity
+// a certificate this relay minted carries. The key it returns is the one a
+// session's authorized keys are checked against. The flag reports that such a
+// certificate carried it: the mark of another relay node, presenting a guest's
+// key. A guest's own agent certificate is not one.
 func (a proxyAuth) authenticate(conn ssh.ConnMetadata, pk ssh.PublicKey) (*AuthRequest, ssh.PublicKey, bool, error) {
 	if string(conn.ClientVersion()) == upterm.HostSSHClientVersion {
+		// First of all, so nothing is dialed for it.
+		if a.listener == listenerInternal {
+			return nil, nil, false, errHostOnInternalListener
+		}
 		if conn.User() == "" {
 			return nil, nil, false, fmt.Errorf("empty session ID for host connection")
 		}
@@ -329,13 +373,24 @@ func (a proxyAuth) authenticate(conn ssh.ConnMetadata, pk ssh.PublicKey) (*AuthR
 		return nil, nil, false, err
 	}
 
+	// Where an internal listener exists, a relay certificate is a hop on that
+	// listener and nowhere else.
+	relayCert := isRelayCertificate(pk)
+	if relayCert && (a.listener == listenerPublic || a.listener == listenerBridge) {
+		return nil, nil, false, errRelayCertOnPublicListener
+	}
+
 	auth, key, err := checker.Authenticate(conn.User(), pk)
-	// A certificate this relay did not mint is not a credential, it is just a
-	// key the peer holds: an ssh-agent's own CA certificate arrives this way.
-	// Authorizing cert.Key rather than refusing keeps who may join unchanged,
-	// and the authorized-key check is what then decides. A malformed
-	// AuthRequest from a signer we do trust is a different matter and is not
-	// tolerated.
+	// On the internal listener a relay certificate is a hop or nothing.
+	if relayCert && a.listener == listenerInternal && errors.Is(err, errCertUntrustedAuthority) {
+		return nil, nil, false, errRelayCertFromUntrustedSigner
+	}
+	// Otherwise a certificate this relay did not mint is not a credential, it
+	// is just a key the peer holds: an ssh-agent's own CA certificate arrives
+	// this way. Authorizing cert.Key rather than refusing keeps who may join
+	// unchanged, and the authorized-key check is what then decides. A
+	// malformed AuthRequest from a signer we do trust is a different matter and
+	// is not tolerated.
 	if errors.Is(err, errCertNotSignedByHost) || errors.Is(err, errCertUntrustedAuthority) {
 		err = nil
 	}
