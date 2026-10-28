@@ -16,6 +16,24 @@ Please note we have a code of conduct, please follow it in all your interactions
 4. You may merge the Pull Request in once you have the sign-off of two other developers, or if you 
    do not have permission to do that, you may request the second reviewer to merge it for you.
 
+## Publishing the website and Helm chart
+
+`script/publish-website` publishes the website and Helm chart to `gh-pages`,
+served at <https://upterm.dev>. Helm publishing is manual; the release workflows
+do not run this script.
+
+For chart changes, increment `version` in `charts/uptermd/Chart.yaml` before
+publishing so users can select the new release. With Helm installed, a clean
+source checkout, and the local `gh-pages` branch up to date with `origin/gh-pages`,
+run from the repository root:
+
+```sh
+script/publish-website
+```
+
+The script packages the chart, indexes it alongside previously published charts,
+and commits and pushes the website and chart artifacts to `origin/gh-pages`.
+
 ## Tests
 
 A test must pass or fail on what the code does, not on how fast the machine running it is.

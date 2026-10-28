@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-set -e
+set -eo pipefail
 
 # Cleanup function
 cleanup() {
@@ -17,16 +17,20 @@ current_branch=$(git rev-parse --abbrev-ref HEAD)
 tmp_dir=$(mktemp -d -t upterm-XXXXXXXXXX)
 upterm_dir=${PWD}
 
-pushd  $tmp_dir
-helm package $upterm_dir/charts/uptermd && helm repo index .
-cp $upterm_dir/README.md index.md
-cp -r $upterm_dir/docs .
-cp $upterm_dir/fly.example.toml .
+# Retain older chart releases when rebuilding the repository index.
+git archive gh-pages -- '*.tgz' | tar -x -C "$tmp_dir"
+
+pushd "$tmp_dir"
+helm package "$upterm_dir/charts/uptermd"
+helm repo index .
+cp "$upterm_dir/README.md" index.md
+cp -r "$upterm_dir/docs" .
+cp "$upterm_dir/fly.example.toml" .
 popd > /dev/null
 
 git checkout gh-pages
-cp -r $tmp_dir/* .
-cp -r $tmp_dir/.* . 2>/dev/null || true
+cp -r "$tmp_dir"/* .
+cp -r "$tmp_dir"/.* . 2>/dev/null || true
 
 git add .
 if git diff --staged --quiet; then
