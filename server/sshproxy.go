@@ -35,6 +35,11 @@ type sshProxy struct {
 	// with the sshd. Nil only where a test builds the proxy alone.
 	hostActivity *hostActivity
 
+	// listener is which of the node's SSH listeners this proxy serves, and so
+	// where a guest that connects to it directly entered the fleet. The zero
+	// value, the shared listener, establishes no entry point.
+	listener listenerKind
+
 	routing *SSHRouting
 	mux     sync.Mutex
 	// stopped records a Shutdown that arrived before Serve; see sshd.stopped.
@@ -79,6 +84,7 @@ func (r *sshProxy) Serve(ln net.Listener) error {
 			SessionManager: r.SessionManager,
 			ConnDialer:     r.ConnDialer,
 			NodeAddr:       r.NodeAddr,
+			listener:       r.listener,
 			authorizedKeys: authorizedKeys,
 			Logger:         r.Logger.With("component", "auth"),
 		},
@@ -174,7 +180,10 @@ func bannerSessionID(sessionID string) string {
 var errUpstreamHostKeyMismatch = errors.New(upterm.UpstreamHostKeyMismatch)
 
 type proxyAuth struct {
-	NodeAddr       string
+	NodeAddr string
+	// listener is the one its sshProxy serves: a direct guest's AuthRequest
+	// takes its origin from it, and a hop's keeps the one it carries.
+	listener       listenerKind
 	authorizedKeys map[string]struct{} // SHA256 fingerprints; nil disables the gate
 	SessionManager *SessionManager
 	ConnDialer     connDialer
@@ -340,7 +349,9 @@ func (a proxyAuth) authenticate(conn ssh.ConnMetadata, pk ssh.PublicKey) (*AuthR
 	}
 
 	// Only a certificate this relay's authority minted yields an AuthRequest,
-	// and only a relay node holds one.
+	// and only a relay node holds one. It is the guest's own, as the node the
+	// guest entered by recorded it, and goes on unchanged, its origin included:
+	// that node is the only one that knew where the guest came in.
 	hop := auth != nil
 	if auth == nil {
 		auth = &AuthRequest{
@@ -350,6 +361,12 @@ func (a proxyAuth) authenticate(conn ssh.ConnMetadata, pk ssh.PublicKey) (*AuthR
 			// guest dialled, which is what sshd puts in SSH_CONNECTION.
 			LocalAddr:     conn.LocalAddr().String(),
 			AuthorizedKey: ssh.MarshalAuthorizedKey(key),
+		}
+		// Only a guest's request records where it entered. A host's goes to
+		// this node's own sshd, which admits the host by it, and stays as it
+		// has always been.
+		if string(conn.ClientVersion()) != upterm.HostSSHClientVersion {
+			auth.Ingress, auth.IngressNode, auth.IngressConnection = originOf(a.listener, conn, a.NodeAddr)
 		}
 	}
 
@@ -543,6 +560,11 @@ func (a proxyAuth) refresh(ctx context.Context, conn ssh.ConnMetadata, pk ssh.Pu
 	return next, true
 }
 
+// newUserCertSigners mints, with each of the relay's signing keys, a
+// certificate that presents auth upstream. Its KeyId is conn's own SSH session
+// ID, a hop's as well: the sshd binds a host's session proof to it, the one
+// value both ends of that connection share. A guest's ID at the node it
+// entered by travels in auth instead, as ingress_connection.
 func (a proxyAuth) newUserCertSigners(conn ssh.ConnMetadata, auth *AuthRequest) ([]ssh.Signer, error) {
 	var certSigners []ssh.Signer
 	for _, s := range a.Signers {
