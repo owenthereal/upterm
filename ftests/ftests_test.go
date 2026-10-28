@@ -440,6 +440,15 @@ func NewServerWithOptions(hostKey string, mode routing.Mode, opts ...func(*Serve
 	}
 	s.sshln, s.wsln = sshln, wsln
 
+	if s.internalListener {
+		s.internalln, err = net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			_ = sshln.Close()
+			_ = wsln.Close()
+			return nil, fmt.Errorf("failed to create internal listener: %w", err)
+		}
+	}
+
 	// Start server in background
 	startErrCh := make(chan error, 1)
 	go func() {
@@ -497,6 +506,13 @@ func withHostCertAuthority(ca ssh.Signer) func(*Server) {
 	return func(s *Server) { s.hostCertAuthority = ca }
 }
 
+// withInternalListener gives the relay an internal listener on a free loopback
+// port, for node hops and other nodes' WebSocket bridges, and makes it the
+// relay's NodeAddr, as uptermd's --internal-addr does.
+func withInternalListener() func(*Server) {
+	return func(s *Server) { s.internalListener = true }
+}
+
 // rebindTimeout bounds the retries of a listen that failed.
 const rebindTimeout = 2 * time.Second
 
@@ -527,6 +543,11 @@ type Server struct {
 	sshln          net.Listener
 	wsln           net.Listener
 	hostKeyContent string
+
+	// internalListener asks for internalln, the relay's internal listener;
+	// see withInternalListener.
+	internalListener bool
+	internalln       net.Listener
 	mode           routing.Mode
 	logger         *slog.Logger
 
@@ -610,9 +631,16 @@ func (s *Server) start() error {
 		return fmt.Errorf("unsupported routing mode: %s", s.mode)
 	}
 
+	// Neighbours reach the relay at its NodeAddr: the SSH listener, or the
+	// internal one when it has one.
+	nodeAddr := s.SSHAddr()
+	if s.internalln != nil {
+		nodeAddr = s.internalln.Addr().String()
+	}
+
 	s.mu.Lock()
 	s.Server = &server.Server{
-		NodeAddr:            s.SSHAddr(), // node addr is hard coded to ssh addr
+		NodeAddr:            nodeAddr,
 		HostSigners:         hostSigners,
 		Signers:             authorities,
 		NetworkProvider:     network,
@@ -623,7 +651,7 @@ func (s *Server) start() error {
 	}
 	s.mu.Unlock()
 
-	return s.Server.ServeWithContext(context.Background(), s.sshln, s.wsln)
+	return s.Server.ServeListeners(context.Background(), server.Listeners{SSH: s.sshln, WS: s.wsln, Internal: s.internalln})
 }
 
 // certifiedBy is signer's host certificate for hostnames, as
