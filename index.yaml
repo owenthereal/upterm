@@ -3,7 +3,24 @@ entries:
   uptermd:
   - apiVersion: v2
     appVersion: 0.14.3
-    created: "2026-01-13T21:13:03.360421-08:00"
+    created: "2026-10-27T20:46:39.595053-07:00"
+    description: Secure Terminal Sharing
+    digest: 17168d848d37455c702e061ffbe437a5fa0d1fa4696540220e1702ad031fc287
+    home: https://upterm.dev
+    maintainers:
+    - email: o@owenou.com
+      name: Owen Ou
+      url: https://github.com/owenthereal
+    name: uptermd
+    sources:
+    - https://github.com/owenthereal/upterm
+    type: application
+    urls:
+    - uptermd-0.2.1.tgz
+    version: 0.2.1
+  - apiVersion: v2
+    appVersion: 0.14.3
+    created: "2026-10-27T20:46:39.594788-07:00"
     description: Secure Terminal Sharing
     digest: e4864a7436fe78b0dbcb4b079367544854241e24f65484a671e1705038be4b3e
     home: https://upterm.dev
@@ -18,4 +35,21 @@ entries:
     urls:
     - uptermd-0.2.0.tgz
     version: 0.2.0
-generated: "2026-01-13T21:13:03.358445-08:00"
+  - apiVersion: v2
+    appVersion: 0.4.4
+    created: "2026-10-27T20:46:39.5944-07:00"
+    description: Secure Terminal Sharing
+    digest: 11c281b12be6524ae0af105ec57b52ba5d20bbc17705501511edc3bbd38683c7
+    home: https://upterm.dev
+    maintainers:
+    - email: o@owenou.com
+      name: Owen Ou
+      url: https://github.com/jingweno
+    name: uptermd
+    sources:
+    - https://github.com/jingweno/upterm
+    type: application
+    urls:
+    - uptermd-0.1.0.tgz
+    version: 0.1.0
+generated: "2026-10-27T20:46:39.59318-07:00"
