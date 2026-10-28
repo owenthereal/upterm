@@ -44,6 +44,7 @@ type Opt struct {
 	AuthorizedKeysFiles      []string      `mapstructure:"authorized-keys"`
 	HopKeys                  []string      `mapstructure:"hop-key"`
 	HopTrustedKeys           []string      `mapstructure:"hop-trusted-key"`
+	NodeTrustedKeys          []string      `mapstructure:"node-trusted-key"`
 	HopRefuseHostKey         bool          `mapstructure:"hop-refuse-host-key"`
 	PrivateKeys              []string      `mapstructure:"private-key"`
 	Hostnames                []string      `mapstructure:"hostname"`
@@ -159,6 +160,18 @@ func (opt *Opt) validateEmbeddedConfig() error {
 	return nil
 }
 
+func parseTrustedKeys(option string, lines []string) ([]ssh.PublicKey, error) {
+	var keys []ssh.PublicKey
+	for i, line := range lines {
+		key, _, _, _, err := ssh.ParseAuthorizedKey([]byte(line))
+		if err != nil {
+			return nil, fmt.Errorf("%s at index %d: %w", option, i, err)
+		}
+		keys = append(keys, key)
+	}
+	return keys, nil
+}
+
 func Start(ctx context.Context, opt Opt, logger *slog.Logger) error {
 	// Validate configuration upfront
 	if err := opt.Validate(); err != nil {
@@ -203,13 +216,13 @@ func Start(ctx context.Context, opt Opt, logger *slog.Logger) error {
 			return err
 		}
 	}
-	var hopTrusted []ssh.PublicKey
-	for i, line := range opt.HopTrustedKeys {
-		key, _, _, _, err := ssh.ParseAuthorizedKey([]byte(line))
-		if err != nil {
-			return fmt.Errorf("hop-trusted-key at index %d: %w", i, err)
-		}
-		hopTrusted = append(hopTrusted, key)
+	hopTrusted, err := parseTrustedKeys("hop-trusted-key", opt.HopTrustedKeys)
+	if err != nil {
+		return err
+	}
+	nodeTrusted, err := parseTrustedKeys("node-trusted-key", opt.NodeTrustedKeys)
+	if err != nil {
+		return err
 	}
 
 	// key signers + corresponding cert signers
@@ -362,6 +375,7 @@ func Start(ctx context.Context, opt Opt, logger *slog.Logger) error {
 			Signers:             signers,
 			HopSigners:          hopSigners,
 			HopTrusted:          hopTrusted,
+			NodeTrusted:         nodeTrusted,
 			RefuseHostKeyHops:   opt.HopRefuseHostKey,
 			NetworkProvider:     network,
 			SessionManager:      sessionManager,
@@ -430,6 +444,7 @@ type Server struct {
 	Signers             []ssh.Signer
 	HopSigners          []ssh.Signer
 	HopTrusted          []ssh.PublicKey
+	NodeTrusted         []ssh.PublicKey
 	RefuseHostKeyHops   bool
 	NetworkProvider     NetworkProvider
 	MetricsProvider     provider.Provider
@@ -723,6 +738,7 @@ func (s *Server) ServeListeners(ctx context.Context, ls Listeners) error {
 				Signers:             s.Signers,
 				HopSigners:          s.HopSigners,
 				HopTrusted:          s.HopTrusted,
+				NodeTrusted:         s.NodeTrusted,
 				RefuseHostKeyHops:   s.RefuseHostKeyHops,
 				NodeAddr:            s.NodeAddr,
 				AuthorizedKeysFiles: s.AuthorizedKeysFiles,

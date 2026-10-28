@@ -26,6 +26,7 @@ type sshProxy struct {
 	Signers             []ssh.Signer
 	HopSigners          []ssh.Signer
 	HopTrusted          []ssh.PublicKey
+	NodeTrusted         []ssh.PublicKey
 	RefuseHostKeyHops   bool
 	NodeAddr            string
 	AuthorizedKeysFiles []string
@@ -91,6 +92,7 @@ func (r *sshProxy) Serve(ln net.Listener) error {
 			Signers:           r.Signers,
 			HopSigners:        r.HopSigners,
 			HopTrusted:        r.HopTrusted,
+			NodeTrusted:       r.NodeTrusted,
 			RefuseHostKeyHops: r.RefuseHostKeyHops,
 			SessionManager:    r.SessionManager,
 			ConnDialer:        r.ConnDialer,
@@ -236,6 +238,7 @@ type proxyAuth struct {
 	Signers           []ssh.Signer
 	HopSigners        []ssh.Signer
 	HopTrusted        []ssh.PublicKey
+	NodeTrusted       []ssh.PublicKey
 	RefuseHostKeyHops bool
 	HostSigners       []ssh.Signer
 
@@ -530,6 +533,14 @@ func (a proxyAuth) plan(conn ssh.ConnMetadata, target *upstreamTarget, creds rou
 			for _, s := range a.HostSigners {
 				if utils.KeysEqual(key, s.PublicKey()) {
 					return nil
+				}
+			}
+
+			if target.id.Type != api.Identifier_HOST {
+				for _, trusted := range a.NodeTrusted {
+					if utils.KeysEqual(key, trusted) {
+						return nil
+					}
 				}
 			}
 		} else {

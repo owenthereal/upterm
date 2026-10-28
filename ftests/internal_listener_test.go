@@ -112,6 +112,11 @@ func useTestKeyPairs(t *testing.T) {
 // key, it would join and show the host the relay's key.
 func requireJoinsAsItsOwnKey(t *testing.T, hostURL, hostNodeAddr, joinURL string, authorities ...ssh.Signer) {
 	t.Helper()
+	requireJoinsWithNodeKey(t, hostURL, hostNodeAddr, joinURL, nil, authorities...)
+}
+
+func requireJoinsWithNodeKey(t *testing.T, hostURL, hostNodeAddr, joinURL string, nodeKey ssh.PublicKey, authorities ...ssh.Signer) {
+	t.Helper()
 	joined := make(chan *api.Client, 4)
 	adminSocketFile := setupAdminSocket(t)
 	h := &Host{
@@ -125,6 +130,14 @@ func requireJoinsAsItsOwnKey(t *testing.T, hostURL, hostNodeAddr, joinURL string
 				joined <- c
 			}
 		},
+	}
+	if nodeKey != nil {
+		h.HostKeyCallback = func(_ string, _ net.Addr, key ssh.PublicKey) error {
+			if !utils.KeysEqual(key, nodeKey) {
+				return fmt.Errorf("host connected to a relay with another key")
+			}
+			return nil
+		}
 	}
 	require.NoError(t, h.Share(hostURL))
 	t.Cleanup(h.Close)
@@ -242,8 +255,7 @@ func classificationSession(t *testing.T, relay *Server) (*api.GetSessionResponse
 	t.Helper()
 	hostKey, err := ssh.ParsePrivateKey([]byte(HostPrivateKeyContent))
 	require.NoError(t, err)
-	authority, err := ssh.ParsePrivateKey([]byte(ServerPrivateKeyContent))
-	require.NoError(t, err)
+	authority := relay.Server.Signers[0]
 	guest, _, _, _, err := ssh.ParseAuthorizedKey([]byte(ClientPublicKeyContent))
 	require.NoError(t, err)
 	id := utils.GenerateSessionID()
@@ -463,12 +475,21 @@ func TestHopKeyRotationPhases(t *testing.T) {
 // refusal switch as well as the untrusted-certificate fallback.
 func requireHopSignerRefused(t *testing.T, node *Server, signer ssh.Signer) {
 	t.Helper()
+	requireRotationSignerRefused(t, node, signer, true)
+}
+
+func requireRotationSignerRefused(t *testing.T, node *Server, signer ssh.Signer, restricted bool) {
+	t.Helper()
 	guest, _, _, _, err := ssh.ParseAuthorizedKey([]byte(ClientPublicKeyContent))
 	require.NoError(t, err)
 	host, _, _, _, err := ssh.ParseAuthorizedKey([]byte(HostPublicKeyContent))
 	require.NoError(t, err)
 	id := utils.GenerateSessionID()
-	user, err := node.Server.SessionManager.CreateSession(server.NewSession(id, node.NodeAddr(), "host", [][]byte{ssh.MarshalAuthorizedKey(host)}, [][]byte{ssh.MarshalAuthorizedKey(guest)}))
+	var allowed [][]byte
+	if restricted {
+		allowed = [][]byte{ssh.MarshalAuthorizedKey(guest)}
+	}
+	user, err := node.Server.SessionManager.CreateSession(server.NewSession(id, node.NodeAddr(), "host", [][]byte{ssh.MarshalAuthorizedKey(host)}, allowed))
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, node.Server.SessionManager.DeleteSession(id)) })
 	cert, err := (&server.UserCertSigner{SessionID: "untrusted", User: user, AuthRequest: &server.AuthRequest{ClientVersion: "SSH-2.0-Go", AuthorizedKey: ssh.MarshalAuthorizedKey(guest)}}).SignCert(signer)
@@ -616,4 +637,137 @@ func (s *credentialGateSession) DialContext(ctx context.Context, id string) (net
 		}
 	}
 	return s.SessionDialListener.DialContext(ctx, id)
+}
+
+// Every node carries the same complete trust sets throughout the mixed fleet.
+func TestServerKeyRotationKeepsFleetJoined(t *testing.T) {
+	if !testhelpers.IsConsulAvailable() {
+		t.Skip("Consul not available")
+	}
+	useTestKeyPairs(t)
+	k1, k2, hop := newTestSigner(t), newTestSigner(t), newTestSigner(t)
+	both := []ssh.PublicKey{k1.PublicKey(), k2.PublicKey()}
+	for _, tc := range []struct {
+		name  string
+		keys  [2]ssh.Signer
+		trust []ssh.PublicKey
+	}{
+		{"trust", [2]ssh.Signer{k1, k1}, both},
+		{"present_mixed", [2]ssh.Signer{k2, k1}, both},
+		{"present_complete", [2]ssh.Signer{k2, k2}, both},
+		{"retire", [2]ssh.Signer{k2, k2}, []ssh.PublicKey{k2.PublicKey()}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			nodes := []*Server{rotationRelay(t, tc.keys[0], tc.trust, hop, nil), rotationRelay(t, tc.keys[1], tc.trust, hop, nil)}
+			requireRotationJoinsBothWays(t, nodes, tc.keys, [2]ssh.Signer{hop, hop})
+		})
+	}
+	for _, name := range []string{"retired_key", "old_key_retired_early"} {
+		t.Run(name, func(t *testing.T) {
+			entry := rotationRelay(t, k2, []ssh.PublicKey{k2.PublicKey()}, hop, nil)
+			targetTrust := []ssh.PublicKey{k2.PublicKey()}
+			if name == "old_key_retired_early" {
+				targetTrust = both
+			}
+			target := rotationRelay(t, k1, targetTrust, hop, nil)
+			requireRotationRouteRefused(t, entry, target, upterm.UpstreamHostKeyMismatch)
+		})
+	}
+}
+
+func TestServerKeyRotationWithoutHopKey(t *testing.T) {
+	if !testhelpers.IsConsulAvailable() {
+		t.Skip("Consul not available")
+	}
+	useTestKeyPairs(t)
+	k1, k2 := newTestSigner(t), newTestSigner(t)
+	both := []ssh.PublicKey{k1.PublicKey(), k2.PublicKey()}
+	for _, tc := range []struct {
+		name     string
+		hopTrust []ssh.PublicKey
+		joins    [2]bool
+	}{
+		{"node_trust_only", nil, [2]bool{false, false}},
+		{"new_hop_key_only", []ssh.PublicKey{k2.PublicKey()}, [2]bool{true, false}},
+		{"both_hop_keys", both, [2]bool{true, true}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			keys := [2]ssh.Signer{k2, k1}
+			nodes := []*Server{rotationRelay(t, k2, both, nil, tc.hopTrust), rotationRelay(t, k1, both, nil, tc.hopTrust)}
+			for entry, target := range []int{1, 0} {
+				t.Run(fmt.Sprintf("n%d_to_n%d", entry+1, target+1), func(t *testing.T) {
+					if tc.joins[entry] {
+						requireJoinsWithNodeKey(t, nodes[target].joinURL("ssh"), nodes[target].NodeAddr(), nodes[entry].joinURL("ssh"), keys[target].PublicKey(), keys[target])
+						requireSuccessfulRouteClassification(t, nodes[target], nodes[entry].joinURL("ssh"), true)
+					} else {
+						requireRotationRouteRefused(t, nodes[entry], nodes[target], upterm.UpstreamAuthFailed)
+						t.Run("restricted", func(t *testing.T) { requireRotationSignerRefused(t, nodes[target], keys[entry], true) })
+						t.Run("open_session_control", func(t *testing.T) { requireRotationSignerRefused(t, nodes[target], keys[entry], false) })
+					}
+				})
+			}
+		})
+	}
+	for _, tc := range []struct {
+		name  string
+		keys  [2]ssh.Signer
+		trust []ssh.PublicKey
+	}{
+		{"trust", [2]ssh.Signer{k1, k1}, both},
+		{"present_complete", [2]ssh.Signer{k2, k2}, both},
+		{"retire", [2]ssh.Signer{k2, k2}, []ssh.PublicKey{k2.PublicKey()}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			nodes := []*Server{rotationRelay(t, tc.keys[0], tc.trust, nil, tc.trust), rotationRelay(t, tc.keys[1], tc.trust, nil, tc.trust)}
+			requireRotationJoinsBothWays(t, nodes, tc.keys, tc.keys)
+		})
+	}
+}
+
+func rotationRelay(t *testing.T, key ssh.Signer, nodeTrust []ssh.PublicKey, hop ssh.Signer, hopTrust []ssh.PublicKey) *Server {
+	t.Helper()
+	ready := make(chan struct{})
+	relay := newRedialRelay(t, routing.ModeConsul, withInternalListener(false), func(s *Server) {
+		s.beforeServe = func(s *Server) {
+			s.Server.HostSigners = []ssh.Signer{key}
+			s.Server.Signers = []ssh.Signer{key}
+			s.Server.NodeTrusted = nodeTrust
+			if hop != nil {
+				s.Server.HopSigners = []ssh.Signer{hop}
+				s.Server.RefuseHostKeyHops = true
+			}
+			s.Server.HopTrusted = hopTrust
+			close(ready)
+		}
+	})
+	select {
+	case <-ready:
+	case <-time.After(5 * time.Second):
+		t.Fatal("rotation relay did not initialize")
+	}
+	return relay
+}
+
+func requireRotationJoinsBothWays(t *testing.T, nodes []*Server, keys, authorities [2]ssh.Signer) {
+	t.Helper()
+	for entry, target := range []int{1, 0} {
+		t.Run(fmt.Sprintf("n%d_to_n%d", entry+1, target+1), func(t *testing.T) {
+			requireJoinsWithNodeKey(t, nodes[target].joinURL("ssh"), nodes[target].NodeAddr(), nodes[entry].joinURL("ssh"), keys[target].PublicKey(), authorities[target])
+			requireSuccessfulRouteClassification(t, nodes[target], nodes[entry].joinURL("ssh"), true)
+		})
+	}
+}
+
+func requireRotationRouteRefused(t *testing.T, entry, target *Server, want string) {
+	t.Helper()
+	session, _ := classificationSession(t, target)
+	auths, err := authMethodsFromFiles([]string{ClientPrivateKey})
+	require.NoError(t, err)
+	client, err := ssh.Dial("tcp", entry.SSHAddr(), &ssh.ClientConfig{User: session.SshUser, ClientVersion: upterm.JoinSSHClientVersion, Auth: auths, HostKeyCallback: ssh.InsecureIgnoreHostKey(), Timeout: 5 * time.Second})
+	require.NoError(t, err)
+	defer client.Close()
+	_, _, err = client.OpenChannel("echo@upterm.test", nil)
+	var refusal *ssh.OpenChannelError
+	require.ErrorAs(t, err, &refusal)
+	require.Equal(t, want, refusal.Message)
 }

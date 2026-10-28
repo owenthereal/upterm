@@ -304,3 +304,11 @@ func TestHopKeyFlags(t *testing.T) {
 	require.Equal(t, "public key(s) whose signatures this node accepts on node hops, in addition to its hop keys", cmd.PersistentFlags().Lookup("hop-trusted-key").Usage)
 	require.Equal(t, "stop accepting node hops signed with the server's own keys", cmd.PersistentFlags().Lookup("hop-refuse-host-key").Usage)
 }
+
+func TestNodeTrustedKeyFlag(t *testing.T) {
+	resetUptermdEnv(t)
+	opt, err := unmarshalForTest(t, "--node-trusted-key", "key-one,key-two")
+	require.NoError(t, err)
+	require.Equal(t, []string{"key-one", "key-two"}, opt.NodeTrustedKeys)
+	require.Equal(t, "public key(s) this node accepts from another relay node it hops to, in addition to its own server keys. Add a new server key here on every node before any node presents it, and keep the old one listed until no node presents it", Root().PersistentFlags().Lookup("node-trusted-key").Usage)
+}

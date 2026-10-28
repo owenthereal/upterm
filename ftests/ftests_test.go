@@ -747,6 +747,7 @@ type Host struct {
 	ClientJoinedCallback     func(*api.Client)
 	ClientLeftCallback       func(*api.Client)
 	PermittedClientPublicKey string
+	HostKeyCallback          ssh.HostKeyCallback
 	AllowLocalTCPForwarding  bool
 	ReadOnly                 bool
 	SFTPDisabled             bool // Disable SFTP subsystem
@@ -810,6 +811,9 @@ func (c *Host) init() {
 }
 
 func (c *Host) Share(url string) error {
+	if c.HostKeyCallback == nil {
+		c.HostKeyCallback = ssh.InsecureIgnoreHostKey()
+	}
 	c.init()
 
 	stdinr, stdinw, err := os.Pipe()
@@ -868,7 +872,7 @@ func (c *Host) Share(url string) error {
 		KeepAliveDuration:       keepAliveDuration,
 		Reconnect:               c.Reconnect,
 		Logger:                  logger,
-		HostKeyCallback:         ssh.InsecureIgnoreHostKey(),
+		HostKeyCallback:         c.HostKeyCallback,
 		AllowLocalTCPForwarding: c.AllowLocalTCPForwarding,
 		ReadOnly:                c.ReadOnly,
 		SFTPDisabled:            c.SFTPDisabled,

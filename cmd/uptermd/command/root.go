@@ -36,6 +36,7 @@ func Root() *cobra.Command {
 	cmd.PersistentFlags().StringSliceP("authorized-keys", "", nil, "authorized_keys file(s) controlling which public keys may register as hosts; may be repeated, mirroring OpenSSH's AuthorizedKeysFile directive")
 	cmd.PersistentFlags().StringSlice("hop-key", nil, "private key file(s) that sign node hops; the first signs. Without it, hops are signed with the server's own keys. Hosts are always sent certificates signed with the server's own keys")
 	cmd.PersistentFlags().StringSlice("hop-trusted-key", nil, "public key(s) whose signatures this node accepts on node hops, in addition to its hop keys")
+	cmd.PersistentFlags().StringSlice("node-trusted-key", nil, "public key(s) this node accepts from another relay node it hops to, in addition to its own server keys. Add a new server key here on every node before any node presents it, and keep the old one listed until no node presents it")
 	cmd.PersistentFlags().Bool("hop-refuse-host-key", false, "stop accepting node hops signed with the server's own keys")
 	cmd.PersistentFlags().StringSliceP("private-key", "", nil, "server private key")
 	cmd.PersistentFlags().StringSliceP("hostname", "", nil, "server hostname for public-key authentication certificate principals. If empty, public-key authentication is used instead.")
