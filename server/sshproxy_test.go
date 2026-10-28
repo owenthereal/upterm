@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"errors"
 	"io"
+	"log/slog"
 	"net"
 	"os"
 	"path/filepath"
@@ -382,6 +383,164 @@ func Test_proxyAuth_checkAuthorizedKeys(t *testing.T) {
 			} else {
 				require.Error(t, err)
 			}
+		})
+	}
+}
+
+// The internal listener is where other relay nodes reach this one, and hosts
+// register on the public listener. A host on the internal listener is refused
+// before anything is dialed for it, this node's sshd included.
+func TestInternalListenerRefusesHosts(t *testing.T) {
+	logger := slog.New(slog.DiscardHandler)
+	key := certTestSigner(t)
+	a := proxyAuth{NodeAddr: "n1:22", listener: listenerInternal, SessionManager: newEmbeddedSessionManager(logger), Logger: logger}
+	_, _, _, err := a.authenticate(originConn("session", upterm.HostSSHClientVersion, "sid"), key.PublicKey())
+	require.EqualError(t, err, "hosts register on the public listener")
+
+	// End to end, with the same host on the public listener as the control: a
+	// dial count of zero proves nothing unless the host would otherwise have
+	// been dialed for.
+	for _, tc := range []struct {
+		name     string
+		kind     listenerKind
+		admitted bool
+	}{
+		{"the public listener", listenerPublic, true},
+		{"the internal listener", listenerInternal, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			upstream, peers := stockTestUpstream(t, false, TestPrivateKeyContent)
+			dialer := &stockTestDialer{addr: upstream}
+			_, addr, _, signer := stockTestProxy(t, 2*time.Second, dialer, func(p *sshProxy) { p.listener = tc.kind })
+			client, err := ssh.Dial("tcp", addr, &ssh.ClientConfig{
+				User:            "session",
+				ClientVersion:   upterm.HostSSHClientVersion,
+				Auth:            []ssh.AuthMethod{ssh.PublicKeys(signer)},
+				HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+				Timeout:         5 * time.Second,
+			})
+			if !tc.admitted {
+				require.ErrorContains(t, err, "unable to authenticate")
+				require.Zero(t, dialer.calls.Load(), "the sshd was dialed for a host the internal listener refused")
+				return
+			}
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = client.Close() })
+			select {
+			case <-peers:
+			case <-time.After(5 * time.Second):
+				t.Fatal("upstream did not authenticate")
+			}
+			require.Equal(t, int32(1), dialer.calls.Load())
+		})
+	}
+}
+
+// A relay certificate is one carrying an AuthRequest, judged from the
+// certificate itself, whoever signed it. With an internal listener it is a hop
+// there and nowhere else: the public listener and the bridge refuse it from any
+// signer, and the internal listener refuses it from one that isn't a hop
+// authority rather than authorizing its key. A certificate without an
+// AuthRequest is its key on every listener. The shared listener, a node without
+// an internal one, keeps today's rules.
+func TestRelayCertsByListener(t *testing.T) {
+	logger := slog.New(slog.DiscardHandler)
+	authority, err := ssh.ParsePrivateKey([]byte(TestPrivateKeyContent))
+	require.NoError(t, err)
+	guest := certTestSigner(t)
+	foreign := certTestSigner(t)
+	sm := newSessionManagerWithStore(newMemorySessionStore(logger), routing.NewEncodeDecoder(routing.ModeConsul))
+
+	relayCert := func(signer ssh.Signer) ssh.PublicKey {
+		cert, err := (&UserCertSigner{SessionID: "sid-1", User: "session", AuthRequest: &AuthRequest{
+			ClientVersion: "SSH-2.0-OpenSSH_9.0", AuthorizedKey: ssh.MarshalAuthorizedKey(guest.PublicKey()),
+		}}).SignCert(signer)
+		require.NoError(t, err)
+		return cert.PublicKey()
+	}
+	// The relay's own signing key, certified by itself with no AuthRequest.
+	bareRelayCert, err := testCertSigner("session", authority)
+	require.NoError(t, err)
+
+	type outcome struct {
+		key ssh.PublicKey // the key authorized
+		hop bool
+		err string
+	}
+	admits := func(key ssh.PublicKey, hop bool) outcome { return outcome{key: key, hop: hop} }
+	refuses := func(err string) outcome { return outcome{err: err} }
+	everywhere := func(o outcome) map[listenerKind]outcome {
+		return map[listenerKind]outcome{listenerShared: o, listenerPublic: o, listenerBridge: o, listenerInternal: o}
+	}
+	const (
+		onPublic  = "relay certificate on a public listener"
+		untrusted = "relay certificate from an untrusted signer"
+	)
+
+	for _, tc := range []struct {
+		name    string
+		offered ssh.PublicKey
+		want    map[listenerKind]outcome
+	}{
+		{"a hop authority's relay certificate", relayCert(authority), map[listenerKind]outcome{
+			listenerShared:   admits(guest.PublicKey(), true),
+			listenerPublic:   refuses(onPublic),
+			listenerBridge:   refuses(onPublic),
+			listenerInternal: admits(guest.PublicKey(), true),
+		}},
+		{"another signer's relay certificate", relayCert(foreign), map[listenerKind]outcome{
+			listenerShared:   admits(foreign.PublicKey(), false),
+			listenerPublic:   refuses(onPublic),
+			listenerBridge:   refuses(onPublic),
+			listenerInternal: refuses(untrusted),
+		}},
+		{"an agent's certificate from its own CA", agentCert(t, guest).PublicKey(), everywhere(admits(guest.PublicKey(), false))},
+		{"the relay's key certified without an AuthRequest", bareRelayCert.PublicKey(), everywhere(admits(authority.PublicKey(), false))},
+		{"a plain key", guest.PublicKey(), everywhere(admits(guest.PublicKey(), false))},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, kind := range allListenerKinds {
+				want := tc.want[kind]
+				a := proxyAuth{NodeAddr: "n1:22", listener: kind, Signers: []ssh.Signer{authority}, SessionManager: sm, Logger: logger}
+				auth, key, hop, err := a.authenticate(originConn("session", "SSH-2.0-Go", "sid-2"), tc.offered)
+				if want.err != "" {
+					require.EqualError(t, err, want.err, "listener %d", kind)
+					require.Nil(t, auth, "listener %d", kind)
+					continue
+				}
+				require.NoError(t, err, "listener %d", kind)
+				require.Equal(t, string(ssh.MarshalAuthorizedKey(want.key)), string(ssh.MarshalAuthorizedKey(key)), "listener %d", kind)
+				require.Equal(t, want.hop, hop, "listener %d", kind)
+			}
+		})
+	}
+}
+
+// A guest's own key on the internal listener is a guest a neighbour's
+// WebSocket hands over raw, or a peer this node knows nothing about. It is
+// served as on any listener, and its request claims no entry. An agent's
+// certificate, carrying no AuthRequest, is the guest's key there too.
+func TestRawInternalGuestOrigin(t *testing.T) {
+	guest := certTestSigner(t)
+	for name, offered := range map[string]ssh.Signer{
+		"a plain key":            guest,
+		"an agent's certificate": agentCert(t, guest),
+	} {
+		t.Run(name, func(t *testing.T) {
+			upstream, peers := stockTestUpstream(t, false, TestPrivateKeyContent)
+			n2, addr := originNode(t, listenerInternal, "n2:22", &stockTestDialer{addr: upstream})
+			user := holdSession(t, n2, guest.PublicKey())
+			client, err := ssh.Dial("tcp", addr, &ssh.ClientConfig{User: user, Auth: []ssh.AuthMethod{ssh.PublicKeys(offered)},
+				HostKeyCallback: ssh.InsecureIgnoreHostKey(), Timeout: 5 * time.Second})
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = client.Close() })
+
+			peer, _, auth := arrived(t, peers)
+			require.Equal(t, string(ssh.MarshalAuthorizedKey(guest.PublicKey())), peer.Permissions.Extensions["key"],
+				"the upstream saw the guest's key")
+			require.Equal(t, Ingress_INGRESS_UNSPECIFIED, auth.GetIngress())
+			require.Empty(t, auth.GetIngressNode())
+			require.Equal(t, client.SessionID(), auth.GetIngressConnection())
 		})
 	}
 }

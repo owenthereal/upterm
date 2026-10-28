@@ -31,6 +31,17 @@ message CreateSessionResponse {
   bool sessionKeyRedial = 4;
 }
 
+// Ingress is where a guest's connection entered the relay fleet.
+enum Ingress {
+  // A relay that predates the field, or a connection whose entry point
+  // this relay can't establish.
+  INGRESS_UNSPECIFIED = 0;
+  // The public SSH listener.
+  INGRESS_SSH = 1;
+  // A WebSocket listener, on the node that terminated the guest's SSH.
+  INGRESS_WEBSOCKET = 2;
+}
+
 message AuthRequest {
   string client_version = 1;
   string remote_addr = 2;
@@ -39,4 +50,12 @@ message AuthRequest {
   // guest's: the server half of the SSH_CONNECTION a guest's forced command
   // sees. Empty from a relay that predates it.
   string local_addr = 4;
+  // Where the guest's connection entered the fleet. Hops carry it unchanged.
+  Ingress ingress = 5;
+  // The NodeAddr of the node where the guest's connection entered; empty
+  // when ingress is INGRESS_UNSPECIFIED. Hops carry it unchanged.
+  string ingress_node = 6;
+  // The SSH session ID of the guest's own connection, at the node that
+  // terminated it. Hops carry it unchanged.
+  bytes ingress_connection = 7;
 }

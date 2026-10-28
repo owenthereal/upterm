@@ -13,7 +13,7 @@ import (
 // start from a known-empty environment. root.go:100-105 binds UPTERMD_*
 // through viper's AutomaticEnv and additionally binds bare SENTRY_DSN.
 var uptermdEnv = []string{
-	"UPTERMD_SSH_ADDR", "UPTERMD_WS_ADDR", "UPTERMD_NODE_ADDR",
+	"UPTERMD_SSH_ADDR", "UPTERMD_WS_ADDR", "UPTERMD_NODE_ADDR", "UPTERMD_INTERNAL_ADDR",
 	"UPTERMD_AUTHORIZED_KEYS", "UPTERMD_PRIVATE_KEY", "UPTERMD_HOSTNAME",
 	"UPTERMD_SSH_PROXY_PROTOCOL", "UPTERMD_NETWORK", "UPTERMD_NETWORK_OPT",
 	"UPTERMD_METRIC_ADDR", "UPTERMD_DEBUG", "UPTERMD_ROUTING",
@@ -231,4 +231,32 @@ func TestRemovedFrontDoorFlag(t *testing.T) {
 			require.ErrorContains(t, Root().ParseFlags([]string{arg}), "unknown flag: --stock-ssh")
 		})
 	}
+}
+
+func TestInternalAddrFlag(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args []string
+		env  string
+		want string
+	}{
+		{name: "default"},
+		{name: "flag", args: []string{"--internal-addr", "10.0.0.1:2223"}, want: "10.0.0.1:2223"},
+		{name: "environment", env: "10.0.0.2:2223", want: "10.0.0.2:2223"},
+		{name: "flag overrides environment", args: []string{"--internal-addr=10.0.0.1:2223"}, env: "10.0.0.2:2223", want: "10.0.0.1:2223"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			resetUptermdEnv(t)
+			if tc.env != "" {
+				t.Setenv("UPTERMD_INTERNAL_ADDR", tc.env)
+			}
+			opt, err := unmarshalForTest(t, tc.args...)
+			require.NoError(t, err)
+			require.Equal(t, tc.want, opt.InternalAddr)
+		})
+	}
+
+	flag := Root().PersistentFlags().Lookup("internal-addr")
+	require.NotNil(t, flag)
+	require.Equal(t, "address for the internal listener that node hops and bridged WebSocket guests use; only other relay nodes should be able to reach it. When set, the public SSH listener refuses relay certificates", flag.Usage)
 }

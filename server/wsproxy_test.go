@@ -339,6 +339,49 @@ func Test_WebSocketProxy_EmbeddedGuestGoesToSSHProxy(t *testing.T) {
 	require.Zero(t, accepted.Load(), "the address the guest's user named was dialed")
 }
 
+// With an internal listener, this node's NodeAddr is that listener, and the
+// store names it for every session on this node. A guest of one still goes to
+// the bridge, this node's SSH proxy for its WebSocket guests: on the internal
+// listener it would arrive raw and claim no entry.
+func Test_WebSocketProxy_ThisNodesGuestGoesToTheBridge(t *testing.T) {
+	logger := slog.New(slog.DiscardHandler)
+	internal, dialedInternal := standInNode(t)
+	sm := newSessionManagerWithStore(newMemorySessionStore(logger), routing.NewEncodeDecoder(routing.ModeConsul))
+	user, err := sm.CreateSession(NewSession("session", internal, "host", nil, nil))
+	require.NoError(t, err)
+	c := openGuestWS(t, &wsHandler{
+		ConnDialer:     sshProxyDialer{sshProxyAddr: standInSSHProxy(t), ownNodeAddr: internal, nodeAddrFromStore: true, Logger: logger},
+		SessionManager: sm,
+		Logger:         logger,
+	}, user)
+
+	_, msg, err := c.ReadMessage()
+	require.NoError(t, err)
+	require.Equal(t, "from the SSH proxy", string(msg))
+	require.Zero(t, dialedInternal.Load(), "this node's internal listener was dialed")
+}
+
+// Only another node's address is dialed directly: the neighbour's SSH proxy
+// takes the guest raw, as it always has.
+func Test_WebSocketProxy_ANeighboursGuestIsDialedDirectly(t *testing.T) {
+	logger := slog.New(slog.DiscardHandler)
+	neighbour, dialedNeighbour := standInNode(t)
+	internal, dialedInternal := standInNode(t)
+	sm := newSessionManagerWithStore(newMemorySessionStore(logger), routing.NewEncodeDecoder(routing.ModeConsul))
+	user, err := sm.CreateSession(NewSession("session", neighbour, "host", nil, nil))
+	require.NoError(t, err)
+	c := openGuestWS(t, &wsHandler{
+		ConnDialer:     sshProxyDialer{sshProxyAddr: standInSSHProxy(t), ownNodeAddr: internal, nodeAddrFromStore: true, Logger: logger},
+		SessionManager: sm,
+		Logger:         logger,
+	}, user)
+
+	_, _, err = c.ReadMessage()
+	require.NoError(t, err)
+	require.Equal(t, int32(1), dialedNeighbour.Load(), "the neighbour was not dialed")
+	require.Zero(t, dialedInternal.Load(), "this node's internal listener was dialed")
+}
+
 // The page's ssh line names the relay's SSH address: the Host header's own
 // port when it has one, and 443 when it doesn't. The wss URLs take the header
 // as it is.

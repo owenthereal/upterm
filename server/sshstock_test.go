@@ -96,7 +96,12 @@ func stockTestUpstream(t *testing.T, reject bool, hostKey string) (string, <-cha
 		if err != nil {
 			return nil, err
 		}
-		return &ssh.Permissions{Extensions: map[string]string{"key": string(auth.AuthorizedKey)}}, nil
+		// "cert" is the certificate itself, for a test that reads what else
+		// it carried.
+		return &ssh.Permissions{Extensions: map[string]string{
+			"key":  string(auth.AuthorizedKey),
+			"cert": string(cert.Marshal()),
+		}}, nil
 	}}
 	cfg.AddHostKey(signer)
 	ln, err := net.Listen("tcp", "127.0.0.1:0")

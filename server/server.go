@@ -38,6 +38,7 @@ type Opt struct {
 	SSHProxyProtocol    bool          `mapstructure:"ssh-proxy-protocol"`
 	WSAddr              string        `mapstructure:"ws-addr"`
 	NodeAddr            string        `mapstructure:"node-addr"`
+	InternalAddr        string        `mapstructure:"internal-addr"`
 	AuthorizedKeysFiles []string      `mapstructure:"authorized-keys"`
 	PrivateKeys         []string      `mapstructure:"private-key"`
 	Hostnames           []string      `mapstructure:"hostname"`
@@ -81,6 +82,9 @@ func (opt *Opt) Validate() error {
 	if opt.SSHAddr == "" {
 		return fmt.Errorf("ssh-addr is required")
 	}
+	if err := opt.validateInternalAddr(); err != nil {
+		return err
+	}
 
 	// Routing-specific validation
 	switch routingMode := opt.ResolvedRouting(); routingMode {
@@ -91,6 +95,25 @@ func (opt *Opt) Validate() error {
 	default:
 		return fmt.Errorf("unsupported routing mode: %s", routingMode)
 	}
+}
+
+// validateInternalAddr requires node-addr beside an internal-addr whose host
+// is a wildcard. NodeAddr is where neighbours hop to this node, and without
+// node-addr it is the internal listener's bound address, which for a wildcard
+// is no address another machine can dial.
+func (opt *Opt) validateInternalAddr() error {
+	if opt.InternalAddr == "" || opt.NodeAddr != "" {
+		return nil
+	}
+	host, _, err := net.SplitHostPort(opt.InternalAddr)
+	if err != nil {
+		// Left to the listen, whose error says what is wrong with it.
+		return nil
+	}
+	if ip := net.ParseIP(host); host == "" || (ip != nil && ip.IsUnspecified()) {
+		return fmt.Errorf("internal-addr is a wildcard; set node-addr to the address neighbours dial")
+	}
+	return nil
 }
 
 // validateConsulConfig validates Consul-specific configuration
@@ -168,9 +191,16 @@ func Start(ctx context.Context, opt Opt, logger *slog.Logger) error {
 	logger = logger.With("app", "uptermd", "network", opt.Network, "network_opt", opt.NetworkOpts)
 
 	var (
-		sshln net.Listener
-		wsln  net.Listener
+		sshln      net.Listener
+		wsln       net.Listener
+		internalln net.Listener
 	)
+	listenersOwned := true
+	defer func() {
+		if listenersOwned {
+			closeListeners(logger, sshln, wsln, internalln)
+		}
+	}()
 
 	if opt.SSHAddr != "" {
 		sshln, err = net.Listen("tcp", opt.SSHAddr)
@@ -200,8 +230,21 @@ func Start(ctx context.Context, opt Opt, logger *slog.Logger) error {
 		logger = logger.With("ws_addr", wsln.Addr().String())
 	}
 
-	// fallback node addr to ssh addr or ws addr if empty
+	if opt.InternalAddr != "" {
+		internalln, err = net.Listen("tcp", opt.InternalAddr)
+		if err != nil {
+			return err
+		}
+		logger = logger.With("internal_addr", internalln.Addr().String())
+	}
+
+	// fallback node addr to the internal, ssh or ws addr if empty. Neighbours
+	// hop to a node at its NodeAddr, and with an internal listener that is
+	// where they hop. Validate has refused a wildcard here without node-addr.
 	nodeAddr := opt.NodeAddr
+	if nodeAddr == "" && internalln != nil {
+		nodeAddr = internalln.Addr().String()
+	}
 	if nodeAddr == "" && sshln != nil {
 		nodeAddr = sshln.Addr().String()
 	}
@@ -293,7 +336,7 @@ func Start(ctx context.Context, opt Opt, logger *slog.Logger) error {
 		// serially on the goroutine already inside Run, before Run returns, so
 		// this write happens before the read below.
 		g.Add(func() error {
-			return s.ServeWithContext(ctx, sshln, wsln)
+			return s.ServeListeners(ctx, Listeners{SSH: sshln, WS: wsln, Internal: internalln})
 		}, func(err error) {
 			if shutdownErr := s.Shutdown(); shutdownErr != nil {
 				logger.Error("error during server shutdown", "error", shutdownErr)
@@ -321,6 +364,8 @@ func Start(ctx context.Context, opt Opt, logger *slog.Logger) error {
 	// whatever Shutdown reported and nothing else. Both are joined rather than
 	// either winning: an actor that failed and a shutdown that then failed to
 	// clean up are two separate things the operator needs to see.
+	// ServeListeners takes ownership as soon as the server actor starts.
+	listenersOwned = false
 	return errors.Join(g.Run(), serverShutdownErr)
 }
 
@@ -348,7 +393,7 @@ type Server struct {
 	mux    sync.Mutex
 	ctx    context.Context
 	cancel func()
-	// served closes when ServeWithContext returns, which is the moment every
+	// served closes when ServeListeners returns, which is the moment every
 	// component has run its own shutdown and released its listener. Shutdown
 	// waits on it so that callers keep the guarantee they had when Shutdown
 	// closed the listeners itself: once it returns, nothing is still bound.
@@ -440,7 +485,7 @@ func waitForServerSessionCleanup(ctx context.Context, cleaned <-chan error) erro
 }
 
 // Shutdown cancels serving and waits for it to finish. It deliberately does not
-// close sshln or wsln: each is owned by the component serving it, which closes
+// close the listeners: each is owned by the component serving it, which closes
 // it from its own run.Group interrupt as the context unwinds. Closing them here
 // as well made every listener close twice with no ordering between the two, and
 // the loser of that race reported "use of closed network connection" from
@@ -507,7 +552,44 @@ func (s *Server) Shutdown() error {
 	return err
 }
 
+// Listeners are the sockets a Server serves; any may be nil.
+type Listeners struct {
+	SSH      net.Listener // the public SSH listener
+	WS       net.Listener // the WebSocket listener
+	Internal net.Listener // node hops and bridged WebSocket guests; needs SSH
+}
+
+// errInternalNeedsSSH refuses an internal listener served without the SSH
+// listener. An internal listener takes node hops and bridged WebSocket guests
+// off the SSH listener, and without one there is nothing to take them off: a
+// WebSocket listener alone reaches the sshd and other nodes directly, with no
+// SSH proxy in between.
+var errInternalNeedsSSH = errors.New("an internal listener needs the SSH listener")
+
+// ServeWithContext serves sshln and wsln, either of which may be nil, with no
+// internal listener.
 func (s *Server) ServeWithContext(ctx context.Context, sshln net.Listener, wsln net.Listener) error {
+	return s.ServeListeners(ctx, Listeners{SSH: sshln, WS: wsln})
+}
+
+// ServeListeners serves ls until ctx is done or Shutdown is called, alongside
+// this node's own sshd, and owns every listener in ls from the moment it is
+// called.
+//
+// Without an internal listener, everything arrives on the SSH listener: direct
+// clients, other nodes' hops, and the guests that a WebSocket listener, this
+// node's or a neighbour's, bridges to it. With one, the SSH listener is left
+// direct clients alone. Other nodes hop to the internal listener and hand it
+// their WebSocket guests, and this node's WebSocket listener bridges to a
+// loopback listener opened here for it alone, so each listener knows what
+// arrives on it.
+func (s *Server) ServeListeners(ctx context.Context, ls Listeners) error {
+	if ls.Internal != nil && ls.SSH == nil {
+		// Handed over all the same, so released as a failed start releases them.
+		closeListeners(s.Logger, ls.WS, ls.Internal)
+		return errInternalNeedsSSH
+	}
+
 	s.mux.Lock()
 	s.ctx, s.cancel = context.WithCancel(ctx)
 	// Shutdown may already be waiting on a previous run's channel, so give it a
@@ -525,6 +607,27 @@ func (s *Server) ServeWithContext(ctx context.Context, sshln net.Listener, wsln 
 	// one process's: the proxy routes a host to this node's own sshd.
 	activity := newHostActivity()
 
+	// run.Group actors do not start until Run, so until then nothing has taken
+	// any listener over, and each, handed over or opened here, is still this
+	// call's to release.
+	var bridgeln net.Listener
+	if ls.WS != nil && ls.Internal != nil {
+		ln, err := net.Listen("tcp4", "127.0.0.1:0")
+		if err != nil {
+			closeListeners(s.Logger, ls.SSH, ls.WS, ls.Internal)
+			return err
+		}
+		bridgeln = ln
+		// The one listener no caller handed in, and so the one whose address
+		// nothing else reports.
+		s.Logger.Info("listening for this node's WebSocket bridge", "bridge_addr", ln.Addr().String())
+	}
+	sshdln, err := sshdDialListener.Listen()
+	if err != nil {
+		closeListeners(s.Logger, ls.SSH, ls.WS, ls.Internal, bridgeln)
+		return err
+	}
+
 	var g run.Group
 	{
 		g.Add(func() error {
@@ -535,13 +638,38 @@ func (s *Server) ServeWithContext(ctx context.Context, sshln net.Listener, wsln 
 		})
 	}
 	{
-		if sshln != nil {
-			cd := sidewayConnDialer{
-				NodeAddr:            s.NodeAddr,
-				SSHDDialListener:    sshdDialListener,
-				SessionDialListener: sessionDialListener,
-				NeighbourDialer:     tcpConnDialer{},
-				Logger:              s.Logger.With("component", "ssh-conn-dialer"),
+		cd := sidewayConnDialer{
+			NodeAddr:            s.NodeAddr,
+			SSHDDialListener:    sshdDialListener,
+			SessionDialListener: sessionDialListener,
+			NeighbourDialer:     tcpConnDialer{},
+			Logger:              s.Logger.With("component", "ssh-conn-dialer"),
+		}
+		// One set of routing metrics for all the SSH proxies, as there was for
+		// the one SSH listener everything used to arrive on: the same totals,
+		// and each metric registered once, which a Prometheus registry insists
+		// on.
+		var instruments *routingInstruments
+		if ls.SSH != nil {
+			instruments = newSSHRoutingInstruments(s.MetricsProvider)
+		}
+		// The SSH listener establishes an entry point only once an internal
+		// listener takes everything else off it.
+		sshKind := listenerShared
+		if ls.Internal != nil {
+			sshKind = listenerPublic
+		}
+		for _, l := range []struct {
+			ln        net.Listener
+			kind      listenerKind
+			component string
+		}{
+			{ls.SSH, sshKind, "ssh-proxy"},
+			{ls.Internal, listenerInternal, "internal-ssh-proxy"},
+			{bridgeln, listenerBridge, "bridge-ssh-proxy"},
+		} {
+			if l.ln == nil {
+				continue
 			}
 			sp := &sshProxy{
 				HandshakeTimeout:    s.HandshakeTimeout,
@@ -551,12 +679,16 @@ func (s *Server) ServeWithContext(ctx context.Context, sshln net.Listener, wsln 
 				AuthorizedKeysFiles: s.AuthorizedKeysFiles,
 				ConnDialer:          cd,
 				SessionManager:      s.SessionManager,
-				Logger:              s.Logger.With("component", "ssh-proxy"),
+				Logger:              s.Logger.With("component", l.component),
 				MetricsProvider:     s.MetricsProvider,
-				hostActivity:        activity,
+				// The bridge carries WebSocket hosts, as the SSH listener
+				// carries the rest, and the internal listener refuses them.
+				hostActivity: activity,
+				listener:     l.kind,
+				instruments:  instruments,
 			}
 			g.Add(func() error {
-				return sp.Serve(sshln)
+				return sp.Serve(l.ln)
 			}, func(err error) {
 				if err := sp.Shutdown(); err != nil {
 					sp.Logger.Error("error during ssh proxy shutdown", "error", err)
@@ -565,9 +697,9 @@ func (s *Server) ServeWithContext(ctx context.Context, sshln net.Listener, wsln 
 		}
 	}
 	{
-		if wsln != nil {
+		if ls.WS != nil {
 			var cd connDialer
-			if sshln == nil {
+			if ls.SSH == nil {
 				cd = sidewayConnDialer{
 					NodeAddr:            s.NodeAddr,
 					SSHDDialListener:    sshdDialListener,
@@ -576,12 +708,12 @@ func (s *Server) ServeWithContext(ctx context.Context, sshln net.Listener, wsln 
 					Logger:              s.Logger.With("component", "ws-conn-dialer"),
 				}
 			} else {
-				// If sshln is not nil, always dial to SSHProxy.
+				// With an SSH listener, always dial to SSHProxy.
 				// So Host/Client -> WSProxy -> SSHProxy -> sshd/Session
 				// This makes sure that SSHProxy terminates all SSH requests
 				// which provides a consistent authentication mechanism.
-				cd = sshProxyDialer{
-					sshProxyAddr: sshln.Addr().String(),
+				d := sshProxyDialer{
+					sshProxyAddr: ls.SSH.Addr().String(),
 					// Only Consul mode resolves a guest's node from the
 					// session store, so only there does an identifier's
 					// NodeAddr name a relay node. Embedded mode takes it from
@@ -589,6 +721,15 @@ func (s *Server) ServeWithContext(ctx context.Context, sshln net.Listener, wsln 
 					nodeAddrFromStore: s.SessionManager.GetRoutingMode() == routing.ModeConsul,
 					Logger:            s.Logger.With("component", "ws-sshproxy-dialer"),
 				}
+				if bridgeln != nil {
+					// The bridge takes the SSH proxy's place. This node's
+					// NodeAddr is then the internal listener, which the store
+					// names for every session on this node, so the dialer is
+					// told it: a guest the store places there is this node's
+					// own, and goes to the bridge as well.
+					d.sshProxyAddr, d.ownNodeAddr = bridgeln.Addr().String(), s.NodeAddr
+				}
+				cd = d
 			}
 			ws := &webSocketProxy{
 				ConnDialer:     cd,
@@ -596,7 +737,7 @@ func (s *Server) ServeWithContext(ctx context.Context, sshln net.Listener, wsln 
 				Logger:         s.Logger.With("component", "ws-proxy"),
 			}
 			g.Add(func() error {
-				return ws.Serve(wsln)
+				return ws.Serve(ls.WS)
 			}, func(err error) {
 				if err := ws.Shutdown(); err != nil {
 					ws.Logger.Error("error during websocket proxy shutdown", "error", err)
@@ -605,14 +746,6 @@ func (s *Server) ServeWithContext(ctx context.Context, sshln net.Listener, wsln 
 		}
 	}
 	{
-		ln, err := sshdDialListener.Listen()
-		if err != nil {
-			// run.Group actors do not start until Run, so nothing has taken
-			// sshln or wsln over yet and they are still this call's to release.
-			closeListeners(s.Logger, sshln, wsln)
-			return err
-		}
-
 		sshd := sshd{
 			SessionManager:      s.SessionManager,
 			HostSigners:         s.HostSigners, // TODO: use different host keys
@@ -625,7 +758,7 @@ func (s *Server) ServeWithContext(ctx context.Context, sshln net.Listener, wsln 
 			hostActivity:        activity,
 		}
 		g.Add(func() error {
-			return sshd.Serve(ln)
+			return sshd.Serve(sshdln)
 		}, func(err error) {
 			if err := sshd.Shutdown(); err != nil {
 				stopResult.add(err)
@@ -640,7 +773,7 @@ func (s *Server) ServeWithContext(ctx context.Context, sshln net.Listener, wsln 
 	// hands back whichever happened to return first, so without this the same
 	// clean shutdown surfaced a different error run to run and every caller,
 	// the ftests harness included, logged it.
-	err := g.Run()
+	err = g.Run()
 	if isRequestedStop(err) {
 		err = nil
 	}
@@ -688,7 +821,14 @@ type sshProxyDialer struct {
 	// directly. Where it is not set, a guest's upstream goes to this node's SSH
 	// proxy, which resolves the guest's own SSH user itself.
 	nodeAddrFromStore bool
-	Logger            *slog.Logger
+	// ownNodeAddr is this node's NodeAddr when that is not where sshProxyAddr
+	// listens: the internal listener, with sshProxyAddr the bridge. A guest the
+	// store places there is this node's own, and goes to sshProxyAddr like any
+	// other. Empty without an internal listener, where NodeAddr is the SSH
+	// listener neighbours hop to, the same proxy sshProxyAddr reaches, and
+	// dialing it stays as it always was.
+	ownNodeAddr string
+	Logger      *slog.Logger
 }
 
 func (d sshProxyDialer) Dial(id *api.Identifier) (net.Conn, error) {
@@ -710,8 +850,10 @@ func (d sshProxyDialer) DialContext(ctx context.Context, id *api.Identifier) (ne
 	// refusal can say why, and in Consul mode when the resolved node won't take
 	// the dial, so the route can be refreshed. It is also every guest of a mode
 	// that resolves no node at all, where the address rides in the guest's own
-	// SSH user and the SSHProxy is the component that decodes it.
-	if id.NodeAddr == "" || !d.nodeAddrFromStore {
+	// SSH user and the SSHProxy is the component that decodes it. And it is a
+	// guest the store places on this node at its internal listener, which
+	// would take the guest raw and claim no entry for it.
+	if id.NodeAddr == "" || !d.nodeAddrFromStore || id.NodeAddr == d.ownNodeAddr {
 		d.Logger.With("session", id.Id, "sshproxy_addr", d.sshProxyAddr, "node_addr_from_store", d.nodeAddrFromStore).Info("dialing this node's sshproxy for a guest")
 		return dialer.DialContext(ctx, "tcp", d.sshProxyAddr)
 	}

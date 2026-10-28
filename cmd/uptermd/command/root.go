@@ -30,6 +30,7 @@ func Root() *cobra.Command {
 	cmd.PersistentFlags().StringP("ssh-addr", "", utils.DefaultLocalhost("2222"), "ssh server address")
 	cmd.PersistentFlags().StringP("ws-addr", "", "", "websocket server address")
 	cmd.PersistentFlags().StringP("node-addr", "", "", "node address")
+	cmd.PersistentFlags().StringP("internal-addr", "", "", "address for the internal listener that node hops and bridged WebSocket guests use; only other relay nodes should be able to reach it. When set, the public SSH listener refuses relay certificates")
 	cmd.PersistentFlags().StringSliceP("authorized-keys", "", nil, "authorized_keys file(s) controlling which public keys may register as hosts; may be repeated, mirroring OpenSSH's AuthorizedKeysFile directive")
 	cmd.PersistentFlags().StringSliceP("private-key", "", nil, "server private key")
 	cmd.PersistentFlags().StringSliceP("hostname", "", nil, "server hostname for public-key authentication certificate principals. If empty, public-key authentication is used instead.")

@@ -57,6 +57,10 @@ type SSHRouting struct {
 	// the host is connected. Nil records nothing.
 	hostActivity *hostActivity
 
+	// instruments, when set, are the routing metrics this counts into, shared
+	// with the other SSH listeners' routing. Nil registers a set of its own.
+	instruments *routingInstruments
+
 	cancel   context.CancelFunc
 	workers  sync.WaitGroup
 	listener net.Listener
