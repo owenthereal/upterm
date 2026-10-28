@@ -15,7 +15,7 @@ import (
 var uptermdEnv = []string{
 	"UPTERMD_SSH_ADDR", "UPTERMD_WS_ADDR", "UPTERMD_NODE_ADDR", "UPTERMD_INTERNAL_ADDR",
 	"UPTERMD_AUTHORIZED_KEYS", "UPTERMD_PRIVATE_KEY", "UPTERMD_HOSTNAME",
-	"UPTERMD_SSH_PROXY_PROTOCOL", "UPTERMD_NETWORK", "UPTERMD_NETWORK_OPT",
+	"UPTERMD_SSH_NETWORK", "UPTERMD_SSH_PROXY_PROTOCOL_REQUIRED", "UPTERMD_SSH_PROXY_PROTOCOL", "UPTERMD_NETWORK", "UPTERMD_NETWORK_OPT",
 	"UPTERMD_METRIC_ADDR", "UPTERMD_DEBUG", "UPTERMD_ROUTING",
 	"UPTERMD_CONSUL_URL", "UPTERMD_CONSUL_SESSION_TTL", "UPTERMD_SENTRY_DSN",
 	"SENTRY_DSN", "UPTERMD_HANDSHAKE_TIMEOUT",
@@ -259,4 +259,34 @@ func TestInternalAddrFlag(t *testing.T) {
 	flag := Root().PersistentFlags().Lookup("internal-addr")
 	require.NotNil(t, flag)
 	require.Equal(t, "address for the internal listener that node hops and bridged WebSocket guests use; only other relay nodes should be able to reach it. When set, the public SSH listener refuses relay certificates", flag.Usage)
+}
+
+func TestStrictFlags(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		args     []string
+		env      bool
+		network  string
+		required bool
+	}{
+		{name: "defaults", network: "tcp"},
+		{name: "flags", args: []string{"--ssh-network=tcp4", "--ssh-proxy-protocol-required"}, network: "tcp4", required: true},
+		{name: "environment", env: true, network: "tcp6", required: true},
+		{name: "flags override environment", args: []string{"--ssh-network=tcp4", "--ssh-proxy-protocol-required=false"}, env: true, network: "tcp4"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			resetUptermdEnv(t)
+			if tc.env {
+				t.Setenv("UPTERMD_SSH_NETWORK", "tcp6")
+				t.Setenv("UPTERMD_SSH_PROXY_PROTOCOL_REQUIRED", "true")
+			}
+			opt, err := unmarshalForTest(t, tc.args...)
+			require.NoError(t, err)
+			require.Equal(t, tc.network, opt.SSHNetwork)
+			require.Equal(t, tc.required, opt.SSHProxyProtocolRequired)
+		})
+	}
+	flags := Root().PersistentFlags()
+	require.Equal(t, "network for the SSH listener: tcp (the address's own families), tcp4 or tcp6", flags.Lookup("ssh-network").Usage)
+	require.Equal(t, "require a PROXY protocol v2 header on every SSH connection, and close any connection without one. Needs --internal-addr. Only as trustworthy as the network: make sure nothing but your proxy can reach this listener", flags.Lookup("ssh-proxy-protocol-required").Usage)
 }

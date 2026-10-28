@@ -27,14 +27,22 @@ import (
 // bridges it to its own node's SSH proxy, or hands it to the session's node
 // raw.
 func TestInternalListenerJoins(t *testing.T) {
+	testInternalListenerJoins(t, false)
+}
+
+func TestStrictInternalListenerJoins(t *testing.T) {
+	testInternalListenerJoins(t, true)
+}
+
+func testInternalListenerJoins(t *testing.T, strict bool) {
 	for _, mode := range []routing.Mode{routing.ModeEmbedded, routing.ModeConsul} {
 		t.Run(string(mode), func(t *testing.T) {
 			if mode == routing.ModeConsul && !testhelpers.IsConsulAvailable() {
 				t.Skip("Consul not available - set CONSUL_URL or ensure Consul is running on localhost:8500")
 			}
 			useTestKeyPairs(t)
-			n1 := newRedialRelay(t, mode, withInternalListener())
-			n2 := newRedialRelay(t, mode, withInternalListener())
+			n1 := newRedialRelay(t, mode, withInternalListener(strict))
+			n2 := newRedialRelay(t, mode, withInternalListener(strict))
 
 			for _, tc := range []struct {
 				name        string
@@ -66,7 +74,7 @@ func TestInternalListenerMixedFleet(t *testing.T) {
 	}
 	useTestKeyPairs(t)
 	n1 := newRedialRelay(t, routing.ModeConsul)
-	n2 := newRedialRelay(t, routing.ModeConsul, withInternalListener())
+	n2 := newRedialRelay(t, routing.ModeConsul, withInternalListener(false))
 
 	for _, tc := range []struct {
 		name           string

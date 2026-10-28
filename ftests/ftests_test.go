@@ -36,6 +36,7 @@ import (
 	"github.com/owenthereal/upterm/utils"
 	"github.com/owenthereal/upterm/ws"
 	"github.com/pborman/ansi"
+	"github.com/pires/go-proxyproto"
 	"github.com/pkg/sftp"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/suite"
@@ -449,6 +450,18 @@ func NewServerWithOptions(hostKey string, mode routing.Mode, opts ...func(*Serve
 		}
 	}
 
+	if s.strictProxy {
+		s.proxyFront, err = net.Listen("tcp4", "127.0.0.1:0")
+		if err != nil {
+			_ = sshln.Close()
+			_ = wsln.Close()
+			_ = s.internalln.Close()
+			return nil, err
+		}
+		s.sshln = server.RequireProxyV2(sshln)
+		go serveProxyFront(s.proxyFront, sshln.Addr().String())
+	}
+
 	// Start server in background
 	startErrCh := make(chan error, 1)
 	go func() {
@@ -508,9 +521,10 @@ func withHostCertAuthority(ca ssh.Signer) func(*Server) {
 
 // withInternalListener gives the relay an internal listener on a free loopback
 // port, for node hops and other nodes' WebSocket bridges, and makes it the
-// relay's NodeAddr, as uptermd's --internal-addr does.
-func withInternalListener() func(*Server) {
-	return func(s *Server) { s.internalListener = true }
+// relay's NodeAddr, as uptermd's --internal-addr does. In strict mode the
+// public listener requires PROXY v2 and clients enter through a loopback proxy.
+func withInternalListener(strict bool) func(*Server) {
+	return func(s *Server) { s.internalListener, s.strictProxy = true, strict }
 }
 
 // rebindTimeout bounds the retries of a listen that failed.
@@ -550,6 +564,9 @@ type Server struct {
 	// see withInternalListener.
 	internalListener bool
 	internalln       net.Listener
+
+	strictProxy bool
+	proxyFront  net.Listener
 
 	// authorizedKeysFiles restricts which identities may register as hosts,
 	// uptermd's --authorized-keys.
@@ -671,6 +688,9 @@ func certifiedBy(signer, ca ssh.Signer, hostnames []string) (ssh.Signer, error) 
 }
 
 func (s *Server) SSHAddr() string {
+	if s.proxyFront != nil {
+		return s.proxyFront.Addr().String()
+	}
 	return s.sshln.Addr().String()
 }
 
@@ -690,6 +710,9 @@ func (s *Server) NodeAddr() string {
 func (s *Server) Shutdown() error {
 	var err error
 	s.shutdownOnce.Do(func() {
+		if s.proxyFront != nil {
+			_ = s.proxyFront.Close()
+		}
 		// Under the same lock NodeAddr takes, and for the same reason: start
 		// runs on its own goroutine and fills both of these in, so a shutdown
 		// that reaches them first — a test that ends without ever having
@@ -1336,4 +1359,37 @@ func writeTempFile(name, content string) (string, error) {
 	}
 
 	return file.Name(), nil
+}
+
+// serveProxyFront supplies the socket peer's address before forwarding SSH.
+func serveProxyFront(ln net.Listener, target string) {
+	for {
+		down, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		go func() {
+			defer func() { _ = down.Close() }()
+			up, err := net.DialTimeout("tcp4", target, 2*time.Second)
+			if err != nil {
+				return
+			}
+			defer func() { _ = up.Close() }()
+			if err := up.SetWriteDeadline(time.Now().Add(2 * time.Second)); err != nil {
+				return
+			}
+			_, err = (&proxyproto.Header{Version: 2, Command: proxyproto.PROXY, TransportProtocol: proxyproto.TCPv4, SourceAddr: down.RemoteAddr(), DestinationAddr: down.LocalAddr()}).WriteTo(up)
+			if err != nil {
+				return
+			}
+			if err := up.SetWriteDeadline(time.Time{}); err != nil {
+				return
+			}
+			copied := make(chan struct{})
+			go func() { _, _ = io.Copy(up, down); _ = up.Close(); close(copied) }()
+			_, _ = io.Copy(down, up)
+			_ = down.Close()
+			<-copied
+		}()
+	}
 }

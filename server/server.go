@@ -33,23 +33,25 @@ const (
 )
 
 type Opt struct {
-	HandshakeTimeout    time.Duration `mapstructure:"handshake-timeout"`
-	SSHAddr             string        `mapstructure:"ssh-addr"`
-	SSHProxyProtocol    bool          `mapstructure:"ssh-proxy-protocol"`
-	WSAddr              string        `mapstructure:"ws-addr"`
-	NodeAddr            string        `mapstructure:"node-addr"`
-	InternalAddr        string        `mapstructure:"internal-addr"`
-	AuthorizedKeysFiles []string      `mapstructure:"authorized-keys"`
-	PrivateKeys         []string      `mapstructure:"private-key"`
-	Hostnames           []string      `mapstructure:"hostname"`
-	Network             string        `mapstructure:"network"`
-	NetworkOpts         []string      `mapstructure:"network-opt"`
-	MetricAddr          string        `mapstructure:"metric-addr"`
-	Debug               bool          `mapstructure:"debug"`
-	Routing             routing.Mode  `mapstructure:"routing"`
-	ConsulURL           string        `mapstructure:"consul-url"`
-	ConsulSessionTTL    string        `mapstructure:"consul-session-ttl"`
-	SentryDSN           string        `mapstructure:"sentry-dsn"`
+	HandshakeTimeout         time.Duration `mapstructure:"handshake-timeout"`
+	SSHAddr                  string        `mapstructure:"ssh-addr"`
+	SSHNetwork               string        `mapstructure:"ssh-network"`
+	SSHProxyProtocol         bool          `mapstructure:"ssh-proxy-protocol"`
+	SSHProxyProtocolRequired bool          `mapstructure:"ssh-proxy-protocol-required"`
+	WSAddr                   string        `mapstructure:"ws-addr"`
+	NodeAddr                 string        `mapstructure:"node-addr"`
+	InternalAddr             string        `mapstructure:"internal-addr"`
+	AuthorizedKeysFiles      []string      `mapstructure:"authorized-keys"`
+	PrivateKeys              []string      `mapstructure:"private-key"`
+	Hostnames                []string      `mapstructure:"hostname"`
+	Network                  string        `mapstructure:"network"`
+	NetworkOpts              []string      `mapstructure:"network-opt"`
+	MetricAddr               string        `mapstructure:"metric-addr"`
+	Debug                    bool          `mapstructure:"debug"`
+	Routing                  routing.Mode  `mapstructure:"routing"`
+	ConsulURL                string        `mapstructure:"consul-url"`
+	ConsulSessionTTL         string        `mapstructure:"consul-session-ttl"`
+	SentryDSN                string        `mapstructure:"sentry-dsn"`
 }
 
 // ResolvedRouting returns the effective routing mode. It resolves ModeAuto
@@ -77,6 +79,14 @@ func (opt *Opt) Validate() error {
 	// Operator config gets the stricter floor; 0 still selects the default.
 	if opt.HandshakeTimeout > 0 && opt.HandshakeTimeout < minHandshakeTimeout {
 		return fmt.Errorf("handshake-timeout must be at least %s: half of it must cover a full SSH handshake", minHandshakeTimeout)
+	}
+	switch opt.SSHNetwork {
+	case "", "tcp", "tcp4", "tcp6":
+	default:
+		return fmt.Errorf("ssh-network must be tcp, tcp4 or tcp6")
+	}
+	if opt.SSHProxyProtocolRequired && opt.InternalAddr == "" {
+		return fmt.Errorf("ssh-proxy-protocol-required needs internal-addr: node hops and WebSocket bridges can't send a PROXY header")
 	}
 	// Basic validation
 	if opt.SSHAddr == "" {
@@ -203,16 +213,17 @@ func Start(ctx context.Context, opt Opt, logger *slog.Logger) error {
 	}()
 
 	if opt.SSHAddr != "" {
-		sshln, err = net.Listen("tcp", opt.SSHAddr)
+		sshln, err = listenSSH(opt.SSHNetwork, opt.SSHAddr)
 		if err != nil {
 			return err
 		}
 		logger = logger.With("ssh_addr", sshln.Addr().String())
-		if opt.SSHProxyProtocol {
+		if opt.SSHProxyProtocolRequired {
+			sshln = RequireProxyV2(sshln)
+		} else if opt.SSHProxyProtocol {
 			// Wrap the SSH listener with proxyproto.Listener to preserve the real client IP
 			// when connections are coming through a TCP proxy (e.g., AWS ELB, HAProxy).
-			// Internal node hops and the WebSocket bridge use plain SSH on
-			// this same listener, so PROXY headers must remain optional.
+			// Headers remain optional so direct SSH connections still work.
 			sshln = &proxyproto.Listener{
 				Listener: sshln,
 				ConnPolicy: func(proxyproto.ConnPolicyOptions) (proxyproto.Policy, error) {

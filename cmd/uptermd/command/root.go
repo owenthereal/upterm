@@ -27,6 +27,8 @@ func Root() *cobra.Command {
 	cmd.PersistentFlags().Duration("handshake-timeout", server.DefaultHandshakeTimeout, "SSH establishment budget (half downstream, half upstream dial and handshake)")
 	cmd.PersistentFlags().String("config", "", "server config")
 
+	cmd.PersistentFlags().String("ssh-network", "tcp", "network for the SSH listener: tcp (the address's own families), tcp4 or tcp6")
+	cmd.PersistentFlags().Bool("ssh-proxy-protocol-required", false, "require a PROXY protocol v2 header on every SSH connection, and close any connection without one. Needs --internal-addr. Only as trustworthy as the network: make sure nothing but your proxy can reach this listener")
 	cmd.PersistentFlags().StringP("ssh-addr", "", utils.DefaultLocalhost("2222"), "ssh server address")
 	cmd.PersistentFlags().StringP("ws-addr", "", "", "websocket server address")
 	cmd.PersistentFlags().StringP("node-addr", "", "", "node address")

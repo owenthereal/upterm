@@ -1190,3 +1190,23 @@ func TestInternalListenerStartFailureClosesListeners(t *testing.T) {
 		})
 	}
 }
+
+func TestSSHNetworkValidation(t *testing.T) {
+	for _, network := range []string{"", "tcp", "tcp4", "tcp6", "udp"} {
+		t.Run(network, func(t *testing.T) {
+			opt := Opt{SSHAddr: "127.0.0.1:2222", SSHNetwork: network}
+			if network == "udp" {
+				require.EqualError(t, opt.Validate(), "ssh-network must be tcp, tcp4 or tcp6")
+			} else {
+				require.NoError(t, opt.Validate())
+			}
+		})
+	}
+}
+
+func TestProxyRequiredNeedsInternal(t *testing.T) {
+	opt := Opt{SSHAddr: "127.0.0.1:2222", SSHProxyProtocolRequired: true}
+	require.EqualError(t, opt.Validate(), "ssh-proxy-protocol-required needs internal-addr: node hops and WebSocket bridges can't send a PROXY header")
+	opt.InternalAddr = "127.0.0.1:2223"
+	require.NoError(t, opt.Validate())
+}
