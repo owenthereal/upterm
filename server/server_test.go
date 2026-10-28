@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"syscall"
@@ -993,6 +994,10 @@ func TestInternalAddrDefaultsNodeAddr(t *testing.T) {
 // ServeListeners must see released whichever way it returns: on a requested
 // stop, and on a start that fails, wherever it fails.
 func TestServeListenersClosesBridgeOnReturn(t *testing.T) {
+	connectionRefused := syscall.ECONNREFUSED
+	if runtime.GOOS == "windows" {
+		connectionRefused = syscall.Errno(10061) // WSAECONNREFUSED
+	}
 	for _, tc := range []struct {
 		name  string
 		apply func(t *testing.T, s *Server)
@@ -1038,7 +1043,7 @@ func TestServeListenersClosesBridgeOnReturn(t *testing.T) {
 			}
 
 			_, err := net.DialTimeout("tcp4", bridge, time.Second)
-			require.ErrorIs(t, err, syscall.ECONNREFUSED, "the bridge listener outlived ServeListeners")
+			require.ErrorIs(t, err, connectionRefused, "the bridge listener outlived ServeListeners")
 			for _, ln := range []*closeObservedListener{sshln, wsln, internal} {
 				requireListenerClosed(t, ln)
 			}
@@ -1160,6 +1165,10 @@ func TestServeListenersSharesRoutingMetrics(t *testing.T) {
 
 // A bind failure must release every socket Start already opened.
 func TestInternalListenerStartFailureClosesListeners(t *testing.T) {
+	addressInUse := syscall.EADDRINUSE
+	if runtime.GOOS == "windows" {
+		addressInUse = syscall.Errno(10048) // WSAEADDRINUSE
+	}
 	for _, failAt := range []string{"WebSocket", "internal"} {
 		t.Run(failAt, func(t *testing.T) {
 			t.Setenv("PRIVATE_KEY", "")
@@ -1179,7 +1188,7 @@ func TestInternalListenerStartFailureClosesListeners(t *testing.T) {
 			}
 
 			err := Start(context.Background(), opt, slog.New(slog.DiscardHandler))
-			require.ErrorIs(t, err, syscall.EADDRINUSE)
+			require.ErrorIs(t, err, addressInUse)
 			for _, addr := range opened {
 				ln, err := net.Listen("tcp", addr)
 				if err == nil {
