@@ -15,9 +15,9 @@ var (
 	errCertNotSignedByHost = fmt.Errorf("ssh cert not signed by host")
 
 	// errCertUntrustedAuthority reports a certificate whose signer is not an
-	// authority this call site recognizes. The relay's front door tolerates it
-	// and authorizes the certified key instead; the host's sshd and the
-	// internal node listener refuse the connection.
+	// authority this call site recognizes. Guest certificates can authorize
+	// the certified key instead; relay certificates must satisfy the
+	// listener's hop trust policy.
 	errCertUntrustedAuthority = fmt.Errorf("ssh cert signed by an unrecognized authority")
 )
 

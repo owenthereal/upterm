@@ -735,6 +735,13 @@ its own hop signing keys implicitly. By default it also accepts hops signed
 with its own server keys; `--hop-refuse-host-key` disables that fallback and
 requires a hop key or trusted hop key.
 
+On a shared SSH listener (without `--internal-addr`), configuring any hop key,
+trusted hop key, or `--hop-refuse-host-key` makes untrusted relay certificates
+fail authentication. With none of those hop options set, the shared listener
+preserves the legacy fallback: an untrusted relay certificate is admitted as
+its certified key if that key may join the session. Certificates without the
+relay extension continue to authenticate as ordinary guest keys.
+
 To migrate from server-key signing to a dedicated hop key H1, complete each
 step on every node before starting the next:
 

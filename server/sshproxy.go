@@ -405,8 +405,9 @@ func (a proxyAuth) authenticate(conn ssh.ConnMetadata, pk ssh.PublicKey) (*AuthR
 	}
 
 	auth, key, err := checker.Authenticate(conn.User(), pk)
-	// On the internal listener a relay certificate is a hop or nothing.
-	if relayCert && a.listener == listenerInternal && errors.Is(err, errCertUntrustedAuthority) {
+	// Explicit hop trust also makes a shared listener refuse untrusted hops.
+	hopConfigured := len(a.HopSigners) > 0 || len(a.HopTrusted) > 0 || a.RefuseHostKeyHops
+	if relayCert && (a.listener == listenerInternal || (a.listener == listenerShared && hopConfigured)) && errors.Is(err, errCertUntrustedAuthority) {
 		return nil, nil, false, errRelayCertFromUntrustedSigner
 	}
 	// Otherwise a certificate this relay did not mint is not a credential, it

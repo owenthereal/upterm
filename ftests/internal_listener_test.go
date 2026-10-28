@@ -494,13 +494,15 @@ func requireRotationSignerRefused(t *testing.T, node *Server, signer ssh.Signer,
 	t.Cleanup(func() { require.NoError(t, node.Server.SessionManager.DeleteSession(id)) })
 	cert, err := (&server.UserCertSigner{SessionID: "untrusted", User: user, AuthRequest: &server.AuthRequest{ClientVersion: "SSH-2.0-Go", AuthorizedKey: ssh.MarshalAuthorizedKey(guest)}}).SignCert(signer)
 	require.NoError(t, err)
-	guestSigner, err := ssh.ParsePrivateKey([]byte(ClientPrivateKeyContent))
-	require.NoError(t, err)
-	signed := cert.PublicKey().(*ssh.Certificate)
-	signed.Key = guestSigner.PublicKey()
-	require.NoError(t, signed.SignCert(rand.Reader, signer))
-	cert, err = ssh.NewCertSigner(signed, guestSigner)
-	require.NoError(t, err)
+	if restricted {
+		guestSigner, err := ssh.ParsePrivateKey([]byte(ClientPrivateKeyContent))
+		require.NoError(t, err)
+		signed := cert.PublicKey().(*ssh.Certificate)
+		signed.Key = guestSigner.PublicKey()
+		require.NoError(t, signed.SignCert(rand.Reader, signer))
+		cert, err = ssh.NewCertSigner(signed, guestSigner)
+		require.NoError(t, err)
+	}
 	c, err := ssh.Dial("tcp", node.NodeAddr(), &ssh.ClientConfig{User: user, Auth: []ssh.AuthMethod{ssh.PublicKeys(cert)}, HostKeyCallback: ssh.InsecureIgnoreHostKey(), Timeout: 5 * time.Second})
 	if c != nil {
 		_ = c.Close()
@@ -770,4 +772,45 @@ func requireRotationRouteRefused(t *testing.T, entry, target *Server, want strin
 	var refusal *ssh.OpenChannelError
 	require.ErrorAs(t, err, &refusal)
 	require.Equal(t, want, refusal.Message)
+}
+
+// Open sessions expose fallback admission; restricted sessions also catch an
+// untrusted certificate whose certified key is itself an allowed guest.
+func TestSharedListenerHopRejection(t *testing.T) {
+	useTestKeyPairs(t)
+	current, retired := newTestSigner(t), newTestSigner(t)
+	relay, err := ssh.ParsePrivateKey([]byte(ServerPrivateKeyContent))
+	require.NoError(t, err)
+	for _, tc := range []struct {
+		name   string
+		sign   ssh.Signer
+		trust  []ssh.PublicKey
+		refuse bool
+	}{
+		{name: "hop signing alone", sign: current},
+		{name: "trusted hop alone", trust: []ssh.PublicKey{current.PublicKey()}},
+		{name: "refusal alone", refuse: true},
+		{name: "dedicated hop with server key refusal", sign: current, refuse: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			node := newRedialRelay(t, routing.ModeEmbedded, hopOptions(tc.sign, tc.trust, tc.refuse))
+			for _, restricted := range []bool{false, true} {
+				t.Run(fmt.Sprintf("restricted_%v", restricted), func(t *testing.T) {
+					t.Run("retired hop key", func(t *testing.T) { requireRotationSignerRefused(t, node, retired, restricted) })
+					if tc.refuse {
+						t.Run("server key", func(t *testing.T) { requireRotationSignerRefused(t, node, relay, restricted) })
+					}
+				})
+			}
+		})
+	}
+}
+
+func TestSharedListenerTrustedHop(t *testing.T) {
+	useTestKeyPairs(t)
+	hop := newTestSigner(t)
+	entry := newRedialRelay(t, routing.ModeEmbedded, hopOptions(hop, nil, true))
+	target := newRedialRelay(t, routing.ModeEmbedded, hopOptions(nil, []ssh.PublicKey{hop.PublicKey()}, true))
+	requireJoinsAsItsOwnKey(t, target.joinURL("ssh"), target.NodeAddr(), entry.joinURL("ssh"), hop)
+	requireSuccessfulRouteClassification(t, target, entry.joinURL("ssh"), true)
 }

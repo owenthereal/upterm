@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/owenthereal/upterm/host/api"
+	"github.com/owenthereal/upterm/routing"
 	"github.com/owenthereal/upterm/upterm"
 	"github.com/owenthereal/upterm/utils"
 	"github.com/stretchr/testify/require"
@@ -247,5 +248,104 @@ func TestPlanPicksCredsRelayRotation(t *testing.T) {
 		require.NoError(t, err)
 		_ = client.Close()
 		require.NoError(t, <-done)
+	}
+}
+
+// Configured hop trust must never turn an untrusted relay into a plain guest.
+func TestSharedListenerHopTrust(t *testing.T) {
+	relay, hop, retired, guest := certTestSigner(t), certTestSigner(t), certTestSigner(t), certTestSigner(t)
+	logger := slog.New(slog.DiscardHandler)
+	sm := newSessionManagerWithStore(newMemorySessionStore(logger), routing.NewEncodeDecoder(routing.ModeConsul))
+	carried := &AuthRequest{ClientVersion: "SSH-2.0-OpenSSH_9.0", AuthorizedKey: ssh.MarshalAuthorizedKey(guest.PublicKey()),
+		RemoteAddr: "203.0.113.7:4711", Ingress: Ingress_INGRESS_WEBSOCKET, IngressNode: "entry:22", IngressConnection: []byte("entry-id")}
+	for _, tc := range []struct {
+		name                  string
+		signing               []ssh.Signer
+		trusted               []ssh.PublicKey
+		nodeTrusted           []ssh.PublicKey
+		refuse, rejectRetired bool
+	}{
+		{name: "no hop options legacy fallback"},
+		{name: "node trust alone legacy fallback", nodeTrusted: []ssh.PublicKey{retired.PublicKey()}},
+		{name: "hop signing alone", signing: []ssh.Signer{hop}, rejectRetired: true},
+		{name: "trusted hop alone", trusted: []ssh.PublicKey{hop.PublicKey()}, rejectRetired: true},
+		{name: "refusal alone", refuse: true, rejectRetired: true},
+		{name: "dedicated hop with server key refusal", signing: []ssh.Signer{hop}, refuse: true, rejectRetired: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a := proxyAuth{listener: listenerShared, Signers: []ssh.Signer{relay}, HopSigners: tc.signing, HopTrusted: tc.trusted,
+				NodeTrusted: tc.nodeTrusted, RefuseHostKeyHops: tc.refuse, SessionManager: sm, Logger: logger}
+			for _, offer := range []struct {
+				name            string
+				signer          ssh.Signer
+				reject, wantHop bool
+			}{
+				{"retired hop key", retired, tc.rejectRetired, false},
+				{"server key", relay, tc.refuse, true},
+				{"current hop key", hop, tc.rejectRetired && len(tc.signing) == 0 && len(tc.trusted) == 0, len(tc.signing) > 0 || len(tc.trusted) > 0},
+			} {
+				t.Run(offer.name, func(t *testing.T) {
+					cert, err := (&UserCertSigner{SessionID: "entry-id", User: "session", AuthRequest: carried}).SignCert(offer.signer)
+					require.NoError(t, err)
+					auth, key, isHop, err := a.authenticate(originConn("session", "SSH-2.0-Go", "next-id"), cert.PublicKey())
+					if offer.reject {
+						require.ErrorIs(t, err, errRelayCertFromUntrustedSigner)
+						require.Nil(t, auth)
+						return
+					}
+					require.NoError(t, err)
+					require.Equal(t, offer.wantHop, isHop)
+					if offer.wantHop {
+						require.True(t, utils.KeysEqual(guest.PublicKey(), key))
+						require.True(t, proto.Equal(carried, auth), "trusted hop must preserve guest identity and origin")
+					} else {
+						require.True(t, utils.KeysEqual(offer.signer.PublicKey(), key))
+						require.Equal(t, ssh.MarshalAuthorizedKey(offer.signer.PublicKey()), auth.AuthorizedKey)
+						require.Equal(t, []byte("next-id"), auth.IngressConnection)
+					}
+				})
+			}
+			bareRelay, err := testCertSigner("session", relay)
+			require.NoError(t, err)
+			for name, offered := range map[string]ssh.Signer{
+				"agent certificate without relay extension":  agentCert(t, guest),
+				"server certificate without relay extension": bareRelay,
+			} {
+				t.Run(name, func(t *testing.T) {
+					auth, key, isHop, err := a.authenticate(originConn("session", "SSH-2.0-Go", "next-id"), offered.PublicKey())
+					require.NoError(t, err)
+					require.False(t, isHop)
+					certifiedKey := offered.PublicKey().(*ssh.Certificate).Key
+					require.True(t, utils.KeysEqual(certifiedKey, key))
+					require.Equal(t, ssh.MarshalAuthorizedKey(certifiedKey), auth.AuthorizedKey)
+				})
+			}
+		})
+	}
+}
+
+func TestSharedListenerLegacyFallback(t *testing.T) {
+	for _, nodeTrust := range []bool{false, true} {
+		t.Run(map[bool]string{false: "no hop options", true: "node trust alone"}[nodeTrust], func(t *testing.T) {
+			authority, guest := certTestSigner(t), certTestSigner(t)
+			upstream, peers := stockTestUpstream(t, false, TestPrivateKeyContent)
+			proxy, addr, _, _ := stockTestProxy(t, 4*time.Second, &stockTestDialer{addr: upstream}, func(p *sshProxy) {
+				if nodeTrust {
+					p.NodeTrusted = []ssh.PublicKey{authority.PublicKey()}
+				}
+			})
+			user := holdSession(t, proxy, authority.PublicKey())
+			cert, err := (&UserCertSigner{SessionID: "entry-id", User: user, AuthRequest: &AuthRequest{
+				ClientVersion: "SSH-2.0-Go", AuthorizedKey: ssh.MarshalAuthorizedKey(guest.PublicKey()), IngressConnection: []byte("entry-id"),
+			}}).SignCert(authority)
+			require.NoError(t, err)
+			client, err := ssh.Dial("tcp", addr, &ssh.ClientConfig{User: user, Auth: []ssh.AuthMethod{ssh.PublicKeys(cert)},
+				HostKeyCallback: ssh.InsecureIgnoreHostKey(), Timeout: 5 * time.Second})
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = client.Close() })
+			peer, _, auth := arrived(t, peers)
+			require.Equal(t, string(ssh.MarshalAuthorizedKey(authority.PublicKey())), peer.Permissions.Extensions["key"])
+			require.Equal(t, client.SessionID(), auth.IngressConnection, "fallback records this guest connection's origin")
+		})
 	}
 }

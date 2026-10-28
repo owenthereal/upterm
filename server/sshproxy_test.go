@@ -443,7 +443,7 @@ func TestInternalListenerRefusesHosts(t *testing.T) {
 // signer, and the internal listener refuses it from one that isn't a hop
 // authority rather than authorizing its key. A certificate without an
 // AuthRequest is its key on every listener. The shared listener, a node without
-// an internal one, keeps today's rules.
+// an internal one, keeps the legacy fallback when no hop options are set.
 func TestRelayCertsByListener(t *testing.T) {
 	logger := slog.New(slog.DiscardHandler)
 	authority, err := ssh.ParsePrivateKey([]byte(TestPrivateKeyContent))
