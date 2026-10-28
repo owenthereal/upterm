@@ -575,6 +575,7 @@ type Server struct {
 	// hostCertAuthority, when set, signs the relay's host certificate and its
 	// guests' certificates in place of the relay's own key.
 	hostCertAuthority ssh.Signer
+	beforeServe       func(*Server)
 
 	shutdownOnce sync.Once
 	mu           sync.RWMutex
@@ -666,6 +667,9 @@ func (s *Server) start() error {
 		Logger:              logger,
 		AuthorizedKeysFiles: s.authorizedKeysFiles,
 	}
+	if s.beforeServe != nil {
+		s.beforeServe(s)
+	}
 	s.mu.Unlock()
 
 	return s.Server.ServeListeners(context.Background(), server.Listeners{SSH: s.sshln, WS: s.wsln, Internal: s.internalln})
@@ -743,6 +747,7 @@ type Host struct {
 	ClientJoinedCallback     func(*api.Client)
 	ClientLeftCallback       func(*api.Client)
 	PermittedClientPublicKey string
+	HostKeyCallback          ssh.HostKeyCallback
 	AllowLocalTCPForwarding  bool
 	ReadOnly                 bool
 	SFTPDisabled             bool // Disable SFTP subsystem
@@ -806,6 +811,9 @@ func (c *Host) init() {
 }
 
 func (c *Host) Share(url string) error {
+	if c.HostKeyCallback == nil {
+		c.HostKeyCallback = ssh.InsecureIgnoreHostKey()
+	}
 	c.init()
 
 	stdinr, stdinw, err := os.Pipe()
@@ -864,7 +872,7 @@ func (c *Host) Share(url string) error {
 		KeepAliveDuration:       keepAliveDuration,
 		Reconnect:               c.Reconnect,
 		Logger:                  logger,
-		HostKeyCallback:         ssh.InsecureIgnoreHostKey(),
+		HostKeyCallback:         c.HostKeyCallback,
 		AllowLocalTCPForwarding: c.AllowLocalTCPForwarding,
 		ReadOnly:                c.ReadOnly,
 		SFTPDisabled:            c.SFTPDisabled,

@@ -42,6 +42,10 @@ type Opt struct {
 	NodeAddr                 string        `mapstructure:"node-addr"`
 	InternalAddr             string        `mapstructure:"internal-addr"`
 	AuthorizedKeysFiles      []string      `mapstructure:"authorized-keys"`
+	HopKeys                  []string      `mapstructure:"hop-key"`
+	HopTrustedKeys           []string      `mapstructure:"hop-trusted-key"`
+	NodeTrustedKeys          []string      `mapstructure:"node-trusted-key"`
+	HopRefuseHostKey         bool          `mapstructure:"hop-refuse-host-key"`
 	PrivateKeys              []string      `mapstructure:"private-key"`
 	Hostnames                []string      `mapstructure:"hostname"`
 	Network                  string        `mapstructure:"network"`
@@ -87,6 +91,9 @@ func (opt *Opt) Validate() error {
 	}
 	if opt.SSHProxyProtocolRequired && opt.InternalAddr == "" {
 		return fmt.Errorf("ssh-proxy-protocol-required needs internal-addr: node hops and WebSocket bridges can't send a PROXY header")
+	}
+	if opt.HopRefuseHostKey && len(opt.HopKeys) == 0 && len(opt.HopTrustedKeys) == 0 && os.Getenv("HOP_KEY") == "" {
+		return fmt.Errorf("hop-refuse-host-key needs hop-key or hop-trusted-key, or no node could hop")
 	}
 	// Basic validation
 	if opt.SSHAddr == "" {
@@ -153,6 +160,18 @@ func (opt *Opt) validateEmbeddedConfig() error {
 	return nil
 }
 
+func parseTrustedKeys(option string, lines []string) ([]ssh.PublicKey, error) {
+	var keys []ssh.PublicKey
+	for i, line := range lines {
+		key, _, _, _, err := ssh.ParseAuthorizedKey([]byte(line))
+		if err != nil {
+			return nil, fmt.Errorf("%s at index %d: %w", option, i, err)
+		}
+		keys = append(keys, key)
+	}
+	return keys, nil
+}
+
 func Start(ctx context.Context, opt Opt, logger *slog.Logger) error {
 	// Validate configuration upfront
 	if err := opt.Validate(); err != nil {
@@ -179,6 +198,29 @@ func Start(ctx context.Context, opt Opt, logger *slog.Logger) error {
 	}
 
 	signers, err := utils.CreateSigners(privateKeys)
+	if err != nil {
+		return err
+	}
+
+	hopKeys, err := utils.ReadFiles(opt.HopKeys)
+	if err != nil {
+		return err
+	}
+	if key := os.Getenv("HOP_KEY"); key != "" {
+		hopKeys = append(hopKeys, []byte(key))
+	}
+	var hopSigners []ssh.Signer
+	if len(hopKeys) > 0 {
+		hopSigners, err = utils.CreateSigners(hopKeys)
+		if err != nil {
+			return err
+		}
+	}
+	hopTrusted, err := parseTrustedKeys("hop-trusted-key", opt.HopTrustedKeys)
+	if err != nil {
+		return err
+	}
+	nodeTrusted, err := parseTrustedKeys("node-trusted-key", opt.NodeTrustedKeys)
 	if err != nil {
 		return err
 	}
@@ -331,6 +373,10 @@ func Start(ctx context.Context, opt Opt, logger *slog.Logger) error {
 			AuthorizedKeysFiles: opt.AuthorizedKeysFiles,
 			HostSigners:         hostSigners,
 			Signers:             signers,
+			HopSigners:          hopSigners,
+			HopTrusted:          hopTrusted,
+			NodeTrusted:         nodeTrusted,
+			RefuseHostKeyHops:   opt.HopRefuseHostKey,
 			NetworkProvider:     network,
 			SessionManager:      sessionManager,
 			Logger:              logger.With("component", "server"),
@@ -396,6 +442,10 @@ type Server struct {
 	AuthorizedKeysFiles []string
 	HostSigners         []ssh.Signer
 	Signers             []ssh.Signer
+	HopSigners          []ssh.Signer
+	HopTrusted          []ssh.PublicKey
+	NodeTrusted         []ssh.PublicKey
+	RefuseHostKeyHops   bool
 	NetworkProvider     NetworkProvider
 	MetricsProvider     provider.Provider
 	SessionManager      *SessionManager
@@ -686,6 +736,10 @@ func (s *Server) ServeListeners(ctx context.Context, ls Listeners) error {
 				HandshakeTimeout:    s.HandshakeTimeout,
 				HostSigners:         s.HostSigners,
 				Signers:             s.Signers,
+				HopSigners:          s.HopSigners,
+				HopTrusted:          s.HopTrusted,
+				NodeTrusted:         s.NodeTrusted,
+				RefuseHostKeyHops:   s.RefuseHostKeyHops,
 				NodeAddr:            s.NodeAddr,
 				AuthorizedKeysFiles: s.AuthorizedKeysFiles,
 				ConnDialer:          cd,

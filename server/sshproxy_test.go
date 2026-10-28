@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/go-kit/kit/metrics/provider"
+	"github.com/owenthereal/upterm/host/api"
 	"github.com/owenthereal/upterm/internal/logging"
 	"github.com/owenthereal/upterm/routing"
 	"github.com/owenthereal/upterm/upterm"
@@ -442,7 +443,7 @@ func TestInternalListenerRefusesHosts(t *testing.T) {
 // signer, and the internal listener refuses it from one that isn't a hop
 // authority rather than authorizing its key. A certificate without an
 // AuthRequest is its key on every listener. The shared listener, a node without
-// an internal one, keeps today's rules.
+// an internal one, keeps the legacy fallback when no hop options are set.
 func TestRelayCertsByListener(t *testing.T) {
 	logger := slog.New(slog.DiscardHandler)
 	authority, err := ssh.ParsePrivateKey([]byte(TestPrivateKeyContent))
@@ -543,4 +544,39 @@ func TestRawInternalGuestOrigin(t *testing.T) {
 			require.Equal(t, client.SessionID(), auth.GetIngressConnection())
 		})
 	}
+}
+
+func TestNeighbourHostKeyTrust(t *testing.T) {
+	own, trusted, other := certTestSigner(t), certTestSigner(t), certTestSigner(t)
+	a := proxyAuth{HostSigners: []ssh.Signer{own}, NodeTrusted: []ssh.PublicKey{trusted.PublicKey()}}
+	for _, tc := range []struct {
+		name     string
+		target   *upstreamTarget
+		key      ssh.PublicKey
+		accepted bool
+	}{
+		{"own key", &upstreamTarget{id: &api.Identifier{Type: api.Identifier_CLIENT}}, own.PublicKey(), true},
+		{"listed neighbour", &upstreamTarget{id: &api.Identifier{Type: api.Identifier_CLIENT}}, trusted.PublicKey(), true},
+		{"other neighbour", &upstreamTarget{id: &api.Identifier{Type: api.Identifier_CLIENT}}, other.PublicKey(), false},
+		{"registration keeps own key", &upstreamTarget{id: &api.Identifier{Type: api.Identifier_HOST}}, own.PublicKey(), true},
+		{"registration excludes neighbour trust", &upstreamTarget{id: &api.Identifier{Type: api.Identifier_HOST}}, trusted.PublicKey(), false},
+		{"local host excludes neighbour trust", &upstreamTarget{id: &api.Identifier{Type: api.Identifier_CLIENT}, local: &Session{HostPublicKeys: []ssh.PublicKey{other.PublicKey()}}}, trusted.PublicKey(), false},
+		{"local host retains session key", &upstreamTarget{id: &api.Identifier{Type: api.Identifier_CLIENT}, local: &Session{HostPublicKeys: []ssh.PublicKey{other.PublicKey()}}}, other.PublicKey(), true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			route := a.plan(&fakeConnMetadata{user: "session"}, tc.target, routeCreds{})
+			err := route.config.HostKeyCallback("node", &net.TCPAddr{}, tc.key)
+			if tc.accepted {
+				require.NoError(t, err)
+			} else {
+				require.ErrorIs(t, err, errUpstreamHostKeyMismatch)
+			}
+		})
+	}
+}
+
+func TestNodeTrustedKeyParseError(t *testing.T) {
+	t.Setenv("HOP_KEY", "")
+	err := Start(context.Background(), Opt{SSHAddr: "127.0.0.1:0", Network: "mem", NodeTrustedKeys: []string{TestPublicKeyContent, "bad-key"}}, slog.New(slog.DiscardHandler))
+	require.ErrorContains(t, err, "node-trusted-key at index 1")
 }
