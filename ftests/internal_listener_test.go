@@ -2,10 +2,13 @@ package ftests
 
 import (
 	"testing"
+	"time"
 
 	"github.com/owenthereal/upterm/host/api"
 	"github.com/owenthereal/upterm/internal/testhelpers"
 	"github.com/owenthereal/upterm/routing"
+	"github.com/owenthereal/upterm/server"
+	"github.com/owenthereal/upterm/upterm"
 	"github.com/owenthereal/upterm/utils"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/crypto/ssh"
@@ -111,4 +114,41 @@ func requireJoinsAsItsOwnKey(t *testing.T, hostURL, hostNodeAddr, joinURL string
 	require.NoError(t, err)
 	require.Equal(t, utils.FingerprintSHA256(guestKey), awaitClientCallback(t, joined, "joined").PublicKeyFingerprint,
 		"the host saw a key other than the guest's own")
+	requireRefusedHop(t, session, hostNodeAddr)
+}
+
+// A refused key in a relay certificate earns a hop-only banner. Probe the same
+// restricted session separately from the successful join to observe the
+// receiving relay's classification without exposing its connection state.
+func requireRefusedHop(t *testing.T, session *api.GetSessionResponse, addr string) {
+	t.Helper()
+	authority, err := ssh.ParsePrivateKey([]byte(ServerPrivateKeyContent))
+	require.NoError(t, err)
+	otherGuest, _, _, _, err := ssh.ParseAuthorizedKey([]byte(HostPublicKeyContent))
+	require.NoError(t, err)
+	cert, err := (&server.UserCertSigner{
+		SessionID: "refused-hop",
+		User:      session.SshUser,
+		AuthRequest: &server.AuthRequest{
+			ClientVersion: "SSH-2.0-Go",
+			AuthorizedKey: ssh.MarshalAuthorizedKey(otherGuest),
+		},
+	}).SignCert(authority)
+	require.NoError(t, err)
+
+	var banners []string
+	client, err := ssh.Dial("tcp", addr, &ssh.ClientConfig{
+		User: session.SshUser, Auth: []ssh.AuthMethod{ssh.PublicKeys(cert)},
+		HostKeyCallback: ssh.InsecureIgnoreHostKey(), Timeout: 5 * time.Second,
+		BannerCallback: func(message string) error {
+			banners = append(banners, message)
+			return nil
+		},
+	})
+	if client != nil {
+		_ = client.Close()
+	}
+	require.ErrorContains(t, err, "unable to authenticate")
+	require.Equal(t, []string{upterm.HopBannerKeyRefused}, banners,
+		"the receiving relay did not classify the certificate as a hop")
 }

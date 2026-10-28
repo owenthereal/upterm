@@ -1157,3 +1157,36 @@ func TestServeListenersSharesRoutingMetrics(t *testing.T) {
 	require.True(t, ok)
 	require.Equal(t, 3.0, v)
 }
+
+// A bind failure must release every socket Start already opened.
+func TestInternalListenerStartFailureClosesListeners(t *testing.T) {
+	for _, failAt := range []string{"WebSocket", "internal"} {
+		t.Run(failAt, func(t *testing.T) {
+			t.Setenv("PRIVATE_KEY", "")
+			keyPath := filepath.Join(t.TempDir(), "host_key")
+			require.NoError(t, os.WriteFile(keyPath, []byte(TestPrivateKeyContent), 0600))
+
+			// Reserve addresses together, then release only those Start should
+			// open. The retained socket forces a later bind to fail.
+			sshln, wsln, internal := listenLoopback(t), listenLoopback(t), listenLoopback(t)
+			opt := Opt{SSHAddr: sshln.Addr().String(), WSAddr: wsln.Addr().String(),
+				InternalAddr: internal.Addr().String(), PrivateKeys: []string{keyPath}, Network: "mem"}
+			require.NoError(t, sshln.Close())
+			opened := []string{opt.SSHAddr}
+			if failAt == "internal" {
+				require.NoError(t, wsln.Close())
+				opened = append(opened, opt.WSAddr)
+			}
+
+			err := Start(context.Background(), opt, slog.New(slog.DiscardHandler))
+			require.ErrorIs(t, err, syscall.EADDRINUSE)
+			for _, addr := range opened {
+				ln, err := net.Listen("tcp", addr)
+				if err == nil {
+					_ = ln.Close()
+				}
+				require.NoError(t, err, "Start left %s bound after failing", addr)
+			}
+		})
+	}
+}

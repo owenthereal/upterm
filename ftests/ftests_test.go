@@ -543,13 +543,13 @@ type Server struct {
 	sshln          net.Listener
 	wsln           net.Listener
 	hostKeyContent string
+	mode           routing.Mode
+	logger         *slog.Logger
 
 	// internalListener asks for internalln, the relay's internal listener;
 	// see withInternalListener.
 	internalListener bool
 	internalln       net.Listener
-	mode             routing.Mode
-	logger           *slog.Logger
 
 	// authorizedKeysFiles restricts which identities may register as hosts,
 	// uptermd's --authorized-keys.

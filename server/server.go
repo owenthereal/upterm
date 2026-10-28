@@ -195,6 +195,12 @@ func Start(ctx context.Context, opt Opt, logger *slog.Logger) error {
 		wsln       net.Listener
 		internalln net.Listener
 	)
+	listenersOwned := true
+	defer func() {
+		if listenersOwned {
+			closeListeners(logger, sshln, wsln, internalln)
+		}
+	}()
 
 	if opt.SSHAddr != "" {
 		sshln, err = net.Listen("tcp", opt.SSHAddr)
@@ -358,6 +364,8 @@ func Start(ctx context.Context, opt Opt, logger *slog.Logger) error {
 	// whatever Shutdown reported and nothing else. Both are joined rather than
 	// either winning: an actor that failed and a shutdown that then failed to
 	// clean up are two separate things the operator needs to see.
+	// ServeListeners takes ownership as soon as the server actor starts.
+	listenersOwned = false
 	return errors.Join(g.Run(), serverShutdownErr)
 }
 
