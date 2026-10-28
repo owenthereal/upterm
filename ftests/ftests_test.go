@@ -575,6 +575,7 @@ type Server struct {
 	// hostCertAuthority, when set, signs the relay's host certificate and its
 	// guests' certificates in place of the relay's own key.
 	hostCertAuthority ssh.Signer
+	beforeServe       func(*Server)
 
 	shutdownOnce sync.Once
 	mu           sync.RWMutex
@@ -665,6 +666,9 @@ func (s *Server) start() error {
 		SessionManager:      sm,
 		Logger:              logger,
 		AuthorizedKeysFiles: s.authorizedKeysFiles,
+	}
+	if s.beforeServe != nil {
+		s.beforeServe(s)
 	}
 	s.mu.Unlock()
 

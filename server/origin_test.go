@@ -113,12 +113,17 @@ func TestOriginOf(t *testing.T) {
 		})
 	}
 
-	// Whichever listener it arrives on, a host's request stays as it has
+	// On listeners that admit hosts, a host's request stays as it has
 	// always been: this node's own sshd admits the host by it.
 	t.Run("a host connection", func(t *testing.T) {
 		for _, kind := range allListenerKinds {
 			a := proxyAuth{NodeAddr: "n1:22", listener: kind, SessionManager: sm, Logger: logger}
 			auth, _, hop, err := a.authenticate(originConn("session", upterm.HostSSHClientVersion, "sid"), key.PublicKey())
+			if kind == listenerInternal {
+				require.ErrorIs(t, err, errHostOnInternalListener)
+				require.Nil(t, auth)
+				continue
+			}
 			require.NoError(t, err)
 			require.False(t, hop)
 			want := &AuthRequest{
@@ -133,7 +138,7 @@ func TestOriginOf(t *testing.T) {
 }
 
 // A hop's request is the guest's own, as the node it entered by recorded it.
-// The node it reaches, whatever listener that is on, passes it on unchanged,
+// On a listener that admits hops, the receiving node passes it on unchanged,
 // and mints its certificates onward under its own connection's ID.
 func TestHopPreservesOrigin(t *testing.T) {
 	logger := slog.New(slog.DiscardHandler)
@@ -162,6 +167,11 @@ func TestHopPreservesOrigin(t *testing.T) {
 				a := proxyAuth{NodeAddr: "n2", listener: kind, Signers: []ssh.Signer{authority}, SessionManager: sm, Logger: logger}
 				conn := originConn("session", "SSH-2.0-Go", "sid-2")
 				auth, key, hop, err := a.authenticate(conn, hopCert.PublicKey())
+				if kind == listenerPublic || kind == listenerBridge {
+					require.ErrorIs(t, err, errRelayCertOnPublicListener)
+					require.Nil(t, auth)
+					continue
+				}
 				require.NoError(t, err)
 				require.True(t, hop)
 				require.Equal(t, ssh.MarshalAuthorizedKey(guest.PublicKey()), ssh.MarshalAuthorizedKey(key))

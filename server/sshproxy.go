@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -23,6 +24,9 @@ type sshProxy struct {
 	HandshakeTimeout    time.Duration
 	HostSigners         []ssh.Signer
 	Signers             []ssh.Signer
+	HopSigners          []ssh.Signer
+	HopTrusted          []ssh.PublicKey
+	RefuseHostKeyHops   bool
 	NodeAddr            string
 	AuthorizedKeysFiles []string
 	ConnDialer          connDialer
@@ -83,14 +87,17 @@ func (r *sshProxy) Serve(ln net.Listener) error {
 		HostSigners:      r.HostSigners,
 		HandshakeTimeout: r.HandshakeTimeout,
 		Auth: &proxyAuth{
-			HostSigners:    r.HostSigners,
-			Signers:        r.Signers,
-			SessionManager: r.SessionManager,
-			ConnDialer:     r.ConnDialer,
-			NodeAddr:       r.NodeAddr,
-			listener:       r.listener,
-			authorizedKeys: authorizedKeys,
-			Logger:         r.Logger.With("component", "auth"),
+			HostSigners:       r.HostSigners,
+			Signers:           r.Signers,
+			HopSigners:        r.HopSigners,
+			HopTrusted:        r.HopTrusted,
+			RefuseHostKeyHops: r.RefuseHostKeyHops,
+			SessionManager:    r.SessionManager,
+			ConnDialer:        r.ConnDialer,
+			NodeAddr:          r.NodeAddr,
+			listener:          r.listener,
+			authorizedKeys:    authorizedKeys,
+			Logger:            r.Logger.With("component", "auth"),
 		},
 		MetricsProvider: r.MetricsProvider,
 		Logger:          r.Logger,
@@ -222,12 +229,15 @@ type proxyAuth struct {
 	NodeAddr string
 	// listener is the one its sshProxy serves: a direct guest's AuthRequest
 	// takes its origin from it, and a hop's keeps the one it carries.
-	listener       listenerKind
-	authorizedKeys map[string]struct{} // SHA256 fingerprints; nil disables the gate
-	SessionManager *SessionManager
-	ConnDialer     connDialer
-	Signers        []ssh.Signer
-	HostSigners    []ssh.Signer
+	listener          listenerKind
+	authorizedKeys    map[string]struct{} // SHA256 fingerprints; nil disables the gate
+	SessionManager    *SessionManager
+	ConnDialer        connDialer
+	Signers           []ssh.Signer
+	HopSigners        []ssh.Signer
+	HopTrusted        []ssh.PublicKey
+	RefuseHostKeyHops bool
+	HostSigners       []ssh.Signer
 
 	Logger *slog.Logger
 }
@@ -252,16 +262,17 @@ func (a proxyAuth) checkAuthorizedKeys(conn ssh.ConnMetadata, pk ssh.PublicKey) 
 	return fmt.Errorf("public key is not authorized")
 }
 
-// isOwnAuthority reports whether key is one of this relay's signing keys, and
-// so may vouch for a certificate's AuthRequest. Only the relay mints them.
-//
-// Signers, not HostSigners: Signers is what newUserCertSigners signs with. A
-// cross-node hop arrives carrying a certificate a neighbour minted, which this
-// recognizes because the nodes of a cluster share these keys -- as the sideway
-// branch of prepare's host key callback already requires of HostSigners, which
-// is cloned from Signers.
-func (a proxyAuth) isOwnAuthority(key ssh.PublicKey) bool {
-	return signerAuthority(a.Signers, key)
+// isHopAuthority reports whether a key may vouch for a node hop.
+func (a proxyAuth) isHopAuthority(key ssh.PublicKey) bool {
+	if signerAuthority(a.HopSigners, key) {
+		return true
+	}
+	for _, trusted := range a.HopTrusted {
+		if key != nil && bytes.Equal(trusted.Marshal(), key.Marshal()) {
+			return true
+		}
+	}
+	return !a.RefuseHostKeyHops && signerAuthority(a.Signers, key)
 }
 
 // publicKeyFingerprint returns the SHA256 fingerprint of the underlying
@@ -305,11 +316,15 @@ func loadAuthorizedKeys(paths []string) (map[string]struct{}, error) {
 	return fps, nil
 }
 
+// routeCreds retains both kinds so a refreshed route can change locality.
+type routeCreds struct{ relay, hop []ssh.AuthMethod }
+
 // preparedRoute is one upstream attempt's plan, taken from one snapshot of the
 // session: where to dial, which host key to expect there, and the route to
 // compare against if it fails. Taking all three from one read is what keeps the
 // dial target and the host key it must present from disagreeing.
 type preparedRoute struct {
+	creds  routeCreds
 	id     *api.Identifier   // the dial target
 	route  Route             // node and generation, for the refresh comparison
 	config *ssh.ClientConfig // credentials, and the host-key policy for that target
@@ -328,6 +343,12 @@ type upstreamTarget struct {
 	// present. A host's upstream, and a hop to another node, must present the
 	// relay's own; that node checks the guest itself.
 	local *Session
+}
+
+// needsRelayCreds includes registrations at this node's sshd, and guests
+// reaching a local host that pins this relay's signing key.
+func (t *upstreamTarget) needsRelayCreds() bool {
+	return t.id.Type == api.Identifier_HOST || t.local != nil
 }
 
 // admits reports whether key may join the session t leads to.
@@ -362,7 +383,7 @@ func (a proxyAuth) authenticate(conn ssh.ConnMetadata, pk ssh.PublicKey) (*AuthR
 		return nil, nil, false, err
 	}
 	checker := UserCertChecker{
-		IsUserAuthority: a.isOwnAuthority,
+		IsUserAuthority: a.isHopAuthority,
 		UserKeyFallback: func(user string, key ssh.PublicKey) (ssh.PublicKey, error) {
 			return key, nil
 		},
@@ -502,7 +523,7 @@ func (a proxyAuth) targetOf(sess *Session) *upstreamTarget {
 }
 
 // plan completes target into an attempt that presents creds.
-func (a proxyAuth) plan(conn ssh.ConnMetadata, target *upstreamTarget, creds []ssh.AuthMethod) *preparedRoute {
+func (a proxyAuth) plan(conn ssh.ConnMetadata, target *upstreamTarget, creds routeCreds) *preparedRoute {
 	hostKeyCb := func(hostname string, remote net.Addr, key ssh.PublicKey) error {
 		if target.local == nil {
 			// check host keys for sideway connections
@@ -522,8 +543,12 @@ func (a proxyAuth) plan(conn ssh.ConnMetadata, target *upstreamTarget, creds []s
 		return errUpstreamHostKeyMismatch
 	}
 
-	pr := &preparedRoute{id: target.id, route: target.route}
-	pr.config = &ssh.ClientConfig{User: conn.User(), HostKeyCallback: hostKeyCb, Auth: creds}
+	pr := &preparedRoute{id: target.id, route: target.route, creds: creds}
+	auth := creds.hop
+	if target.needsRelayCreds() {
+		auth = creds.relay
+	}
+	pr.config = &ssh.ClientConfig{User: conn.User(), HostKeyCallback: hostKeyCb, Auth: auth}
 	pr.config.BannerCallback = func(message string) error {
 		pr.banner = message
 		return nil
@@ -553,7 +578,16 @@ func (a proxyAuth) prepare(conn ssh.ConnMetadata, pk ssh.PublicKey) (*preparedRo
 	if hop {
 		perms.Extensions = map[string]string{permHop: ""}
 	}
-	return a.plan(conn, target, []ssh.AuthMethod{ssh.PublicKeys(signers...)}), perms, nil
+	creds := routeCreds{relay: []ssh.AuthMethod{ssh.PublicKeys(signers...)}}
+	creds.hop = creds.relay
+	if len(a.HopSigners) > 0 {
+		hop, err := signUserCerts(conn, auth, a.HopSigners[:1])
+		if err != nil {
+			return nil, nil, fmt.Errorf("error creating hop cert signer: %w", err)
+		}
+		creds.hop = []ssh.AuthMethod{ssh.PublicKeys(hop...)}
+	}
+	return a.plan(conn, target, creds), perms, nil
 }
 
 // prepareFrom plans an attempt from sess, a snapshot of pk's session, with
@@ -562,7 +596,7 @@ func (a proxyAuth) prepare(conn ssh.ConnMetadata, pk ssh.PublicKey) (*preparedRo
 // stage. It authorizes pk against sess as authorize does against its own read,
 // and reads nothing itself, so a watch that replaces or removes the cache entry
 // meanwhile changes nothing about the attempt.
-func (a proxyAuth) prepareFrom(conn ssh.ConnMetadata, pk ssh.PublicKey, sess *Session, creds []ssh.AuthMethod) (*preparedRoute, error) {
+func (a proxyAuth) prepareFrom(conn ssh.ConnMetadata, pk ssh.PublicKey, sess *Session, creds routeCreds) (*preparedRoute, error) {
 	_, key, _, err := a.authenticate(conn, pk)
 	if err != nil {
 		return nil, err
@@ -605,7 +639,7 @@ func (a proxyAuth) refresh(ctx context.Context, conn ssh.ConnMetadata, pk ssh.Pu
 		logger.Info("refreshed the route; it has not moved")
 		return nil, false
 	}
-	next, err := a.prepareFrom(conn, pk, fresh, attempted.config.Auth)
+	next, err := a.prepareFrom(conn, pk, fresh, attempted.creds)
 	if err != nil {
 		logger.Info("refreshed the route; it no longer admits the key", "error", err)
 		return nil, false
@@ -621,8 +655,12 @@ func (a proxyAuth) refresh(ctx context.Context, conn ssh.ConnMetadata, pk ssh.Pu
 // value both ends of that connection share. A guest's ID at the node it
 // entered by travels in auth instead, as ingress_connection.
 func (a proxyAuth) newUserCertSigners(conn ssh.ConnMetadata, auth *AuthRequest) ([]ssh.Signer, error) {
+	return signUserCerts(conn, auth, a.Signers)
+}
+
+func signUserCerts(conn ssh.ConnMetadata, auth *AuthRequest, signers []ssh.Signer) ([]ssh.Signer, error) {
 	var certSigners []ssh.Signer
-	for _, s := range a.Signers {
+	for _, s := range signers {
 		ucs := UserCertSigner{
 			SessionID:   string(conn.SessionID()),
 			User:        conn.User(),

@@ -14,6 +14,7 @@ import (
 // through viper's AutomaticEnv and additionally binds bare SENTRY_DSN.
 var uptermdEnv = []string{
 	"UPTERMD_SSH_ADDR", "UPTERMD_WS_ADDR", "UPTERMD_NODE_ADDR", "UPTERMD_INTERNAL_ADDR",
+	"UPTERMD_HOP_KEY", "UPTERMD_HOP_TRUSTED_KEY", "UPTERMD_HOP_REFUSE_HOST_KEY",
 	"UPTERMD_AUTHORIZED_KEYS", "UPTERMD_PRIVATE_KEY", "UPTERMD_HOSTNAME",
 	"UPTERMD_SSH_NETWORK", "UPTERMD_SSH_PROXY_PROTOCOL_REQUIRED", "UPTERMD_SSH_PROXY_PROTOCOL", "UPTERMD_NETWORK", "UPTERMD_NETWORK_OPT",
 	"UPTERMD_METRIC_ADDR", "UPTERMD_DEBUG", "UPTERMD_ROUTING",
@@ -289,4 +290,17 @@ func TestStrictFlags(t *testing.T) {
 	flags := Root().PersistentFlags()
 	require.Equal(t, "network for the SSH listener: tcp (the address's own families), tcp4 or tcp6", flags.Lookup("ssh-network").Usage)
 	require.Equal(t, "require a PROXY protocol v2 header on every SSH connection, and close any connection without one. Needs --internal-addr. Only as trustworthy as the network: make sure nothing but your proxy can reach this listener", flags.Lookup("ssh-proxy-protocol-required").Usage)
+}
+
+func TestHopKeyFlags(t *testing.T) {
+	resetUptermdEnv(t)
+	opt, err := unmarshalForTest(t, "--hop-key", "h1,h2", "--hop-trusted-key", "key-one,key-two", "--hop-refuse-host-key")
+	require.NoError(t, err)
+	require.Equal(t, []string{"h1", "h2"}, opt.HopKeys)
+	require.Equal(t, []string{"key-one", "key-two"}, opt.HopTrustedKeys)
+	require.True(t, opt.HopRefuseHostKey)
+	cmd := Root()
+	require.Equal(t, "private key file(s) that sign node hops; the first signs. Without it, hops are signed with the server's own keys. Hosts are always sent certificates signed with the server's own keys", cmd.PersistentFlags().Lookup("hop-key").Usage)
+	require.Equal(t, "public key(s) whose signatures this node accepts on node hops, in addition to its hop keys", cmd.PersistentFlags().Lookup("hop-trusted-key").Usage)
+	require.Equal(t, "stop accepting node hops signed with the server's own keys", cmd.PersistentFlags().Lookup("hop-refuse-host-key").Usage)
 }

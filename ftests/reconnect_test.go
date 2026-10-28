@@ -340,7 +340,7 @@ type redialHost struct {
 
 // shareRedialling shares a session through a forwarder to relay's protocol
 // listener, paced by timing, and returns once the session is ready.
-func shareRedialling(t *testing.T, protocol string, relay *Server, timing host.ReconnectTiming) *redialHost {
+func shareRedialling(t *testing.T, protocol string, relay *Server, timing host.ReconnectTiming, callbacks ...func(*api.Client)) *redialHost {
 	t.Helper()
 	fwd := testhelpers.NewForwarder(t, relay.addr(protocol))
 	h := &Host{
@@ -349,6 +349,9 @@ func shareRedialling(t *testing.T, protocol string, relay *Server, timing host.R
 		AdminSocketFile:          setupAdminSocket(t),
 		PermittedClientPublicKey: ClientPublicKeyContent,
 		Reconnect:                timing,
+	}
+	if len(callbacks) > 0 {
+		h.ClientJoinedCallback = callbacks[0]
 	}
 	r := &redialHost{Host: h, fwd: fwd}
 	r.first = shareHost(t, h, protocol+"://"+fwd.Addr(), relay.NodeAddr())
