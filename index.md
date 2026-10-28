@@ -65,13 +65,19 @@ go install ./cmd/upterm/...
    upterm host
    ```
 
-1. Host retrieves and shares the SSH connection string:
+1. Host retrieves and shares the connection string:
 
    ```console
    upterm session current
    ```
 
-1. Client connects using the shared string:
+1. Client joins using the shared string, and rejoins on its own if the connection drops:
+
+   ```console
+   upterm join ssh://TOKEN@uptermd.upterm.dev
+   ```
+
+   Or with plain `ssh` (no install needed):
 
    ```console
    ssh TOKEN@uptermd.upterm.dev
@@ -80,7 +86,24 @@ go install ./cmd/upterm/...
 ## :blue_book: Quick Reference
 
 Dive into more commands and advanced usage in the [documentation](docs/upterm.md).
+To reach agents running in [Herdr](https://github.com/herdrdev/herdr) at home from a phone or another laptop, see [Reach your Herdr agents from anywhere](guides/herdr.md).
 Below are some notable highlights:
+
+### Joining with `upterm join`
+
+`upterm join` takes the connect string on the host's `➤ Join:` line. If the
+connection drops, it resets most terminal modes the session had set (the
+alternate screen and mouse reporting, for example), says why it's waiting, and
+rejoins on its own: Enter retries at once, and Ctrl-C stops. `~.` leaves.
+
+A forced command (`upterm host --force-command`) starts again on each rejoin,
+so don't use `upterm join` with one whose effects mustn't repeat.
+
+It offers keys as `ssh` does: the agent's, then the default key files, and it
+generates one only when you have none. Unlike `ssh`, it doesn't read
+`~/.ssh/config`: per-host `IdentityFile`, `User` and `ProxyJump` don't apply,
+the target can't be a host alias, and FIDO keys work only through the agent.
+Use `-i`, or plain `ssh`, for those.
 
 ### Command Execution
 
@@ -125,11 +148,17 @@ for that host are used.
 
 ### SSH agents and hardware keys
 
-`upterm host` authenticates to the server with your SSH identity once, when
-the tunnel is established, the same as `ssh` would. Everything after that —
-guest joins, `upterm attach`, key renegotiation — uses a key generated for
-the session, so an agent that confirms each signature (gpg-agent with a
-smartcard, 1Password, a FIDO key) asks once, at start.
+`upterm host` authenticates to the server with your SSH identity when the
+tunnel is established, the same as `ssh` would, and again whenever it
+reconnects. Everything else — guest joins, `upterm attach`, key renegotiation —
+uses a key generated for the session, so an agent that confirms each signature
+(gpg-agent with a smartcard, 1Password, a FIDO key) asks at start. On a server
+that accepts any host, as uptermd.upterm.dev does, a reconnect uses the
+session's own key and doesn't ask the agent, unless `--private-key` names the
+identities: those are then the only ones offered, on every reconnect too. On a
+server with `--authorized-keys`, such an agent asks on every reconnect. For a
+long-lived session that will reconnect, use a key file or an agent without
+per-use confirmation.
 
 To keep such an agent out of it entirely, name a plain key. A supplied
 `--private-key` is the whole set, like OpenSSH's `IdentitiesOnly`:
@@ -147,6 +176,10 @@ upterm host --private-key ~/.ssh/id_ed25519_sk.pub
 
 Guests still authenticate with a key of their own. A session with no
 `--authorized-keys` or `--authorized-user` accepts any key, but not none.
+Started with `--accept` as well, such a session is open: anyone with the
+session ID can join, and nobody is asked. `upterm host` warns about it as the
+session starts, and `upterm session info` says so (`"open": true` in its
+JSON).
 
 ### Force command
 
@@ -156,6 +189,10 @@ This mirrors functionality provided by tmate:
 ```console
 upterm host --force-command 'tmux attach -t pair-programming' -- tmux new -t pair-programming
 ```
+
+A forced command starts again each time `upterm join` rejoins; nothing the previous one did is undone.
+
+Each guest's forced command runs on a pty of its own, with `SSH_TTY`, `SSH_CONNECTION` and `SSH_CLIENT` set as sshd sets them, so a program that copies over OSC 52 when it runs over SSH copies to the guest's clipboard. `--hide-client-ip` leaves out the two that carry the guest's address.
 
 ### Running Without a Terminal
 
@@ -176,11 +213,11 @@ EOF
 
 The same two lines are committed at [`etc/known_hosts/uptermd.upterm.dev`](etc/known_hosts/uptermd.upterm.dev), for anyone who would rather fetch the file than paste it — compare the fingerprint of *every* line in whatever you fetch before trusting it. `uptermd.upterm.dev`'s host key has the SHA256 fingerprint `SHA256:9ajV8JqMe6jJE/s3TYjb/9xw7T0pfJ2+gADiBIJWDPE`; that's the value to check against, however you obtained the key.
 
-Note that `ssh-keyscan uptermd.upterm.dev` is **not** equivalent. The relay presents an SSH host certificate, and a `known_hosts` entry only authorizes one when the line is marked `@cert-authority` — which `ssh-keyscan` does not emit. With a plain key line, upterm falls back to its first-connection prompt: an operator at a terminal still sees the fingerprint there and can compare it by hand, but on a runner with no terminal that prompt can't be answered, so nothing gets verified.
+Note that `ssh-keyscan uptermd.upterm.dev` is **not** a substitute. It records whatever answered the scan, so its line is only as good as the fingerprint check you make on it. The relay presents an SSH host certificate signed with its own key, and upterm checks the plain key line `ssh-keyscan` emits against that key, as OpenSSH does; upterm 0.37.0 and earlier authorize a certificate only through a line marked `@cert-authority`, and fall back to the first-connection prompt, which a runner with no terminal can't answer.
 
 `--skip-host-key-check` accepts whatever answers on the first connection. It is convenient for a self-hosted relay you are bringing up, and it is not a substitute for pinning: on a fresh runner it will trust anything that can intercept that connection.
 
-If this key is ever rotated, a pin pasted into a job has to be updated by hand: the fingerprint here changes, and so does the copy bundled with [action-upterm](https://github.com/owenthereal/action-upterm), which needs a release of its own. A stale pin does not surface as a host-key mismatch: `known_hosts` simply holds no authority for the rotated key, which upterm treats as an unknown host. A job with no terminal therefore fails, because the first-connection prompt cannot be answered; an interactive run is prompted instead and could accept the new key, so update the pin rather than accepting at the prompt. Watch this section after upgrading.
+If this key is ever rotated, a pin pasted into a job has to be updated by hand: the fingerprint here changes, and so does the copy bundled with [action-upterm](https://github.com/owenthereal/action-upterm), which needs a release of its own. A stale pin surfaces as a host-key mismatch, and upterm won't connect until it is updated. upterm 0.37.0 and earlier treat it as an unknown host instead: a job with no terminal fails, because the first-connection prompt cannot be answered, and an interactive run is prompted and could accept the new key, so update the pin rather than accepting at the prompt. Watch this section after upgrading.
 
 Look the session up by name while it runs and after it ends. The record outlives the process and carries how the command finished:
 
@@ -188,7 +225,7 @@ Look the session up by name while it runs and after it ends. The record outlives
 upterm session info build-shell -o json
 ```
 
-The `status` field is `starting`, `ready`, `disconnected` or `ending` while the session still holds its name, and `ended` once nobody does; `reason` is `exited` (with `exitCode`), `signaled` (with `signal` and originating `signalNumber`), `stopped` (explicit admin stop), `canceled` (parent cancellation), `join_timeout`, `startup_failed`, `startup_abandoned` (declined at the confirmation prompt) or `unknown`.
+The `status` field is `starting`, `ready`, `reconnecting`, `disconnected` or `ending` while the session still holds its name, and `ended` once nobody does; `reason` is `exited` (with `exitCode`), `signaled` (with `signal` and originating `signalNumber`), `stopped` (explicit admin stop), `canceled` (parent cancellation), `join_timeout`, `startup_failed`, `startup_abandoned` (declined at the confirmation prompt) or `unknown`. While it is `reconnecting`, `tunnelReason` says why (`network`, `relay_error`, `agent_unavailable`, `agent_refused`, `auth_refused`, `relay_key_changed`, `relay_unsupported` or `proof_refused`), with `tunnelLostAt`, `tunnelError` and `nextAttemptAt`; a `disconnected` session's `tunnelReason` is `reconnect_unsupported`. `reconnect` is `supported` or `unsupported` once the first connection has shown which.
 
 `upterm session wait NAME` returns the command's exit code, 0 for explicit stop or join timeout, 128 plus the originating signal number for host or command signals, and 125 for cancellation or unavailable outcomes. Lookup, read and replacement failures, and cancellation of the waiter's context, return 125 with a diagnostic; interrupting the observer leaves the session alive. Legacy stopped records remain successful; legacy signal records without a valid numeric signal return 125. The on-disk record calls the numeric field `signal_number`.
 
@@ -218,7 +255,76 @@ Put a terminal on a session started without one, from any shell on the same mach
 upterm attach build-shell
 ```
 
-Type `~.` at the start of a line to detach; the session keeps running, and `upterm attach` again picks up where the screen left off. On Unix, `~^Z` suspends the terminal instead — `fg` resumes it. `--escape-char none` sends every keystroke to the session. A session's own terminal counts as a client too: `session info` lists it as `host` and guests as `guest`. In its JSON, `guestCount` counts currently connected guests (including forwarding, excluding host terminals); scripts asking whether a terminal or SFTP guest has ever joined should use `firstGuestJoinedAt`.
+Type `~.` at the start of a line to detach; the session keeps running, and `upterm attach` again picks up where the screen left off. On Unix, `~^Z` suspends the terminal instead — `fg` resumes it. `--escape-char none` sends every keystroke to the session. A session's own terminal counts as a client too: `session info` lists it as `host`, guests as `guest`, and a guest connection's forwards (see [Local TCP Forwarding](#local-tcp-forwarding)) as `jump`. In its JSON, `guestCount` counts currently connected guests (including jumps, excluding host terminals); scripts asking whether a terminal or SFTP guest has ever joined should use `firstGuestJoinedAt`.
+
+### Reconnecting
+
+If the host's connection to the server drops — a Wi-Fi switch, a laptop
+waking up, a server deploy — `upterm host` reconnects on its own and keeps the
+same session ID, so the same connect string works again once it's back. While it
+retries, `upterm session info` shows `reconnecting`, why, and when it tries
+next. Nothing on the host stops: the command, its terminal and a local
+`upterm attach` carry on. The ID lasts as long as the `upterm host` process,
+not across a restart.
+
+(On a self-hosted relay with several nodes and no Consul, a host that comes back on another node gets a new connect string; `upterm session info` shows it.)
+
+Guests connected at the drop are disconnected. A guest who joined with
+`upterm join` rejoins on its own once the host is back, and says it's waiting
+and when it tries next until then. If the connect string changed, as in the
+note above, it keeps waiting on the old one and, after 5 minutes, adds that the
+session may have ended or moved: stop it with Ctrl-C and join the new one. A
+plain `ssh` guest rejoins with the same command; one who tries during the gap
+is told:
+
+```text
+upterm: no host is connected for session ID right now. If it's reconnecting, try again once it's back; on some relays the host then has a new command to share. Otherwise it may have ended, or the ID may be wrong.
+```
+
+(A plain `ssh` guest who enters at another node of a multi-node relay reads a shorter form, in ssh's `channel 0: open failed` line: `…right now; it may have ended, or the ID may be wrong.`)
+
+For machines without upterm, this script rejoins an interactive session
+automatically and leaves the terminal usable after a drop. Save it as
+`upterm-rejoin` and run it in place of `ssh`, with the same arguments:
+
+```bash
+#!/usr/bin/env bash
+# upterm-rejoin: rejoin an interactive upterm session when the connection drops.
+# Retries only when ssh itself fails (exit 255). Any other exit status is the
+# remote side ending — your shell's own `exit 1` included — and stops. It stops
+# too after 10 tries in a row that fail within 5 s, before the session starts.
+reset_modes() { printf '\030\0337\033[?1049l\033[?1047l\033[?47l\033[r\0338\033[?1l\033[?7h\033[?25h\033[?1000l\033[?1002l\033[?1003l\033[?1004l\033[?1005l\033[?1006l\033[?2004l\033[<u\033[>4m\033(B'; }
+trap reset_modes EXIT   # also runs on Ctrl-C
+fails=0
+while :; do
+  start=$SECONDS
+  ssh -t "$@"; rc=$?
+  reset_modes
+  [ "$rc" -eq 255 ] || exit "$rc"
+  if [ $((SECONDS - start)) -lt 5 ]; then fails=$((fails + 1)); else fails=0; fi
+  if [ "$fails" -ge 10 ]; then
+    echo "upterm-rejoin: 10 tries in a row failed within 5 s; stopping. upterm join says why, and waits for a host that's reconnecting." >&2
+    exit 255
+  fi
+  echo "upterm-rejoin: connection lost; rejoining in 3 s (Ctrl-C to stop)" >&2
+  sleep 3 || exit 130
+done
+```
+
+- To stop, press Ctrl-C during the pause. While connected, Ctrl-C goes to the
+  session.
+- ssh's `~.` also exits 255, and so reconnects; follow it with Ctrl-C.
+- A remote command that exits 255 is retried too, which is why the script is
+  for interactive sessions only.
+- A refused key, a session that has ended and a host that's still away all
+  exit 255 before the session starts, so after about half a minute of those
+  the script stops. [`upterm join`](#joining-with-upterm-join) tells them
+  apart, and keeps waiting for a host that's reconnecting.
+
+Reconnecting needs a server that supports it: uptermd 0.34.0 or later, which
+uptermd.upterm.dev runs. With an older one, `upterm session info` says
+`Reconnect: unsupported by this relay`, and a lost connection leaves the
+session `disconnected`, as before.
 
 ### File Transfer (SFTP/SCP)
 
@@ -235,7 +341,7 @@ scp -P PORT ./local/file.txt USER@HOST:/path/to/destination/
 **Security model:**
 
 - File transfers have the same access as the terminal session (clients can already access any file via the shell)
-- Without `--accept`, each file operation prompts the host for approval via a dialog. Where no dialog can be shown (no display, such as over SSH, or on Linux no `zenity`, `qarma` or `matedialog` to draw it), the operation is denied
+- Without `--accept`, file operations need the host's approval in a dialog, which can allow the file asked about, or everything in that scp or sftp command. Where no dialog can be shown (no display, such as over SSH, or on Linux no `zenity`, `qarma` or `matedialog` to draw it), the operation is denied
 - Use `--read-only` to restrict SFTP to downloads only (no uploads, deletes, or modifications)
 - Use `--no-sftp` to disable file transfers entirely
 
@@ -248,7 +354,7 @@ upterm host --allow-local-tcp-forwarding
 ssh -L 5555:127.0.0.1:8080 SESSION_SSH_USER@uptermd.upterm.dev
 ```
 
-After the first successful forward, the guest appears in session info and join/leave notifications until its SSH connection closes, even between forwarding channels. Multiple forwards on that connection share one entry; terminal and SFTP sessions retain their own entries. Forwarding alone does not set `firstGuestJoinedAt` or satisfy `--join-timeout`: an accepted terminal or SFTP session must join before that deadline. An idle `ssh -N` connection or a failed forward does not appear.
+After the first successful forward, the guest appears in session info and join/leave notifications until its SSH connection closes, even between forwarding channels. It is listed as `jump`, followed by where its forwards go, such as `→ 127.0.0.1:8080`: each distinct destination once, up to 16, then how many more forwards it opened, to anywhere else (`(+N more forwards)`). `--hide-client-ip`, and CI, hide the destinations along with the address. Multiple forwards on that connection share one entry; terminal and SFTP sessions retain their own entries. Forwarding alone does not set `firstGuestJoinedAt` or satisfy `--join-timeout`: an accepted terminal or SFTP session must join before that deadline. An idle `ssh -N` connection or a failed forward does not appear.
 
 ### WebSocket Connection
 
@@ -259,6 +365,12 @@ upterm host --server wss://uptermd.upterm.dev -- bash
 ```
 
 Clients can connect to the host session via WebSocket as well:
+
+```console
+upterm join wss://TOKEN@uptermd.upterm.dev
+```
+
+Or with `ssh`, through `upterm proxy`:
 
 ```console
 ssh -o ProxyCommand='upterm proxy wss://TOKEN@uptermd.upterm.dev' TOKEN@uptermd.upterm.dev:443
@@ -274,7 +386,7 @@ upterm host --proxy http://proxy.example.com:3128 -- bash
 
 Without `--proxy`, `ws://` and `wss://` connections already use `HTTPS_PROXY`/`HTTP_PROXY`, but `ssh://` connections go direct. Many corporate proxies only allow `CONNECT` to port 443; in that case, use `--server wss://uptermd.upterm.dev` as well.
 
-Like other flags, `--proxy` can be set with `UPTERM_PROXY` or as `proxy` in the config file, which keeps proxy credentials off the command line. Clients behind a proxy pass the same flag to `upterm proxy`.
+Like other flags, `--proxy` can be set with `UPTERM_PROXY` or as `proxy` in the config file, which keeps proxy credentials off the command line. Clients behind a proxy pass the same flag to `upterm join` or `upterm proxy`.
 
 ### Debug GitHub Actions
 
@@ -363,7 +475,19 @@ set-option -ga update-environment " UPTERM_ADMIN_SOCKET UPTERM_SESSION_NAME"
 
 ```bash
 # Show 🆙 emoji and connected client count when in upterm session
-export PS1='$(upterm session current -o go-template="🆙 {{.ClientCount}} " 2>/dev/null)'"$PS1"
+# (zsh also needs `setopt PROMPT_SUBST` for the prompt to run the command)
+export PS1='$([ -n "$UPTERM_ADMIN_SOCKET" ] && upterm session current -o go-template="🆙 {{.ClientCount}} " 2>/dev/null)'"$PS1"
+```
+
+The `UPTERM_ADMIN_SOCKET` check keeps `upterm` from running on every prompt outside a session. With [Starship](https://starship.rs), add to `~/.config/starship.toml` and include `${custom.upterm}` in your `format` (or leave `format` unset so Starship places it):
+
+```toml
+[custom.upterm]
+command = "upterm session current -o go-template='{{.ClientCount}}'"
+when = 'test -n "$UPTERM_ADMIN_SOCKET"'
+format = "([🆙 $output]($style) )"
+style = "bold yellow"
+shell = ["sh"]
 ```
 
 **Template variables available** (Go templates use PascalCase field names):
