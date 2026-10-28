@@ -142,3 +142,50 @@ func TestStartSSHProxyProtocolOptional(t *testing.T) {
 		})
 	}
 }
+
+func TestStartRequireProxyV2(t *testing.T) {
+	t.Setenv("PRIVATE_KEY", "")
+	keyPath := filepath.Join(t.TempDir(), "host_key")
+	require.NoError(t, os.WriteFile(keyPath, []byte(TestPrivateKeyContent), 0600))
+	logs := make(proxyProtocolTestLogs, 128)
+	logger := slog.New(slog.NewJSONHandler(logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- Start(ctx, Opt{SSHAddr: "0.0.0.0:0", SSHNetwork: "tcp4", InternalAddr: "127.0.0.1:0", SSHProxyProtocolRequired: true, PrivateKeys: []string{keyPath}, Network: "mem"}, logger)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case err := <-done:
+			require.NoError(t, err)
+		case <-time.After(5 * time.Second):
+			t.Error("server did not stop")
+		}
+	})
+	var addr string
+	timer := time.NewTimer(5 * time.Second)
+	defer timer.Stop()
+	for addr == "" {
+		select {
+		case record := <-logs:
+			if record["msg"] == "starting server" {
+				addr = record["ssh_addr"].(string)
+			}
+		case <-timer.C:
+			t.Fatal("server did not start")
+		}
+	}
+	_, port, err := net.SplitHostPort(addr)
+	require.NoError(t, err)
+	raw, err := net.DialTimeout("tcp4", net.JoinHostPort("127.0.0.1", port), time.Second)
+	require.NoError(t, err)
+	defer func() { _ = raw.Close() }()
+	require.NoError(t, raw.SetDeadline(time.Now().Add(2*time.Second)))
+	_, err = io.WriteString(raw, "SSH-2.0-probe\r\n")
+	require.NoError(t, err)
+	var b [1]byte
+	n, err := raw.Read(b[:])
+	require.Zero(t, n, "required mode must imply PROXY support even without ssh-proxy-protocol")
+	require.ErrorIs(t, err, io.EOF)
+}

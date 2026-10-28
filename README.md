@@ -688,8 +688,10 @@ networks:
 **Important notes:**
 
 - **Proxy Protocol:**
-  The `--ssh-proxy-protocol` flag (or `UPTERMD_SSH_PROXY_PROTOCOL=true` environment variable) tells `uptermd` to expect the [PROXY protocol](https://www.haproxy.org/download/1.8/doc/proxy-protocol.txt) header on incoming SSH connections. This is essential when using Traefik (or other TCP proxies like HAProxy or AWS ELB) to preserve the real client IP address.
-  **If you enable `--ssh-proxy-protocol`, all incoming SSH connections must come through a proxy that supports and is configured to use the PROXY protocol. Direct SSH connections will fail, as `uptermd` will expect the protocol header.**
+  The `--ssh-proxy-protocol` flag (or `UPTERMD_SSH_PROXY_PROTOCOL=true`) uses the [PROXY protocol](https://www.haproxy.org/download/1.8/doc/proxy-protocol.txt) header when present to preserve the client IP address behind TCP proxies such as Traefik, HAProxy or AWS ELB. The header is optional: direct SSH connections still work.
+  To refuse connections without a PROXY protocol v2 header, use `--ssh-proxy-protocol-required` (or `UPTERMD_SSH_PROXY_PROTOCOL_REQUIRED=true`). This implies `--ssh-proxy-protocol` and requires `--internal-addr`, where node hops and WebSocket bridges connect without a PROXY header. Only v2 PROXY headers describing TCPv4 or TCPv6 are accepted.
+  A valid header from any peer is believed. Use network isolation or a firewall so only trusted proxies can reach the public SSH listener.
+  The `--ssh-network` option (or `UPTERMD_SSH_NETWORK`) selects `tcp` (the default), `tcp4` or `tcp6`. For an IPv4-only public listener, use `--ssh-network=tcp4 --ssh-addr=0.0.0.0:2222`; the default `tcp` preserves dual-stack wildcard binding.
 
 - **Entrypoints:**
   Make sure to configure the appropriate [Traefik entrypoints](https://doc.traefik.io/traefik/routing/entrypoints/). This example uses two: one for SSH (`uptermd` on port `2222`) and one for WebSocket/HTTPS (`websecure` on port `443`).
