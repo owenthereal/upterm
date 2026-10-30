@@ -1,0 +1,535 @@
+package consent
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"log/slog"
+	"strings"
+	"sync"
+	"testing"
+	"testing/synctest"
+	"time"
+
+	"github.com/stretchr/testify/require"
+)
+
+type answer struct {
+	decision Decision
+	err      error
+}
+type review struct {
+	ctx    context.Context
+	prompt Prompt
+	answer chan answer
+}
+type fakePrompter struct {
+	calls              chan review
+	ignoreCancellation bool
+}
+
+func quietManager(p Prompter) *Manager {
+	return NewManager(p, slog.New(slog.NewTextHandler(io.Discard, nil)))
+}
+func newPrompter() *fakePrompter { return &fakePrompter{calls: make(chan review, 1024)} }
+func (p *fakePrompter) Prompt(ctx context.Context, prompt Prompt) (Decision, error) {
+	r := review{ctx, prompt, make(chan answer, 1)}
+	p.calls <- r
+	if p.ignoreCancellation {
+		a := <-r.answer
+		return a.decision, a.err
+	}
+	select {
+	case a := <-r.answer:
+		return a.decision, a.err
+	case <-ctx.Done():
+		return Deny, ctx.Err()
+	}
+}
+func check(m *Manager, ctx context.Context, op Operation, c ClientInfo, subjects ...string) <-chan answer {
+	result := make(chan answer, 1)
+	go func() { d, e := m.CheckPermission(ctx, op, c, subjects...); result <- answer{d, e} }()
+	synctest.Wait()
+	return result
+}
+func next(t *testing.T, p *fakePrompter) review {
+	t.Helper()
+	select {
+	case r := <-p.calls:
+		return r
+	default:
+		t.Fatal("expected a consent prompt")
+		return review{}
+	}
+}
+func reply(r review, d Decision) { r.answer <- answer{decision: d}; synctest.Wait() }
+func allowed(t *testing.T, result <-chan answer, d Decision) {
+	t.Helper()
+	a := <-result
+	require.NoError(t, a.err)
+	require.Equal(t, d, a.decision)
+}
+func denied(t *testing.T, result <-chan answer, err error) {
+	t.Helper()
+	a := <-result
+	require.Equal(t, Deny, a.decision)
+	require.ErrorIs(t, a.err, err)
+}
+
+var guest = ClientInfo{Fingerprint: "guest-key", ConnectionID: "connection-1"}
+var reconnect = ClientInfo{Fingerprint: "guest-key", ConnectionID: "connection-2"}
+
+// Removing capability, connection or full tuple from the grant key must fail.
+func TestConsentScopes(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		p := newPrompter()
+		m := quietManager(p)
+		defer m.Close()
+		subjects := []string{"a\x00:b", "c:d\x00"}
+		result := check(m, context.Background(), OpRename, guest, subjects...)
+		r := next(t, p)
+		require.Equal(t, subjects, r.prompt.Subjects)
+		require.Equal(t, OpRename, r.prompt.Operation)
+		require.Equal(t, guest, r.prompt.Client)
+		require.NotEmpty(t, r.prompt.ID)
+		reply(r, AllowConnection)
+		allowed(t, result, AllowConnection)
+		// SFTP operations share the path grant, but other capabilities do not.
+		for _, op := range []Operation{OpDownload, OpUpload, OpDelete, OpMkdir, OpRmdir, OpRename, OpSymlink, OpLink, OpSetstat} {
+			allowed(t, check(m, context.Background(), op, guest, subjects...), AllowConnection)
+		}
+		require.Len(t, p.calls, 0) // Exactly one prompt for identical scope.
+		result = check(m, context.Background(), OpExec, guest, subjects...)
+		reply(next(t, p), Deny)
+		otherCapabilityResult := <-result
+		require.Equal(t, Deny, otherCapabilityResult.decision)
+		require.ErrorIs(t, otherCapabilityResult.err, ErrDenied)
+		for _, tuple := range [][]string{{"a\x00:b", "changed"}, {"a\x00", "b:c:d\x00"}, {"a\x00:b:c:d\x00"}, {"a\x00:b", "c:d\x00", ""}} {
+			result = check(m, context.Background(), OpRename, guest, tuple...)
+			reply(next(t, p), Deny)
+			denied(t, result, ErrDenied)
+		}
+		result = check(m, context.Background(), OpRename, reconnect, subjects...)
+		reply(next(t, p), Deny)
+		denied(t, result, ErrDenied)
+		result = check(m, context.Background(), OpExec, guest, "echo ok")
+		reply(next(t, p), AllowGuest)
+		allowed(t, result, AllowGuest)
+		allowed(t, check(m, context.Background(), OpExec, reconnect, "different command"), AllowGuest)
+		result = check(m, context.Background(), OpDownload, reconnect, "different path")
+		reply(next(t, p), Deny)
+		denied(t, result, ErrDenied)
+	})
+}
+
+// Expiry must win over a late prompt answer and may never reset at re-entry.
+func TestConsentDeadline(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		p := newPrompter()
+		p.ignoreCancellation = true
+		m := quietManager(p)
+		defer m.Close()
+		arrival := time.Now()
+		result := check(m, context.Background(), OpExec, guest, "sleep")
+		r := next(t, p)
+		require.Equal(t, arrival.Add(60*time.Second), r.prompt.Deadline)
+		time.Sleep(60 * time.Second)
+		synctest.Wait()
+		denied(t, result, ErrTimeout)
+		reply(r, AllowGuest)
+		require.Zero(t, len(m.guests)+len(m.grants))
+		result = check(m, context.Background(), OpExec, reconnect, "sleep")
+		r = next(t, p)
+		reply(r, Deny)
+		denied(t, result, ErrDenied)
+		ctx, cancel := context.WithTimeout(context.Background(), 7*time.Second)
+		defer cancel()
+		result = check(m, ctx, OpForward, guest, "127.0.0.1", "22")
+		r = next(t, p)
+		require.Equal(t, time.Now().Add(7*time.Second), r.prompt.Deadline)
+		time.Sleep(7 * time.Second)
+		synctest.Wait()
+		reply(r, AllowConnection)
+		denied(t, result, ErrTimeout)
+		require.Zero(t, len(m.guests)+len(m.grants))
+	})
+}
+
+// A plain answer cannot be adopted by a different connection on the same flight.
+func TestConsentCoalescing(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		p := newPrompter()
+		m := quietManager(p)
+		defer m.Close()
+		first := check(m, context.Background(), OpExec, guest, "command")
+		r := next(t, p)
+		same := check(m, context.Background(), OpExec, guest, "command")
+		time.Sleep(20 * time.Second)
+		other := check(m, context.Background(), OpExec, reconnect, "command")
+		require.Len(t, p.calls, 0)
+		reply(r, AllowConnection)
+		allowed(t, first, AllowConnection)
+		allowed(t, same, AllowConnection)
+		r2 := next(t, p)
+		require.NotEqual(t, r.prompt.ID, r2.prompt.ID)
+		require.Equal(t, reconnect, r2.prompt.Client)
+		require.Equal(t, r.prompt.Deadline.Add(20*time.Second), r2.prompt.Deadline)
+		reply(r2, Deny)
+		denied(t, other, ErrDenied)
+		require.Len(t, p.calls, 0)
+		// Denial can resolve both connections on an identical flight.
+		first = check(m, context.Background(), OpExec, guest, "denied")
+		r = next(t, p)
+		other = check(m, context.Background(), OpExec, reconnect, "denied")
+		reply(r, Deny)
+		denied(t, first, ErrDenied)
+		denied(t, other, ErrDenied)
+		require.Len(t, p.calls, 0)
+	})
+}
+
+// A guest grant resolves all live tuples of that capability, across connections.
+func TestConsentGuestGrant(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		p := newPrompter()
+		m := quietManager(p)
+		defer m.Close()
+		first := check(m, context.Background(), OpExec, guest, "one")
+		r := next(t, p)
+		other := check(m, context.Background(), OpExec, reconnect, "two")
+		r2 := next(t, p)
+		forward := check(m, context.Background(), OpForward, reconnect, "127.0.0.1", "22")
+		r3 := next(t, p)
+		reply(r, AllowGuest)
+		allowed(t, first, AllowGuest)
+		allowed(t, other, AllowGuest)
+		require.ErrorIs(t, r2.ctx.Err(), context.Canceled)
+		select {
+		case <-forward:
+			t.Fatal("guest exec grant crossed capability")
+		default:
+		}
+		reply(r3, Deny)
+		denied(t, forward, ErrDenied)
+		stranger := ClientInfo{Fingerprint: "other-key", ConnectionID: "connection-3"}
+		pending := check(m, context.Background(), OpExec, stranger, "one")
+		reply(next(t, p), Deny)
+		denied(t, pending, ErrDenied)
+	})
+}
+
+// Empty identities may only obtain connection-scoped authority.
+func TestConsentEmptyIdentity(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		p := newPrompter()
+		m := quietManager(p)
+		defer m.Close()
+		a := ClientInfo{ConnectionID: "a"}
+		b := ClientInfo{ConnectionID: "b"}
+		first := check(m, context.Background(), OpExec, a, "one")
+		r := next(t, p)
+		second := check(m, context.Background(), OpExec, b, "one")
+		r2 := next(t, p)
+		reply(r, AllowGuest)
+		allowed(t, first, AllowConnection)
+		select {
+		case <-second:
+			t.Fatal("empty identity crossed connections")
+		default:
+		}
+		reply(r2, Deny)
+		denied(t, second, ErrDenied)
+		first = check(m, context.Background(), OpExec, a, "two")
+		reply(next(t, p), Deny)
+		denied(t, first, ErrDenied)
+	})
+}
+
+// Cancellation of the displayed origin invalidates its ID before any answer.
+func TestConsentOriginCancellation(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		p := newPrompter()
+		p.ignoreCancellation = true
+		m := quietManager(p)
+		defer m.Close()
+		ctx, cancel := context.WithCancel(context.Background())
+		origin := check(m, ctx, OpExec, guest, "same")
+		old := next(t, p)
+		time.Sleep(10 * time.Second)
+		survivor := check(m, context.Background(), OpExec, reconnect, "same")
+		unrelated := check(m, context.Background(), OpForward, guest, "127.0.0.1", "22")
+		separate := next(t, p)
+		cancel()
+		synctest.Wait()
+		denied(t, origin, ErrCanceled)
+		fresh := next(t, p)
+		require.NotEqual(t, old.prompt.ID, fresh.prompt.ID)
+		require.Equal(t, old.prompt.Deadline.Add(10*time.Second), fresh.prompt.Deadline)
+		reply(old, AllowGuest)
+		grantsFromStaleAnswer := len(m.guests) + len(m.grants)
+		survivorResolvedByStaleAnswer := len(survivor)
+		unrelatedResolvedByCancellation := len(unrelated)
+		// Release even deliberately cancellation-ignoring prompt workers before
+		// asserting, so security mutations fail without leaking test goroutines.
+		reply(fresh, AllowConnection)
+		reply(separate, Deny)
+		require.Zero(t, grantsFromStaleAnswer)
+		require.Zero(t, survivorResolvedByStaleAnswer)
+		require.Zero(t, unrelatedResolvedByCancellation)
+		allowed(t, survivor, AllowConnection)
+		denied(t, unrelated, ErrDenied)
+	})
+}
+
+func TestConsentWaiterDeadline(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		p := newPrompter()
+		m := quietManager(p)
+		defer m.Close()
+		first := check(m, context.Background(), OpExec, guest, "one")
+		old := next(t, p)
+		time.Sleep(40 * time.Second)
+		second := check(m, context.Background(), OpExec, reconnect, "one")
+		time.Sleep(20 * time.Second)
+		synctest.Wait()
+		denied(t, first, ErrTimeout)
+		fresh := next(t, p)
+		require.NotEqual(t, old.prompt.ID, fresh.prompt.ID)
+		require.Equal(t, time.Now().Add(40*time.Second), fresh.prompt.Deadline)
+		time.Sleep(40 * time.Second)
+		synctest.Wait()
+		denied(t, second, ErrTimeout)
+	})
+}
+
+func TestConsentClearConnection(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		p := newPrompter()
+		m := quietManager(p)
+		defer m.Close()
+		first := check(m, context.Background(), OpDownload, guest, "path")
+		reply(next(t, p), AllowConnection)
+		allowed(t, first, AllowConnection)
+		second := check(m, context.Background(), OpDownload, reconnect, "path")
+		reply(next(t, p), AllowConnection)
+		allowed(t, second, AllowConnection)
+		pending := check(m, context.Background(), OpExec, guest, "one")
+		old := next(t, p)
+		other := check(m, context.Background(), OpExec, reconnect, "one")
+		m.ClearConnection(guest.ConnectionID)
+		synctest.Wait()
+		denied(t, pending, ErrCanceled)
+		require.ErrorIs(t, old.ctx.Err(), context.Canceled)
+		fresh := next(t, p)
+		reply(fresh, Deny)
+		denied(t, other, ErrDenied)
+		allowed(t, check(m, context.Background(), OpDownload, reconnect, "path"), AllowConnection)
+		first = check(m, context.Background(), OpDownload, guest, "path")
+		reply(next(t, p), Deny)
+		denied(t, first, ErrDenied)
+		// Guest grants survive connection teardown.
+		first = check(m, context.Background(), OpExec, guest, "grant")
+		reply(next(t, p), AllowGuest)
+		allowed(t, first, AllowGuest)
+		m.ClearConnection(guest.ConnectionID)
+		allowed(t, check(m, context.Background(), OpExec, reconnect, "another"), AllowGuest)
+	})
+}
+
+func TestConsentClose(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		p := newPrompter()
+		m := quietManager(p)
+		first := check(m, context.Background(), OpExec, guest, "grant")
+		reply(next(t, p), AllowGuest)
+		allowed(t, first, AllowGuest)
+		pending := check(m, context.Background(), OpDownload, guest, "pending")
+		r := next(t, p)
+		m.Close()
+		synctest.Wait()
+		denied(t, pending, ErrUnavailable)
+		require.ErrorIs(t, r.ctx.Err(), context.Canceled)
+		require.Empty(t, m.guests)
+		require.Empty(t, m.grants)
+		denied(t, check(m, context.Background(), OpExec, guest, "grant"), ErrUnavailable)
+		m.Close()
+	})
+}
+
+// Removing any admission bound must cause an observable extra prompt/waiter.
+func TestConsentBounds(t *testing.T) {
+	cases := []struct {
+		name    string
+		count   int
+		client  func(int) ClientInfo
+		subject func(int) string
+	}{
+		{"distinct_flights", 32, func(i int) ClientInfo { return ClientInfo{Fingerprint: "g", ConnectionID: fmt.Sprint(i)} }, func(i int) string { return fmt.Sprint(i) }},
+		{"per_connection", 32, func(int) ClientInfo { return guest }, func(i int) string { return "same" }},
+		{"shared_flight", 64, func(i int) ClientInfo { return ClientInfo{Fingerprint: "g", ConnectionID: fmt.Sprint(i)} }, func(int) string { return "same" }},
+		{"total_waiters", 256, func(i int) ClientInfo { return ClientInfo{Fingerprint: "g", ConnectionID: fmt.Sprint(i)} }, func(i int) string { return fmt.Sprint(i / 64) }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				p := newPrompter()
+				m := quietManager(p)
+				defer m.Close()
+				for i := 0; i < tc.count; i++ {
+					check(m, context.Background(), OpExec, tc.client(i), tc.subject(i))
+				}
+				result := check(m, context.Background(), OpExec, tc.client(tc.count), tc.subject(tc.count))
+				denied(t, result, ErrOverloaded)
+			})
+		})
+	}
+}
+
+func TestConsentValidation(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		p := newPrompter()
+		m := quietManager(p)
+		defer m.Close()
+		denied(t, check(m, context.Background(), Operation("bogus"), guest, "x"), ErrDenied)
+		denied(t, check(quietManager(nil), context.Background(), OpExec, guest, "x"), ErrUnavailable)
+		result := check(m, context.Background(), OpExec, guest, "x")
+		reply(next(t, p), Decision(255))
+		denied(t, result, ErrDenied)
+		result = check(m, context.Background(), OpExec, guest, "x")
+		r := next(t, p)
+		r.answer <- answer{AllowGuest, errors.New("offline")}
+		synctest.Wait()
+		denied(t, result, ErrUnavailable)
+		denied(t, check(m, context.Background(), OpRename, guest, strings.Repeat("é", 2048), strings.Repeat("x", 4097)), ErrSubjectTooLarge)
+		require.Len(t, p.calls, 0)
+		result = check(m, context.Background(), OpRename, guest, strings.Repeat("é", 2048), strings.Repeat("x", 4096))
+		r = next(t, p)
+		require.Equal(t, 8192, len(r.prompt.Subjects[0])+len(r.prompt.Subjects[1]))
+		reply(r, AllowGuest)
+		allowed(t, result, AllowGuest)
+		// Cached grants do not require presentation and can cover larger subjects.
+		allowed(t, check(m, context.Background(), OpDownload, reconnect, strings.Repeat("x", 9000)), AllowGuest)
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		denied(t, check(m, ctx, OpDownload, reconnect, "cached"), ErrCanceled)
+	})
+}
+
+// Every policy outcome must be diagnosable; logging cannot hold the state lock.
+type lockedLog struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *lockedLog) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+func (b *lockedLog) String() string { b.mu.Lock(); defer b.mu.Unlock(); return b.buf.String() }
+func TestConsentLogging(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		var output lockedLog
+		p := newPrompter()
+		p.ignoreCancellation = true
+		m := NewManager(p, slog.New(slog.NewJSONHandler(&output, nil)))
+		defer m.Close()
+		for _, err := range []error{ErrUnavailable, ErrDenied, ErrTimeout, ErrCanceled, ErrOverloaded, ErrSubjectTooLarge, ErrStale} {
+			result := check(m, context.Background(), OpExec, guest, err.Error())
+			r := next(t, p)
+			r.answer <- answer{Deny, err}
+			synctest.Wait()
+			denied(t, result, err)
+		}
+		logs := output.String()
+		for _, outcome := range []string{"unavailable", "denied", "timeout", "canceled", "overloaded", "subject_too_large", "stale"} {
+			require.Contains(t, logs, `"outcome":"`+outcome+`"`)
+		}
+		for _, field := range []string{"capability", "operation", "subjects", "fingerprint", "connection_id", "request_id"} {
+			require.Contains(t, logs, `"`+field+`"`)
+		}
+	})
+}
+
+// An unrelated waiter cancellation cannot retire the displayed origin.
+func TestConsentWaiterCancellation(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		p := newPrompter()
+		m := quietManager(p)
+		defer m.Close()
+		first := check(m, context.Background(), OpExec, guest, "same")
+		r := next(t, p)
+		ctx, cancel := context.WithCancel(context.Background())
+		second := check(m, ctx, OpExec, reconnect, "same")
+		cancel()
+		synctest.Wait()
+		denied(t, second, ErrCanceled)
+		require.NoError(t, r.ctx.Err())
+		require.Len(t, p.calls, 0)
+		reply(r, AllowConnection)
+		allowed(t, first, AllowConnection)
+	})
+}
+
+// A prompt may return an allow immediately after it observes cancellation.
+// Both context cancellation and expiry must prevent creating any grant.
+type prompterFunc func(context.Context, Prompt) (Decision, error)
+
+func (f prompterFunc) Prompt(ctx context.Context, p Prompt) (Decision, error) { return f(ctx, p) }
+func TestConsentAnswerCancellationRace(t *testing.T) {
+	for _, expire := range []bool{false, true} {
+		t.Run(fmt.Sprint(expire), func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				ctx, cancel := context.WithCancel(context.Background())
+				defer cancel()
+				p := prompterFunc(func(context.Context, Prompt) (Decision, error) {
+					if expire {
+						time.Sleep(60 * time.Second)
+					} else {
+						cancel()
+					}
+					return AllowGuest, nil
+				})
+				m := quietManager(p)
+				defer m.Close()
+				result := check(m, ctx, OpExec, guest, "race")
+				if expire {
+					denied(t, result, ErrTimeout)
+				} else {
+					denied(t, result, ErrCanceled)
+				}
+				require.Empty(t, m.guests)
+				require.Empty(t, m.grants)
+			})
+		})
+	}
+}
+
+// Close must join canceled prompt workers before it returns, even if they need
+// time to finish after receiving cancellation.
+func TestConsentCloseJoinsWorkers(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		p := newPrompter()
+		p.ignoreCancellation = true
+		m := quietManager(p)
+		pending := check(m, context.Background(), OpExec, guest, "pending")
+		r := next(t, p)
+		closed := make(chan struct{})
+		go func() { m.Close(); close(closed) }()
+		synctest.Wait()
+		denied(t, pending, ErrUnavailable)
+		returnedBeforeWorker := false
+		select {
+		case <-closed:
+			returnedBeforeWorker = true
+		default:
+		}
+		reply(r, AllowGuest)
+		<-closed
+		require.False(t, returnedBeforeWorker, "Close returned before its prompt worker exited")
+		require.Empty(t, m.guests)
+		require.Empty(t, m.grants)
+	})
+}
