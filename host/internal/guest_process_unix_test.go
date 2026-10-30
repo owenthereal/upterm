@@ -20,6 +20,7 @@ import (
 
 	gssh "charm.land/ssh"
 	"github.com/owenthereal/upterm/server"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/crypto/ssh"
 )
@@ -512,4 +513,53 @@ func (s *guestRegistrationBarrier) Signals(c chan<- gssh.Signal) {
 	s.Session.Signals(c)
 	close(s.registered)
 	<-s.closed
+}
+
+// The holder can see stdin EOF only after the runner leaves its first select:
+// the client's stdin stays open, and the holder explicitly inherits the pipe.
+// DRAIN therefore proves Wait won and post-select draining started before the
+// test cancels the channel/transport. The holder exits through an owned FIFO,
+// without signaling any PID remembered after the leader has been reaped.
+func TestGuestProcessCancellationAfterWait(t *testing.T) {
+	for _, transport := range []bool{false, true} {
+		t.Run(fmt.Sprintf("transport=%t", transport), func(t *testing.T) {
+			dir := t.TempDir()
+			gatePath := filepath.Join(dir, "release")
+			finishedPath := filepath.Join(dir, "holder-finished")
+			require.NoError(t, syscall.Mkfifo(gatePath, 0600))
+			gate, err := os.OpenFile(gatePath, os.O_RDWR, 0600)
+			require.NoError(t, err)
+			defer func() {
+				defer func() { _ = gate.Close() }()
+				_, _ = io.WriteString(gate, "finish\n")
+				require.Eventually(t, func() bool { _, err := os.Stat(finishedPath); return err == nil }, harnessTimeout, time.Millisecond, "owned output holder did not finish after release")
+			}()
+			spec := guestShell(`exec 3<&0; sh -c 'cat >/dev/null; printf DRAIN; IFS= read -r release < "$1"; : > "$2"' sh "$1" "$2" <&3 3<&- & exit 0`)
+			spec.Argv = append(spec.Argv, "sh", gatePath, finishedPath)
+			waited := make(chan error, 1)
+			spec.onWait = func(err error) { waited <- err }
+			connection := make(chan func() error, 1)
+			sess, results, _ := guestProcessSession(t, spec, false, nil, func(s gssh.Session) { connection <- serverConn(s).Close })
+			input, err := sess.StdinPipe()
+			require.NoError(t, err)
+			defer func() { _ = input.Close() }()
+			output, err := sess.StdoutPipe()
+			require.NoError(t, err)
+			require.NoError(t, sess.Start("ignored"))
+			closeTransport := <-connection
+			marker := make([]byte, len("DRAIN"))
+			_, err = io.ReadFull(output, marker)
+			require.NoError(t, err)
+			require.Equal(t, "DRAIN", string(marker))
+			require.NoError(t, <-waited, "the actual runner leader must have exited zero before cancellation")
+			if transport {
+				require.NoError(t, closeTransport())
+			} else {
+				require.NoError(t, sess.Close())
+			}
+			result := guestResult(t, results)
+			assert.NotZero(t, result.code, "channel/transport cancellation during draining must not report success")
+			assert.ErrorIs(t, result.err, context.Canceled, "the real runner must propagate post-Wait operation cancellation")
+		})
+	}
 }

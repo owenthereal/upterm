@@ -225,6 +225,15 @@ func (h *sessionHandler) runGuestProcess(ctx context.Context, sess gssh.Session,
 		case <-time.After(time.Second):
 		}
 	}
+	// Wait does not end the channel lifetime: cancellation can arrive during
+	// output draining. Keep any recorded or queued I/O failure authoritative.
+	if operationErr == nil {
+		select {
+		case operationErr = <-outputErrors:
+		default:
+			operationErr = ctx.Err()
+		}
+	}
 	select {
 	case <-exited:
 		code, normal := exitCode(waitErr)
