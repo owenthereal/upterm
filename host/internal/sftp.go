@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strconv"
+	"sync/atomic"
 	"time"
 
 	gssh "charm.land/ssh"
@@ -20,6 +21,15 @@ import (
 )
 
 const sftpApprovalHint = "SFTP needs approval in the primary host terminal; the host can attach with approval escapes enabled or use --accept"
+
+// A boundary ID names one protected operation, independently of the Manager's
+// coalesced review IDs. Process-wide sequencing also separates concurrent
+// channels on the same transport without adding state to copied handlers.
+var sftpRequestSequence atomic.Uint64
+
+func nextSFTPRequestID() string {
+	return "sftp-" + strconv.FormatUint(sftpRequestSequence.Add(1), 10)
+}
 
 // SFTPSession tracks permission state for a single SFTP session
 type SFTPSession struct {
@@ -108,8 +118,8 @@ func (s *SFTPSession) operationContext(parent context.Context) (context.Context,
 
 // checkPermission retains the original handler-entry deadline across queueing
 // and re-coalescing. Paired operations always supply their complete tuple.
-func (s *SFTPSession) checkPermission(ctx context.Context, arrived time.Time, op consent.Operation, paths ...string) (resultErr error) {
-	defer func() { s.logPermission(op, paths, resultErr) }()
+func (s *SFTPSession) checkPermission(ctx context.Context, arrived time.Time, requestID string, op consent.Operation, paths ...string) (resultErr error) {
+	defer func() { s.logPermission(requestID, op, paths, resultErr) }()
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}
@@ -158,9 +168,13 @@ func (s *SFTPSession) checkPermission(ctx context.Context, arrived time.Time, op
 
 // Consent failures are actionable in the host log. Writing a diagnostic to an
 // unread SSH stderr stream here could otherwise hold permission cleanup open.
-func (s *SFTPSession) logPermission(op consent.Operation, paths []string, err error) {
+func (s *SFTPSession) logPermission(requestID string, op consent.Operation, paths []string, err error) {
 	outcome := "allowed"
 	switch {
+	case errors.Is(err, consent.ErrStale):
+		outcome = "stale"
+	case errors.Is(err, consent.ErrSubjectTooLarge):
+		outcome = "subject_too_large"
 	case errors.Is(err, consent.ErrUnavailable):
 		outcome = "unavailable"
 	case errors.Is(err, context.DeadlineExceeded), errors.Is(err, consent.ErrTimeout):
@@ -183,7 +197,7 @@ func (s *SFTPSession) logPermission(op consent.Operation, paths []string, err er
 	if err != nil {
 		reason = sftpLogText(err.Error())
 	}
-	s.logger.Info("SFTP permission policy", "outcome", outcome, "operation", op, "subjects", subjects, "fingerprint", sftpLogText(s.clientInfo.Fingerprint), "connection_id", sftpLogText(s.clientInfo.ConnectionID), "request_id", "", "reason", reason)
+	s.logger.Info("SFTP permission policy", "outcome", outcome, "capability", consent.CapabilitySFTP, "operation", op, "subjects", subjects, "fingerprint", sftpLogText(s.clientInfo.Fingerprint), "connection_id", sftpLogText(s.clientInfo.ConnectionID), "request_id", requestID, "reason", reason)
 }
 func sftpLogText(text string) string {
 	if len(text) > 256 {
@@ -282,6 +296,7 @@ type sftpFileReader struct {
 
 func (h *sftpFileReader) Fileread(r *sftp.Request) (io.ReaderAt, error) {
 	arrived := time.Now()
+	requestID := nextSFTPRequestID()
 	ctx, cancel := h.session.operationContext(r.Context())
 	defer cancel()
 	path, err := h.session.resolvePath(r.Filepath)
@@ -290,7 +305,7 @@ func (h *sftpFileReader) Fileread(r *sftp.Request) (io.ReaderAt, error) {
 	}
 
 	// Check permission before opening the file.
-	if err := h.session.checkPermission(ctx, arrived, consent.OpDownload, path); err != nil {
+	if err := h.session.checkPermission(ctx, arrived, requestID, consent.OpDownload, path); err != nil {
 		h.logger.Info("SFTP download denied", "path", path)
 		return nil, sftpPermissionError(err)
 	}
@@ -310,10 +325,12 @@ type sftpFileWriter struct {
 
 func (h *sftpFileWriter) Filewrite(r *sftp.Request) (io.WriterAt, error) {
 	arrived := time.Now()
+	requestID := nextSFTPRequestID()
 	ctx, cancel := h.session.operationContext(r.Context())
 	defer cancel()
 	// Deny uploads in read-only mode
 	if h.session.readOnly {
+		h.session.logPermission(requestID, consent.OpUpload, []string{r.Filepath}, consent.ErrDenied)
 		h.logger.Info("SFTP upload denied (read-only mode)", "path", r.Filepath)
 		return nil, sftp.ErrSSHFxPermissionDenied
 	}
@@ -328,7 +345,7 @@ func (h *sftpFileWriter) Filewrite(r *sftp.Request) (io.WriterAt, error) {
 
 	logger = logger.With("resolved_path", path)
 
-	if err := h.session.checkPermission(ctx, arrived, consent.OpUpload, path); err != nil {
+	if err := h.session.checkPermission(ctx, arrived, requestID, consent.OpUpload, path); err != nil {
 		logger.Info("SFTP upload denied")
 		return nil, sftpPermissionError(err)
 	}
@@ -366,10 +383,17 @@ type sftpFileCmder struct {
 
 func (h *sftpFileCmder) Filecmd(r *sftp.Request) error {
 	arrived := time.Now()
+	requestID := nextSFTPRequestID()
 	ctx, cancel := h.session.operationContext(r.Context())
 	defer cancel()
+	op := sftpCommandOperation(r.Method)
 	// Deny all modifications in read-only mode
 	if h.session.readOnly {
+		subjects := []string{r.Filepath}
+		if r.Method == "Rename" || r.Method == "Symlink" || r.Method == "Link" {
+			subjects = append(subjects, r.Target)
+		}
+		h.session.logPermission(requestID, op, subjects, consent.ErrDenied)
 		h.logger.Info("SFTP command denied (read-only mode)", "method", r.Method, "path", r.Filepath)
 		return sftp.ErrSSHFxPermissionDenied
 	}
@@ -389,33 +413,16 @@ func (h *sftpFileCmder) Filecmd(r *sftp.Request) error {
 		}
 	}
 
-	// Map request method to operation
-	var op consent.Operation
-	switch r.Method {
-	case "Remove":
-		op = consent.OpDelete
-	case "Mkdir":
-		op = consent.OpMkdir
-	case "Rename":
-		op = consent.OpRename
-	case "Rmdir":
-		op = consent.OpRmdir
-	case "Symlink":
-		op = consent.OpSymlink
-	case "Link":
-		op = consent.OpLink
-	case "Setstat":
-		op = consent.OpSetstat
-	default:
+	if op == "" {
 		h.logger.Info("SFTP unsupported command", "method", r.Method, "path", path)
 		return sftp.ErrSSHFxOpUnsupported
 	}
 
 	// Check permission - pass both paths for two-path operations
 	if isTwoPathOp {
-		err = h.session.checkPermission(ctx, arrived, op, path, targetPath)
+		err = h.session.checkPermission(ctx, arrived, requestID, op, path, targetPath)
 	} else {
-		err = h.session.checkPermission(ctx, arrived, op, path)
+		err = h.session.checkPermission(ctx, arrived, requestID, op, path)
 	}
 	if err != nil {
 		h.logger.Info("SFTP command denied", "method", r.Method, "path", path)
@@ -493,6 +500,27 @@ func (h *sftpFileCmder) Filecmd(r *sftp.Request) error {
 	}
 
 	return sftp.ErrSSHFxOpUnsupported
+}
+
+func sftpCommandOperation(method string) consent.Operation {
+	switch method {
+	case "Remove":
+		return consent.OpDelete
+	case "Mkdir":
+		return consent.OpMkdir
+	case "Rename":
+		return consent.OpRename
+	case "Rmdir":
+		return consent.OpRmdir
+	case "Symlink":
+		return consent.OpSymlink
+	case "Link":
+		return consent.OpLink
+	case "Setstat":
+		return consent.OpSetstat
+	default:
+		return ""
+	}
 }
 
 // sftpFileLister handles directory listing and stat

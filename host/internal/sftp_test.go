@@ -401,8 +401,8 @@ func TestSFTPConsent(t *testing.T) {
 			t.Fatal("accept prompted")
 			return consent.Deny, nil
 		}}}
-		require.NoError(t, s.checkPermission(t.Context(), time.Now(), consent.OpDownload, "file"))
-		require.Error(t, s.checkPermission(t.Context(), time.Now(), consent.OpExec, "command"))
+		require.NoError(t, s.checkPermission(t.Context(), time.Now(), nextSFTPRequestID(), consent.OpDownload, "file"))
+		require.Error(t, s.checkPermission(t.Context(), time.Now(), nextSFTPRequestID(), consent.OpExec, "command"))
 	})
 	t.Run("permission deadline cannot authorize late work", func(t *testing.T) {
 		synctest.Test(t, func(t *testing.T) {
@@ -410,7 +410,7 @@ func TestSFTPConsent(t *testing.T) {
 				time.Sleep(consent.PermissionTimeout)
 				return consent.AllowGuest, nil
 			}}}
-			require.Error(t, s.checkPermission(t.Context(), time.Now(), consent.OpDownload, "file"))
+			require.Error(t, s.checkPermission(t.Context(), time.Now(), nextSFTPRequestID(), consent.OpDownload, "file"))
 		})
 	})
 	t.Run("transfer context outlives consent timeout", func(t *testing.T) {
@@ -452,7 +452,9 @@ func TestSFTPConsentDeadline(t *testing.T) {
 				return m.CheckPermission(ctx, op, c, subjects...)
 			}}}
 			result := make(chan error, 1)
-			go func() { result <- s.checkPermission(t.Context(), arrived, consent.OpDownload, "file") }()
+			go func() {
+				result <- s.checkPermission(t.Context(), arrived, nextSFTPRequestID(), consent.OpDownload, "file")
+			}()
 			synctest.Wait()
 			time.Sleep(40 * time.Second)
 			synctest.Wait()
@@ -475,7 +477,9 @@ func TestSFTPConsentDeadline(t *testing.T) {
 			defer cancel()
 			s := &SFTPSession{ctx: t.Context(), logger: discardLogger(), permissionChecker: m, clientInfo: consent.ClientInfo{Fingerprint: "guest", ConnectionID: "one"}}
 			first := make(chan error, 1)
-			go func() { first <- s.checkPermission(origin, time.Now(), consent.OpDownload, "file") }()
+			go func() {
+				first <- s.checkPermission(origin, time.Now(), nextSFTPRequestID(), consent.OpDownload, "file")
+			}()
 			synctest.Wait()
 			old := <-prompts
 			time.Sleep(10 * time.Second)
@@ -483,7 +487,9 @@ func TestSFTPConsentDeadline(t *testing.T) {
 			other := *s
 			other.clientInfo.ConnectionID = "two"
 			second := make(chan error, 1)
-			go func() { second <- other.checkPermission(t.Context(), arrived, consent.OpDownload, "file") }()
+			go func() {
+				second <- other.checkPermission(t.Context(), arrived, nextSFTPRequestID(), consent.OpDownload, "file")
+			}()
 			synctest.Wait()
 			time.Sleep(20 * time.Second)
 			cancel()

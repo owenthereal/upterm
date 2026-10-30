@@ -11,8 +11,10 @@ import (
 	"fmt"
 	"github.com/owenthereal/upterm/upterm"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -291,7 +293,9 @@ func TestSFTPConsentQueuedBehindReview(t *testing.T) {
 		arrived := time.Now()
 		s := &SFTPSession{ctx: t.Context(), logger: discardLogger(), permissionChecker: m, clientInfo: consent.ClientInfo{Fingerprint: "guest", ConnectionID: "sftp"}}
 		second := make(chan error, 1)
-		go func() { second <- s.checkPermission(t.Context(), arrived, consent.OpDownload, "file") }()
+		go func() {
+			second <- s.checkPermission(t.Context(), arrived, nextSFTPRequestID(), consent.OpDownload, "file")
+		}()
 		synctest.Wait()
 		queued := pending()
 		require.Len(t, queued, 2)
@@ -361,4 +365,52 @@ func sftpMkdirStatus(t *testing.T, client *ssh.Client, path string) (uint32, str
 	require.NoError(t, ssh.Unmarshal(packet[1:], &status))
 	require.Equal(t, uint32(1), status.ID)
 	return status.Code, status.Message
+}
+
+func TestSFTPAuditSSH(t *testing.T) {
+	output := &recordingWriter{}
+	h := startHost(t, &Server{Command: readsALine("READY", 0), SFTPAutoAccept: true, Logger: slog.New(slog.NewJSONHandler(output, nil))})
+	guest := h.guestClient(t)
+	clients := make([]*sftp.Client, 2)
+	for i := range clients {
+		var err error
+		clients[i], err = sftp.NewClient(guest)
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = clients[i].Close() })
+	}
+	root := t.TempDir()
+	start := make(chan struct{})
+	results := make(chan error, 2)
+	for i, c := range clients {
+		go func() { <-start; results <- c.Mkdir(filepath.Join(root, fmt.Sprint(i))) }()
+	}
+	close(start)
+	for range clients {
+		require.NoError(t, <-results)
+	}
+	require.NoError(t, clients[0].Mkdir(filepath.Join(root, "again")))
+	// Exercise read/upload handler identity wiring on these same channels too.
+	downloaded, err := clients[0].Open(filepath.Join(root, "0"))
+	require.NoError(t, err)
+	require.NoError(t, downloaded.Close())
+	uploaded, err := clients[1].Create(filepath.Join(root, "upload"))
+	require.NoError(t, err)
+	require.NoError(t, uploaded.Close())
+	records := sftpAuditRecords(t, output)
+	require.Len(t, records, 5)
+	operations := map[string]int{}
+	ids := make(map[string]bool)
+	for _, record := range records {
+		require.Equal(t, "sftp", record["capability"])
+		operations[record["operation"].(string)]++
+		require.Equal(t, "allowed", record["outcome"])
+		require.Equal(t, strconv.QuoteToASCII(hex.EncodeToString(guest.SessionID())), record["connection_id"])
+		require.Equal(t, strconv.QuoteToASCII(utils.FingerprintSHA256(h.relaySigner.PublicKey())), record["fingerprint"])
+		id, ok := record["request_id"].(string)
+		require.True(t, ok)
+		require.NotEmpty(t, id)
+		require.False(t, ids[id], "concurrent channels reused boundary ID")
+		ids[id] = true
+	}
+	require.Equal(t, map[string]int{"mkdir": 3, "download": 1, "upload": 1}, operations)
 }
