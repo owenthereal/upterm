@@ -39,30 +39,30 @@ func (p *approvalInput) reset() {
 	p.escapeExpired = false
 }
 
+// approvalSequenceStart identifies only framing, not terminal semantics.
+func approvalSequenceStart(b byte) byte {
+	switch b {
+	case 0x1b:
+		return 'e'
+	case 0x9b:
+		return '['
+	case 0x9d:
+		return ']'
+	case 0x90:
+		return 'P'
+	case 0x9f:
+		return '_'
+	}
+	return 0
+}
+
 func (p *approvalInput) feed(data []byte, epoch uint64) (program, keys []byte) {
 	p.interrupted = false
 	for _, b := range data {
 		if p.kind == 0 {
 			p.sequenceEpoch = epoch
-			if b == 0x1b {
-				p.kind = 'e'
-				p.add(b)
-				continue
-			}
-			// C1 bytes are sequence introducers too. UTF-8 text is not a confirmation.
-			if b == 0x9b {
-				p.kind = '['
-				p.add(b)
-				continue
-			}
-			if b == 0x9d || b == 0x90 || b == 0x9f {
-				p.kind = ']'
-				if b == 0x90 {
-					p.kind = 'P'
-				}
-				if b == 0x9f {
-					p.kind = '_'
-				}
+			if kind := approvalSequenceStart(b); kind != 0 {
+				p.kind = kind
 				p.add(b)
 				continue
 			}
@@ -112,12 +112,12 @@ func (p *approvalInput) feed(data []byte, epoch uint64) (program, keys []byte) {
 				sequenceEpoch := p.sequenceEpoch
 				valid := !p.overflow
 				p.reset()
-				if strings.HasSuffix(seq, "[200~") {
+				if seq == "\x1b[200~" || seq == "\x9b200~" {
 					p.paste = true
 					p.interrupted = true
 					continue
 				}
-				if strings.HasSuffix(seq, "[201~") {
+				if seq == "\x1b[201~" || seq == "\x9b201~" {
 					p.paste = false
 					p.interrupted = true
 					continue

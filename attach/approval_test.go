@@ -770,3 +770,123 @@ func TestApprovalEntryReplySuffix(t *testing.T) {
 		}
 	}
 }
+
+func TestApprovalNormalFramesKeepProgramOwnership(t *testing.T) {
+	frames := []struct{ name, start, end string }{
+		{"paste", "\x1b[200~", "\x1b[201~"},
+		{"OSC", "\x1b]52;c;", "\a"},
+		{"DCS", "\x1bP1$r", "\x1b\\"},
+		{"APC", "\x1b_", "\x1b\\"},
+		{"C1-paste", "\x9b200~", "\x9b201~"},
+		{"C1-OSC", "\x9d52;c;", "\x9c"},
+		{"C1-DCS", "\x901$r", "\x9c"},
+		{"C1-APC", "\x9f", "\x9c"},
+	}
+	for _, frame := range frames {
+		prefix := frame.start + "\r~a"
+		for split := 0; split <= len(prefix); split++ {
+			t.Run(fmt.Sprintf("%s/%d", frame.name, split), func(t *testing.T) {
+				synctest.Test(t, func(t *testing.T) {
+					sink := &syncSink{}
+					review, pw, program, stop := approvalTestRun(t, sink)
+					defer stop()
+					review.updates <- approvalTestState("first")
+					synctest.Wait()
+					_, _ = pw.Write([]byte(prefix[:split]))
+					synctest.Wait()
+					_, _ = pw.Write([]byte(prefix[split:]))
+					synctest.Wait()
+					// If the shortcut was incorrectly recognized, use the displayed code
+					// to prove that subsequent marked-body input still cannot answer it.
+					code := "ABCD"
+					if strings.Contains(sink.String(), "upterm: d ") {
+						code = approvalTestCode(t, sink.String())
+					}
+					continuation := "g " + code + "\r"
+					_, _ = pw.Write([]byte(continuation[:3]))
+					synctest.Wait()
+					_, _ = pw.Write([]byte(continuation[3:]))
+					synctest.Wait()
+					require.Empty(t, review.answers, "a known normal-mode frame must not approve")
+					require.NotContains(t, sink.String(), "upterm: d ", "a shortcut inside a frame must not capture the keyboard")
+					for _, b := range []byte(frame.end) {
+						_, _ = pw.Write([]byte{b})
+						synctest.Wait()
+					}
+					_, _ = pw.Write([]byte("\r"))
+					synctest.Wait()
+					expected := prefix + continuation + frame.end + "\r"
+					require.Equal(t, expected, program.String(), "framing and payload remain program-owned, exactly once")
+					_, _ = pw.Write([]byte("~a"))
+					synctest.Wait()
+					fresh := approvalTestCode(t, sink.String())
+					_, _ = pw.Write([]byte("c " + fresh + "\r"))
+					synctest.Wait()
+					require.Len(t, review.answers, 1)
+					require.Equal(t, upterm.ApprovalAnswer{ID: "first", Decision: "connection"}, <-review.answers)
+					require.Equal(t, expected, program.String())
+				})
+			})
+		}
+	}
+}
+
+func TestApprovalPendingEscapeBeforeFrame(t *testing.T) {
+	for _, fragmented := range []bool{false, true} {
+		t.Run(fmt.Sprint(fragmented), func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				sink := &syncSink{}
+				review, pw, program, stop := approvalTestRun(t, sink)
+				defer stop()
+				review.updates <- approvalTestState("first")
+				synctest.Wait()
+				input := "~\x1b[200~\r~a\r~~a\x1b[201~tail\r"
+				if fragmented {
+					for _, b := range []byte(input) {
+						_, _ = pw.Write([]byte{b})
+						synctest.Wait()
+					}
+				} else {
+					_, _ = pw.Write([]byte(input))
+					synctest.Wait()
+				}
+				require.Equal(t, input, program.String(), "the held escape and framed body must stay byte-exact")
+				require.NotContains(t, sink.String(), "upterm: d ")
+				require.Empty(t, review.answers)
+				_, _ = pw.Write([]byte("~a"))
+				synctest.Wait()
+				code := approvalTestCode(t, sink.String())
+				_, _ = pw.Write([]byte("c " + code + "\r"))
+				synctest.Wait()
+				require.Len(t, review.answers, 1)
+			})
+		})
+	}
+}
+
+func TestApprovalOrdinarySplitInput(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		sink := &syncSink{}
+		review, pw, program, stop := approvalTestRun(t, sink)
+		defer stop()
+		review.updates <- approvalTestState("first")
+		synctest.Wait()
+		// These UTF-8 characters contain bytes that are standalone C1 introducers.
+		// They remain ordinary program text even when each byte arrives separately.
+		input := "ordinary ~text \u2010\u201b\u201d\u201f\r"
+		for _, b := range []byte(input) {
+			_, _ = pw.Write([]byte{b})
+			synctest.Wait()
+		}
+		require.Equal(t, input, program.String())
+		require.NotContains(t, sink.String(), "upterm: d ")
+		_, _ = pw.Write([]byte("~a"))
+		synctest.Wait()
+		require.Contains(t, sink.String(), "upterm: d ", "ordinary split UTF-8 must not leave a false control frame open")
+		code := approvalTestCode(t, sink.String())
+		_, _ = pw.Write([]byte("c " + code + "\r"))
+		synctest.Wait()
+		require.Len(t, review.answers, 1)
+		require.Equal(t, input, program.String())
+	})
+}

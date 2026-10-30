@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"github.com/owenthereal/upterm/upterm"
 )
@@ -103,6 +104,9 @@ type terminalReview struct {
 	generation                uint64
 	epoch                     atomic.Uint64
 	parser                    approvalInput
+	programFrame              bool // the current frame prefix has already been forwarded raw
+	programUTF8               [utf8.UTFMax]byte
+	programUTF8Len            int
 	display                   chan approvalDisplay
 	displaying                bool
 	dirty                     bool
@@ -320,25 +324,14 @@ func (r *terminalReview) next(ctx context.Context, reads <-chan approvalRead) (a
 }
 func (r *terminalReview) input(chunk approvalRead, filter *EscapeFilter) ([]byte, EscapeAction) {
 	if !r.active {
-		data := chunk.p
-		var replies []byte
+		if !filter.approval {
+			return filter.Feed(chunk.p)
+		}
 		if chunk.epoch != r.epoch.Load() {
-			replies, _ = r.parser.feed(data, chunk.epoch)
+			replies, _ := r.parser.feed(chunk.p, chunk.epoch)
 			return replies, EscapeNone
 		}
-		if r.parser.inSequence() {
-			replies, data = r.parser.feed(data, chunk.epoch)
-		}
-		out, action := filter.Feed(data)
-		out = append(replies, out...)
-		if action == EscapeApproval {
-			r.enter()
-			// Same-read typeahead is never keys, but its sequence/paste framing
-			// must survive so a later read cannot expose a payload as an answer.
-			replies, _ := r.parser.feed(filter.remainder, chunk.epoch)
-			out = append(out, replies...)
-		}
-		return out, action
+		return r.programInput(chunk, filter)
 	}
 	program, keys := r.parser.feed(chunk.p, chunk.epoch)
 	if r.parser.loneEscape() {
@@ -418,6 +411,76 @@ func (r *terminalReview) input(chunk approvalRead, filter *EscapeFilter) ([]byte
 		}
 	}
 	return program, EscapeNone
+}
+
+// A C1-valued continuation byte inside ordinary UTF-8 is not a control
+// introducer. Track at most one rune while forwarding all program bytes.
+func (r *terminalReview) programSequenceStart(b byte) bool {
+	if r.programUTF8Len > 0 {
+		r.programUTF8[r.programUTF8Len] = b
+		r.programUTF8Len++
+		if !utf8.FullRune(r.programUTF8[:r.programUTF8Len]) {
+			return false
+		}
+		_, size := utf8.DecodeRune(r.programUTF8[:r.programUTF8Len])
+		r.programUTF8Len = 0
+		if size > 1 {
+			return false
+		}
+	}
+	if !utf8.FullRune([]byte{b}) {
+		r.programUTF8[0] = b
+		r.programUTF8Len = 1
+		return false
+	}
+	return approvalSequenceStart(b) != 0
+}
+
+// programInput tracks framing even before review starts. Normal-mode frame
+// bytes remain program-owned and pass through unchanged; only unframed keys
+// reach the local escape filter. A frame left incomplete by review still
+// uses the parser's reply output, since its prefix has not been forwarded.
+func (r *terminalReview) programInput(chunk approvalRead, filter *EscapeFilter) (out []byte, action EscapeAction) {
+	for i, b := range chunk.p {
+		data := chunk.p[i : i+1]
+		if r.parser.inSequence() || r.programSequenceStart(b) {
+			if !r.parser.inSequence() {
+				r.programFrame = true
+			}
+			replies, keys := r.parser.feed(data, chunk.epoch)
+			if r.programFrame {
+				// A held escape belongs before this opaque frame, and cannot combine
+				// with a later body byte to form a local shortcut.
+				out = append(out, filter.Flush()...)
+				out = append(out, b)
+				filter.lineStart = b == '\r' || b == '\n'
+				r.programFrame = r.parser.inSequence()
+				continue
+			}
+			out = append(out, replies...)
+			data = keys
+		}
+		forwarded, current := filter.Feed(data)
+		out = append(out, forwarded...)
+		switch current {
+		case EscapeApproval:
+			r.enter()
+			// The rest of this read cannot supply review keys, but its framing
+			// and replies survive with the original read's ownership epoch.
+			replies, _ := r.parser.feed(chunk.p[i+1:], chunk.epoch)
+			out = append(out, replies...)
+			return out, EscapeApproval
+		case EscapeDetach:
+			return out, EscapeDetach
+		case EscapeSuspend:
+			action = EscapeSuspend
+		case EscapeStatus:
+			if action == EscapeNone {
+				action = EscapeStatus
+			}
+		}
+	}
+	return
 }
 
 func approvalLines(state upterm.ApprovalState, code string) []string {
