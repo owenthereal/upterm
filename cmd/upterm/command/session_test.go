@@ -3751,3 +3751,39 @@ func TestWhatNeitherANameNorAnIDIsNotFoundAsBefore(t *testing.T) {
 		require.Equal(t, tc.line, stderr, "%v", tc.args)
 	}
 }
+
+func TestGuestPolicyOptionalFieldsRemainIndependent(t *testing.T) {
+	for _, key := range []string{"guest_shell", "execution", "tcp_forwarding", "approval_method"} {
+		for _, value := range []string{"", "future-policy"} {
+			response := permissionsResponse(false, "all", true, false)
+			raw, err := json.Marshal(map[string]string{key: value})
+			require.NoError(t, err)
+			require.NoError(t, json.Unmarshal(raw, response))
+			info := currentInfoFrom(response)
+			raw, err = json.Marshal(info)
+			require.NoError(t, err)
+			var got map[string]any
+			require.NoError(t, json.Unmarshal(raw, &got))
+			fields := map[string]string{"guest_shell": "guestShell", "execution": "execution", "tcp_forwarding": "tcpForwarding", "approval_method": "approvalMethod"}
+			for field, jsonKey := range fields {
+				if field == key {
+					require.Equal(t, value, got[jsonKey])
+				} else {
+					require.NotContains(t, got, jsonKey)
+				}
+			}
+			detail, err := buildSessionDetail(response)
+			require.NoError(t, err)
+			require.NotNil(t, detail.Guests)
+			fieldsInView := map[string]*string{"guest_shell": detail.Guests.GuestShell, "execution": detail.Guests.Execution, "tcp_forwarding": detail.Guests.TCPForwarding, "approval_method": detail.Guests.ApprovalMethod}
+			for field, ptr := range fieldsInView {
+				if field == key {
+					require.NotNil(t, ptr)
+					require.Equal(t, value, *ptr)
+				} else {
+					require.Nil(t, ptr)
+				}
+			}
+		}
+	}
+}

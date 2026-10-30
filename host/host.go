@@ -687,6 +687,7 @@ func (c *Host) Run(ctx context.Context) (runErr error) {
 			Name:         c.Name,
 			Command:      c.Command,
 			ForceCommand: c.ForceCommand,
+			LoginCommand: c.LoginCommand,
 		})
 		cancelClaim()
 		if err != nil {
@@ -883,6 +884,7 @@ func (c *Host) Run(ctx context.Context) (runErr error) {
 		SshUser:        sessResp.SshUser,
 		Command:        c.Command,
 		ForceCommand:   c.ForceCommand,
+		LoginCommand:   c.LoginCommand,
 		AuthorizedKeys: toApiAuthorizedKeys(c.AuthorizedKeys),
 		SftpDisabled:   c.SFTPDisabled,
 		// The same emptiness the guest door admits anyone on.
@@ -894,6 +896,12 @@ func (c *Host) Run(ctx context.Context) (runErr error) {
 		SFTPDisabled:                 c.SFTPDisabled,
 		AllowLocalTCPForwarding:      c.AllowLocalTCPForwarding,
 		FileTransferApprovalRequired: c.FileTransferApprovalRequired,
+		AllowLoopbackTCPForwarding:   c.AllowLoopbackTCPForwarding,
+		ForwardingDisabled:           c.ForwardingDisabled,
+		AcceptExec:                   c.AcceptExec,
+		ExecDisabled:                 c.ExecDisabled,
+		TerminalConsent:              c.TerminalConsent,
+		PermissionChecker:            c.PermissionChecker,
 	}.Report(session)
 	// The name the session holds, which is not c.Name when Run was handed a
 	// socket (the name is then ignored) or generated one (c.Name is empty).

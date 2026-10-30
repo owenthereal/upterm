@@ -1712,6 +1712,10 @@ func TestSessionReportsItsNameStateAndPermissions(t *testing.T) {
 	f := newJoinTimeoutHost(t)
 	f.h.ReadOnly = true
 	f.h.AllowLocalTCPForwarding = true
+	f.h.AllowLoopbackTCPForwarding = true
+	f.h.AcceptExec = true
+	f.h.LoginCommand = []string{"herdr"}
+	f.h.TerminalConsent = true
 	f.h.FileTransferApprovalRequired = true
 	f.start(t)
 	awaitJoinTimeoutSignal(t, f.ready, "readiness")
@@ -1724,6 +1728,7 @@ func TestSessionReportsItsNameStateAndPermissions(t *testing.T) {
 		return sess
 	}
 
+	require.Equal(t, []string{"herdr"}, f.record(t).LoginCommand)
 	reconnect := f.record(t).Reconnect
 	require.NotEmpty(t, reconnect, "the relay has shown whether it derives session IDs by the time the session is ready")
 	for _, tc := range []struct {
@@ -1739,7 +1744,12 @@ func TestSessionReportsItsNameStateAndPermissions(t *testing.T) {
 		require.Equal(t, reconnect, tc.sess.GetReconnect(), tc.what)
 		require.True(t, tc.sess.GetStartConfirmed(), "%s: nobody passed --accept", tc.what)
 		require.True(t, tc.sess.GetReadOnly(), tc.what)
-		require.True(t, tc.sess.GetLocalForwarding(), tc.what)
+		require.False(t, tc.sess.GetLocalForwarding(), "%s: read-only denies even configured unrestricted forwarding", tc.what)
+		require.Equal(t, []string{"herdr"}, tc.sess.GetLoginCommand(), tc.what)
+		require.Equal(t, "login", tc.sess.GetGuestShell(), tc.what)
+		require.Equal(t, "off", tc.sess.GetExecution(), tc.what)
+		require.Equal(t, "off", tc.sess.GetTcpForwarding(), tc.what)
+		require.Equal(t, "terminal", tc.sess.GetApprovalMethod(), tc.what)
 		require.Equal(t, "downloads", tc.sess.GetFileTransfer(), tc.what)
 		require.True(t, tc.sess.GetFileTransferApprovalRequired(), tc.what)
 		require.Nil(t, tc.sess.TunnelLostAtUnixNano, "%s: the tunnel has not dropped", tc.what)

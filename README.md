@@ -326,6 +326,59 @@ uptermd.upterm.dev runs. With an older one, `upterm session info` says
 `Reconnect: unsupported by this relay`, and a lost connection leaves the
 session `disconnected`, as before.
 
+### Private guest commands and terminal approval
+
+Ordinary `upterm host` shares one terminal. A guest's explicit SSH command
+runs privately after execution approval; use `--accept-exec` to grant that
+trust for the run. This permits further code and input on stdin, not just the
+command text shown for approval. On Unix the raw command runs through
+`$SHELL -c` (or `/bin/sh`); Windows uses pwsh, Windows PowerShell or cmd.exe.
+Guest commands use the host's launch directory and inherited environment;
+guest environment requests are ignored.
+
+`--login-command 'env -u HERDR_ENV herdr'` opens that host-selected command
+for shell requests, without exec approval. Explicit guest commands still use
+the exec policy. `--force-command COMMAND` instead replaces shell and exec
+commands; it runs with a private PTY when requested and pipes otherwise.
+With pipes, stdin EOF closes child input without cancelling the command;
+output drains before the child's real exit status is returned.
+Only forced exec receives `SSH_ORIGINAL_COMMAND`. Both flags parse argv with
+shell-style quoting and are mutually exclusive. `--no-exec` and `--read-only`
+deny explicit exec before forced substitution or grants; host-selected shell
+commands remain available, with read-only input suppressed.
+
+Ungranted exec, literal loopback forwarding and file operations without
+`--accept` request approval at the **primary local host terminal**. Type `~a`
+at the start of a line to review the oldest pending request. Follow its fresh
+confirmation code: `c CODE` allows this connection, capability and complete
+subject tuple; `g CODE` allows this authenticated guest key and capability
+until the host session ends, across reconnects. An exec grant never grants
+SFTP or forwarding. Escape leaves a request pending. Requests expire 60 seconds
+after arrival at the host permission boundary, including queueing and review;
+earlier protocol buffering is outside that deadline.
+
+No capable primary terminal means immediate denial without an applicable
+grant. A detached door needs `upterm attach NAME` for new approvals; approval
+never moves silently to a secondary attachment or guest. `--escape-char none`
+disables review and passes all input through. A custom escape character
+replaces `~`; type it twice at line start to send a literal one (`~~a` sends
+`~a`). These escapes are local to the host attachment.
+
+`--login-command`, `--accept-exec`, `--allow-loopback-tcp-forwarding`,
+`--no-exec` and `--no-forwarding` are per-run CLI options, not environment or
+config settings. Restart the session to change them.
+
+`session info`, `session current` and detached JSON report `loginCommand`,
+`guestShell` (`shared`, `login`, `forced`), `execution` (`off`, `approval`,
+`granted`, `forced`), `tcpForwarding` (`off`, `loopback-approval`, `loopback`,
+`all`) and `approvalMethod` (`terminal`, `custom`, `unavailable`). These report
+configured policy, never cached grants or current prompts. `approval` with
+`unavailable` means ungranted requests are denied immediately. Missing optional
+policy fields from old daemons or ended sessions mean unknown. Ended records
+retain command metadata, including the login command, without retaining grants.
+The legacy `localForwarding` boolean is true only for effective unrestricted
+forwarding.
+
 ### File Transfer (SFTP/SCP)
 
 Clients can transfer files using standard `scp` or `sftp` commands. The connection details are shown when running `upterm session current`:
@@ -341,20 +394,48 @@ scp -P PORT ./local/file.txt USER@HOST:/path/to/destination/
 **Security model:**
 
 - File transfers have the same access as the terminal session (clients can already access any file via the shell)
-- Without `--accept`, file operations need the host's approval in a dialog, which can allow the file asked about, or everything in that scp or sftp command. Where no dialog can be shown (no display, such as over SSH, or on Linux no `zenity`, `qarma` or `matedialog` to draw it), the operation is denied
+- Without `--accept`, protected file operations need approval through `~a` at the primary host terminal, with the connection/subject or guest/capability scope described above. No capable primary means denial without an applicable grant
 - Use `--read-only` to restrict SFTP to downloads only (no uploads, deletes, or modifications)
 - Use `--no-sftp` to disable file transfers entirely
 
 ### Local TCP Forwarding
 
-Clients can use standard SSH local forwarding through a hosted session when the host opts in:
+Clients can use standard SSH local forwarding through a hosted session.
+Without a grant, only literal 127.0.0.0/8 and ::1 destinations can request
+terminal approval. `--allow-loopback-tcp-forwarding` grants that tier for the
+run; hostnames (including `localhost`), mapped IPv6 and zoned addresses do not
+qualify. The existing `--allow-local-tcp-forwarding` grants any destination the
+host can reach. `--no-forwarding` and `--read-only` deny all forwarding before
+grants or approval. `--accept` grants no forwarding.
+
+For example:
 
 ```console
-upterm host --allow-local-tcp-forwarding
+upterm host --allow-loopback-tcp-forwarding
 ssh -L 5555:127.0.0.1:8080 SESSION_SSH_USER@uptermd.upterm.dev
 ```
 
 After the first successful forward, the guest appears in session info and join/leave notifications until its SSH connection closes, even between forwarding channels. It is listed as `jump`, followed by where its forwards go, such as `→ 127.0.0.1:8080`: each distinct destination once, up to 16, then how many more forwards it opened, to anywhere else (`(+N more forwards)`). `--hide-client-ip`, and CI, hide the destinations along with the address. Multiple forwards on that connection share one entry; terminal and SFTP sessions retain their own entries. Forwarding alone does not set `firstGuestJoinedAt` or satisfy `--join-timeout`: an accepted terminal or SFTP session must join before that deadline. An idle `ssh -N` connection or a failed forward does not appear.
+
+### Upgrading guest permissions and embeddings
+
+Forced commands now support pipes when the guest requests no PTY. File-transfer
+approval uses the primary host terminal instead of desktop dialogs; `--accept`
+remains the unattended file-transfer option. Guest-wide approvals survive
+connections for the host session but remain capability-scoped. Unanswered
+requests expire, and nil or unavailable checkers deny ungranted requests. The
+new local `~a` escape is consumed where approval is supported; use `~~a` for
+literal input or change/disable the escape as described above.
+
+**Embedding API migration:** import permission types from `host/consent`
+instead of `host/sftp`; there are no old-package aliases. Replace
+`Host.SFTPPermissionChecker` with `Host.PermissionChecker`. Implement
+`CheckPermission(context.Context, consent.Operation, consent.ClientInfo,
+...string) (consent.Decision, error)` and `ClearConnection(string)`, honor the
+context deadline/cancellation, and handle SFTP, exec and forwarding capabilities.
+For built-in primary-terminal approval, set `Host.TerminalConsent = true`
+instead of supplying a custom checker; the two options are mutually exclusive.
+A nil checker with terminal consent disabled denies ungranted operations.
 
 ### WebSocket Connection
 

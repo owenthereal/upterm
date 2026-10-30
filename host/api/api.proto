@@ -89,7 +89,12 @@ message GetSessionResponse {
   optional bool read_only = 20;
   optional string file_transfer = 21;                 // off, downloads, all
   optional bool file_transfer_approval_required = 22; // each guest file transfer waits for approval in the primary host terminal
-  optional bool local_forwarding = 23;
+  optional bool local_forwarding = 23; // unrestricted effective grant only
+  repeated string login_command = 24;
+  optional string guest_shell = 25;    // shared, login, forced
+  optional string execution = 26;      // off, approval, granted, forced
+  optional string tcp_forwarding = 27; // off, loopback-approval, loopback, all
+  optional string approval_method = 28; // terminal, custom, unavailable
 }
 
 message AuthorizedKey {

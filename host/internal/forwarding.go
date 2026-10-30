@@ -306,7 +306,9 @@ func forwardingHandler(events *emitter.Emitter, forwards *Forwards, policy forwa
 		copies.Go(func() { _, _ = io.Copy(stream, socket); _ = stream.CloseWrite() })
 		copies.Wait()
 		close(requestsDone)
-		// Reply can be blocked on transport output; closing the channel releases it.
+		// Close performs ordinary channel cleanup. If Reply holds the channel
+		// write lock while blocked on transport output, Close can block too;
+		// the bounded outer Host.Run/tunnel teardown owns transport closure.
 		_ = stream.Close()
 		workers.Wait()
 	}

@@ -51,6 +51,7 @@ type SessionDetail struct {
 	SessionID        string
 	Command          string
 	ForceCommand     string
+	LoginCommand     string
 	Host             string
 	JoinCommand      string // upterm join, for guests who have upterm
 	SSHCommand       string
@@ -116,6 +117,10 @@ type GuestPermissions struct {
 	FileTransfer     string // FileTransferOff, FileTransferDownloads or FileTransferAll
 	ApprovalRequired bool   // false whenever FileTransfer is FileTransferOff
 	LocalForwarding  bool
+	GuestShell       *string
+	Execution        *string
+	TCPForwarding    *string
+	ApprovalMethod   *string
 }
 
 // guestsRow is the Guests row's value: whether guests can type, what they may
@@ -153,7 +158,20 @@ func guestsRow(p GuestPermissions) string {
 		forwarding = "port forwarding allowed"
 	}
 
-	return strings.Join([]string{typing, files, forwarding}, "; ")
+	parts := []string{typing, files, forwarding}
+	if p.TCPForwarding != nil {
+		parts[2] = "forwarding: " + *p.TCPForwarding
+	}
+	if p.GuestShell != nil {
+		parts = append(parts, "shell: "+*p.GuestShell)
+	}
+	if p.Execution != nil {
+		parts = append(parts, "exec: "+*p.Execution)
+	}
+	if p.ApprovalMethod != nil {
+		parts = append(parts, "approval: "+*p.ApprovalMethod)
+	}
+	return strings.Join(parts, "; ")
 }
 
 // tunnelHints say what to do, or what to expect, for each reason a tunnel
@@ -385,6 +403,9 @@ func renderSessionDetailAt(detail SessionDetail, width int, at time.Time) string
 	// Basic fields (skip empty fields to reduce noise)
 	if detail.Command != "" {
 		renderWrappedRow(&b, "Command:", detail.Command, labelWidth, valueWidth, ValueStyle)
+	}
+	if detail.LoginCommand != "" {
+		renderWrappedRow(&b, "Login Command:", detail.LoginCommand, labelWidth, valueWidth, ValueStyle)
 	}
 	if detail.ForceCommand != "" {
 		renderWrappedRow(&b, "Force Command:", detail.ForceCommand, labelWidth, valueWidth, ValueStyle)

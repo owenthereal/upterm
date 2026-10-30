@@ -315,6 +315,11 @@ func newDaemonAnswer(launch string) *api.GetSessionResponse {
 		FileTransfer:                 proto.String("all"),
 		FileTransferApprovalRequired: proto.Bool(true),
 		LocalForwarding:              proto.Bool(false),
+		LoginCommand:                 []string{"env", "-u", "HERDR_ENV", "herdr"},
+		GuestShell:                   proto.String("login"),
+		Execution:                    proto.String("granted"),
+		TcpForwarding:                proto.String("loopback"),
+		ApprovalMethod:               proto.String("terminal"),
 	}
 }
 
@@ -343,6 +348,7 @@ func TestInfoJSONGoldenEnded(t *testing.T) {
 		r.Status = sessiondir.StatusEnding
 		r.SessionID = "sid-1"
 		r.Reason = sessiondir.ReasonExited
+		r.LoginCommand = []string{"herdr"}
 		r.ExitCode = &code
 		r.Reconnect = sessiondir.ReconnectSupported
 		r.TunnelLostAt = lost
@@ -403,6 +409,10 @@ func TestDetachJSONGolden(t *testing.T) {
 		r.FileTransfer = proto.String("all")
 		r.FileTransferApprovalRequired = proto.Bool(false)
 		r.LocalForwarding = proto.Bool(false)
+		r.GuestShell = proto.String("shared")
+		r.Execution = proto.String("approval")
+		r.TcpForwarding = proto.String("loopback-approval")
+		r.ApprovalMethod = proto.String("terminal")
 	}
 	var stdout, stderr bytes.Buffer
 	s := newSession(t, spawn, nil, &stdout, &stderr)
@@ -420,4 +430,80 @@ func TestListJSONGolden(t *testing.T) {
 	stdout, stderr, code := runCLI(t, "session", "list", "-o", "json")
 	require.Equal(t, 0, code, stderr)
 	requireGolden(t, "list", stdout)
+}
+
+// New policy is additive; old daemons and ended records cannot answer it.
+func TestGuestPolicyJSONAndView(t *testing.T) {
+	for _, status := range []string{sessiondir.StatusReady, sessiondir.StatusReconnecting} {
+		t.Run(status, func(t *testing.T) {
+			var response api.GetSessionResponse
+			require.NoError(t, json.Unmarshal([]byte(`{"session_id":"sid","host":"ssh://127.0.0.1:2222","login_command":["herdr"],"guest_shell":"login","execution":"approval","tcp_forwarding":"loopback-approval","approval_method":"terminal","start_confirmed":true,"read_only":false,"file_transfer":"all","file_transfer_approval_required":true,"local_forwarding":false}`), &response))
+			response.Status = proto.String(status)
+			got := currentJSON(t, &response)
+			for key, want := range map[string]any{"loginCommand": "herdr", "guestShell": "login", "execution": "approval", "tcpForwarding": "loopback-approval", "approvalMethod": "terminal", "localForwarding": false} {
+				require.Equal(t, want, got[key], key)
+			}
+			info := withSessionReport(sessionInfo{}, &response)
+			raw, err := json.Marshal(info)
+			require.NoError(t, err)
+			var projected map[string]any
+			require.NoError(t, json.Unmarshal(raw, &projected))
+			for _, key := range []string{"guestShell", "execution", "tcpForwarding", "approvalMethod"} {
+				require.Equal(t, got[key], projected[key], key)
+			}
+			detail, err := buildSessionDetail(&response)
+			require.NoError(t, err)
+			view := viewText(detail)
+			for _, text := range []string{"Login Command: herdr", "shell: login", "exec: approval", "forwarding: loopback-approval", "approval: terminal"} {
+				require.Contains(t, view, text)
+			}
+		})
+	}
+	setupSessionRoots(t)
+	d := claimSession(t, "ended-policy")
+	require.NoError(t, d.Update(func(r *sessiondir.Record) {
+		require.NoError(t, json.Unmarshal([]byte(`{"login_command":["herdr"]}`), r))
+	}))
+	require.NoError(t, d.Release(context.Background()))
+	ended := lookupJSON(t, "ended-policy")
+	require.Equal(t, "herdr", ended["loginCommand"])
+	for _, key := range []string{"guestShell", "execution", "tcpForwarding", "approvalMethod"} {
+		require.NotContains(t, ended, key)
+	}
+	old := currentJSON(t, &api.GetSessionResponse{})
+	for _, key := range []string{"loginCommand", "guestShell", "execution", "tcpForwarding", "approvalMethod"} {
+		require.NotContains(t, old, key)
+	}
+}
+
+func TestInfoJSONGoldenReconnectingWithGuestPolicy(t *testing.T) {
+	setupSessionRoots(t)
+	d := claimSession(t, "build")
+	releaseAtEnd(t, d)
+	require.NoError(t, d.Update(func(r *sessiondir.Record) {
+		r.Status = sessiondir.StatusReconnecting
+		r.SessionID = "sid-1"
+		r.Reconnect = sessiondir.ReconnectSupported
+	}))
+	response := newDaemonAnswer(d.LaunchID())
+	response.Status = proto.String(sessiondir.StatusReconnecting)
+	serveStubAdmin(t, d.AdminSocket(), response)
+	stdout, stderr, code := runCLI(t, "session", "info", "build", "-o", "json", "--hide-client-ip")
+	require.Equal(t, 0, code, stderr)
+	requireGolden(t, "info-reconnecting", stdout)
+}
+func TestCurrentJSONGoldenForcedGuestPolicy(t *testing.T) {
+	setupSessionRoots(t)
+	response := newDaemonAnswer("launch-1")
+	response.LoginCommand = nil
+	response.ForceCommand = []string{"herdr"}
+	response.GuestShell = proto.String("forced")
+	response.Execution = proto.String("forced")
+	response.TcpForwarding = proto.String("off")
+	response.ApprovalMethod = proto.String("unavailable")
+	socket := socketIn(t, "a.sock")
+	serveStubAdmin(t, socket, response)
+	stdout, stderr, code := runCurrent(t, socket, "-o", "json", "--hide-client-ip")
+	require.Equal(t, 0, code, stderr)
+	requireGolden(t, "current-forced", stdout)
 }

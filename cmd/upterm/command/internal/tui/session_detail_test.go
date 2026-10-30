@@ -707,3 +707,28 @@ func Test_renderSessionDetail_ConnectedRow(t *testing.T) {
 	detail.ConnectedClients = nil
 	assert.NotContains(t, renderSessionDetail(detail, 80), "Connected")
 }
+
+// Losing any new policy field, or coercing absent policy to off, changes what
+// the view tells guests. The legacy row remains usable with absent pointers.
+func TestGuestToolPolicyRows(t *testing.T) {
+	for _, shell := range []string{"shared", "login", "forced"} {
+		for _, exec := range []string{"off", "approval", "granted", "forced"} {
+			for _, forward := range []string{"off", "loopback-approval", "loopback", "all"} {
+				for _, method := range []string{"terminal", "custom", "unavailable"} {
+					p := GuestPermissions{FileTransfer: FileTransferAll, GuestShell: &shell, Execution: &exec, TCPForwarding: &forward, ApprovalMethod: &method}
+					row := guestsRow(p)
+					for _, text := range []string{"shell: " + shell, "exec: " + exec, "forwarding: " + forward, "approval: " + method} {
+						require.Contains(t, row, text)
+					}
+				}
+			}
+		}
+	}
+	detail := SessionDetail{LoginCommand: "herdr", Guests: &GuestPermissions{ReadOnly: true, FileTransfer: FileTransferDownloads}}
+	got := renderSessionDetail(detail, 120)
+	require.Contains(t, got, "Login Command:")
+	require.Contains(t, got, "herdr")
+	require.NotContains(t, got, "exec: off")
+	require.NotContains(t, got, "shell: shared")
+	require.NotContains(t, got, "approval:")
+}

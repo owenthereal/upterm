@@ -1,5 +1,6 @@
 {
   "access": "allowlist",
+  "approvalMethod": "terminal",
   "clientCount": 2,
   "command": "bash",
   "connectedClients": [
@@ -7,21 +8,25 @@
     "guest [redacted] SSH-2.0-OpenSSH_9.6 SHA256:alice"
   ],
   "countsKnown": true,
+  "execution": "granted",
   "fileTransfer": "all",
   "fileTransferApprovalRequired": true,
   "firstGuestJoinedAt": "2026-10-13T11:59:00Z",
   "forceCommand": "",
   "guestCount": 1,
+  "guestShell": "login",
   "host": "ssh://127.0.0.1:2222",
   "joinCommand": "upterm join ssh://sid-1@127.0.0.1:2222",
   "joinStateSource": "daemon",
   "launchId": "LAUNCH",
   "localForwarding": false,
+  "loginCommand": "env -u HERDR_ENV herdr",
   "name": "build",
   "readOnly": false,
   "reconnect": "supported",
   "sessionId": "sid-1",
   "sshCommand": "ssh sid-1@127.0.0.1 -p 2222",
   "startConfirmed": true,
-  "status": "ready"
+  "status": "ready",
+  "tcpForwarding": "loopback"
 }

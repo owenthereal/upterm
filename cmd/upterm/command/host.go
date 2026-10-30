@@ -159,7 +159,9 @@ keys a guest must have.
 What guests may do: type into the session, or only watch it with
 --read-only; transfer files with sftp or scp, with your access (downloads
 only with --read-only, none with --no-sftp); and forward TCP ports (ssh -L)
-to what this machine can reach, only with --allow-local-tcp-forwarding.
+to literal loopback destinations after approval or with
+--allow-loopback-tcp-forwarding, or to anything this machine can reach with
+--allow-local-tcp-forwarding. --no-forwarding and --read-only deny forwarding.
 Guest shell requests share the hosted terminal by default. --login-command runs a
 host-chosen program instead. Explicit exec needs approval or --accept-exec; stdin
 can contain further code. --read-only and --no-exec deny explicit exec.
@@ -216,7 +218,7 @@ reports the command's status.`,
 	}
 
 	cmd.PersistentFlags().StringVarP(&flagServer, "server", "", "ssh://uptermd.upterm.dev:22", "Relay to host the session on: ssh://HOST[:PORT], ws://HOST[:PORT] or wss://HOST[:PORT]. Without a port, ssh uses 22, ws 80 and wss 443.")
-	cmd.PersistentFlags().StringVarP(&flagForceCommand, "force-command", "f", "", "Run this command for each guest who joins, on a terminal of its own, instead of showing them the session's command (e.g. 'tmux attach -t pair-programming', for a tmux session of that name).")
+	cmd.PersistentFlags().StringVarP(&flagForceCommand, "force-command", "f", "", "Run this host-chosen command for guest shell and exec requests, with a private PTY when requested and pipes otherwise. --no-exec and --read-only still deny explicit exec. Mutually exclusive with --login-command.")
 	cmd.PersistentFlags().StringVar(&flagLoginCommand, "login-command", "", "Run this host-chosen command for guest shell requests, without exec approval. Mutually exclusive with --force-command; explicit guest exec still needs approval.")
 	cmd.PersistentFlags().BoolVar(&flagAcceptExec, "accept-exec", false, "Let guests execute private commands without approval. Command stdin can contain further code; this grants execution trust.")
 	cmd.PersistentFlags().BoolVar(&flagNoExec, "no-exec", false, "Deny explicit guest exec requests, including forced exec. Host-chosen login and forced shell commands still run.")
