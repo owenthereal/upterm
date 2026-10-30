@@ -5,8 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"os/exec"
+	"strconv"
 	"sync/atomic"
 	"time"
 
@@ -101,15 +103,46 @@ func (h *sessionHandler) checkExecPermission(ctx context.Context, arrived time.T
 	return nil
 }
 
-func (h *sessionHandler) handlePrivateCommand(sess gssh.Session, selection guestCommandSelection, selectionErr error) {
-	if h.ctx.Err() != nil || h.stopCtx != nil && h.stopCtx.Err() != nil {
-		h.exitLate(sess)
-		return
+// Boundary IDs identify admitted explicit exec requests even when no manager
+// review exists (forced commands, pregrants, custom policy, and cached grants).
+var execRequestSequence atomic.Uint64
+
+func logExecPermission(logger *slog.Logger, client consent.ClientInfo, requestID, raw string, err error) {
+	outcome := "allowed"
+	switch {
+	case errors.Is(err, consent.ErrUnavailable):
+		outcome = "unavailable"
+	case errors.Is(err, context.DeadlineExceeded), errors.Is(err, consent.ErrTimeout):
+		outcome = "timeout"
+	case errors.Is(err, context.Canceled), errors.Is(err, consent.ErrCanceled):
+		outcome = "canceled"
+	case errors.Is(err, consent.ErrOverloaded):
+		outcome = "overloaded"
+	case errors.Is(err, consent.ErrStale):
+		outcome = "stale"
+	case errors.Is(err, consent.ErrSubjectTooLarge):
+		outcome = "subject_too_large"
+	case err != nil:
+		outcome = "denied"
 	}
-	ctx, cancel := sessionOperationContext(h.ctx, sess)
-	defer cancel()
-	stopKeepAlive := h.privateKeepAlive(ctx, sess)
-	defer stopKeepAlive()
+	reason := ""
+	if err != nil {
+		reason = execLogText(err.Error())
+	}
+	logger.Info("exec permission policy", "outcome", outcome,
+		"capability", consent.CapabilityExec, "operation", consent.OpExec,
+		"subjects", []string{execLogText(raw)}, "fingerprint", execLogText(client.Fingerprint),
+		"connection_id", execLogText(client.ConnectionID), "request_id", execLogText(requestID), "reason", reason)
+}
+
+func execLogText(text string) string {
+	if len(text) > 256 {
+		text = text[:256] + "..."
+	}
+	return strconv.QuoteToASCII(text)
+}
+
+func (h *sessionHandler) handlePrivateCommand(sess gssh.Session, selection guestCommandSelection, selectionErr error) {
 	var auth *server.AuthRequest
 	client := consent.ClientInfo{ConnectionID: sess.Context().Value(gssh.ContextKeySessionID).(string)}
 	guest, isGuest := sess.Context().Value(authenticatedGuestKey{}).(authenticatedGuest)
@@ -119,10 +152,51 @@ func (h *sessionHandler) handlePrivateCommand(sess gssh.Session, selection guest
 			client.Fingerprint = utils.FingerprintSHA256(guest.key)
 		}
 	}
+	requestID := ""
+	if sessionRequestType(sess) == "exec" {
+		requestID = "exec-" + strconv.FormatUint(execRequestSequence.Add(1), 10)
+	}
+	logPermission := func(err error) {
+		if requestID != "" {
+			logExecPermission(h.logger, client, requestID, selection.RawCommand, err)
+		}
+	}
+	// Observe the original owners synchronously: context watchers may still be
+	// queued when a checker or host-supplied audit sink cancels an owner.
+	operationError := func() error {
+		for _, owner := range []context.Context{h.ctx, h.stopCtx, sess.Context()} {
+			if owner != nil {
+				if err := owner.Err(); err != nil {
+					return err
+				}
+			}
+		}
+		select {
+		case <-channelClosed(sess):
+			return context.Canceled
+		default:
+		}
+		return nil
+	}
+	if h.ctx.Err() != nil || h.stopCtx != nil && h.stopCtx.Err() != nil {
+		logPermission(operationError())
+		h.exitLate(sess)
+		return
+	}
+	ctx, cancel := sessionOperationContext(h.ctx, sess)
+	defer cancel()
+	stopKeepAlive := h.privateKeepAlive(ctx, sess)
+	defer stopKeepAlive()
+	var consentDeadline time.Time
 	if selectionErr == nil && selection.NeedsExecConsent {
 		arrived := sessionRequestReceivedAt(sess)
 		if arrived.IsZero() {
 			arrived = time.Now()
+		}
+		// Preserve pregrant/forced bypass semantics: only a request which actually
+		// needs consent retains its arrival deadline through the pre-start audit.
+		if !h.acceptExec {
+			consentDeadline = arrived.Add(consent.PermissionTimeout)
 		}
 		permissionParent := ctx
 		if h.stopCtx != nil {
@@ -132,19 +206,40 @@ func (h *sessionHandler) handlePrivateCommand(sess gssh.Session, selection guest
 		selectionErr = h.checkExecPermission(permissionCtx, arrived, client, selection.RawCommand)
 		releasePermission()
 	}
+	requestError := func() error {
+		if err := operationError(); err != nil {
+			return err
+		}
+		if !consentDeadline.IsZero() && !time.Now().Before(consentDeadline) {
+			return context.DeadlineExceeded
+		}
+		return nil
+	}
+	exitBeforeStart := func() {
+		// Preserve the original ctx-before-stop status precedence.
+		if ctx.Err() == nil && h.stopCtx != nil && h.stopCtx.Err() != nil {
+			h.exitLate(sess)
+		} else {
+			_ = sess.Exit(1)
+		}
+	}
 	if selectionErr != nil {
-		h.logger.Info("guest exec denied", "reason", selectionErr)
+		logPermission(selectionErr)
 		guestCommandDiagnostic(sess, "upterm: guest exec denied; approval in the primary host terminal or --accept-exec is required.\r\n")
 		_ = sess.Exit(1)
 		return
 	}
-	// Check original cancellation again after any custom permission checker.
-	if ctx.Err() != nil {
-		_ = sess.Exit(1)
+	if err := requestError(); err != nil {
+		logPermission(err)
+		exitBeforeStart()
 		return
 	}
-	if h.stopCtx != nil && h.stopCtx.Err() != nil {
-		h.exitLate(sess)
+	logPermission(nil)
+	// Synchronous audit output can itself lose an owner or consent deadline.
+	// Keep the final pre-start guard and correlate that outcome with this request.
+	if err := requestError(); err != nil {
+		logPermission(err)
+		exitBeforeStart()
 		return
 	}
 	env := withoutSSHSessionVars(append(os.Environ(), h.commandEnv...))
