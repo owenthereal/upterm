@@ -1,6 +1,7 @@
 package internal
 
 import (
+	"runtime"
 	"testing"
 
 	"github.com/owenthereal/upterm/server"
@@ -60,5 +61,17 @@ func TestGuestConnectionEnv(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			assert.Equal(t, tc.want, guestConnectionEnv(tc.auth, tc.hideClientIP))
 		})
+	}
+}
+
+func TestGuestProcessEnvironment(t *testing.T) {
+	empty := guestProcessEnvironment(nil, "", false)
+	assert.NotNil(t, empty, "exec.Cmd must receive an explicitly empty environment")
+	assert.Empty(t, empty)
+	env := []string{"A=first", "SSH_TTY=old", "TERM=host", "A=last", "SSH_ORIGINAL_COMMAND=original"}
+	assert.Equal(t, []string{"TERM=host", "A=last", "SSH_ORIGINAL_COMMAND=original"}, guestProcessEnvironment(env, "ignored", false))
+	assert.Equal(t, []string{"A=last", "SSH_ORIGINAL_COMMAND=original", "TERM=guest"}, guestProcessEnvironment(env, "guest", true))
+	if runtime.GOOS == "windows" {
+		assert.Equal(t, []string{"=D:=other", "=C:=new", "PATH=new"}, guestProcessEnvironment([]string{"=C:=old", "=D:=other", "=C:=new", "Path=old", "PATH=new", "ssh_tty=stale"}, "", false))
 	}
 }

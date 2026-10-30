@@ -3,6 +3,7 @@ package internal
 import (
 	"fmt"
 	"net/netip"
+	"runtime"
 	"slices"
 	"strings"
 
@@ -49,4 +50,33 @@ func guestConnectionEnv(auth *server.AuthRequest, hideClientIP bool) []string {
 		fmt.Sprintf("SSH_CONNECTION=%s %d %s %d", clientIP, client.Port(), relayIP, relay.Port()),
 		fmt.Sprintf("SSH_CLIENT=%s %d %d", clientIP, client.Port(), relay.Port()),
 	}
+}
+
+// guestProcessEnvironment preserves the caller's complete environment while
+// supplying only the terminal details owned by the process runner. Deduplicate
+// here too because ConPTY bypasses exec.Cmd's environment deduplication.
+func guestProcessEnvironment(env []string, term string, pty bool) []string {
+	result := make([]string, 0, len(env)+1)
+	seen := make(map[string]bool)
+	for i := len(env) - 1; i >= 0; i-- {
+		name, _, _ := strings.Cut(env[i], "=")
+		if runtime.GOOS == "windows" {
+			// Windows uses =C:=... entries for drive-specific working dirs.
+			if strings.HasPrefix(env[i], "=") {
+				drive, _, _ := strings.Cut(env[i][1:], "=")
+				name = "=" + drive
+			}
+			name = strings.ToUpper(name)
+		}
+		if name == "SSH_TTY" || pty && name == "TERM" || seen[name] {
+			continue
+		}
+		seen[name] = true
+		result = append(result, env[i])
+	}
+	slices.Reverse(result)
+	if pty {
+		result = append(result, "TERM="+term)
+	}
+	return result
 }
