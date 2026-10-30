@@ -726,7 +726,16 @@ func (h *sessionHandler) admitGuest(sess gssh.Session, requestType string) bool 
 	if requestType == "subsystem" && !h.servesSubsystem(sess.Subsystem()) {
 		return false
 	}
-	return handlers.admit(sess)
+	key := sess
+	if raw, ok := sess.(*rawSession); ok {
+		key = raw.Session
+		if !handlers.admit(key) {
+			return false
+		}
+		raw.admission = handlers
+		return true
+	}
+	return handlers.admit(key)
 }
 
 // servesSubsystem reports whether the door has a handler for the named
@@ -755,14 +764,16 @@ func (h *sessionHandler) startAdmitted(handle gssh.SubsystemHandler) gssh.Subsys
 // the handler unconditionally (charm.land/ssh v0.4.3 session.go:261-296), and
 // taking the admission is the first thing the handler does.
 func (h *sessionHandler) takeAdmission(sess gssh.Session) func() {
+	if raw, ok := sess.(*rawSession); ok {
+		if raw.admission == nil {
+			return nil
+		}
+		return raw.admission.take(raw.Session)
+	}
+	// Sessions constructed directly by tests have no channel-owned state.
 	handlers := h.guestTracker()
 	if handlers == nil {
 		return nil
-	}
-	// The door's handler is given the session charm admitted wrapped, so
-	// that its output goes straight to the channel; the key is charm's own.
-	if raw, ok := sess.(*rawSession); ok {
-		sess = raw.Session
 	}
 	return handlers.take(sess)
 }
@@ -1715,9 +1726,10 @@ func channelClosed(sess gssh.Session) <-chan struct{} {
 // awaitChannelClosed waits, up to timeout, for a session's channel to be
 // closed from the far side: for closed to close, or for winCh to, which charm
 // does for a session with a pty as the channel's request loop ends. It drains
-// winCh as it waits: charm delivers a window change from inside the request
-// loop, so one nobody reads would park the loop, and the close with it. A nil
-// winCh is one already seen closed, or a session with no pty; with closed nil
+// winCh as it waits, including for unwrapped test sessions whose producer
+// could otherwise block delivering a size. rawSession consumes Charm's window
+// channel independently of this wait. A nil winCh is one already seen closed,
+// or a session with no pty; with closed nil
 // too, there is nothing to wait for.
 func awaitChannelClosed(closed <-chan struct{}, winCh <-chan gssh.Window, timeout time.Duration) {
 	if closed == nil && winCh == nil {

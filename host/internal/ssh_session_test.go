@@ -1,11 +1,13 @@
 package internal
 
 import (
+	"context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"io"
 	"net"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	gssh "charm.land/ssh"
@@ -77,3 +79,106 @@ func TestRawSessionOutput(t *testing.T) {
 		}
 	}
 }
+
+func TestRawSessionAdmissionKeepsSelectedTracker(t *testing.T) {
+	for _, kind := range []clientKind{kindGuest, kindHost} {
+		t.Run(map[clientKind]string{kindGuest: "guest", kindHost: "host"}[kind], func(t *testing.T) {
+			original, replacement := &guestHandlers{}, &guestHandlers{}
+			h := &sessionHandler{kind: kind, sharedGuests: original, hostHandlers: original, forceCommands: replacement}
+			underlying := &fakeGuestSession{}
+			raw := &rawSession{Session: underlying}
+			require.True(t, h.admitGuest(raw, "shell"))
+			original.mu.Lock()
+			_, keyedByUnderlying := original.admitted[underlying]
+			original.mu.Unlock()
+			require.True(t, keyedByUnderlying, "admission must preserve Charm's underlying session key")
+			h.forceCommand = []string{"changed-after-admission"}
+			h.hostHandlers = replacement
+			finish := h.takeAdmission(raw)
+			require.NotNil(t, finish, "handler must take the tracker selected at admission")
+			finish()
+			require.True(t, original.wait(time.Second))
+			require.Empty(t, original.admitted)
+		})
+	}
+}
+
+// A denied request may be followed by a PTY and a different request on the
+// same channel; the initial no-PTY observation must not prevent consuming it.
+func TestRawSessionWindowsAfterRejectedRequest(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		underlying := &fakeGuestSession{}
+		raw := &rawSession{Session: underlying}
+		raw.startWindowChanges()
+		underlying.winCh = make(chan gssh.Window, 256)
+		raw.startWindowChanges()
+		_, changes, _ := raw.Pty()
+		require.NotNil(t, changes)
+		for i := range 256 {
+			underlying.winCh <- gssh.Window{Width: 90 + i, Height: 30 + i}
+		}
+		synctest.Wait()
+		pty, _, _ := raw.Pty()
+		require.Equal(t, gssh.Window{Width: 345, Height: 285}, pty.Window)
+		require.Equal(t, gssh.Window{Width: 345, Height: 285}, <-changes)
+		select {
+		case <-changes:
+			t.Fatal("mailbox retained an obsolete window")
+		default:
+		}
+		close(underlying.winCh)
+		synctest.Wait()
+		_, ok := <-changes
+		require.False(t, ok, "mailbox must close with its channel")
+	})
+}
+
+func TestRawSessionOperationContext(t *testing.T) {
+	for _, source := range []string{"host", "transport", "channel", "cleanup", "already closed channel", "already closed transport"} {
+		t.Run(source, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				parent, stopHost := context.WithCancel(context.Background())
+				defer stopHost()
+				transport, stopTransport := context.WithCancel(context.Background())
+				defer stopTransport()
+				closed := make(chan struct{})
+				sess := &rawSession{Session: &fakeGuestSession{ctx: &operationTransport{operationCtx: transport}}, closed: closed}
+				if source == "already closed channel" {
+					close(closed)
+				}
+				if source == "already closed transport" {
+					stopTransport()
+				}
+				ctx, cleanup := sessionOperationContext(parent, sess)
+				defer cleanup()
+				if source == "already closed channel" || source == "already closed transport" {
+					require.ErrorIs(t, ctx.Err(), context.Canceled)
+				} else {
+					require.NoError(t, ctx.Err())
+					switch source {
+					case "host":
+						stopHost()
+					case "transport":
+						stopTransport()
+					case "channel":
+						close(closed)
+					case "cleanup":
+						cleanup()
+					}
+				}
+				synctest.Wait()
+				require.ErrorIs(t, ctx.Err(), context.Canceled)
+			})
+		})
+	}
+}
+
+type operationTransport struct {
+	gssh.Context
+	operationCtx context.Context
+}
+
+func (c *operationTransport) Deadline() (time.Time, bool) { return c.operationCtx.Deadline() }
+func (c *operationTransport) Done() <-chan struct{}       { return c.operationCtx.Done() }
+func (c *operationTransport) Err() error                  { return c.operationCtx.Err() }
+func (c *operationTransport) Value(key any) any           { return c.operationCtx.Value(key) }
