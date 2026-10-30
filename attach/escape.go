@@ -18,6 +18,8 @@ const (
 	// this terminal, and send the session nothing for it. Feed keeps going,
 	// as for a suspend.
 	EscapeStatus
+	// EscapeApproval enters local review and discards the rest of this read.
+	EscapeApproval
 )
 
 // EscapeFilter recognises ssh's detach, suspend and help conventions in a
@@ -32,9 +34,12 @@ const (
 // longer attached to anything. Bytes after a suspend or a status request are
 // not: they are still the session's, queued for delivery as usual.
 type EscapeFilter struct {
-	esc       byte
-	suspend   bool
-	status    bool
+	esc      byte
+	suspend  bool
+	status   bool
+	approval bool
+	// remainder is classified, but never treated as keys, at review entry.
+	remainder []byte
 	lineStart bool
 	pending   bool
 }
@@ -49,6 +54,9 @@ type EscapeOption func(*EscapeFilter)
 func WithStatus() EscapeOption {
 	return func(f *EscapeFilter) { f.status = true }
 }
+
+// WithApproval offers esc followed by a as a deliberate local review boundary.
+func WithApproval() EscapeOption { return func(f *EscapeFilter) { f.approval = true } }
 
 // NewEscapeFilter returns a filter for esc. Zero disables it: Feed passes
 // everything through, ~? included. suspend says whether esc followed by ^Z is
@@ -74,7 +82,8 @@ func (f *EscapeFilter) Feed(p []byte) (out []byte, action EscapeAction) {
 		return p, EscapeNone
 	}
 	out = make([]byte, 0, len(p)+1)
-	for _, b := range p {
+	f.remainder = nil
+	for i, b := range p {
 		if f.pending {
 			f.pending = false
 			switch b {
@@ -96,6 +105,13 @@ func (f *EscapeFilter) Feed(p []byte) (out []byte, action EscapeAction) {
 				// Not offered here (no hook, or a platform with no job
 				// control): both bytes are the session's, like any other
 				// unrecognised pair.
+				out = append(out, f.esc)
+			case 'a':
+				if f.approval {
+					f.lineStart = true
+					f.remainder = p[i+1:]
+					return out, EscapeApproval
+				}
 				out = append(out, f.esc)
 			case '?':
 				if f.status {

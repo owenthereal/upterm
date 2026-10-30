@@ -2334,3 +2334,82 @@ func TestClientShowsItsStatusInThisTerminalOnly(t *testing.T) {
 		t.Fatal("Run did not return after cancellation")
 	}
 }
+
+func TestApprovalRegistrationAndSessionEnd(t *testing.T) {
+	for _, mode := range []string{"interactive", "disabled", "no-pty", "no-stdin", "not-enabled", "refused"} {
+		t.Run(mode, func(t *testing.T) {
+			registered := atomic.Bool{}
+			ready := make(chan struct{})
+			finish := make(chan struct{})
+			replies := make(chan bool, 4)
+			door := serveDoor(t, func(s gssh.Session) {
+				offered := mode == "interactive" || mode == "refused"
+				if registered.Load() != offered {
+					t.Errorf("registration before shell: got %v, want %v", registered.Load(), offered)
+				}
+				conn := serverConnOf(s)
+				if mode == "interactive" {
+					payload, err := upterm.EncodeApprovalState(approvalTestState("first"))
+					if err != nil {
+						t.Error(err)
+						return
+					}
+					for _, kind := range []string{"approval-state-v2@upterm", upterm.ApprovalStateRequest} {
+						ok, _, err := conn.SendRequest(kind, true, payload)
+						if err != nil {
+							t.Error(err)
+							return
+						}
+						replies <- ok
+					}
+				}
+				_, _ = io.WriteString(s, "READY")
+				close(ready)
+				select {
+				case <-finish:
+				case <-s.Context().Done():
+					return
+				}
+				sendSessionEnd(t, s, upterm.SessionEnd{Cause: upterm.CauseStopped})
+				_ = s.Exit(0)
+			})
+			door.server.RequestHandlers[upterm.ApprovalRegisterRequest] = func(_ gssh.Context, _ *gssh.Server, req *ssh.Request) (bool, []byte) {
+				registered.Store(true)
+				if len(req.Payload) != 0 {
+					t.Error("registration payload")
+				}
+				return mode != "refused", nil
+			}
+			sink := &syncSink{}
+			pr, pw := io.Pipe()
+			defer pw.Close()
+			client := &Client{Socket: door.socket, HostKeys: door.pin(), Stdin: pr, Stdout: sink, Pty: &Pty{Term: "xterm"}, Escape: '~', Approvals: true, Logger: slog.New(slog.DiscardHandler)}
+			switch mode {
+			case "disabled":
+				client.Escape = 0
+			case "no-pty":
+				client.Pty = nil
+			case "no-stdin":
+				client.Stdin = nil
+			case "not-enabled":
+				client.Approvals = false
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
+			defer cancel()
+			done := runAsync(t, ctx, client)
+			awaitClosed(t, ready, "shell never started")
+			if mode == "interactive" {
+				require.False(t, <-replies)
+				require.True(t, <-replies)
+				waitFor(t, func() bool { return strings.Contains(sink.String(), "pending") }, "notification missing")
+				_, err := pw.Write([]byte("~a"))
+				require.NoError(t, err)
+				waitFor(t, func() bool { return strings.Contains(sink.String(), "upterm: d ") }, "review missing")
+			}
+			close(finish)
+			res := awaitResult(t, done)
+			require.Equal(t, Exited, res.Reason)
+			require.Equal(t, CauseStopped, res.Cause.Kind)
+		})
+	}
+}

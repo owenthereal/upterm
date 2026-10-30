@@ -90,11 +90,12 @@ type Pty struct {
 // escapes, a suspend, and on the way out the drain and the mode restore.
 // Client is a Terminal on the session's attach socket.
 type Terminal struct {
-	Stdin   io.Reader
-	Stdout  io.Writer
-	Pty     *Pty
-	Resizes <-chan termsize.Size
-	Escape  byte
+	Stdin     io.Reader
+	Stdout    io.Writer
+	Pty       *Pty
+	Resizes   <-chan termsize.Size
+	Escape    byte
+	Approvals ApprovalReview
 
 	// Suspend stops the process this client runs in and returns once it is
 	// running again, with the terminal's size and whether the terminal is
@@ -600,9 +601,20 @@ type output struct {
 // statusOffer is one ~?'s lines, as the one write they are made in, and what
 // closes once they are gone from the slot: written, dropped, or discarded.
 type statusOffer struct {
-	p     []byte
-	taken chan struct{}
+	p         []byte
+	taken     chan struct{}
+	completed chan localOutcome
 }
+
+type localOutcome uint8
+
+const (
+	localDropped localOutcome = iota
+	localCompleted
+	localFailed
+)
+
+func (s *statusOffer) finish(result localOutcome) { s.completed <- result; close(s.completed) }
 
 // writing counts a goroutine about to write to w; wrote counts it out once
 // its write has returned.
@@ -709,9 +721,17 @@ func (o *output) abandon() {
 // of its own would leave the terminal where the tracker doesn't know it is,
 // and the session's next bytes inside whatever it opened. The erase is
 // upterm's own, written after the text is made plain, and sets no mode.
-func (o *output) offerStatus(lines []string) (taken <-chan struct{}, ok bool) {
-	if len(lines) == 0 {
+func (o *output) offerStatus(lines []string) (<-chan struct{}, bool) {
+	offer := o.offerLocal(lines)
+	if offer == nil {
 		return nil, false
+	}
+	return offer.taken, true
+}
+
+func (o *output) offerLocal(lines []string) *statusOffer {
+	if len(lines) == 0 {
+		return nil
 	}
 	p := []byte("\r\n")
 	for _, l := range lines {
@@ -721,11 +741,11 @@ func (o *output) offerStatus(lines []string) (taken <-chan struct{}, ok bool) {
 	o.statusMu.Lock()
 	defer o.statusMu.Unlock()
 	if o.statusClosed || o.status != nil {
-		return nil, false
+		return nil
 	}
-	offer := &statusOffer{p: p, taken: make(chan struct{})}
+	offer := &statusOffer{p: p, taken: make(chan struct{}), completed: make(chan localOutcome, 1)}
 	o.status = offer
-	return offer.taken, true
+	return offer
 }
 
 // takeStatus hands the waiting status to a caller holding turn, if the
@@ -751,7 +771,7 @@ func (o *output) offerStatus(lines []string) (taken <-chan struct{}, ok bool) {
 // is. One that is not is counted here, in the same hold of statusMu as the
 // take: a take that closeStatus did not stop is then always a write Released
 // waits for.
-func (o *output) takeStatus(counted bool) []byte {
+func (o *output) takeStatus(counted bool) *statusOffer {
 	if o.modes == nil {
 		return nil
 	}
@@ -771,7 +791,7 @@ func (o *output) takeStatus(counted bool) []byte {
 	if !counted {
 		o.writing()
 	}
-	return offer.p
+	return offer
 }
 
 // dropStatus drops the offer taken belongs to, if it is still in the slot, and
@@ -784,6 +804,7 @@ func (o *output) dropStatus(taken <-chan struct{}, logger *slog.Logger, why stri
 	if dropped {
 		o.status = nil
 		close(offer.taken)
+		offer.finish(localDropped)
 	}
 	o.statusMu.Unlock()
 	if dropped {
@@ -805,6 +826,7 @@ func (o *output) closeStatus() {
 	o.statusClosed = true
 	if o.status != nil {
 		close(o.status.taken)
+		o.status.finish(localDropped)
 		o.status = nil
 	}
 	close(o.statusClosing)
@@ -838,9 +860,15 @@ func (o *output) closeStatus() {
 // the copy writing nothing more (see fail). With the output idle the copy has
 // nothing to write, and would never find out on its own.
 func (t *Terminal) showStatus(ctx context.Context, o *output, safeWait, turnWait time.Duration, logger *slog.Logger) {
-	taken, ok := o.offerStatus(t.Status(ctx))
-	if !ok {
-		return
+	o.showLocal(t.Status(ctx), safeWait, turnWait, logger)
+}
+
+// showLocal returns success only after the complete write succeeds. Taking
+// an offer out of the slot is not evidence that a human could see it.
+func (o *output) showLocal(lines []string, safeWait, turnWait time.Duration, logger *slog.Logger) localOutcome {
+	offer := o.offerLocal(lines)
+	if offer == nil {
+		return localDropped
 	}
 	safe := time.NewTimer(safeWait)
 	defer safe.Stop()
@@ -848,36 +876,46 @@ func (t *Terminal) showStatus(ctx context.Context, o *output, safeWait, turnWait
 	defer wait.Stop()
 	select {
 	case o.turn <- struct{}{}:
-	case <-taken:
-		// Written at the end of a chunk while this waited.
-		return
+	case <-offer.taken:
+		return <-offer.completed
 	case <-wait.C:
-		o.dropStatus(taken, logger, "the terminal is not taking output", turnWait)
-		return
+		o.dropStatus(offer.taken, logger, "the terminal is not taking output", turnWait)
+		return localDropped
 	case <-o.statusClosing:
-		return
+		return localDropped
 	}
-	if p := o.takeStatus(false); p != nil {
-		err := writeAll(o.w, p)
+	if pending := o.takeStatus(false); pending != nil {
+		err := o.writeLocal(pending)
 		if err != nil {
-			// Before the turn is given back, so the copy never takes it
-			// without seeing the failure.
 			o.fail()
 		}
 		o.wrote()
 		<-o.turn
 		if err != nil {
-			logging.WarnWithin(logger, logging.LogBound, "could not show the session's status", "error", err)
+			logging.WarnWithin(logger, logging.LogBound, "could not show local terminal text", "error", err)
 		}
-		return
+	} else {
+		<-o.turn
 	}
-	<-o.turn
 	select {
-	case <-taken:
+	case result := <-offer.completed:
+		return result
 	case <-safe.C:
-		o.dropStatus(taken, logger, "the session's output stayed inside an escape sequence", safeWait)
+		o.dropStatus(offer.taken, logger, "the session's output stayed inside an escape sequence", safeWait)
+		return localDropped
 	case <-o.statusClosing:
+		return localDropped
 	}
+}
+
+func (o *output) writeLocal(offer *statusOffer) error {
+	err := writeAll(o.w, offer.p)
+	if err != nil {
+		offer.finish(localFailed)
+	} else {
+		offer.finish(localCompleted)
+	}
+	return err
 }
 
 // writeAll writes p to w, a short write being a failed one, as io.Copy has
@@ -1068,7 +1106,7 @@ func copyOutput(r io.Reader, o *output) error {
 			werr := writeAll(o.w, buf[:n])
 			if werr == nil {
 				if p := o.takeStatus(true); p != nil {
-					werr = writeAll(o.w, p)
+					werr = o.writeLocal(p)
 				}
 			}
 			<-o.turn
@@ -1107,6 +1145,9 @@ func (t *Terminal) forwardInput(ctx context.Context, sess *ssh.Session, stdin io
 	if t.Status != nil && o.modes != nil {
 		opts = append(opts, WithStatus())
 	}
+	if t.Approvals != nil && o.modes != nil && t.Escape != 0 {
+		opts = append(opts, WithApproval())
+	}
 	filter := NewEscapeFilter(t.Escape, t.Suspend != nil, opts...)
 	// One ~? at a time: one pressed while another is still being looked up
 	// or written is dropped, so a terminal that has stopped taking bytes
@@ -1115,8 +1156,6 @@ func (t *Terminal) forwardInput(ctx context.Context, sess *ssh.Session, stdin io
 	// outlives Run keeps them.
 	var showing atomic.Bool
 	safeWait, turnWait := lim.statusSafe, lim.outputDrain
-	buf := make([]byte, 4096)
-	r := uio.NewContextReader(ctx, t.Stdin)
 
 	q := newInputQueue(lim.inputBacklog)
 	// Closed on every path, including the ones that do not wait: it is what
@@ -1135,61 +1174,52 @@ func (t *Terminal) forwardInput(ctx context.Context, sess *ssh.Session, stdin io
 	}
 
 	dropped := false
+	review := newTerminalReview(t, o, lim, logger)
+	defer review.close()
+	reads := review.readInput(ctx, t.Stdin)
 	for {
-		n, err := r.Read(buf)
-		if n > 0 {
-			out, action := filter.Feed(buf[:n])
+		chunk, alive := review.next(ctx, reads)
+		if !alive {
+			return false
+		}
+		if len(chunk.p) > 0 {
+			out, action := review.input(chunk, filter)
 			if action == EscapeDetach {
-				// The bytes before the escape are the session's — the Enter
-				// that preceded ~. — but a detach that has been detected
-				// must reach the cancellation machinery whether or not the
-				// session is still taking input, so they are queued and
-				// waited for rather than written here. With the backlog
-				// already full they are dropped like any other byte: the
-				// policy does not change for the last read, and a session
-				// that has taken nothing for a megabyte will not take this.
+				// The prefix is still program-owned. Queue and flush it within the
+				// existing bound so a stopped program cannot hold the detach.
 				q.append(out)
 				flush()
 				return true
 			}
+			// Never wait on a full program-input queue from the keyboard owner.
 			if !q.append(out) && !dropped {
-				// Dropped rather than waited on, deliberately: a session that
-				// is not reading will never see these bytes, and blocking for
-				// it is the defect this queue exists to fix — OpenSSH stops
-				// reading the terminal here, which is no better. Once per
-				// attachment, and bounded: this runs on the goroutine that
-				// has to stay responsive.
 				dropped = true
-				logging.WarnWithin(logger, logging.LogBound, "dropping input: the session is not taking it",
-					"backlog-bytes", lim.inputBacklog)
+				logging.WarnWithin(logger, logging.LogBound, "dropping input: the session is not taking it", "backlog-bytes", lim.inputBacklog)
 			}
 			if action == EscapeStatus && showing.CompareAndSwap(false, true) {
-				// Off this goroutine, which has to stay free for ~. and for
-				// the session's end, however long the lookup and the
-				// terminal take.
-				go func() {
-					defer showing.Store(false)
-					t.showStatus(ctx, o, safeWait, turnWait, logger)
-				}()
+				go func() { defer showing.Store(false); t.showStatus(ctx, o, safeWait, turnWait, logger) }()
 			}
-			if action == EscapeSuspend && !t.suspend(sess, o, lim.outputDrain, logger) {
-				flush()
-				return true
+			if action == EscapeSuspend {
+				if review.active {
+					review.leave()
+				}
+				if !t.suspend(sess, o, lim.outputDrain, logger) {
+					flush()
+					return true
+				}
 			}
 		}
-		if err != nil {
+		if chunk.err != nil {
 			if ctx.Err() != nil {
 				return false
 			}
-			// Stdin ended: the terminal is gone. An escape byte held back
-			// was real input; it is delivered under the same bound, for
-			// the same reason.
-			q.append(filter.Flush())
+			if !review.active {
+				q.append(filter.Flush())
+			}
 			flush()
 			return true
 		}
 		if q.stopped() {
-			// The session went away under us; Wait says how.
 			return false
 		}
 	}

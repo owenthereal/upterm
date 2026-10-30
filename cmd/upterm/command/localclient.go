@@ -69,6 +69,7 @@ func attachLocalTerminalWith(ctx context.Context, socket string, keys []ssh.Publ
 	// terminal's: its escape character, and ~^Z only where it suspends.
 	src.Escape, src.Suspend = escape, client.Suspend != nil
 	client.Status = terminalStatus(src, logger)
+	client.Approvals = true
 	return client.Run(ctx)
 }
 
