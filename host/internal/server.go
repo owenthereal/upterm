@@ -124,6 +124,7 @@ type Server struct {
 	// state is read from outside the serving goroutine, and a pointer written
 	// there would be a race with every such read.
 	hostClients hostClients
+	approvals   *approvalBroker
 
 	// order is the session's shutdown cause, as host publishes it, and the
 	// order of each command's end against it. A value, so that it exists
@@ -495,12 +496,17 @@ func (s *Server) ServeWithContext(ctx context.Context, guest, host net.Listener)
 		// command itself, so it is told of every change.
 		s.hostClients.onPrimary = pacer.setPrimary
 		hostSH.hostClients = &s.hostClients
+		s.approvals = newApprovalBroker(&s.hostClients, s.Logger)
+		hostSH.approvals = s.approvals
+		defer s.approvals.Close()
 
 		hostServer := gssh.Server{
 			HostSigners:      ss,
 			Handler:          hostSH.HandleSession,
 			Version:          upterm.HostSSHServerVersion,
 			PublicKeyHandler: (&hostPublicKeyHandler{}).HandlePublicKey,
+			ConnCallback:     s.approvals.localConnection,
+			RequestHandlers:  map[string]gssh.RequestHandler{"default": s.approvals.HandleRequest, upterm.ApprovalRegisterRequest: s.approvals.HandleRequest, upterm.ApprovalAnswerRequest: s.approvals.HandleRequest},
 			ChannelHandlers:  map[string]gssh.ChannelHandler{"session": rawSessionHandler},
 			// Admits a client's shell with the session's end, as the guest
 			// door does a guest's.
@@ -719,6 +725,9 @@ func (h *sessionHandler) guestTracker() *guestHandlers {
 // handler with no trackers -- a test's -- admits everything. The host door
 // admits its clients the same way, with its own tracker.
 func (h *sessionHandler) admitGuest(sess gssh.Session, requestType string) bool {
+	if h.approvals != nil && !h.approvals.admitSession(sess) {
+		return false
+	}
 	handlers := h.guestTracker()
 	if handlers == nil {
 		return true
@@ -973,6 +982,7 @@ type sessionHandler struct {
 	// hostClients, set on the host door only, is the elector every client that
 	// could be primary registers with.
 	hostClients *hostClients
+	approvals   *approvalBroker
 
 	// forceCommands is what the session's end waits on for the forced
 	// commands' teardowns: each is hung up and sends its guest a reset once
