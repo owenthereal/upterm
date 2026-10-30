@@ -3,6 +3,7 @@ package consent
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -697,4 +698,28 @@ func TestConsentWorkerBounds(t *testing.T) {
 			denied(t, retry, ErrCanceled)
 		})
 	})
+}
+
+func TestConsentLoggingBounded(t *testing.T) {
+	var output bytes.Buffer
+	m := NewManager(nil, slog.New(slog.NewJSONHandler(&output, nil)))
+	subjects := make([]string, 1000)
+	for i := range subjects {
+		subjects[i] = "path\x1b[2J\n" + strings.Repeat("x", 10000)
+	}
+	m.log(OpUpload, ClientInfo{Fingerprint: "key\x1b[0m", ConnectionID: strings.Repeat("c", 10000)}, subjects, "request", Deny, errors.New(strings.Repeat("failure\n", 10000)))
+	require.Less(t, output.Len(), 20000)
+	var fields map[string]any
+	require.NoError(t, json.Unmarshal(output.Bytes(), &fields))
+	for _, key := range []string{"fingerprint", "connection_id", "error"} {
+		value := fields[key].(string)
+		require.NotContains(t, value, "\x1b")
+		require.NotContains(t, value, "\n")
+		require.Less(t, len(value), 2000)
+	}
+	for _, subject := range fields["subjects"].([]any) {
+		require.NotContains(t, subject.(string), "\x1b")
+		require.NotContains(t, subject.(string), "\n")
+		require.Less(t, len(subject.(string)), 2000)
+	}
 }

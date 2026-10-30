@@ -20,9 +20,9 @@ import (
 	"github.com/oklog/run"
 	"github.com/olebedev/emitter"
 	"github.com/owenthereal/upterm/host/api"
+	"github.com/owenthereal/upterm/host/consent"
 	"github.com/owenthereal/upterm/host/internal"
 	"github.com/owenthereal/upterm/host/sessiondir"
-	"github.com/owenthereal/upterm/host/sftp"
 	"github.com/owenthereal/upterm/internal/liveness"
 	"github.com/owenthereal/upterm/internal/registration"
 	"github.com/owenthereal/upterm/internal/termsize"
@@ -164,8 +164,8 @@ type Host struct {
 	// reports that; it changes nothing about who may join.
 	AutoAccept bool
 	// FileTransferApprovalRequired says each guest file transfer waits for
-	// the host's desktop dialog (no --accept). The daemon sets it, with the
-	// SFTPPermissionChecker that shows the dialog. It is reported to readers
+	// the primary host terminal (no --accept). The daemon sets it alongside
+	// TerminalConsent. It is reported to readers
 	// of the session and changes nothing about what is allowed.
 	FileTransferApprovalRequired bool
 	// ProxyURL, when non-nil, routes the connection to the upterm server
@@ -321,8 +321,11 @@ type Host struct {
 	state atomic.Pointer[sessionState]
 
 	// SFTP configuration
-	SFTPDisabled          bool                   // Disable SFTP subsystem entirely (--no-sftp)
-	SFTPPermissionChecker sftp.PermissionChecker // Optional: prompts user for SFTP permissions (nil = auto-allow)
+	SFTPDisabled bool // Disable SFTP subsystem entirely (--no-sftp)
+	// PermissionChecker supplies custom consent policy. Nil denies ungranted operations.
+	PermissionChecker consent.PermissionChecker
+	// TerminalConsent selects consent on the primary local terminal; mutually exclusive with PermissionChecker.
+	TerminalConsent bool
 
 	// Name is the session's local name. It determines the socket paths, so
 	// they are known before the server is ever contacted. It is unrelated to
@@ -578,6 +581,9 @@ func (c *Host) claimTimeout() time.Duration {
 // A caller that supplied AdminSocketFile keeps it across runs, since managing
 // the path is what supplying it means.
 func (c *Host) Run(ctx context.Context) (runErr error) {
+	if c.TerminalConsent && c.PermissionChecker != nil {
+		return errors.New("TerminalConsent and PermissionChecker are mutually exclusive")
+	}
 	// First, before anything here can write a byte. Whatever a
 	// SessionCreatedCallback prints, and whatever a VersionWarningCallback or
 	// a RelayWarningCallback prints, goes out well before the signal actor is
@@ -1169,7 +1175,9 @@ func (c *Host) Run(ctx context.Context) (runErr error) {
 			InitialClientTimeout:    c.InitialClientTimeout,
 			StopGrace:               c.StopGrace,
 			SFTPDisabled:            c.SFTPDisabled,
-			SFTPPermissionChecker:   c.SFTPPermissionChecker,
+			PermissionChecker:       c.PermissionChecker,
+			TerminalConsent:         c.TerminalConsent,
+			SFTPAutoAccept:          c.AutoAccept,
 			OnCommandStarted: func() {
 				cmdOnce.Do(func() { close(cmdReady) })
 				if c.CommandStartedCallback != nil {

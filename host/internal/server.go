@@ -15,8 +15,8 @@ import (
 
 	gssh "charm.land/ssh"
 	"github.com/owenthereal/upterm/host/api"
+	"github.com/owenthereal/upterm/host/consent"
 	"github.com/owenthereal/upterm/host/internal/replay"
-	"github.com/owenthereal/upterm/host/sftp"
 	"github.com/owenthereal/upterm/server"
 	"github.com/owenthereal/upterm/upterm"
 	"github.com/owenthereal/upterm/utils"
@@ -112,8 +112,14 @@ type Server struct {
 	OnGuestServerStopped func(error)
 
 	// SFTP configuration
-	SFTPDisabled          bool                   // Disable SFTP subsystem entirely
-	SFTPPermissionChecker sftp.PermissionChecker // Optional: prompts user for SFTP permissions (nil = auto-allow)
+	SFTPDisabled bool // Disable SFTP subsystem entirely
+	// PermissionChecker supplies custom consent policy. Nil denies ungranted operations.
+	PermissionChecker consent.PermissionChecker
+	// TerminalConsent selects consent on the primary local terminal; mutually exclusive with PermissionChecker.
+	TerminalConsent bool
+
+	// SFTPAutoAccept grants SFTP only, after hard policy checks.
+	SFTPAutoAccept bool
 
 	// cmd is the hosted command, kept so its outcome can be read after
 	// ServeWithContext returns.
@@ -195,6 +201,9 @@ func logReplayFallback(logger *slog.Logger) func(error) {
 // guest, and — when host is not nil — the host door on host, for clients that
 // are already on this machine.
 func (s *Server) ServeWithContext(ctx context.Context, guest, host net.Listener) error {
+	if s.TerminalConsent && s.PermissionChecker != nil {
+		return errors.New("TerminalConsent and PermissionChecker are mutually exclusive")
+	}
 	timing := s.timing.orDefault()
 	replayBudget := s.replayBudget
 	if replayBudget == 0 {
@@ -295,30 +304,49 @@ func (s *Server) ServeWithContext(ctx context.Context, guest, host net.Listener)
 	// Both doors share this: the session ends for one reason, and the guest
 	// actor's interrupt is what decides when sessions are released.
 	sessCtx, cancel := context.WithCancel(sessionContext(ctx))
+	// Establish the local primary owner before constructing its broker. Consent
+	// lives for this host session, outside the guest tunnel's reconnect loop.
+	s.hostClients.logger = s.Logger
+	s.hostClients.promoteFlushTimeout = timing.promoteFlush
+	s.hostClients.onPrimary = pacer.setPrimary
+	permissionChecker := s.PermissionChecker
+	if s.TerminalConsent {
+		var prompter consent.Prompter
+		if host != nil {
+			s.approvals = newApprovalBroker(&s.hostClients, s.Logger)
+			prompter = s.approvals
+			defer s.approvals.Close()
+		}
+		manager := consent.NewManager(prompter, s.Logger)
+		defer manager.Close()
+		permissionChecker = manager
+	}
+
 	sh := sessionHandler{
-		forceCommand:          s.ForceCommand,
-		forceCommands:         &guestHandlers{},
-		sharedGuests:          &guestHandlers{},
-		hostHandlers:          &guestHandlers{},
-		timing:                timing,
-		replayBudget:          replayBudget,
-		commandEnv:            s.CommandEnv,
-		hideClientIP:          s.HideClientIP,
-		ptmx:                  shared,
-		eventEmmiter:          s.EventEmitter,
-		terminals:             newTerminalWindows(s.Logger),
-		writers:               writers,
-		pacer:                 pacer,
-		keepAliveDuration:     s.KeepAliveDuration,
-		ctx:                   sessCtx,
-		stopCtx:               ctx,
-		order:                 &s.order,
-		logger:                s.Logger,
-		readonly:              s.ReadOnly,
-		sftpPermissionChecker: s.SFTPPermissionChecker,
-		kind:                  kindGuest,
-		cmdDone:               cmdDone,
-		commandResult:         cmd.Result,
+		forceCommand:      s.ForceCommand,
+		forceCommands:     &guestHandlers{},
+		sharedGuests:      &guestHandlers{},
+		hostHandlers:      &guestHandlers{},
+		timing:            timing,
+		replayBudget:      replayBudget,
+		commandEnv:        s.CommandEnv,
+		hideClientIP:      s.HideClientIP,
+		ptmx:              shared,
+		eventEmmiter:      s.EventEmitter,
+		terminals:         newTerminalWindows(s.Logger),
+		writers:           writers,
+		pacer:             pacer,
+		keepAliveDuration: s.KeepAliveDuration,
+		ctx:               sessCtx,
+		stopCtx:           ctx,
+		order:             &s.order,
+		logger:            s.Logger,
+		readonly:          s.ReadOnly,
+		permissionChecker: permissionChecker,
+		sftpAutoAccept:    s.SFTPAutoAccept,
+		kind:              kindGuest,
+		cmdDone:           cmdDone,
+		commandResult:     cmd.Result,
 	}
 
 	ss := []gssh.Signer{s.HostKey}
@@ -351,6 +379,13 @@ func (s *Server) ServeWithContext(ctx context.Context, guest, host net.Listener)
 			ConnCallback: func(ctx gssh.Context, conn net.Conn) net.Conn {
 				// Installed before authentication or any concurrent channel handlers.
 				ctx.SetValue(forwardingPresenceKey{}, &forwardingPresence{})
+				if permissionChecker != nil {
+					context.AfterFunc(ctx, func() {
+						if _, authenticated := ctx.Value(authenticatedGuestKey{}).(authenticatedGuest); authenticated {
+							permissionChecker.ClearConnection(ctx.SessionID())
+						}
+					})
+				}
 				return conn
 			},
 			LocalPortForwardingCallback: func(ctx gssh.Context, destinationHost string, destinationPort uint32) bool {
@@ -483,30 +518,29 @@ func (s *Server) ServeWithContext(ctx context.Context, guest, host net.Listener)
 		hostSH.kind = kindHost
 		hostSH.readonly = false
 		hostSH.forceCommand = nil
-		hostSH.sftpPermissionChecker = nil
+		hostSH.permissionChecker = nil
 		hostSH.subsystems = nil
 		// The gate: the first client through this door is what the command's
 		// start is waiting for.
 		hostSH.onHostClientAttached = func() { firstOnce.Do(func() { close(firstHostClient) }) }
 		// And the elector: exactly one of the clients on this door paces the
 		// command and is sent its live terminal queries.
-		s.hostClients.logger = s.Logger
-		s.hostClients.promoteFlushTimeout = timing.promoteFlush
-		// The pacer stands aside while there is a primary, which paces the
-		// command itself, so it is told of every change.
-		s.hostClients.onPrimary = pacer.setPrimary
 		hostSH.hostClients = &s.hostClients
-		s.approvals = newApprovalBroker(&s.hostClients, s.Logger)
 		hostSH.approvals = s.approvals
-		defer s.approvals.Close()
+		var approvalConn gssh.ConnCallback
+		var approvalRequests map[string]gssh.RequestHandler
+		if s.approvals != nil {
+			approvalConn = s.approvals.localConnection
+			approvalRequests = map[string]gssh.RequestHandler{upterm.ApprovalRegisterRequest: s.approvals.HandleRequest, upterm.ApprovalAnswerRequest: s.approvals.HandleRequest}
+		}
 
 		hostServer := gssh.Server{
 			HostSigners:      ss,
 			Handler:          hostSH.HandleSession,
 			Version:          upterm.HostSSHServerVersion,
 			PublicKeyHandler: (&hostPublicKeyHandler{}).HandlePublicKey,
-			ConnCallback:     s.approvals.localConnection,
-			RequestHandlers:  map[string]gssh.RequestHandler{"default": s.approvals.HandleRequest, upterm.ApprovalRegisterRequest: s.approvals.HandleRequest, upterm.ApprovalAnswerRequest: s.approvals.HandleRequest},
+			ConnCallback:     approvalConn,
+			RequestHandlers:  approvalRequests,
 			ChannelHandlers:  map[string]gssh.ChannelHandler{"session": rawSessionHandler},
 			// Admits a client's shell with the session's end, as the guest
 			// door does a guest's.
@@ -999,7 +1033,8 @@ type sessionHandler struct {
 	replayBudget time.Duration
 
 	// SFTP configuration
-	sftpPermissionChecker sftp.PermissionChecker // Optional: prompts user for SFTP permissions
+	permissionChecker consent.PermissionChecker
+	sftpAutoAccept    bool
 
 	// subsystems are the guest door's subsystem handlers, by name, so that
 	// admitGuest refuses one the door doesn't serve. Nil in a test's handler.

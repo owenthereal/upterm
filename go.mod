@@ -55,7 +55,6 @@ require (
 	github.com/hashicorp/go-version v1.9.0
 	github.com/muesli/reflow v0.3.0
 	github.com/muesli/termenv v0.16.0
-	github.com/ncruces/zenity v0.10.15
 	github.com/owenthereal/tmux v0.0.0-20260110065009-80f16deab60d
 	github.com/owenthereal/x/ansi v0.0.0-20261015013042-3e706d88bf76
 	github.com/owenthereal/x/vt v0.0.0-20261018030619-09045b97ea03

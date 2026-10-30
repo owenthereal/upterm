@@ -88,7 +88,7 @@ message GetSessionResponse {
   optional bool start_confirmed = 19;                 // the host answered the start prompt, rather than passing --accept
   optional bool read_only = 20;
   optional string file_transfer = 21;                 // off, downloads, all
-  optional bool file_transfer_approval_required = 22; // each guest file transfer waits for the host's dialog
+  optional bool file_transfer_approval_required = 22; // each guest file transfer waits for approval in the primary host terminal
   optional bool local_forwarding = 23;
 }
 

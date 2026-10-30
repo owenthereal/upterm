@@ -116,7 +116,7 @@ func approvalAttach(t *testing.T, p *approvalPeer, interactive bool) {
 	require.NoError(t, sess.Shell())
 }
 func approvalHost(t *testing.T) *hostHarness {
-	return startHost(t, &Server{Command: []string{"sh", "-c", "printf READY; exec sleep 60"}})
+	return startHost(t, &Server{TerminalConsent: true, Command: []string{"sh", "-c", "printf READY; exec sleep 60"}})
 }
 func approvalPrompt(id string) consent.Prompt {
 	return consent.Prompt{ID: id, Operation: consent.OpExec, Client: consent.ClientInfo{Fingerprint: "SHA256:guest", ConnectionID: "guest"}, Subjects: []string{"echo hi"}, Deadline: time.Now().Add(time.Minute)}
@@ -262,6 +262,7 @@ func TestApprovalQueue(t *testing.T) {
 			clients := &hostClients{primary: &hostClient{id: "primary"}}
 			broker := newApprovalBroker(clients, nil)
 			owner := &approvalTransport{ctx: &approvalTestContext{baseContext: context.Background(), id: "primary"}, registered: true, session: true, eligible: true, wake: make(chan struct{}, 1), done: make(chan struct{})}
+			owner.ctx.(*approvalTestContext).baseContext = context.WithValue(context.Background(), approvalLocalKey{}, owner)
 			broker.transports[owner] = struct{}{}
 			prompt := approvalPrompt("expired")
 			prompt.Deadline = time.Now().Add(time.Second)

@@ -490,7 +490,7 @@ func TestBuildDaemonHostHidesClientIPs(t *testing.T) {
 // TestBuildDaemonHostPassesOnAccept pins that --accept reaches the session,
 // which reports an open one -- nobody asked, and no allowlist -- to every
 // reader of it.
-func TestBuildDaemonHostPassesOnAccept(t *testing.T) {
+func TestDaemonConsentConfiguration(t *testing.T) {
 	for _, accept := range []bool{false, true} {
 		t.Run(fmt.Sprintf("accept=%t", accept), func(t *testing.T) {
 			hostCmd()
@@ -505,12 +505,8 @@ func TestBuildDaemonHostPassesOnAccept(t *testing.T) {
 			h, err := buildDaemonHost(context.Background(), "d", testHostOptions(), child, discardLogger())
 			require.NoError(t, err)
 			require.Equal(t, accept, h.AutoAccept)
-			// File transfers need the host's approval in a dialog, which can
-			// allow the file asked about or everything in that scp or sftp
-			// command, unless the host said not to ask; the session reports
-			// what the checker does.
-			_, autoAllows := h.SFTPPermissionChecker.(*AutoAllowPermissionChecker)
-			require.Equal(t, accept, autoAllows)
+			require.True(t, h.TerminalConsent)
+			require.Nil(t, h.PermissionChecker)
 			require.Equal(t, !accept, h.FileTransferApprovalRequired)
 		})
 	}

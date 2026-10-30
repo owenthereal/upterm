@@ -89,7 +89,7 @@ type Permissions struct {
 	SFTPDisabled            bool
 	AllowLocalTCPForwarding bool
 	// FileTransferApprovalRequired says each guest file transfer waits for
-	// the host's dialog. It means nothing when SFTP is disabled.
+	// approval in the primary host terminal. It means nothing when SFTP is disabled.
 	FileTransferApprovalRequired bool
 }
 

@@ -1,14 +1,18 @@
 package internal
 
 import (
+	"context"
 	"errors"
 	"io"
 	"os"
 	"path/filepath"
 	"runtime"
 	"testing"
+	"testing/synctest"
+	"time"
 
-	hostsftp "github.com/owenthereal/upterm/host/sftp"
+	"github.com/owenthereal/upterm/host/consent"
+	"github.com/pkg/sftp"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -273,20 +277,224 @@ func TestListerat(t *testing.T) {
 	assert.Equal(t, 0, n)
 }
 
-// unavailableChecker is the dialog checker where no dialog can be shown: no
-// display, or no dialog tool to draw one.
-type unavailableChecker struct{}
-
-func (unavailableChecker) CheckPermission(hostsftp.Operation, hostsftp.ClientInfo, ...string) (hostsftp.PermissionResult, error) {
-	return hostsftp.PermissionDenied, errors.New("no display")
+type sftpConsentChecker struct {
+	check func(context.Context, consent.Operation, consent.ClientInfo, ...string) (consent.Decision, error)
+	clear func(string)
 }
 
-func (unavailableChecker) ClearSession(string) {}
+func (c sftpConsentChecker) CheckPermission(ctx context.Context, op consent.Operation, client consent.ClientInfo, paths ...string) (consent.Decision, error) {
+	return c.check(ctx, op, client, paths...)
+}
+func (c sftpConsentChecker) ClearConnection(id string) {
+	if c.clear != nil {
+		c.clear(id)
+	}
+}
 
-// An operation nobody can be asked about is denied. A host that wants
-// transfers without being asked passes --accept, which replaces the dialog
-// with a checker that allows everything.
-func TestSFTPSession_checkPermissionDeniesWhenNobodyCanBeAsked(t *testing.T) {
-	session := &SFTPSession{permissionChecker: unavailableChecker{}, logger: discardLogger()}
-	require.Error(t, session.checkPermission(hostsftp.OpDownload, "/notes.txt"))
+func TestSFTPConsent(t *testing.T) {
+	t.Run("missing checker denies", func(t *testing.T) {
+		s := &SFTPSession{ctx: t.Context(), logger: discardLogger()}
+		path := filepath.Join(t.TempDir(), "new")
+		err := (&sftpFileCmder{session: s, logger: s.logger}).Filecmd(sftp.NewRequest("Mkdir", path))
+		require.Error(t, err)
+		_, err = os.Stat(path)
+		require.True(t, os.IsNotExist(err))
+	})
+	t.Run("all protected operations and complete tuples", func(t *testing.T) {
+		for _, method := range []string{"Get", "Put", "Remove", "Mkdir", "Rmdir", "Rename", "Symlink", "Link", "Setstat"} {
+			t.Run(method, func(t *testing.T) {
+				path, target := filepath.Join(t.TempDir(), "source"), filepath.Join(t.TempDir(), "target")
+				called := false
+				s := &SFTPSession{ctx: t.Context(), logger: discardLogger(), clientInfo: consent.ClientInfo{Fingerprint: "guest", ConnectionID: "connection"}}
+				s.permissionChecker = sftpConsentChecker{check: func(ctx context.Context, op consent.Operation, client consent.ClientInfo, subjects ...string) (consent.Decision, error) {
+					called = true
+					require.Equal(t, s.clientInfo, client)
+					operations := map[string]consent.Operation{"Get": consent.OpDownload, "Put": consent.OpUpload, "Remove": consent.OpDelete, "Mkdir": consent.OpMkdir, "Rmdir": consent.OpRmdir, "Rename": consent.OpRename, "Symlink": consent.OpSymlink, "Link": consent.OpLink, "Setstat": consent.OpSetstat}
+					require.Equal(t, operations[method], op)
+					want := []string{path}
+					if method == "Rename" || method == "Symlink" || method == "Link" {
+						want = append(want, target)
+					}
+					require.Equal(t, want, subjects)
+					return consent.Deny, errors.New("refused")
+				}}
+				r := sftp.NewRequest(method, path)
+				r.Target = target
+				var err error
+				switch method {
+				case "Get":
+					_, err = (&sftpFileReader{session: s, logger: s.logger}).Fileread(r)
+				case "Put":
+					_, err = (&sftpFileWriter{session: s, logger: s.logger}).Filewrite(r)
+				default:
+					err = (&sftpFileCmder{session: s, logger: s.logger}).Filecmd(r)
+				}
+				require.Error(t, err)
+				require.True(t, called)
+				_, err = os.Stat(path)
+				require.True(t, os.IsNotExist(err))
+			})
+		}
+	})
+	t.Run("custom checker decisions and errors", func(t *testing.T) {
+		for _, tc := range []struct {
+			name     string
+			decision consent.Decision
+			err      error
+			allowed  bool
+		}{
+			{"allow", consent.AllowConnection, nil, true}, {"deny", consent.Deny, nil, false}, {"checker error despite allow", consent.AllowGuest, errors.New("checker unavailable"), false}, {"invalid decision", consent.Decision(255), nil, false},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				s := &SFTPSession{ctx: t.Context(), logger: discardLogger(), permissionChecker: sftpConsentChecker{check: func(context.Context, consent.Operation, consent.ClientInfo, ...string) (consent.Decision, error) {
+					return tc.decision, tc.err
+				}}}
+				path := filepath.Join(t.TempDir(), "new")
+				err := (&sftpFileCmder{session: s, logger: s.logger}).Filecmd(sftp.NewRequest("Mkdir", path))
+				if tc.allowed {
+					require.NoError(t, err)
+				} else {
+					require.Error(t, err)
+					_, err = os.Stat(path)
+					require.True(t, os.IsNotExist(err))
+				}
+			})
+		}
+	})
+
+	t.Run("readonly precedes checker and accept", func(t *testing.T) {
+		s := &SFTPSession{ctx: t.Context(), readOnly: true, autoAccept: true, logger: discardLogger(), permissionChecker: sftpConsentChecker{check: func(context.Context, consent.Operation, consent.ClientInfo, ...string) (consent.Decision, error) {
+			t.Fatal("hard denial prompted")
+			return consent.AllowGuest, nil
+		}}}
+		_, err := (&sftpFileWriter{session: s, logger: s.logger}).Filewrite(sftp.NewRequest("Put", filepath.Join(t.TempDir(), "new")))
+		require.Error(t, err)
+		for _, method := range []string{"Remove", "Mkdir", "Rmdir", "Rename", "Symlink", "Link", "Setstat"} {
+			require.Error(t, (&sftpFileCmder{session: s, logger: s.logger}).Filecmd(sftp.NewRequest(method, "unused")))
+		}
+	})
+	t.Run("cancellation after allow prevents side effects", func(t *testing.T) {
+		for _, which := range []string{"request", "channel"} {
+			t.Run(which, func(t *testing.T) {
+				request, cancelRequest := context.WithCancel(t.Context())
+				defer cancelRequest()
+				channel, cancelChannel := context.WithCancel(t.Context())
+				defer cancelChannel()
+				path := filepath.Join(t.TempDir(), "new")
+				s := &SFTPSession{ctx: channel, logger: discardLogger(), permissionChecker: sftpConsentChecker{check: func(ctx context.Context, _ consent.Operation, _ consent.ClientInfo, _ ...string) (consent.Decision, error) {
+					if which == "request" {
+						cancelRequest()
+					} else {
+						cancelChannel()
+					}
+					return consent.AllowConnection, nil
+				}}}
+				r := sftp.NewRequest("Mkdir", path).WithContext(request)
+				require.Error(t, (&sftpFileCmder{session: s, logger: s.logger}).Filecmd(r))
+				_, err := os.Stat(path)
+				require.True(t, os.IsNotExist(err))
+			})
+		}
+	})
+	t.Run("accept bypasses checker only for sftp", func(t *testing.T) {
+		s := &SFTPSession{ctx: t.Context(), autoAccept: true, logger: discardLogger(), permissionChecker: sftpConsentChecker{check: func(context.Context, consent.Operation, consent.ClientInfo, ...string) (consent.Decision, error) {
+			t.Fatal("accept prompted")
+			return consent.Deny, nil
+		}}}
+		require.NoError(t, s.checkPermission(t.Context(), time.Now(), consent.OpDownload, "file"))
+		require.Error(t, s.checkPermission(t.Context(), time.Now(), consent.OpExec, "command"))
+	})
+	t.Run("permission deadline cannot authorize late work", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			s := &SFTPSession{ctx: t.Context(), logger: discardLogger(), permissionChecker: sftpConsentChecker{check: func(ctx context.Context, _ consent.Operation, _ consent.ClientInfo, _ ...string) (consent.Decision, error) {
+				time.Sleep(consent.PermissionTimeout)
+				return consent.AllowGuest, nil
+			}}}
+			require.Error(t, s.checkPermission(t.Context(), time.Now(), consent.OpDownload, "file"))
+		})
+	})
+	t.Run("transfer context outlives consent timeout", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "file")
+			require.NoError(t, os.WriteFile(path, []byte("ok"), 0600))
+			s := &SFTPSession{ctx: t.Context(), autoAccept: true, logger: discardLogger()}
+			reader, err := (&sftpFileReader{session: s, logger: s.logger}).Fileread(sftp.NewRequest("Get", path))
+			require.NoError(t, err)
+			defer reader.(io.Closer).Close()
+			time.Sleep(2 * consent.PermissionTimeout)
+			b := make([]byte, 2)
+			_, err = reader.ReadAt(b, 0)
+			require.NoError(t, err)
+			require.Equal(t, "ok", string(b))
+		})
+	})
+}
+
+type sftpConsentPrompter func(context.Context, consent.Prompt) (consent.Decision, error)
+
+func (f sftpConsentPrompter) Prompt(ctx context.Context, p consent.Prompt) (consent.Decision, error) {
+	return f(ctx, p)
+}
+
+func TestSFTPConsentDeadline(t *testing.T) {
+	t.Run("queued before manager retains handler arrival", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			prompts := make(chan consent.Prompt, 2)
+			m := consent.NewManager(sftpConsentPrompter(func(ctx context.Context, p consent.Prompt) (consent.Decision, error) {
+				prompts <- p
+				<-ctx.Done()
+				return consent.Deny, ctx.Err()
+			}), discardLogger())
+			defer m.Close()
+			arrived := time.Now()
+			s := &SFTPSession{ctx: t.Context(), logger: discardLogger(), permissionChecker: sftpConsentChecker{check: func(ctx context.Context, op consent.Operation, c consent.ClientInfo, subjects ...string) (consent.Decision, error) {
+				time.Sleep(40 * time.Second)
+				return m.CheckPermission(ctx, op, c, subjects...)
+			}}}
+			result := make(chan error, 1)
+			go func() { result <- s.checkPermission(t.Context(), arrived, consent.OpDownload, "file") }()
+			synctest.Wait()
+			time.Sleep(40 * time.Second)
+			synctest.Wait()
+			require.Equal(t, arrived.Add(consent.PermissionTimeout), (<-prompts).Deadline)
+			time.Sleep(20 * time.Second)
+			synctest.Wait()
+			require.Error(t, <-result)
+		})
+	})
+	t.Run("recoalesced waiter retains own deadline", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			prompts := make(chan consent.Prompt, 4)
+			m := consent.NewManager(sftpConsentPrompter(func(ctx context.Context, p consent.Prompt) (consent.Decision, error) {
+				prompts <- p
+				<-ctx.Done()
+				return consent.Deny, ctx.Err()
+			}), discardLogger())
+			defer m.Close()
+			origin, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			s := &SFTPSession{ctx: t.Context(), logger: discardLogger(), permissionChecker: m, clientInfo: consent.ClientInfo{Fingerprint: "guest", ConnectionID: "one"}}
+			first := make(chan error, 1)
+			go func() { first <- s.checkPermission(origin, time.Now(), consent.OpDownload, "file") }()
+			synctest.Wait()
+			old := <-prompts
+			time.Sleep(10 * time.Second)
+			arrived := time.Now()
+			other := *s
+			other.clientInfo.ConnectionID = "two"
+			second := make(chan error, 1)
+			go func() { second <- other.checkPermission(t.Context(), arrived, consent.OpDownload, "file") }()
+			synctest.Wait()
+			time.Sleep(20 * time.Second)
+			cancel()
+			synctest.Wait()
+			require.Error(t, <-first)
+			replacement := <-prompts
+			require.NotEqual(t, old.ID, replacement.ID)
+			require.Equal(t, arrived.Add(consent.PermissionTimeout), replacement.Deadline)
+			time.Sleep(40 * time.Second)
+			synctest.Wait()
+			require.Error(t, <-second)
+		})
+	})
 }

@@ -13,7 +13,6 @@ import (
 	"github.com/owenthereal/upterm/host"
 	"github.com/owenthereal/upterm/host/api"
 	"github.com/owenthereal/upterm/host/sessiondir"
-	"github.com/owenthereal/upterm/host/sftp"
 	"github.com/owenthereal/upterm/internal/version"
 	"github.com/owenthereal/upterm/utils"
 	"golang.org/x/crypto/ssh"
@@ -137,12 +136,7 @@ func buildDaemonHost(ctx context.Context, name string, opts hostOptions, child *
 		return nil, err
 	}
 
-	var sftpPermissionChecker sftp.PermissionChecker = &DialogPermissionChecker{}
-	fileTransferApprovalRequired := true
-	if flagAccept {
-		sftpPermissionChecker = &AutoAllowPermissionChecker{}
-		fileTransferApprovalRequired = false
-	}
+	fileTransferApprovalRequired := !flagAccept
 
 	// Generated here rather than left to Run: the parent pins the door's keys
 	// from what Listening reports, and it must be this run's session host
@@ -215,8 +209,8 @@ func buildDaemonHost(ctx context.Context, name string, opts hostOptions, child *
 		PinPtySize:              flagPtySize != "",
 		Term:                    opts.term,
 		SFTPDisabled:            flagNoSFTP,
-		SFTPPermissionChecker:   sftpPermissionChecker,
-		// Set where the checker is chosen, so that what readers are told is
+		TerminalConsent:         true,
+		// Set alongside terminal consent, so that what readers are told is
 		// what a guest's transfer will do.
 		FileTransferApprovalRequired: fileTransferApprovalRequired,
 		// A foreground parent attaches before the command starts; a detached

@@ -122,12 +122,11 @@ var (
 )
 
 // How a guest's file transfers are approved, as host's help says it in its
-// description and at --accept, --read-only and --no-sftp: the dialog's Allow
-// lets the file asked about through for the rest of that scp or sftp
-// command, and Allow All everything in it; the next command asks again.
+// description and at --accept, --read-only and --no-sftp. Approval grants a
+// path tuple on this connection, or SFTP for the guest until the session ends.
 const (
-	transferApprovalHelp = "file transfers need your approval in a desktop dialog on this machine, which can allow the file asked about, or everything in that scp or sftp command"
-	transferDeniedHelp   = "where no dialog can be shown, transfers are denied"
+	transferApprovalHelp = "file transfers need your approval in the primary host terminal, which can allow the displayed paths on this connection, or SFTP for this guest until the host session ends"
+	transferDeniedHelp   = "without a primary terminal with approval escapes enabled, ungranted transfers are denied; attach with escapes enabled or use --accept"
 )
 
 func hostCmd() *cobra.Command {
@@ -156,10 +155,7 @@ What guests may do: type into the session, or only watch it with
 --read-only; transfer files with sftp or scp, with your access (downloads
 only with --read-only, none with --no-sftp); and forward TCP ports (ssh -L)
 to what this machine can reach, only with --allow-local-tcp-forwarding.
-Unless --accept, a guest's file transfers need your approval in a desktop
-dialog on this machine, which can allow the file asked about, or everything
-in that scp or sftp command; where no dialog can be shown, transfers are
-denied.
+Unless --accept, a guest's ` + transferApprovalHelp + `; ` + transferDeniedHelp + `.
 
 The session runs in a process of its own, and this terminal is attached to
 it. NAME is the session's name, which upterm prints (--name chooses it).

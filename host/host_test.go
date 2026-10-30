@@ -19,6 +19,7 @@ import (
 	"github.com/go-kit/kit/metrics/provider"
 	"github.com/owenthereal/upterm/attach"
 	"github.com/owenthereal/upterm/host/api"
+	"github.com/owenthereal/upterm/host/consent"
 	"github.com/owenthereal/upterm/host/internal"
 	"github.com/owenthereal/upterm/host/sessiondir"
 	"github.com/owenthereal/upterm/routing"
@@ -1767,7 +1768,7 @@ func TestSessionReportsItsNameStateAndPermissions(t *testing.T) {
 }
 
 // Accepted unasked, with file transfer off, the session reports both: nobody
-// confirmed it, and nothing waits on the host's dialog because nothing can
+// confirmed it, and nothing waits for terminal approval because nothing can
 // be transferred.
 func TestSessionReportsAcceptedWithNoFileTransfer(t *testing.T) {
 	f := newJoinTimeoutHost(t)
@@ -2033,4 +2034,11 @@ func TestClaimTimeoutIsTheFieldOrElseThePackages(t *testing.T) {
 	h.ClaimTimeout = -time.Second
 	require.Equal(t, -time.Second, h.claimTimeout(),
 		"a negative field gives the claim no time to wait for a held registry lock, as the package's does")
+}
+
+func TestHostConsentConfiguration(t *testing.T) {
+	checker := consent.NewManager(nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	defer checker.Close()
+	h := &Host{TerminalConsent: true, PermissionChecker: checker}
+	require.ErrorContains(t, h.Run(t.Context()), "mutually exclusive")
 }

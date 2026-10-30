@@ -464,6 +464,27 @@ func (m *Manager) log(op Operation, client ClientInfo, subjects []string, id str
 	} else if decision == AllowConnection {
 		outcome = "allow_connection"
 	}
-	m.logger.Info("consent decision", "outcome", outcome, "capability", op.Capability(), "operation", op,
-		"subjects", subjects, "fingerprint", client.Fingerprint, "connection_id", client.ConnectionID, "request_id", id, "error", err)
+	// Bound before escaping: hostile subjects and custom checker errors must not
+	// amplify logs or inject terminal controls, regardless of the slog handler.
+	boundedSubjects := make([]string, 0, min(len(subjects), 8))
+	for i, subject := range subjects {
+		if i == 8 {
+			boundedSubjects = append(boundedSubjects, "... additional subjects omitted")
+			break
+		}
+		boundedSubjects = append(boundedSubjects, logText(subject))
+	}
+	reason := ""
+	if err != nil {
+		reason = logText(err.Error())
+	}
+	m.logger.Info("consent decision", "outcome", outcome, "capability", logText(string(op.Capability())), "operation", logText(string(op)),
+		"subjects", boundedSubjects, "fingerprint", logText(client.Fingerprint), "connection_id", logText(client.ConnectionID), "request_id", logText(id), "error", reason)
+}
+
+func logText(text string) string {
+	if len(text) > 256 {
+		text = text[:256] + "..."
+	}
+	return strconv.QuoteToASCII(text)
 }
