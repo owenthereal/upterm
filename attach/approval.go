@@ -323,11 +323,11 @@ func (r *terminalReview) input(chunk approvalRead, filter *EscapeFilter) ([]byte
 		data := chunk.p
 		var replies []byte
 		if chunk.epoch != r.epoch.Load() {
-			replies, _ = r.parser.feed(data)
+			replies, _ = r.parser.feed(data, chunk.epoch)
 			return replies, EscapeNone
 		}
 		if r.parser.inSequence() {
-			replies, data = r.parser.feed(data)
+			replies, data = r.parser.feed(data, chunk.epoch)
 		}
 		out, action := filter.Feed(data)
 		out = append(replies, out...)
@@ -335,11 +335,12 @@ func (r *terminalReview) input(chunk approvalRead, filter *EscapeFilter) ([]byte
 			r.enter()
 			// Same-read typeahead is never keys, but its sequence/paste framing
 			// must survive so a later read cannot expose a payload as an answer.
-			r.parser.feed(filter.remainder)
+			replies, _ := r.parser.feed(filter.remainder, chunk.epoch)
+			out = append(out, replies...)
 		}
 		return out, action
 	}
-	program, keys := r.parser.feed(chunk.p)
+	program, keys := r.parser.feed(chunk.p, chunk.epoch)
 	if r.parser.loneEscape() {
 		if r.escapeC == nil {
 			r.escapeTimer = time.NewTimer(50 * time.Millisecond)

@@ -13,7 +13,7 @@ func TestApprovalTerminalReplies(t *testing.T) {
 			var p approvalInput
 			var keys, program []byte
 			for _, chunk := range []string{reply[:split], reply[split:]} {
-				out, k := p.feed([]byte(chunk))
+				out, k := p.feed([]byte(chunk), 0)
 				program = append(program, out...)
 				keys = append(keys, k...)
 			}
@@ -24,14 +24,14 @@ func TestApprovalTerminalReplies(t *testing.T) {
 	for _, encoded := range []string{"\x1b[103u", "\x1b[103;1:1u", "\x1b[27;1;103~"} {
 		for split := 0; split <= len(encoded); split++ {
 			var p approvalInput
-			_, a := p.feed([]byte(encoded[:split]))
-			_, b := p.feed([]byte(encoded[split:]))
+			_, a := p.feed([]byte(encoded[:split]), 0)
+			_, b := p.feed([]byte(encoded[split:]), 0)
 			require.Equal(t, "g", string(append(a, b...)))
 		}
 	}
 	for _, ignored := range []string{"\x1b[103;1:3u", "\x1b[A", "\x1b[15~", "\x1bOP"} {
 		var p approvalInput
-		out, keys := p.feed([]byte(ignored))
+		out, keys := p.feed([]byte(ignored), 0)
 		require.Empty(t, out)
 		require.Empty(t, keys)
 	}
@@ -41,20 +41,20 @@ func TestApprovalInputIsolation(t *testing.T) {
 	paste := "\x1b[200~g ABCD\r\x1b[201~"
 	for split := 0; split <= len(paste); split++ {
 		var p approvalInput
-		_, a := p.feed([]byte(paste[:split]))
-		_, b := p.feed([]byte(paste[split:]))
+		_, a := p.feed([]byte(paste[:split]), 0)
+		_, b := p.feed([]byte(paste[split:]), 0)
 		require.Empty(t, append(a, b...))
 	}
 	for _, marker := range []string{"\x1b]52;c;", "\x1bP", "\x1b_"} {
 		var p approvalInput
-		out, keys := p.feed([]byte(marker + strings.Repeat("x", 9000) + "g ABCD\r"))
+		out, keys := p.feed([]byte(marker+strings.Repeat("x", 9000)+"g ABCD\r"), 0)
 		require.Empty(t, out)
 		require.Empty(t, keys)
 		require.LessOrEqual(t, len(p.sequence), 8192)
-		out, keys = p.feed([]byte("\x1b\\"))
+		out, keys = p.feed([]byte("\x1b\\"), 0)
 		require.Empty(t, out)
 		require.Empty(t, keys)
-		_, keys = p.feed([]byte("c ABCD\r"))
+		_, keys = p.feed([]byte("c ABCD\r"), 0)
 		require.Equal(t, "c ABCD\r", string(keys))
 	}
 }
@@ -99,9 +99,21 @@ func TestApprovalEncodedConfirmation(t *testing.T) {
 	} {
 		for split := 0; split <= len(encoded.input); split++ {
 			var p approvalInput
-			_, a := p.feed([]byte(encoded.input[:split]))
-			_, b := p.feed([]byte(encoded.input[split:]))
+			_, a := p.feed([]byte(encoded.input[:split]), 0)
+			_, b := p.feed([]byte(encoded.input[split:]), 0)
 			require.Equal(t, encoded.want, string(append(a, b...)))
 		}
+	}
+}
+
+func TestApprovalReleasePreservesDecodedKeys(t *testing.T) {
+	for split := 0; split <= len("\x1b[103;1:1u\x1b[103;1:3u"); split++ {
+		sequence := "\x1b[103;1:1u\x1b[103;1:3u"
+		var p approvalInput
+		_, a := p.feed([]byte(sequence[:split]), 0)
+		require.False(t, p.interrupted)
+		_, b := p.feed([]byte(sequence[split:]), 0)
+		require.False(t, p.interrupted)
+		require.Equal(t, "g", string(append(a, b...)))
 	}
 }

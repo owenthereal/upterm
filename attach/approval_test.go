@@ -668,3 +668,105 @@ func TestApprovalEscapeBeforeDisplay(t *testing.T) {
 		require.Empty(t, review.answers)
 	})
 }
+
+func TestApprovalKittyReleaseEvents(t *testing.T) {
+	for _, mode := range []string{"separate-reads", "press-release-pair", "whole-confirmation"} {
+		t.Run(mode, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				sink := &syncSink{}
+				review, pw, program, stop := approvalTestRun(t, sink)
+				defer stop()
+				review.updates <- approvalTestState("first")
+				synctest.Wait()
+				_, _ = pw.Write([]byte("~a"))
+				synctest.Wait()
+				confirmation := "g " + approvalTestCode(t, sink.String()) + "\r"
+				var whole string
+				for _, key := range []byte(confirmation) {
+					press := fmt.Sprintf("\x1b[%d;1:1u", key)
+					release := fmt.Sprintf("\x1b[%d;1:3u", key)
+					switch mode {
+					case "separate-reads":
+						_, _ = pw.Write([]byte(press))
+						synctest.Wait()
+						_, _ = pw.Write([]byte(release))
+						synctest.Wait()
+					case "press-release-pair":
+						_, _ = pw.Write([]byte(press + release))
+						synctest.Wait()
+					case "whole-confirmation":
+						whole += press + release
+					}
+				}
+				if whole != "" {
+					_, _ = pw.Write([]byte(whole))
+					synctest.Wait()
+				}
+				require.Len(t, review.answers, 1)
+				require.Equal(t, upterm.ApprovalAnswer{ID: "first", Decision: "guest"}, <-review.answers)
+				require.Empty(t, program.String())
+			})
+		})
+	}
+}
+
+func TestApprovalSequenceEpochBoundary(t *testing.T) {
+	for _, entryRemainder := range []bool{false, true} {
+		t.Run(fmt.Sprint(entryRemainder), func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				sink := &approvalGateSink{entered: make(chan string, 8), release: make(chan struct{})}
+				review, pw, program, stop := approvalTestRun(t, sink)
+				defer stop()
+				defer close(sink.release)
+				review.updates <- approvalTestState("first")
+				synctest.Wait()
+				<-sink.entered
+				sink.release <- struct{}{}
+				synctest.Wait()
+				entry := "~a"
+				if entryRemainder {
+					entry += "\x1b[103"
+				}
+				_, _ = pw.Write([]byte(entry))
+				synctest.Wait()
+				code := approvalTestCode(t, <-sink.entered)
+				if !entryRemainder {
+					_, _ = pw.Write([]byte("\x1b[103"))
+					synctest.Wait()
+				}
+				sink.release <- struct{}{}
+				synctest.Wait()
+				_, _ = pw.Write([]byte("u " + code + "\r"))
+				synctest.Wait()
+				require.Empty(t, review.answers, "a pre-display key prefix cannot acquire the completion read's epoch")
+				require.Empty(t, program.String())
+				_, _ = pw.Write([]byte("c " + code + "\r"))
+				synctest.Wait()
+				require.Len(t, review.answers, 1)
+				require.Equal(t, "first", (<-review.answers).ID)
+			})
+		})
+	}
+}
+
+func TestApprovalEntryReplySuffix(t *testing.T) {
+	for _, reply := range []string{"\x1b[12;34R", "\x1b]52;c;Z29vZA==\a", "\x1bP1$rvalue\x1b\\", "\x1b_reply\x1b\\"} {
+		for split := 0; split <= len(reply); split++ {
+			t.Run(fmt.Sprintf("%q/%d", reply, split), func(t *testing.T) {
+				synctest.Test(t, func(t *testing.T) {
+					sink := &syncSink{}
+					review, pw, program, stop := approvalTestRun(t, sink)
+					defer stop()
+					review.updates <- approvalTestState("first")
+					synctest.Wait()
+					_, _ = pw.Write([]byte("program\r~a" + reply[:split]))
+					synctest.Wait()
+					_, _ = pw.Write([]byte(reply[split:]))
+					synctest.Wait()
+					require.Equal(t, "program\r"+reply, program.String())
+					require.Empty(t, review.answers)
+				})
+			})
+		}
+	}
+}

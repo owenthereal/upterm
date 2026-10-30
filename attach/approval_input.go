@@ -12,6 +12,7 @@ const approvalSequenceLimit = 8192
 // never keys, including when their terminators arrive in a later read.
 type approvalInput struct {
 	sequence      []byte
+	sequenceEpoch uint64
 	kind          byte
 	overflow      bool
 	stringEscape  bool
@@ -38,10 +39,11 @@ func (p *approvalInput) reset() {
 	p.escapeExpired = false
 }
 
-func (p *approvalInput) feed(data []byte) (program, keys []byte) {
+func (p *approvalInput) feed(data []byte, epoch uint64) (program, keys []byte) {
 	p.interrupted = false
 	for _, b := range data {
 		if p.kind == 0 {
+			p.sequenceEpoch = epoch
 			if b == 0x1b {
 				p.kind = 'e'
 				p.add(b)
@@ -78,6 +80,7 @@ func (p *approvalInput) feed(data []byte) (program, keys []byte) {
 			case 0x1b:
 				p.reset()
 				p.kind = 'e'
+				p.sequenceEpoch = epoch
 				p.add(b)
 				p.interrupted = true
 			case '[', ']', 'P', '_', 'O':
@@ -98,6 +101,7 @@ func (p *approvalInput) feed(data []byte) (program, keys []byte) {
 				// must still be classified before any confirmation keystrokes.
 				p.reset()
 				p.kind = 'e'
+				p.sequenceEpoch = epoch
 				p.add(b)
 				p.interrupted = true
 				continue
@@ -105,6 +109,7 @@ func (p *approvalInput) feed(data []byte) (program, keys []byte) {
 			if b >= 0x40 && b <= 0x7e {
 				seq := string(p.sequence)
 				kind := p.kind
+				sequenceEpoch := p.sequenceEpoch
 				valid := !p.overflow
 				p.reset()
 				if strings.HasSuffix(seq, "[200~") {
@@ -131,7 +136,19 @@ func (p *approvalInput) feed(data []byte) (program, keys []byte) {
 						p.interrupted = true
 						continue
 					}
-					if key, ok := approvalEncodedKey(body, b); ok {
+					key, event := approvalEncodedKey(body, b)
+					switch event {
+					case approvalKeyRelease:
+						// Releases are valid keyboard events, not edits or
+						// malformed input. Preserve earlier decoded keys.
+						continue
+					case approvalKeyPress:
+						// A later read cannot grant fresh ownership to a
+						// key whose prefix was read before the boundary.
+						if sequenceEpoch != epoch {
+							p.interrupted = true
+							continue
+						}
 						keys = append(keys, key)
 						continue
 					}
@@ -179,7 +196,15 @@ func approvalCSIReply(body string, final byte) bool {
 // CSI-u/kitty press and repeat events, plus xterm modifyOtherKeys. Only
 // ASCII characters participate in confirmation; Shift and Ctrl are decoded
 // for uppercase codes and local Escape/Enter/backspace/suspend keys.
-func approvalEncodedKey(body string, final byte) (byte, bool) {
+type approvalKeyEvent uint8
+
+const (
+	approvalKeyUnknown approvalKeyEvent = iota
+	approvalKeyPress
+	approvalKeyRelease
+)
+
+func approvalEncodedKey(body string, final byte) (byte, approvalKeyEvent) {
 	fields := strings.Split(body, ";")
 	code, mod := "", "1"
 	if final == 'u' && len(fields) >= 1 && len(fields) <= 3 {
@@ -191,14 +216,23 @@ func approvalEncodedKey(body string, final byte) (byte, bool) {
 		code = fields[2]
 		mod = fields[1]
 	} else {
-		return 0, false
+		return 0, approvalKeyUnknown
 	}
 	parts := strings.Split(mod, ":")
+	if final == 'u' && len(parts) == 2 && parts[1] == "3" {
+		// Releases also exist for keys/modifiers which are not confirmation
+		// characters. Recognize them without exposing them as pressed keys.
+		modifier, modErr := strconv.ParseUint(parts[0], 10, 16)
+		point, keyErr := strconv.ParseUint(strings.Split(code, ":")[0], 10, 32)
+		if modErr == nil && modifier > 0 && keyErr == nil && point <= 0x10ffff {
+			return 0, approvalKeyRelease
+		}
+	}
 	if len(parts) > 2 || (parts[0] != "1" && parts[0] != "2" && parts[0] != "5" && parts[0] != "6") {
-		return 0, false
+		return 0, approvalKeyUnknown
 	}
 	if len(parts) == 2 && parts[1] != "1" && parts[1] != "2" {
-		return 0, false
+		return 0, approvalKeyUnknown
 	}
 	points := strings.Split(code, ":")
 	code = points[0]
@@ -208,7 +242,7 @@ func approvalEncodedKey(body string, final byte) (byte, bool) {
 	}
 	n, err := strconv.ParseUint(code, 10, 8)
 	if err != nil || n >= 128 {
-		return 0, false
+		return 0, approvalKeyUnknown
 	}
 	if shift && n >= 'a' && n <= 'z' {
 		n -= 32
@@ -217,8 +251,8 @@ func approvalEncodedKey(body string, final byte) (byte, bool) {
 		if (n >= '@' && n <= '_') || (n >= 'a' && n <= 'z') {
 			n &= 31
 		} else {
-			return 0, false
+			return 0, approvalKeyUnknown
 		}
 	}
-	return byte(n), true
+	return byte(n), approvalKeyPress
 }
