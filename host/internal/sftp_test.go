@@ -420,7 +420,7 @@ func TestSFTPConsent(t *testing.T) {
 			s := &SFTPSession{ctx: t.Context(), autoAccept: true, logger: discardLogger()}
 			reader, err := (&sftpFileReader{session: s, logger: s.logger}).Fileread(sftp.NewRequest("Get", path))
 			require.NoError(t, err)
-			defer reader.(io.Closer).Close()
+			defer func() { require.NoError(t, reader.(io.Closer).Close()) }()
 			time.Sleep(2 * consent.PermissionTimeout)
 			b := make([]byte, 2)
 			_, err = reader.ReadAt(b, 0)

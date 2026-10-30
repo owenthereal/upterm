@@ -2382,7 +2382,7 @@ func TestApprovalRegistrationAndSessionEnd(t *testing.T) {
 			}
 			sink := &syncSink{}
 			pr, pw := io.Pipe()
-			defer pw.Close()
+			defer func() { _ = pw.Close() }()
 			client := &Client{Socket: door.socket, HostKeys: door.pin(), Stdin: pr, Stdout: sink, Pty: &Pty{Term: "xterm"}, Escape: '~', Approvals: true, Logger: slog.New(slog.DiscardHandler)}
 			switch mode {
 			case "disabled":

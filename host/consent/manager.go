@@ -113,7 +113,7 @@ func (m *Manager) CheckPermission(ctx context.Context, op Operation, client Clie
 	ctx, cancel := context.WithDeadline(ctx, deadline)
 	defer cancel()
 	subjects = append([]string(nil), subjects...)
-	decision, err, id := m.check(ctx, deadline, op, client, subjects)
+	decision, id, err := m.check(ctx, deadline, op, client, subjects)
 	// Even a cached result must not escape cancellation at the policy boundary.
 	if decision != Deny {
 		if e := contextError(ctx, deadline, time.Now()); e != nil {
@@ -124,7 +124,7 @@ func (m *Manager) CheckPermission(ctx context.Context, op Operation, client Clie
 	return decision, err
 }
 
-func (m *Manager) check(ctx context.Context, deadline time.Time, op Operation, client ClientInfo, subjects []string) (Decision, error, string) {
+func (m *Manager) check(ctx context.Context, deadline time.Time, op Operation, client ClientInfo, subjects []string) (Decision, string, error) {
 	capability := op.Capability()
 	tuple := encodeTuple(subjects)
 	key := flightKey{guestGrant: guestGrant{client.Fingerprint, capability}, tuple: tuple}
@@ -178,7 +178,7 @@ func (m *Manager) check(ctx context.Context, deadline time.Time, op Operation, c
 		m.reconcileLocked(&a)
 		m.mu.Unlock()
 		a.run(m)
-		return immediate.decision, immediate.err, ""
+		return immediate.decision, "", immediate.err
 	}
 	m.sequence++
 	w := &waiter{sequence: m.sequence, ctx: ctx, deadline: deadline, operation: op, client: client, subjects: subjects, key: key, done: make(chan struct{})}
@@ -203,7 +203,7 @@ func (m *Manager) check(ctx context.Context, deadline time.Time, op Operation, c
 	answer, id := w.result, w.requestID
 	m.mu.Unlock()
 	a.run(m)
-	return answer.decision, answer.err, id
+	return answer.decision, id, answer.err
 }
 
 // Length prefixes preserve every tuple element, including NULs and delimiters.

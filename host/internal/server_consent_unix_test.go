@@ -221,7 +221,7 @@ func TestSessionAdmissionShutdownRace(t *testing.T) {
 				sess, err := client.NewSession()
 				require.NoError(t, err)
 				wg.Go(func() {
-					defer sess.Close()
+					defer func() { _ = sess.Close() }()
 					<-start
 					switch kind {
 					case "shell":

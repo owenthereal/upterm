@@ -115,7 +115,7 @@ func TestSFTPConsentSSH(t *testing.T) {
 		approvalState(t, primary, "", 0)
 		second, err := sftp.NewClient(guest)
 		require.NoError(t, err)
-		defer second.Close()
+		defer func() { _ = second.Close() }()
 		f, err := second.Open(path)
 		require.NoError(t, err)
 		require.NoError(t, f.Close())
@@ -132,7 +132,7 @@ func TestSFTPConsentSSH(t *testing.T) {
 				guest := h.guestClient(t)
 				c, err := sftp.NewClient(guest)
 				require.NoError(t, err)
-				defer c.Close()
+				defer func() { _ = c.Close() }()
 				path := filepath.Join(t.TempDir(), "new")
 				err = c.Mkdir(path)
 				// pkg/sftp normalizes status 3 to os.ErrPermission, discarding its text.
@@ -152,7 +152,7 @@ func TestSFTPConsentSSH(t *testing.T) {
 		approvalPrimary(t, h, p.id)
 		c, err := sftp.NewClient(h.guestClient(t))
 		require.NoError(t, err)
-		defer c.Close()
+		defer func() { _ = c.Close() }()
 		require.NoError(t, c.Mkdir(filepath.Join(t.TempDir(), "new")))
 		require.Empty(t, p.states)
 	})
@@ -163,10 +163,10 @@ func TestSFTPConsentSSH(t *testing.T) {
 		h := startHost(t, &Server{Command: readsALine("READY", 0), SFTPAutoAccept: true})
 		c, err := sftp.NewClient(h.guestClient(t))
 		require.NoError(t, err)
-		defer c.Close()
+		defer func() { _ = c.Close() }()
 		f, err := c.Open("notes")
 		require.NoError(t, err)
-		defer f.Close()
+		defer func() { _ = f.Close() }()
 		content, err := io.ReadAll(f)
 		require.NoError(t, err)
 		require.Equal(t, "from home", string(content))
@@ -225,7 +225,7 @@ func TestSFTPConsentSSH(t *testing.T) {
 		require.NoError(t, session.RequestSubsystem("sftp"))
 		c, err := sftp.NewClientPipe(output, input)
 		require.NoError(t, err)
-		defer c.Close()
+		defer func() { _ = c.Close() }()
 		path := filepath.Join(t.TempDir(), "new")
 		finished := make(chan error, 1)
 		go func() { finished <- c.Mkdir(path) }()
@@ -241,7 +241,8 @@ func TestSFTPConsentSSH(t *testing.T) {
 			t.Fatal("channel CLOSE did not cancel sftp worker")
 		}
 		select {
-		case <-finished:
+		case err := <-finished:
+			require.Error(t, err, "channel close must fail the pending mkdir")
 		case <-time.After(harnessTimeout):
 			t.Fatal("sftp request stuck")
 		}
@@ -264,6 +265,19 @@ func TestSFTPConsentQueuedBehindReview(t *testing.T) {
 		b := newApprovalBroker(clients, discardLogger())
 		owner := &approvalTransport{ctx: &approvalTestContext{baseContext: t.Context(), id: "primary"}, registered: true, session: true, eligible: true, wake: make(chan struct{}, 1), done: make(chan struct{})}
 		b.transports[owner] = struct{}{}
+		type queuedRequest struct {
+			subject  string
+			deadline int64
+		}
+		pending := func() []queuedRequest {
+			b.mu.Lock()
+			defer b.mu.Unlock()
+			requests := make([]queuedRequest, len(b.pending))
+			for i, p := range b.pending {
+				requests[i] = queuedRequest{string(p.request.Subjects[0]), p.request.DeadlineUnixMilli}
+			}
+			return requests
+		}
 		m := consent.NewManager(b, discardLogger())
 		defer m.Close()
 		first := make(chan error, 1)
@@ -272,20 +286,24 @@ func TestSFTPConsentQueuedBehindReview(t *testing.T) {
 			first <- err
 		}()
 		synctest.Wait()
-		require.Len(t, b.pending, 1)
+		require.Len(t, pending(), 1)
 		time.Sleep(10 * time.Second)
 		arrived := time.Now()
 		s := &SFTPSession{ctx: t.Context(), logger: discardLogger(), permissionChecker: m, clientInfo: consent.ClientInfo{Fingerprint: "guest", ConnectionID: "sftp"}}
 		second := make(chan error, 1)
 		go func() { second <- s.checkPermission(t.Context(), arrived, consent.OpDownload, "file") }()
 		synctest.Wait()
-		require.Len(t, b.pending, 2)
-		require.Equal(t, "command", string(b.pending[0].request.Subjects[0]))
-		require.Equal(t, arrived.Add(consent.PermissionTimeout).UnixMilli(), b.pending[1].request.DeadlineUnixMilli)
+		queued := pending()
+		require.Len(t, queued, 2)
+		require.Equal(t, "command", queued[0].subject)
+		require.Equal(t, arrived.Add(consent.PermissionTimeout).UnixMilli(), queued[1].deadline)
 		time.Sleep(50 * time.Second)
 		synctest.Wait()
 		require.Error(t, <-first)
-		state, err := upterm.DecodeApprovalState(owner.snapshot)
+		b.mu.Lock()
+		snapshot := append([]byte(nil), owner.snapshot...)
+		b.mu.Unlock()
+		state, err := upterm.DecodeApprovalState(snapshot)
 		require.NoError(t, err)
 		require.Equal(t, uint32(1), state.Pending)
 		require.Equal(t, "file", string(state.Current.Subjects[0]))
@@ -293,7 +311,7 @@ func TestSFTPConsentQueuedBehindReview(t *testing.T) {
 		time.Sleep(10 * time.Second)
 		synctest.Wait()
 		require.Error(t, <-second)
-		require.Empty(t, b.pending)
+		require.Empty(t, pending())
 	})
 }
 
@@ -303,7 +321,7 @@ func sftpMkdirStatus(t *testing.T, client *ssh.Client, path string) (uint32, str
 	t.Helper()
 	session, err := client.NewSession()
 	require.NoError(t, err)
-	defer session.Close()
+	defer func() { _ = session.Close() }()
 	input, err := session.StdinPipe()
 	require.NoError(t, err)
 	output, err := session.StdoutPipe()

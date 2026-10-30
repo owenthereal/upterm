@@ -58,6 +58,30 @@ func approvalTestRun(t *testing.T, w io.Writer) (*approvalTestReview, *io.PipeWr
 	return r, pw, program, func() { cancel(); _ = pw.Close(); <-done; o.closeStatus() }
 }
 
+func TestApprovalAnswerFailureLogged(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		logs := &syncSink{}
+		r := newTerminalReview(&Terminal{}, nil, terminalLimits{}, slog.New(slog.NewTextHandler(logs, nil)))
+		defer r.close()
+		r.readNext = make(chan struct{}, 1)
+		r.answering = true
+		r.answers <- fmt.Errorf("approval answer refused")
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			r.next(ctx, make(chan approvalRead))
+		}()
+		synctest.Wait()
+		require.False(t, r.answering)
+		require.Contains(t, logs.String(), "approval answer failed")
+		require.Contains(t, logs.String(), "approval answer refused")
+		cancel()
+		<-done
+	})
+}
+
 func TestApprovalRenderBeforeAnswer(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		sink := &approvalGateSink{entered: make(chan string, 8), release: make(chan struct{})}
@@ -294,11 +318,12 @@ func TestApprovalExpiryAndGuestResolution(t *testing.T) {
 				code := approvalTestCode(t, sink.String())
 				_, _ = pw.Write([]byte("g " + code[:2]))
 				synctest.Wait()
-				if end == "expiry" {
+				switch end {
+				case "expiry":
 					time.Sleep(61 * time.Second)
-				} else if end == "guest-wide" {
+				case "guest-wide":
 					r.updates <- upterm.ApprovalState{Revision: 2}
-				} else {
+				default:
 					close(r.updates)
 				}
 				synctest.Wait()
@@ -318,7 +343,7 @@ func TestApprovalOutputContinuesAndStatusWaits(t *testing.T) {
 		o := approvalTestOutput(sink)
 		review := &approvalTestReview{make(chan upterm.ApprovalState, 8), make(chan upterm.ApprovalAnswer, 8)}
 		pr, pw := io.Pipe()
-		defer pw.Close()
+		defer func() { _ = pw.Close() }()
 		lookup := make(chan struct{})
 		asked := make(chan struct{})
 		done := make(chan struct{})
@@ -406,9 +431,12 @@ type approvalCaptureFailure struct {
 }
 
 func (s *approvalCaptureFailure) Write(p []byte) (int, error) {
-	s.syncSink.Write(p)
+	n, err := s.syncSink.Write(p)
+	if err != nil {
+		return n, err
+	}
 	if s.short {
-		return len(p) - 1, nil
+		return n - 1, nil
 	}
 	return 0, io.ErrClosedPipe
 }
@@ -534,7 +562,7 @@ func TestApprovalSuspendAndDetach(t *testing.T) {
 	})
 	review := &approvalTestReview{make(chan upterm.ApprovalState, 8), make(chan upterm.ApprovalAnswer, 8)}
 	pr, pw := io.Pipe()
-	defer pw.Close()
+	defer func() { _ = pw.Close() }()
 	sink := &syncSink{}
 	suspended := make(chan struct{}, 1)
 	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)

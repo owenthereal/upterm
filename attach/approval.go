@@ -296,8 +296,11 @@ func (r *terminalReview) next(ctx context.Context, reads <-chan approvalRead) (a
 			if r.dirty {
 				r.render(r.active && !r.armed)
 			}
-		case <-r.answers:
+		case err := <-r.answers:
 			r.answering = false
+			if err != nil {
+				r.logger.Warn("approval answer failed", "error", err)
+			}
 		case <-r.tick.C:
 			if r.active && !r.live() && (r.armed || r.typed != "") {
 				// The broker supplies the next live request. Keep review input local
