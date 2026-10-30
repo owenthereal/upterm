@@ -1,9 +1,11 @@
 package attach
 
 import (
+	"fmt"
 	"github.com/stretchr/testify/require"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 func TestApprovalTerminalReplies(t *testing.T) {
@@ -115,5 +117,37 @@ func TestApprovalReleasePreservesDecodedKeys(t *testing.T) {
 		_, b := p.feed([]byte(sequence[split:]), 0)
 		require.False(t, p.interrupted)
 		require.Equal(t, "g", string(append(a, b...)))
+	}
+}
+
+func TestApprovalUTF8BodyClassification(t *testing.T) {
+	for _, c1 := range []byte{0x90, 0x9b, 0x9c, 0x9d, 0x9f} {
+		samples := [][]byte{{0xc2, c1}, {0xe2, c1, 0x80}, {0xe2, 0x80, c1}, {0xf1, c1, 0x80, 0x80}, {0xf1, 0x80, c1, 0x80}, {0xf1, 0x80, 0x80, c1}}
+		for _, sample := range samples {
+			for _, frame := range approvalUTF8FrameCases() {
+				t.Run(fmt.Sprintf("%x/%s", sample, frame.name), func(t *testing.T) {
+					require.True(t, utf8.Valid(sample))
+					var p approvalInput
+					var program, keys []byte
+					body := frame.start + string(sample) + "201~"
+					for _, b := range []byte(body) {
+						out, k := p.feed([]byte{b}, 0)
+						program = append(program, out...)
+						keys = append(keys, k...)
+					}
+					require.True(t, p.inSequence(), "UTF-8 data must retain the enclosing frame")
+					require.Empty(t, program)
+					require.Empty(t, keys)
+					out, k := p.feed([]byte(frame.end), 0)
+					require.Empty(t, k)
+					require.False(t, p.inSequence(), "a genuine standalone terminator must still work")
+					if strings.Contains(frame.name, "paste") {
+						require.Empty(t, out)
+					} else {
+						require.Equal(t, body+frame.end, string(out))
+					}
+				})
+			}
+		}
 	}
 }

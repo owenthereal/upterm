@@ -3,6 +3,7 @@ package attach
 import (
 	"strconv"
 	"strings"
+	"unicode/utf8"
 )
 
 const approvalSequenceLimit = 8192
@@ -19,6 +20,8 @@ type approvalInput struct {
 	paste         bool
 	interrupted   bool
 	escapeExpired bool
+	utf8Bytes     [utf8.UTFMax]byte
+	utf8Len       int
 }
 
 func (p *approvalInput) inSequence() bool { return p.kind != 0 || p.paste }
@@ -37,6 +40,30 @@ func (p *approvalInput) reset() {
 	p.overflow = false
 	p.stringEscape = false
 	p.escapeExpired = false
+}
+
+// utf8TextByte is stream-wide: it is called for every byte, even inside
+// paste and control-string bodies. C1-valued bytes belonging to UTF-8 text
+// must neither introduce nor terminate a frame. Storage is one bounded rune.
+func (p *approvalInput) utf8TextByte(b byte) bool {
+	if p.utf8Len > 0 {
+		p.utf8Bytes[p.utf8Len] = b
+		p.utf8Len++
+		if !utf8.FullRune(p.utf8Bytes[:p.utf8Len]) {
+			return true
+		}
+		_, size := utf8.DecodeRune(p.utf8Bytes[:p.utf8Len])
+		p.utf8Len = 0
+		if size > 1 {
+			return true
+		}
+	}
+	if !utf8.FullRune([]byte{b}) {
+		p.utf8Bytes[0] = b
+		p.utf8Len = 1
+		return true
+	}
+	return false
 }
 
 // approvalSequenceStart identifies only framing, not terminal semantics.
@@ -59,9 +86,10 @@ func approvalSequenceStart(b byte) byte {
 func (p *approvalInput) feed(data []byte, epoch uint64) (program, keys []byte) {
 	p.interrupted = false
 	for _, b := range data {
+		text := p.utf8TextByte(b)
 		if p.kind == 0 {
 			p.sequenceEpoch = epoch
-			if kind := approvalSequenceStart(b); kind != 0 {
+			if kind := approvalSequenceStart(b); !text && kind != 0 {
 				p.kind = kind
 				p.add(b)
 				continue
@@ -156,7 +184,7 @@ func (p *approvalInput) feed(data []byte, epoch uint64) (program, keys []byte) {
 				p.interrupted = true
 			}
 		case ']', 'P', '_':
-			ended := b == 0x9c || (b == '\\' && p.stringEscape) || (p.kind == ']' && b == 7)
+			ended := (!text && b == 0x9c) || (b == '\\' && p.stringEscape) || (p.kind == ']' && b == 7)
 			p.stringEscape = b == 0x1b
 			if ended {
 				if !p.paste && !p.overflow {

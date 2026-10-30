@@ -890,3 +890,113 @@ func TestApprovalOrdinarySplitInput(t *testing.T) {
 		require.Equal(t, input, program.String())
 	})
 }
+
+func approvalUTF8FrameCases() []struct{ name, start, end, imitation string } {
+	return []struct{ name, start, end, imitation string }{
+		{"paste", "\x1b[200~", "\x1b[201~", "\u201b201~"},
+		{"OSC", "\x1b]0;", "\a", "\u201c"},
+		{"DCS", "\x1bP", "\x1b\\", "\u201c"},
+		{"APC", "\x1b_", "\x1b\\", "\u201c"},
+		{"C1-paste", "\x9b200~", "\x9b201~", "\u201b201~"},
+		{"C1-OSC", "\x9d0;", "\x9c", "\u201c"},
+		{"C1-DCS", "\x90", "\x9c", "\u201c"},
+		{"C1-APC", "\x9f", "\x9c", "\u201c"},
+	}
+}
+
+func TestApprovalUTF8InsideNormalFrames(t *testing.T) {
+	for _, frame := range approvalUTF8FrameCases() {
+		prefix := frame.start + frame.imitation + "\r~a"
+		for split := -1; split <= len(prefix); split++ {
+			t.Run(fmt.Sprintf("%s/%d", frame.name, split), func(t *testing.T) {
+				synctest.Test(t, func(t *testing.T) {
+					sink := &syncSink{}
+					review, pw, program, stop := approvalTestRun(t, sink)
+					defer stop()
+					review.updates <- approvalTestState("first")
+					synctest.Wait()
+					chunks := []string{}
+					if split < 0 {
+						for _, b := range []byte(prefix) {
+							chunks = append(chunks, string([]byte{b}))
+						}
+					} else {
+						chunks = []string{prefix[:split], prefix[split:]}
+					}
+					for _, chunk := range chunks {
+						_, _ = pw.Write([]byte(chunk))
+						synctest.Wait()
+					}
+					code := "ABCD"
+					if strings.Contains(sink.String(), "upterm: d ") {
+						code = approvalTestCode(t, sink.String())
+					}
+					continuation := "g " + code + "\r"
+					_, _ = pw.Write([]byte(continuation))
+					synctest.Wait()
+					require.Empty(t, review.answers, "a UTF-8 continuation cannot terminate the known frame")
+					require.NotContains(t, sink.String(), "upterm: d ", "the true terminator has not arrived")
+					require.Equal(t, prefix+continuation, program.String())
+					for _, b := range []byte(frame.end) {
+						_, _ = pw.Write([]byte{b})
+						synctest.Wait()
+					}
+					_, _ = pw.Write([]byte("\r~a"))
+					synctest.Wait()
+					fresh := approvalTestCode(t, sink.String())
+					_, _ = pw.Write([]byte("c " + fresh + "\r"))
+					synctest.Wait()
+					require.Len(t, review.answers, 1)
+					require.Equal(t, upterm.ApprovalAnswer{ID: "first", Decision: "connection"}, <-review.answers)
+					require.Equal(t, prefix+continuation+frame.end+"\r", program.String())
+				})
+			})
+		}
+	}
+}
+
+func TestApprovalUTF8InsideReviewFrames(t *testing.T) {
+	for _, frame := range approvalUTF8FrameCases() {
+		for _, fragmented := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/%v", frame.name, fragmented), func(t *testing.T) {
+				synctest.Test(t, func(t *testing.T) {
+					sink := &syncSink{}
+					review, pw, program, stop := approvalTestRun(t, sink)
+					defer stop()
+					review.updates <- approvalTestState("first")
+					synctest.Wait()
+					_, _ = pw.Write([]byte("~a"))
+					synctest.Wait()
+					code := approvalTestCode(t, sink.String())
+					prefix := frame.start + frame.imitation
+					if fragmented {
+						for _, b := range []byte(prefix) {
+							_, _ = pw.Write([]byte{b})
+							synctest.Wait()
+						}
+					} else {
+						_, _ = pw.Write([]byte(prefix))
+						synctest.Wait()
+					}
+					continuation := "\rg " + code + "\r"
+					_, _ = pw.Write([]byte(continuation))
+					synctest.Wait()
+					require.Empty(t, review.answers, "review uses the same UTF-8 body classifier")
+					require.Empty(t, program.String(), "a string reply is incomplete until the genuine terminator")
+					for _, b := range []byte(frame.end) {
+						_, _ = pw.Write([]byte{b})
+						synctest.Wait()
+					}
+					if strings.Contains(frame.name, "paste") {
+						require.Empty(t, program.String())
+					} else {
+						require.Equal(t, prefix+continuation+frame.end, program.String())
+					}
+					_, _ = pw.Write([]byte("c " + code + "\r"))
+					synctest.Wait()
+					require.Len(t, review.answers, 1)
+				})
+			})
+		}
+	}
+}

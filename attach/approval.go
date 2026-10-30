@@ -13,7 +13,6 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
-	"unicode/utf8"
 
 	"github.com/owenthereal/upterm/upterm"
 )
@@ -105,8 +104,6 @@ type terminalReview struct {
 	epoch                     atomic.Uint64
 	parser                    approvalInput
 	programFrame              bool // the current frame prefix has already been forwarded raw
-	programUTF8               [utf8.UTFMax]byte
-	programUTF8Len            int
 	display                   chan approvalDisplay
 	displaying                bool
 	dirty                     bool
@@ -413,29 +410,6 @@ func (r *terminalReview) input(chunk approvalRead, filter *EscapeFilter) ([]byte
 	return program, EscapeNone
 }
 
-// A C1-valued continuation byte inside ordinary UTF-8 is not a control
-// introducer. Track at most one rune while forwarding all program bytes.
-func (r *terminalReview) programSequenceStart(b byte) bool {
-	if r.programUTF8Len > 0 {
-		r.programUTF8[r.programUTF8Len] = b
-		r.programUTF8Len++
-		if !utf8.FullRune(r.programUTF8[:r.programUTF8Len]) {
-			return false
-		}
-		_, size := utf8.DecodeRune(r.programUTF8[:r.programUTF8Len])
-		r.programUTF8Len = 0
-		if size > 1 {
-			return false
-		}
-	}
-	if !utf8.FullRune([]byte{b}) {
-		r.programUTF8[0] = b
-		r.programUTF8Len = 1
-		return false
-	}
-	return approvalSequenceStart(b) != 0
-}
-
 // programInput tracks framing even before review starts. Normal-mode frame
 // bytes remain program-owned and pass through unchanged; only unframed keys
 // reach the local escape filter. A frame left incomplete by review still
@@ -443,11 +417,14 @@ func (r *terminalReview) programSequenceStart(b byte) bool {
 func (r *terminalReview) programInput(chunk approvalRead, filter *EscapeFilter) (out []byte, action EscapeAction) {
 	for i, b := range chunk.p {
 		data := chunk.p[i : i+1]
-		if r.parser.inSequence() || r.programSequenceStart(b) {
-			if !r.parser.inSequence() {
+		wasFrame := r.parser.inSequence()
+		// Feed every byte exactly once, including ordinary text and frame
+		// bodies, so UTF-8/control classification cannot depend on mode.
+		replies, keys := r.parser.feed(data, chunk.epoch)
+		if wasFrame || r.parser.inSequence() {
+			if !wasFrame {
 				r.programFrame = true
 			}
-			replies, keys := r.parser.feed(data, chunk.epoch)
 			if r.programFrame {
 				// A held escape belongs before this opaque frame, and cannot combine
 				// with a later body byte to form a local shortcut.
