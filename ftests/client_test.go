@@ -456,7 +456,7 @@ func testClientLocalPortForwardDisabled(t *testing.T, hostShareURL, hostNodeAddr
 	}
 
 	require.Error(err)
-	assert.ErrorContains(err, "upterm: this session doesn't allow port forwarding; the host can allow it with --allow-local-tcp-forwarding.")
+	assert.ErrorContains(err, "consent unavailable")
 }
 
 // testGuestKeepaliveIsAnswered pins what a guest's liveness check relies on: a

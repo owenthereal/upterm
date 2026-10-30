@@ -1488,3 +1488,11 @@ func TestHostGuestCommandOptions(t *testing.T) {
 	require.True(t, flagNoExec)
 	hostCmd()
 }
+
+func TestForwardingFlags(t *testing.T) {
+	cmd := hostCmd()
+	defer hostCmd()
+	require.NoError(t, cmd.ParseFlags([]string{"--allow-loopback-tcp-forwarding", "--no-forwarding", "--accept"}))
+	require.True(t, flagAllowLoopbackTCPForwarding)
+	require.True(t, flagNoForwarding)
+}

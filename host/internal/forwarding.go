@@ -1,14 +1,21 @@
 package internal
 
 import (
+	"context"
+	"fmt"
+	"io"
 	"net"
+	"net/netip"
 	"slices"
 	"strconv"
+	"strings"
 	"sync"
+	"time"
 
 	gssh "charm.land/ssh"
 	"github.com/olebedev/emitter"
 	"github.com/owenthereal/upterm/host/api"
+	"github.com/owenthereal/upterm/host/consent"
 	"github.com/owenthereal/upterm/upterm"
 	"github.com/owenthereal/upterm/utils"
 	"golang.org/x/crypto/ssh"
@@ -103,26 +110,61 @@ func (f *Forwards) describe(clients []*api.Client) []*api.Client {
 	return out
 }
 
-// forwardDestination is where a direct-tcpip channel asks to go, as host:port,
-// or "" for a request that cannot be read (which the library refuses anyway).
-func forwardDestination(ch ssh.NewChannel) string {
-	var req struct {
-		DestAddr   string
-		DestPort   uint32
-		OriginAddr string
-		OriginPort uint32
-	}
-	if err := ssh.Unmarshal(ch.ExtraData(), &req); err != nil {
-		return ""
-	}
-	return net.JoinHostPort(req.DestAddr, strconv.FormatUint(uint64(req.DestPort), 10))
+type forwardingPolicy struct {
+	ReadOnly, Disabled, AllowAny, AllowLoopback bool
+	Checker                                     consent.PermissionChecker
 }
 
-// Observe acceptance rather than permission: the library checks permission
-// before dialing the target, and either the dial or channel acceptance can fail.
-// Keep its protocol handling and proxy implementation intact.
-func forwardingHandler(events *emitter.Emitter, forwards *Forwards, readOnly bool) gssh.ChannelHandler {
-	return func(srv *gssh.Server, conn *ssh.ServerConn, channel ssh.NewChannel, ctx gssh.Context) {
+// The address and decimal port form the complete consent subject, and the same
+// tuple is used by the dial. Never resolve names to qualify for loopback trust.
+func authorizeForward(ctx context.Context, p forwardingPolicy, client consent.ClientInfo, address string, port uint32) error {
+	if p.ReadOnly {
+		return fmt.Errorf("upterm: this session is read-only, so it doesn't allow port forwarding")
+	}
+	if p.Disabled {
+		return fmt.Errorf("upterm: port forwarding is disabled for this session")
+	}
+	if port == 0 || port > 65535 || address == "" || strings.ContainsRune(address, 0) {
+		return fmt.Errorf("invalid forwarding destination")
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if p.AllowAny {
+		return nil
+	}
+	ip, err := netip.ParseAddr(address)
+	if err != nil || ip.Zone() != "" || ip.Is4In6() || !ip.IsLoopback() {
+		return fmt.Errorf("upterm: forwarding requires a literal loopback IP address")
+	}
+	if p.AllowLoopback {
+		return nil
+	}
+	if p.Checker == nil {
+		return consent.ErrUnavailable
+	}
+	decision, err := p.Checker.CheckPermission(ctx, consent.OpForward, client, address, strconv.FormatUint(uint64(port), 10))
+	if err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if deadline, ok := ctx.Deadline(); ok && !time.Now().Before(deadline) {
+		return context.DeadlineExceeded
+	}
+	if decision != consent.AllowConnection && decision != consent.AllowGuest {
+		return consent.ErrDenied
+	}
+	return nil
+}
+
+// Pending opens have no per-channel CLOSE notification until acceptance. The
+// arrival deadline bounds consent and dial; accepted traffic retains only the
+// original transport and host lifetime.
+func forwardingHandler(events *emitter.Emitter, forwards *Forwards, policy forwardingPolicy, hostCtx context.Context) gssh.ChannelHandler {
+	return func(_ *gssh.Server, _ *ssh.ServerConn, channel ssh.NewChannel, ctx gssh.Context) {
+		arrived := time.Now()
 		presence, ok := ctx.Value(forwardingPresenceKey{}).(*forwardingPresence)
 		if !ok || presence == nil {
 			_ = channel.Reject(ssh.ConnectionFailed, "forwarding connection metadata unavailable")
@@ -133,73 +175,139 @@ func forwardingHandler(events *emitter.Emitter, forwards *Forwards, readOnly boo
 			_ = channel.Reject(ssh.ConnectionFailed, "forwarding connection metadata unavailable")
 			return
 		}
-		dest := forwardDestination(channel)
-
-		gssh.DirectTCPIPHandler(srv, conn, &forwardingChannel{NewChannel: channel, readOnly: readOnly, accepted: func() {
-			if dest != "" {
-				presence.opened(dest)
-			}
-			presence.once.Do(func() {
-				id := clientEventID(ctx.SessionID())
-				// Registered before the join is emitted, so a reader that
-				// sees the client sees where it goes.
-				if forwards != nil {
-					forwards.add(id, presence)
-				}
-				client := &api.Client{
-					Id: id, Version: guest.auth.ClientVersion, Addr: guest.auth.RemoteAddr,
-					PublicKeyFingerprint: utils.FingerprintSHA256(guest.key), Kind: api.Client_FORWARD,
-				}
-				presence.describe(client)
-				events.Emit(upterm.EventForwardingClientJoined, client)
-				// Presence belongs to the SSH transport, including gaps between forwards.
-				// The lifecycle consumer reconciles a left delivered before its join.
-				go func() {
-					<-ctx.Done()
-					// The departure carries the jump as it ended, so the leave
-					// callback names every destination, not the join's first.
-					// A copy: the joined client is shared with the repo's
-					// readers. Emitted before the registry forgets it, so a
-					// session info in between still sees the destinations.
-					final := proto.Clone(client).(*api.Client)
-					presence.describe(final)
-					events.Emit(upterm.EventClientLeft, id, final)
-					if forwards != nil {
-						forwards.remove(id)
-					}
-				}()
-			})
-		}}, ctx)
-	}
-}
-
-type forwardingChannel struct {
-	ssh.NewChannel
-	accepted func()
-	readOnly bool
-}
-
-// Reject words the library's refusal of a forward the session doesn't allow,
-// "port forwarding is disabled", for the guest. It names the flag the host
-// would pass to allow it, except in a read-only session: the host can't pass
-// that flag there without dropping --read-only, so the refusal says why the
-// session doesn't allow it instead. The library refuses that way only when the
-// session's forwarding callback does. Every other refusal keeps its message.
-func (c *forwardingChannel) Reject(reason ssh.RejectionReason, message string) error {
-	if reason == ssh.Prohibited {
-		if c.readOnly {
-			message = "upterm: this session is read-only, so it doesn't allow port forwarding."
-		} else {
-			message = "upterm: this session doesn't allow port forwarding; the host can allow it with --allow-local-tcp-forwarding."
+		var req struct {
+			DestAddr   string
+			DestPort   uint32
+			OriginAddr string
+			OriginPort uint32
 		}
+		if err := ssh.Unmarshal(channel.ExtraData(), &req); err != nil {
+			_ = channel.Reject(ssh.ConnectionFailed, "invalid forwarding request")
+			return
+		}
+		transferCtx, cancel := context.WithCancel(ctx)
+		defer cancel()
+		stopHost := context.AfterFunc(hostCtx, cancel)
+		defer stopHost()
+		if hostCtx.Err() != nil {
+			cancel()
+		}
+		openCtx, cancelOpen := context.WithDeadline(transferCtx, arrived.Add(consent.PermissionTimeout))
+		defer cancelOpen()
+		// Cancellation propagation through an SSH context can be asynchronous.
+		// Recheck the original owners synchronously at every side-effect boundary.
+		openError := func() error {
+			for _, parent := range []context.Context{ctx, hostCtx, openCtx} {
+				if err := parent.Err(); err != nil {
+					return err
+				}
+			}
+			if deadline, ok := openCtx.Deadline(); ok && !time.Now().Before(deadline) {
+				return context.DeadlineExceeded
+			}
+			return nil
+		}
+		if err := openError(); err != nil {
+			_ = channel.Reject(ssh.Prohibited, err.Error())
+			return
+		}
+		client := consent.ClientInfo{ConnectionID: ctx.SessionID(), Fingerprint: utils.FingerprintSHA256(guest.key)}
+		if err := authorizeForward(openCtx, policy, client, req.DestAddr, req.DestPort); err != nil {
+			_ = channel.Reject(ssh.Prohibited, err.Error())
+			return
+		}
+		if err := openError(); err != nil {
+			_ = channel.Reject(ssh.Prohibited, err.Error())
+			return
+		}
+		dest := net.JoinHostPort(req.DestAddr, strconv.FormatUint(uint64(req.DestPort), 10))
+		dialer := net.Dialer{Timeout: 10 * time.Second}
+		socket, err := dialer.DialContext(openCtx, "tcp", dest)
+		if err != nil {
+			_ = channel.Reject(ssh.ConnectionFailed, err.Error())
+			return
+		}
+		defer func() { _ = socket.Close() }()
+		if err := openError(); err != nil {
+			_ = channel.Reject(ssh.Prohibited, err.Error())
+			return
+		}
+		stream, requests, err := channel.Accept()
+		if err != nil {
+			return
+		}
+		defer func() { _ = stream.Close() }()
+		if dest != "" {
+			presence.opened(dest)
+		}
+		presence.once.Do(func() {
+			id := clientEventID(ctx.SessionID())
+			// Registered before the join is emitted, so a reader that
+			// sees the client sees where it goes.
+			if forwards != nil {
+				forwards.add(id, presence)
+			}
+			client := &api.Client{
+				Id: id, Version: guest.auth.ClientVersion, Addr: guest.auth.RemoteAddr,
+				PublicKeyFingerprint: utils.FingerprintSHA256(guest.key), Kind: api.Client_FORWARD,
+			}
+			presence.describe(client)
+			events.Emit(upterm.EventForwardingClientJoined, client)
+			// Presence belongs to the SSH transport, including gaps between forwards.
+			// The lifecycle consumer reconciles a left delivered before its join.
+			go func() {
+				<-ctx.Done()
+				// The departure carries the jump as it ended, so the leave
+				// callback names every destination, not the join's first.
+				// A copy: the joined client is shared with the repo's
+				// readers. Emitted before the registry forgets it, so a
+				// session info in between still sees the destinations.
+				final := proto.Clone(client).(*api.Client)
+				presence.describe(final)
+				events.Emit(upterm.EventClientLeft, id, final)
+				if forwards != nil {
+					forwards.remove(id)
+				}
+			}()
+		})
+		cancelOpen()
+		// Close both endpoints on either transport loss or host shutdown. This also
+		// unblocks copies whose peer stopped reading, and joins every worker below.
+		stopCopies := context.AfterFunc(transferCtx, func() { _ = socket.Close(); _ = stream.Close() })
+		defer stopCopies()
+		requestsDone := make(chan struct{})
+		var workers sync.WaitGroup
+		workers.Go(func() {
+			for {
+				select {
+				case request, ok := <-requests:
+					if !ok {
+						// Requests close on accepted channel CLOSE, not stdin EOF.
+						cancel()
+						return
+					}
+					if request.WantReply {
+						_ = request.Reply(false, nil)
+					}
+				case <-requestsDone:
+					return
+				case <-transferCtx.Done():
+					return
+				}
+			}
+		})
+		var copies sync.WaitGroup
+		copies.Go(func() {
+			_, _ = io.Copy(socket, stream)
+			if tcp, ok := socket.(*net.TCPConn); ok {
+				_ = tcp.CloseWrite()
+			}
+		})
+		copies.Go(func() { _, _ = io.Copy(stream, socket); _ = stream.CloseWrite() })
+		copies.Wait()
+		close(requestsDone)
+		// Reply can be blocked on transport output; closing the channel releases it.
+		_ = stream.Close()
+		workers.Wait()
 	}
-	return c.NewChannel.Reject(reason, message)
-}
-
-func (c *forwardingChannel) Accept() (ssh.Channel, <-chan *ssh.Request, error) {
-	channel, requests, err := c.NewChannel.Accept()
-	if err == nil {
-		c.accepted()
-	}
-	return channel, requests, err
 }

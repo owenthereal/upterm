@@ -562,6 +562,7 @@ func TestPerRunFlagsAreExactlyTheRunsOwnChoices(t *testing.T) {
 	require.ElementsMatch(t, []string{
 		"upterm host --detach", "upterm host --name", "upterm host --output",
 		"upterm host --login-command", "upterm host --accept-exec", "upterm host --no-exec",
+		"upterm host --allow-loopback-tcp-forwarding", "upterm host --no-forwarding",
 		"upterm join --wait",
 		"upterm session current --output", "upterm session info --output",
 		"upterm session set --join-timeout",
@@ -593,6 +594,8 @@ func TestPerRunValuesAreIgnored(t *testing.T) {
 		{[]string{"host"}, "output", "json"},
 		{[]string{"host"}, "login-command", "host-tool"},
 		{[]string{"host"}, "accept-exec", "true"},
+		{[]string{"host"}, "allow-loopback-tcp-forwarding", "true"},
+		{[]string{"host"}, "no-forwarding", "true"},
 		{[]string{"host"}, "no-exec", "true"},
 		{[]string{"join"}, "wait", "true"},
 		{[]string{"session", "info"}, "output", "json"},
