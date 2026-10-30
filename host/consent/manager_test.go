@@ -533,3 +533,168 @@ func TestConsentCloseJoinsWorkers(t *testing.T) {
 		require.Empty(t, m.grants)
 	})
 }
+
+// A canceled prompt can observe cancellation immediately but need bounded time
+// to release presentation resources. Retiring waiters must not free its worker
+// reservation before that cleanup exits.
+type cleaningReview struct {
+	ctx      context.Context
+	prompt   Prompt
+	canceled chan struct{}
+	release  chan struct{}
+	once     sync.Once
+}
+
+func (r *cleaningReview) finishCleanup() { r.once.Do(func() { close(r.release) }) }
+
+type cleaningPrompter struct {
+	mu         sync.Mutex
+	calls      chan *cleaningReview
+	reviews    []*cleaningReview
+	live, peak int
+}
+
+func newCleaningPrompter() *cleaningPrompter {
+	return &cleaningPrompter{calls: make(chan *cleaningReview, 1024)}
+}
+func (p *cleaningPrompter) Prompt(ctx context.Context, prompt Prompt) (Decision, error) {
+	r := &cleaningReview{ctx: ctx, prompt: prompt, canceled: make(chan struct{}), release: make(chan struct{})}
+	p.mu.Lock()
+	p.live++
+	p.peak = max(p.peak, p.live)
+	p.reviews = append(p.reviews, r)
+	p.mu.Unlock()
+	defer func() { p.mu.Lock(); p.live--; p.mu.Unlock() }()
+	p.calls <- r
+	<-ctx.Done()
+	close(r.canceled)
+	<-r.release
+	return Deny, ctx.Err()
+}
+func (p *cleaningPrompter) counts() (int, int) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.live, p.peak
+}
+func (p *cleaningPrompter) releaseAll() {
+	p.mu.Lock()
+	reviews := append([]*cleaningReview(nil), p.reviews...)
+	p.mu.Unlock()
+	for _, r := range reviews {
+		r.finishCleanup()
+	}
+}
+func nextCleaning(t *testing.T, p *cleaningPrompter) *cleaningReview {
+	t.Helper()
+	select {
+	case r := <-p.calls:
+		return r
+	default:
+		t.Fatal("expected a consent prompt")
+		return nil
+	}
+}
+
+func TestConsentWorkerBounds(t *testing.T) {
+	t.Run("admission_churn", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			p := newCleaningPrompter()
+			m := quietManager(p)
+			defer func() { p.releaseAll(); m.Close() }()
+			var first *cleaningReview
+			for i := 0; i < 32; i++ {
+				ctx, cancel := context.WithCancel(context.Background())
+				pending := check(m, ctx, OpExec, guest, fmt.Sprint(i))
+				r := nextCleaning(t, p)
+				if first == nil {
+					first = r
+				}
+				cancel()
+				synctest.Wait()
+				denied(t, pending, ErrCanceled)
+				select {
+				case <-r.canceled:
+				default:
+					t.Fatal("prompter did not observe cancellation")
+				}
+			}
+			live, peak := p.counts()
+			require.Equal(t, 32, live)
+			require.Equal(t, 32, peak)
+			for i := 0; i < 8; i++ {
+				overflow := check(m, context.Background(), OpExec, guest, "overflow")
+				_, peak = p.counts()
+				require.LessOrEqual(t, peak, 32, "canceled cleanup must retain prompt capacity")
+				denied(t, overflow, ErrOverloaded)
+			}
+			require.Len(t, p.calls, 0)
+			first.finishCleanup()
+			synctest.Wait()
+			live, _ = p.counts()
+			require.Equal(t, 31, live)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			pending := check(m, ctx, OpExec, guest, "capacity reused")
+			nextCleaning(t, p)
+			live, peak = p.counts()
+			require.Equal(t, 32, live)
+			require.Equal(t, 32, peak)
+			cancel()
+			synctest.Wait()
+			denied(t, pending, ErrCanceled)
+		})
+	})
+	t.Run("replacement_churn", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			p := newCleaningPrompter()
+			m := quietManager(p)
+			defer func() { p.releaseAll(); m.Close() }()
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			pending := check(m, ctx, OpExec, guest, "same")
+			current := nextCleaning(t, p)
+			first := current
+			for i := 1; i < 32; i++ {
+				time.Sleep(time.Second)
+				nextCtx, nextCancel := context.WithCancel(context.Background())
+				defer nextCancel()
+				survivor := check(m, nextCtx, OpExec, reconnect, "same")
+				originalDeadline := time.Now().Add(60 * time.Second)
+				cancel()
+				synctest.Wait()
+				denied(t, pending, ErrCanceled)
+				fresh := nextCleaning(t, p)
+				require.NotEqual(t, current.prompt.ID, fresh.prompt.ID)
+				require.Equal(t, originalDeadline, fresh.prompt.Deadline)
+				current, pending, cancel = fresh, survivor, nextCancel
+			}
+			time.Sleep(time.Second)
+			survivorCtx, survivorCancel := context.WithCancel(context.Background())
+			defer survivorCancel()
+			survivor := check(m, survivorCtx, OpExec, guest, "same")
+			cancel()
+			synctest.Wait()
+			denied(t, pending, ErrCanceled)
+			live, peak := p.counts()
+			require.LessOrEqual(t, peak, 32, "replacement prompts must reserve worker capacity")
+			require.Equal(t, 32, live)
+			denied(t, survivor, ErrOverloaded)
+			require.Len(t, p.calls, 0)
+			first.finishCleanup()
+			synctest.Wait()
+			deadline := time.Now().Add(9 * time.Second)
+			retryCtx, retryCancel := context.WithDeadline(context.Background(), deadline)
+			defer retryCancel()
+			retry := check(m, retryCtx, OpExec, guest, "same")
+			fresh := nextCleaning(t, p)
+			require.NotEqual(t, current.prompt.ID, fresh.prompt.ID)
+			require.Equal(t, deadline, fresh.prompt.Deadline)
+			live, peak = p.counts()
+			require.Equal(t, 32, live)
+			require.Equal(t, 32, peak)
+			retryCancel()
+			synctest.Wait()
+			denied(t, retry, ErrCanceled)
+		})
+	})
+}

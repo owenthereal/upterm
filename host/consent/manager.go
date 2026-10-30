@@ -66,6 +66,7 @@ type Manager struct {
 	grants      map[connectionGrant]struct{}
 	guests      map[guestGrant]struct{}
 	workers     sync.WaitGroup
+	workerCount int // Includes invalidated prompts until their workers finish cleanup.
 }
 
 var _ PermissionChecker = (*Manager)(nil)
@@ -168,7 +169,7 @@ func (m *Manager) check(ctx context.Context, deadline time.Time, op Operation, c
 				immediate.err = ErrOverloaded
 			case m.flights[key] != nil && len(m.flights[key].waiters) >= MaxWaitersPerFlight:
 				immediate.err = ErrOverloaded
-			case m.flights[key] == nil && m.pendingKeysLocked() >= MaxPending:
+			case m.flights[key] == nil && (m.pendingKeysLocked() >= MaxPending || m.workerCount >= MaxPending):
 				immediate.err = ErrOverloaded
 			}
 		}
@@ -291,6 +292,16 @@ func (m *Manager) reconcileLocked(a *transitions) {
 		}
 	}
 	for key, origin := range origins {
+		// Invalidated prompts retain their reservations through worker exit. A
+		// surviving group cannot create unbounded replacement cleanup work.
+		if m.workerCount >= MaxPending {
+			for w := range m.waiters {
+				if w.key == key {
+					m.finishLocked(w, result{Deny, ErrOverloaded}, a)
+				}
+			}
+			continue
+		}
 		m.sequence++
 		ctx, cancel := context.WithCancel(origin.ctx)
 		f := &flight{key: key, origin: origin, waiters: make(map[*waiter]struct{}), ctx: ctx, cancel: cancel,
@@ -303,6 +314,7 @@ func (m *Manager) reconcileLocked(a *transitions) {
 				f.waiters[w] = struct{}{}
 			}
 		}
+		m.workerCount++
 		m.workers.Add(1)
 		a.start = append(a.start, f)
 	}
@@ -327,7 +339,14 @@ func normalizeError(err error) error {
 }
 
 func (m *Manager) review(f *flight) {
-	defer m.workers.Done()
+	// Release the reservation last, after prompt cleanup, result delivery and
+	// any stale-answer logging, rather than when its flight is invalidated.
+	defer func() {
+		m.mu.Lock()
+		m.workerCount--
+		m.mu.Unlock()
+		m.workers.Done()
+	}()
 	decision, err := m.prompter.Prompt(f.ctx, f.prompt)
 	err = normalizeError(err)
 	var a transitions
