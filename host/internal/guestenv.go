@@ -11,15 +11,19 @@ import (
 )
 
 // sshSessionVars are the variables sshd sets to describe a session: where its
-// client is, and which terminal it has. A guest's forced command is told its
+// client is, which terminal it has, and any forced original command. A
+// guest's private command is told its
 // guest's, never the ones the host inherited -- from its own ssh login, say,
 // which describe another connection and a terminal the command is not on.
-var sshSessionVars = []string{"SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY"}
+var sshSessionVars = []string{"SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY", "SSH_ORIGINAL_COMMAND"}
 
 // withoutSSHSessionVars returns a copy of env with sshSessionVars taken out.
 func withoutSSHSessionVars(env []string) []string {
 	return slices.DeleteFunc(slices.Clone(env), func(kv string) bool {
 		name, _, _ := strings.Cut(kv, "=")
+		if runtime.GOOS == "windows" {
+			name = strings.ToUpper(name)
+		}
 		return slices.Contains(sshSessionVars, name)
 	})
 }

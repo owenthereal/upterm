@@ -239,7 +239,7 @@ func TestAGuestWhoseForcedCommandCantStartIsTold(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	sess.Stdout, sess.Stderr = &stdout, &stderr
 	require.NoError(t, sess.Shell())
-	requireExitStatus(t, sess.Wait(), 1)
+	requireExitStatus(t, sess.Wait(), 127)
 	require.Equal(t, "upterm: this session's command couldn't start; the host's log has why.\r\n", stderr.String())
 	require.Empty(t, stdout.String())
 }

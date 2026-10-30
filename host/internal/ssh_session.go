@@ -68,14 +68,16 @@ type rawSession struct {
 	channel           ssh.Channel
 	requestType       string
 	requestReceivedAt time.Time
-	// admission is the tracker chosen before acknowledgement, rather than a
-	// selection repeated later from the handler's configuration.
-	admission   *guestHandlers
-	windowsOnce sync.Once
-	windowsMu   sync.Mutex
-	pty         gssh.Pty
-	isPty       bool
-	windows     chan gssh.Window
+	// Command selection and tracker ownership are fixed before acknowledgement,
+	// rather than repeated later from the handler's configuration.
+	commandSelection    guestCommandSelection
+	commandSelectionErr error
+	admission           *guestHandlers
+	windowsOnce         sync.Once
+	windowsMu           sync.Mutex
+	pty                 gssh.Pty
+	isPty               bool
+	windows             chan gssh.Window
 	// closed closes once the channel has been closed from the far side: the
 	// close the session's Exit sent has been answered, or the connection has
 	// gone.

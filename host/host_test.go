@@ -2042,3 +2042,23 @@ func TestHostConsentConfiguration(t *testing.T) {
 	h := &Host{TerminalConsent: true, PermissionChecker: checker}
 	require.ErrorContains(t, h.Run(t.Context()), "mutually exclusive")
 }
+
+func TestHostGuestCommandOptions(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		login, force []string
+	}{
+		{"conflict", []string{"login"}, []string{"force"}},
+		{"empty login", []string{}, nil}, {"empty force", nil, []string{}},
+		{"whitespace login", []string{"  "}, nil}, {"empty argv0 force", nil, []string{""}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := &Host{Host: "ssh://unreachable.invalid:22", Name: "must-not-be-claimed", LoginCommand: tc.login, ForceCommand: tc.force}
+			err := h.Run(t.Context())
+			require.Error(t, err)
+			require.True(t, strings.Contains(err.Error(), "mutually exclusive") || strings.Contains(err.Error(), "executable"))
+			require.Nil(t, h.SessionDir)
+		})
+	}
+
+}

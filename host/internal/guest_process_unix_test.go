@@ -171,7 +171,7 @@ func TestGuestProcessPipes(t *testing.T) {
 
 func TestGuestProcessPTY(t *testing.T) {
 	t.Run("terminal env geometry and resize", func(t *testing.T) {
-		spec := guestShell(`stty -echo -opost; printf '%s|%s|%s\n' "$TERM" "$SSH_TTY" "$(tty)"; stty size; read line; stty size; exit 7`)
+		spec := guestShell(`stty -echo -opost; printf '%s|%s|%s\n' "$TERM" "$SSH_TTY" "$(tty)"; stty size; while [ "$(stty size)" != "42 113" ]; do :; done; printf "RESIZED\n"; read line; stty size; exit 7`)
 		spec.Env = append(spec.Env, "TERM=host", "SSH_TTY=stale")
 		sess, results, _ := guestProcessSession(t, spec, true, nil)
 		out, err := sess.StdoutPipe()
@@ -191,6 +191,9 @@ func TestGuestProcessPTY(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, "31 97\n", line)
 		require.NoError(t, sess.WindowChange(42, 113))
+		line, err = reader.ReadString('\n')
+		require.NoError(t, err)
+		require.Equal(t, "RESIZED\n", line)
 		_, err = io.WriteString(in, "go\n")
 		require.NoError(t, err)
 		line, err = reader.ReadString('\n')
@@ -389,7 +392,7 @@ func TestGuestProcessPipeHandles(t *testing.T) {
 	cmd := exec.Command("/bin/sh", "-c", "exit 7")
 	pipes, err := startGuestPipes(cmd)
 	require.NoError(t, err)
-	defer pipes.Close()
+	defer func() { _ = pipes.Close() }()
 	require.Error(t, pipes.Wait())
 	require.NoError(t, pipes.Close())
 	require.NoError(t, pipes.Close())
@@ -429,7 +432,7 @@ func TestGuestProcessReadOnlySignals(t *testing.T) {
 			require.NoError(t, syscall.Mkfifo(fifo, 0600))
 			gate, err := os.OpenFile(fifo, os.O_RDWR, 0600)
 			require.NoError(t, err)
-			defer gate.Close()
+			defer func() { _ = gate.Close() }()
 			spec := guestShell(`trap 'exit 9' TERM; printf READY; read line < "$1"; exit 7`)
 			spec.Argv = append(spec.Argv, "sh", fifo)
 			spec.ReadOnly = true

@@ -87,6 +87,7 @@ type fakeGuestSession struct {
 func (f *fakeGuestSession) Read([]byte) (int, error) { return 0, io.EOF }
 
 func (f *fakeGuestSession) Write(p []byte) (int, error) { return f.out.Write(p) }
+func (f *fakeGuestSession) Signals(chan<- gssh.Signal)  {}
 func (f *fakeGuestSession) Close() error                { return nil }
 func (f *fakeGuestSession) Exit(int) error              { return nil }
 func (f *fakeGuestSession) Context() gssh.Context       { return f.ctx }
@@ -152,13 +153,13 @@ func TestALateGuestWaitsForItsCloseToBeAnswered(t *testing.T) {
 				keepAliveDuration: time.Hour,
 				ctx:               ending,
 				logger:            discardLogger(),
-				forceCommands:     &guestHandlers{},
+				privateCommands:   &guestHandlers{},
 				sharedGuests:      &guestHandlers{},
 			}
 			waitedOn := h.sharedGuests
 			if forced {
 				h.forceCommand = []string{"true"}
-				waitedOn = h.forceCommands
+				waitedOn = h.privateCommands
 			}
 
 			// The door admits the shell before the handler runs.
@@ -222,7 +223,7 @@ func TestAGuestTurnedAwayWaitsForItsCloseToBeAnswered(t *testing.T) {
 				keepAliveDuration: time.Hour,
 				ctx:               t.Context(),
 				logger:            discardLogger(),
-				forceCommands:     &guestHandlers{},
+				privateCommands:   &guestHandlers{},
 				sharedGuests:      &guestHandlers{},
 			}
 			tc.setup(h)
@@ -232,7 +233,11 @@ func TestAGuestTurnedAwayWaitsForItsCloseToBeAnswered(t *testing.T) {
 
 			select {
 			case code := <-guest.exited:
-				assert.Equal(t, 1, code)
+				want := 1
+				if tc.name == "forced command fails to start" {
+					want = 127
+				}
+				assert.Equal(t, want, code)
 			case <-time.After(10 * time.Second):
 				t.Fatal("the guest was never sent a status")
 			}
@@ -573,7 +578,7 @@ func TestTheDoorForgetsEachAdmissionOnceItsHandlerHasTakenIt(t *testing.T) {
 		keepAliveDuration: time.Hour,
 		ctx:               t.Context(),
 		logger:            discardLogger(),
-		forceCommands:     &guestHandlers{},
+		privateCommands:   &guestHandlers{},
 		sharedGuests:      &guestHandlers{},
 	}
 

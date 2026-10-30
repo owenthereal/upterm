@@ -17,10 +17,17 @@ import (
 	uio "github.com/owenthereal/upterm/io"
 )
 
+type guestProcessStartError struct{ err error }
+
+func (e *guestProcessStartError) Error() string { return fmt.Sprintf("start guest command: %v", e.err) }
+func (e *guestProcessStartError) Unwrap() error { return e.err }
+
 type guestProcessSpec struct {
 	Argv, Env []string // Env is complete; nil means empty, not inherited.
 	Dir       string
 	ReadOnly  bool
+	onWait    func(error)
+	onStarted func()
 }
 
 // runGuestProcess owns one private child. Admission, command selection, presence
@@ -35,6 +42,7 @@ func (h *sessionHandler) runGuestProcess(ctx context.Context, sess gssh.Session,
 	}
 	request, windows, isPTY := sess.Pty()
 	cmd := exec.Command(spec.Argv[0], spec.Argv[1:]...)
+	prepareGuestCommand(cmd)
 	cmd.Dir = spec.Dir
 	cmd.Env = guestProcessEnvironment(spec.Env, request.Term, isPTY)
 	var terminal PTY
@@ -50,7 +58,10 @@ func (h *sessionHandler) runGuestProcess(ctx context.Context, sess gssh.Session,
 		terminal = pipes
 	}
 	if err != nil {
-		return 1, fmt.Errorf("start guest command: %w", err)
+		return 1, &guestProcessStartError{err: err}
+	}
+	if spec.onStarted != nil {
+		spec.onStarted()
 	}
 	process := &guestProcessOwner{PTY: terminal}
 	closer := newPTYCloser(process)
@@ -62,7 +73,13 @@ func (h *sessionHandler) runGuestProcess(ctx context.Context, sess gssh.Session,
 	timing := h.timing.orDefault()
 	exited := make(chan struct{})
 	var waitErr error
-	go func() { waitErr = process.Wait(); close(exited) }()
+	go func() {
+		waitErr = process.Wait()
+		if spec.onWait != nil {
+			spec.onWait(waitErr)
+		}
+		close(exited)
+	}()
 
 	// Charm delivers signals synchronously with its session lock held. Keep
 	// consuming after the runner returns, until CLOSE/transport loss, so neither
@@ -73,7 +90,7 @@ func (h *sessionHandler) runGuestProcess(ctx context.Context, sess gssh.Session,
 	signals := make(chan gssh.Signal, 128)
 	signalsClosed := channelClosed(sess)
 	if signalsClosed == nil { // Non-raw internal fixtures have only a context.
-		signalsClosed = sess.Context().Done()
+		signalsClosed = ctx.Done()
 	}
 	sess.Signals(signals)
 	go func() {
@@ -141,19 +158,29 @@ func (h *sessionHandler) runGuestProcess(ctx context.Context, sess gssh.Session,
 	drained := make(chan struct{})
 	outputErrors := make(chan error, 2)
 	var copies sync.WaitGroup
-	copyOutput := func(dst io.Writer, src io.Reader) {
+	copyOutput := func(dst io.Writer, src io.Reader, restore func() []byte) {
 		copies.Add(1)
 		go func() {
 			defer copies.Done()
 			_, err := io.Copy(dst, src)
+			if restore != nil {
+				if reset := restore(); len(reset) > 0 {
+					writeGuestNotice(sess, sess, string(reset))
+				}
+			}
 			if err = ptyError(err); err != nil && outCtx.Err() == nil {
 				outputErrors <- err
 			}
 		}()
 	}
-	copyOutput(sess, output)
+	if isPTY {
+		modes := uio.NewModeTracker()
+		copyOutput(sess, io.TeeReader(output, modes), modes.Restore)
+	} else {
+		copyOutput(sess, output, nil)
+	}
 	if pipes != nil {
-		copyOutput(sess.Stderr(), uio.NewContextReader(outCtx, pipes.stderr))
+		copyOutput(sess.Stderr(), uio.NewContextReader(outCtx, pipes.stderr), nil)
 	}
 	go func() { copies.Wait(); close(drained) }()
 	var operationErr error

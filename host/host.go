@@ -124,7 +124,12 @@ type Host struct {
 	KeepAliveDuration time.Duration
 	Command           []string
 	ForceCommand      []string
-	Signers           []ssh.Signer
+	LoginCommand      []string
+	// CommandDir fixes guest working directories for this run. Empty captures cwd at Run entry.
+	CommandDir   string
+	AcceptExec   bool
+	ExecDisabled bool
+	Signers      []ssh.Signer
 	// IdentitiesOnly says Signers is the whole identity set, as --private-key
 	// makes it: a redial never offers the session key ahead of it.
 	IdentitiesOnly bool
@@ -581,6 +586,18 @@ func (c *Host) claimTimeout() time.Duration {
 // A caller that supplied AdminSocketFile keeps it across runs, since managing
 // the path is what supplying it means.
 func (c *Host) Run(ctx context.Context) (runErr error) {
+	if c.LoginCommand != nil && c.ForceCommand != nil {
+		return errors.New("LoginCommand and ForceCommand are mutually exclusive")
+	}
+	for _, argv := range [][]string{c.LoginCommand, c.ForceCommand} {
+		if argv != nil && (len(argv) == 0 || strings.TrimSpace(argv[0]) == "") {
+			return errors.New("guest command must name an executable")
+		}
+	}
+	commandDir, err := filepath.Abs(c.CommandDir)
+	if err != nil {
+		return fmt.Errorf("guest command directory: %w", err)
+	}
 	if c.TerminalConsent && c.PermissionChecker != nil {
 		return errors.New("TerminalConsent and PermissionChecker are mutually exclusive")
 	}
@@ -1158,6 +1175,10 @@ func (c *Host) Run(ctx context.Context) (runErr error) {
 			Command:                 c.Command,
 			CommandEnv:              commandEnv,
 			ForceCommand:            c.ForceCommand,
+			LoginCommand:            c.LoginCommand,
+			CommandDir:              commandDir,
+			AcceptExec:              c.AcceptExec,
+			ExecDisabled:            c.ExecDisabled,
 			HideClientIP:            c.HideClientIP,
 			HostKey:                 hostKey,
 			AuthorizedKeys:          aks,
