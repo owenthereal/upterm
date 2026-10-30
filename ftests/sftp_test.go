@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/pkg/sftp"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -507,4 +508,22 @@ func testSFTPSetstat(t *testing.T, hostShareURL, hostNodeAddr, clientJoinURL str
 	require.NoError(err)
 	// Note: atime may not be preserved on all systems, but mtime should be
 	assert.Equal(mtime.Unix(), info.ModTime().Unix(), "mtime should be updated")
+}
+
+// Keep this SFTP channel live alongside exec and forwarding on the same relay
+// connection. Its successful protected read relies on an explicit SFTP grant.
+func openConcurrentRelaySFTP(t *testing.T, c *Client) *sftp.Client {
+	t.Helper()
+	sf, err := c.SFTP()
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = sf.Close() })
+	file := filepath.Join(t.TempDir(), "concurrent.bin")
+	require.NoError(t, os.WriteFile(file, []byte{0, 255, 10}, 0600))
+	f, err := sf.Open(remotePath(file))
+	require.NoError(t, err)
+	content, err := io.ReadAll(f)
+	require.NoError(t, err)
+	require.NoError(t, f.Close())
+	require.Equal(t, []byte{0, 255, 10}, content)
+	return sf
 }

@@ -82,6 +82,7 @@ func (suite *FtestSuite) TestReconnect() {
 		run  func(t *testing.T, mode routing.Mode, protocol string)
 	}{
 		{"TunnelCutOnTheSameNode", "", testRedialAfterACut},
+		{"ExecGuestGrantAcrossRelayReconnect", "", testExecGuestGrantAcrossRelayReconnect},
 		// A store in memory dies with its relay, so a restart starts empty;
 		// Consul outlives it.
 		{"RelayRestartedWithAnEmptyStore", routing.ModeEmbedded, testRedialAfterARelayRestart},
@@ -341,6 +342,10 @@ type redialHost struct {
 // shareRedialling shares a session through a forwarder to relay's protocol
 // listener, paced by timing, and returns once the session is ready.
 func shareRedialling(t *testing.T, protocol string, relay *Server, timing host.ReconnectTiming, callbacks ...func(*api.Client)) *redialHost {
+	return shareRediallingConfigured(t, protocol, relay, timing, nil, callbacks...)
+}
+
+func shareRediallingConfigured(t *testing.T, protocol string, relay *Server, timing host.ReconnectTiming, configure func(*Host), callbacks ...func(*api.Client)) *redialHost {
 	t.Helper()
 	fwd := testhelpers.NewForwarder(t, relay.addr(protocol))
 	h := &Host{
@@ -349,6 +354,9 @@ func shareRedialling(t *testing.T, protocol string, relay *Server, timing host.R
 		AdminSocketFile:          setupAdminSocket(t),
 		PermittedClientPublicKey: ClientPublicKeyContent,
 		Reconnect:                timing,
+	}
+	if configure != nil {
+		configure(h)
 	}
 	if len(callbacks) > 0 {
 		h.ClientJoinedCallback = callbacks[0]
