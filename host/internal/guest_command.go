@@ -154,7 +154,7 @@ func (h *sessionHandler) handlePrivateCommand(sess gssh.Session, selection guest
 	}
 	var ended, afterShutdown, observedOutcome atomic.Bool
 	var observedCode atomic.Int64
-	joined := false
+	var joinedID string
 	spec := guestProcessSpec{Argv: selection.Argv, Env: env, Dir: h.commandDir, ReadOnly: h.readonly,
 		onWait: func(waitErr error) {
 			afterShutdown.Store(h.order.commandEnded())
@@ -168,9 +168,8 @@ func (h *sessionHandler) handlePrivateCommand(sess gssh.Session, selection guest
 		},
 		onStarted: func() {
 			if isGuest {
-				id := clientEventID(client.ConnectionID)
-				emitClientJoinEvent(h.eventEmmiter, id, guest.auth, guest.key)
-				joined = true
+				joinedID = clientEventID(client.ConnectionID)
+				emitClientJoinEvent(h.eventEmmiter, joinedID, guest.auth, guest.key)
 			}
 		},
 	}
@@ -179,8 +178,8 @@ func (h *sessionHandler) handlePrivateCommand(sess gssh.Session, selection guest
 		runner = h.runGuestProcess
 	}
 	code, err := runner(ctx, sess, spec)
-	if joined {
-		defer emitClientLeftEvent(h.eventEmmiter, clientEventID(client.ConnectionID))
+	if joinedID != "" {
+		defer emitClientLeftEvent(h.eventEmmiter, joinedID)
 	}
 	if err != nil {
 		h.logger.Info("guest command ended", "error", err)

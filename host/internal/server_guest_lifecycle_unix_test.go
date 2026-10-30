@@ -4,6 +4,7 @@ package internal
 
 import (
 	"bytes"
+	"io"
 	"net"
 	"testing"
 	"time"
@@ -261,5 +262,56 @@ func TestFailedForceCommandDoesNotJoin(t *testing.T) {
 	case e := <-left:
 		t.Fatalf("failed force command left without joining: %v", e.Args)
 	case <-time.After(100 * time.Millisecond):
+	}
+}
+
+// Exec presence is per channel. Natural completion and cancellation must each
+// remove exactly the channel that joined, leaving its sibling present.
+func TestGuestExecChannelsLeaveWithTheirJoinedIDs(t *testing.T) {
+	srv := &Server{Command: readsALine("READY", 0), AcceptExec: true}
+	h := startHost(t, srv)
+	joined := srv.EventEmitter.On(upterm.EventClientJoined)
+	left := srv.EventEmitter.On(upterm.EventClientLeft)
+	defer srv.EventEmitter.Off(upterm.EventClientJoined, joined)
+	defer srv.EventEmitter.Off(upterm.EventClientLeft, left)
+	client := h.guestClient(t)
+	sessions := make([]*ssh.Session, 2)
+	inputs := make([]io.WriteCloser, 2)
+	ids := make([]string, 2)
+	for i := range sessions {
+		s, err := client.NewSession()
+		require.NoError(t, err)
+		sessions[i] = s
+		t.Cleanup(func() { _ = s.Close() })
+		inputs[i], err = s.StdinPipe()
+		require.NoError(t, err)
+		require.NoError(t, s.Start("cat >/dev/null"))
+		select {
+		case e := <-joined:
+			ids[i] = e.Args[0].(*api.Client).Id
+		case <-time.After(harnessTimeout):
+			t.Fatal("exec channel did not join")
+		}
+	}
+	require.NotEqual(t, ids[0], ids[1])
+	require.NoError(t, inputs[0].Close())
+	require.NoError(t, sessions[0].Wait())
+	select {
+	case e := <-left:
+		require.Equal(t, ids[0], e.Args[0])
+	case <-time.After(harnessTimeout):
+		t.Fatal("completed exec channel did not leave")
+	}
+	select {
+	case e := <-left:
+		t.Fatalf("live sibling left: %v", e.Args)
+	default:
+	}
+	require.NoError(t, sessions[1].Close())
+	select {
+	case e := <-left:
+		require.Equal(t, ids[1], e.Args[0])
+	case <-time.After(harnessTimeout):
+		t.Fatal("cancelled exec channel did not leave")
 	}
 }
