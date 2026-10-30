@@ -2,10 +2,14 @@ package host
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -524,4 +528,56 @@ func TestForwardingActiveTransferStopsWithHost(t *testing.T) {
 		t.Fatal("active forward survived host teardown")
 	}
 	_ = client.Close()
+}
+
+func TestForwardingAuditHostBoundary(t *testing.T) {
+	for _, allowed := range []bool{false, true} {
+		t.Run(fmt.Sprintf("loopback_pregrant_%v", allowed), func(t *testing.T) {
+			target := forwardingTarget(t)
+			f := newJoinTimeoutHost(t)
+			var logs lockedBuffer
+			f.h.Logger = slog.New(slog.NewJSONHandler(&logs, nil))
+			f.h.AllowLoopbackTCPForwarding = allowed
+			f.start(t)
+			awaitJoinTimeoutSignal(t, f.ready, "readiness")
+			client := f.guestClient(t)
+			conn, err := transferForward(client, target)
+			if allowed {
+				require.NoError(t, err)
+				require.NoError(t, conn.Close())
+			} else {
+				require.Error(t, err)
+			}
+			require.NoError(t, client.Close())
+			f.finish(t, "0")
+			require.NoError(t, f.result(t))
+			var records []map[string]any
+			for _, line := range strings.Split(strings.TrimSpace(logs.String()), "\n") {
+				var record map[string]any
+				require.NoError(t, json.Unmarshal([]byte(line), &record))
+				if record["msg"] == "forwarding permission policy" {
+					records = append(records, record)
+				}
+			}
+			require.Len(t, records, 1, "every forwarding permission decision must reach the configured host logger")
+			record := records[0]
+			outcome := "unavailable"
+			if allowed {
+				outcome = "allowed"
+			}
+			require.Equal(t, outcome, record["outcome"])
+			require.Equal(t, "forward", record["capability"])
+			require.Equal(t, "forward", record["operation"])
+			address, port, err := net.SplitHostPort(target)
+			require.NoError(t, err)
+			require.Equal(t, []any{strconv.QuoteToASCII(address), strconv.QuoteToASCII(port)}, record["subjects"])
+			for _, field := range []string{"fingerprint", "connection_id", "request_id"} {
+				value, ok := record[field].(string)
+				require.True(t, ok, field)
+				raw, err := strconv.Unquote(value)
+				require.NoError(t, err)
+				require.NotEmpty(t, raw, field)
+			}
+		})
+	}
 }

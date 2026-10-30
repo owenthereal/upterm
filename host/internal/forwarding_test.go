@@ -1,14 +1,18 @@
 package internal
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -20,6 +24,7 @@ import (
 	"github.com/owenthereal/upterm/host/consent"
 	"github.com/owenthereal/upterm/server"
 	"github.com/owenthereal/upterm/upterm"
+	"github.com/owenthereal/upterm/utils"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/crypto/ssh"
 )
@@ -96,7 +101,7 @@ func TestForwardingRejectsMissingConnectionMetadata(t *testing.T) {
 				return false // A mistaken delegation still cannot dial a target.
 			}}
 
-			forwardingHandler(events, &Forwards{}, forwardingPolicy{}, context.Background())(srv, nil, channel, ctx)
+			forwardingHandler(events, &Forwards{}, forwardingPolicy{}, context.Background(), discardLogger())(srv, nil, channel, ctx)
 
 			require.Equal(t, ssh.ConnectionFailed, channel.rejectReason)
 			require.Contains(t, channel.rejectMessage, "metadata")
@@ -339,7 +344,10 @@ func TestForwardingConsentCancellation(t *testing.T) {
 			})
 			policy := forwardingPolicy{Checker: checker, ReadOnly: mode == "read-only unrestricted", Disabled: mode == "disabled unrestricted", AllowAny: mode == "read-only unrestricted" || mode == "disabled unrestricted"}
 			done := make(chan struct{})
-			go func() { forwardingHandler(emitter.New(1), &Forwards{}, policy, host)(nil, nil, open, c); close(done) }()
+			go func() {
+				forwardingHandler(emitter.New(1), &Forwards{}, policy, host, discardLogger())(nil, nil, open, c)
+				close(done)
+			}()
 			if mode == "transport" || mode == "host" {
 				select {
 				case <-asked:
@@ -383,7 +391,7 @@ func TestForwardingFailedAcceptDoesNotAnnounce(t *testing.T) {
 	joined := events.On(upterm.EventForwardingClientJoined)
 	done := make(chan struct{})
 	go func() {
-		forwardingHandler(events, &Forwards{}, forwardingPolicy{AllowLoopback: true}, context.Background())(nil, nil, open, c)
+		forwardingHandler(events, &Forwards{}, forwardingPolicy{AllowLoopback: true}, context.Background(), discardLogger())(nil, nil, open, c)
 		close(done)
 	}()
 	require.NoError(t, ln.SetDeadline(time.Now().Add(time.Second)))
@@ -434,7 +442,7 @@ func TestForwardingAcceptedChannelCloseStopsTransfer(t *testing.T) {
 	firstDone := make(chan struct{})
 	var opened atomic.Int32
 	var handlers sync.WaitGroup
-	handle := forwardingHandler(emitter.New(1), &Forwards{}, forwardingPolicy{AllowLoopback: true}, context.Background())
+	handle := forwardingHandler(emitter.New(1), &Forwards{}, forwardingPolicy{AllowLoopback: true}, context.Background(), discardLogger())
 	srv := &gssh.Server{
 		HostSigners:      []gssh.Signer{signer},
 		PublicKeyHandler: func(gssh.Context, gssh.PublicKey) bool { return true },
@@ -489,5 +497,255 @@ func TestForwardingAcceptedChannelCloseStopsTransfer(t *testing.T) {
 	case <-firstDone:
 	case <-time.After(time.Second):
 		t.Fatal("closed forwarding channel retained its handler/socket while transport and silent target remained open")
+	}
+}
+
+func forwardingAuditRecords(t *testing.T, data string) []map[string]any {
+	t.Helper()
+	var records []map[string]any
+	for _, line := range strings.Split(strings.TrimSpace(data), "\n") {
+		if line == "" {
+			continue
+		}
+		var record map[string]any
+		require.NoError(t, json.Unmarshal([]byte(line), &record))
+		records = append(records, record)
+	}
+	return records
+}
+
+func TestForwardingAuditPolicyOutcomes(t *testing.T) {
+	for _, tt := range []struct {
+		name, outcome, address                                     string
+		policy                                                     forwardingPolicy
+		decision                                                   consent.Decision
+		err                                                        error
+		cancelBefore, hostBefore, expired, lateTransport, lateHost bool
+	}{
+		{name: "read-only", outcome: "denied", policy: forwardingPolicy{ReadOnly: true, AllowAny: true}},
+		{name: "disabled", outcome: "denied", policy: forwardingPolicy{Disabled: true, AllowLoopback: true}},
+		{name: "ineligible hostname", outcome: "denied", address: "localhost", policy: forwardingPolicy{AllowLoopback: true}},
+		{name: "unrestricted pregrant", outcome: "allowed", policy: forwardingPolicy{AllowAny: true}},
+		{name: "loopback pregrant", outcome: "allowed", policy: forwardingPolicy{AllowLoopback: true}},
+		{name: "nil checker", outcome: "unavailable"},
+		{name: "custom connection grant", outcome: "allowed", decision: consent.AllowConnection},
+		{name: "custom guest grant", outcome: "allowed", decision: consent.AllowGuest},
+		{name: "custom host denial", outcome: "denied", err: consent.ErrDenied},
+		{name: "custom deny decision", outcome: "denied"},
+		{name: "custom unavailable", outcome: "unavailable", err: fmt.Errorf("primary: %w", consent.ErrUnavailable)},
+		{name: "custom canceled", outcome: "canceled", err: context.Canceled},
+		{name: "custom consent canceled", outcome: "canceled", err: consent.ErrCanceled},
+		{name: "custom timeout", outcome: "timeout", err: context.DeadlineExceeded},
+		{name: "custom consent timeout", outcome: "timeout", err: consent.ErrTimeout},
+		{name: "custom overloaded", outcome: "overloaded", err: consent.ErrOverloaded},
+		{name: "custom late answer", outcome: "stale", err: consent.ErrStale},
+		{name: "custom subject overflow", outcome: "subject_too_large", err: consent.ErrSubjectTooLarge},
+		{name: "custom other failure", outcome: "denied", err: errors.New("checker failed")},
+		{name: "transport canceled before checker", outcome: "canceled", cancelBefore: true},
+		{name: "host canceled before checker", outcome: "canceled", hostBefore: true},
+		{name: "deadline expired before checker", outcome: "timeout", expired: true},
+		{name: "custom late transport allowance", outcome: "canceled", decision: consent.AllowGuest, lateTransport: true},
+		{name: "custom late host allowance", outcome: "canceled", decision: consent.AllowGuest, lateHost: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			listener, err := net.ListenTCP("tcp", &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1)})
+			require.NoError(t, err)
+			defer func() { _ = listener.Close() }()
+			parent, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			host, cancelHost := context.WithCancel(context.Background())
+			defer cancelHost()
+			if tt.cancelBefore {
+				cancel()
+			}
+			if tt.hostBefore {
+				cancelHost()
+			}
+			if tt.expired {
+				var stop context.CancelFunc
+				parent, stop = context.WithDeadline(parent, time.Now().Add(-time.Second))
+				defer stop()
+			}
+			ctx := forwardContext(t, parent)
+			checked := false
+			policy := tt.policy
+			if strings.HasPrefix(tt.name, "custom") || tt.cancelBefore || tt.hostBefore || tt.expired {
+				policy.Checker = forwardPermissionFunc(func(_ context.Context, _ consent.Operation, _ consent.ClientInfo, _ ...string) (consent.Decision, error) {
+					checked = true
+					if tt.lateTransport {
+						cancel()
+					}
+					if tt.lateHost {
+						cancelHost()
+					}
+					return tt.decision, tt.err
+				})
+			}
+			address := tt.address
+			if address == "" {
+				address = "127.0.0.1"
+			}
+			open := &forwardOpen{address: address, port: uint32(listener.Addr().(*net.TCPAddr).Port)}
+			var logs bytes.Buffer
+			logger := slog.New(slog.NewJSONHandler(&logs, nil))
+			forwardingHandler(emitter.New(1), &Forwards{}, policy, host, logger)(nil, nil, open, ctx)
+			records := forwardingAuditRecords(t, logs.String())
+			require.Len(t, records, 1)
+			record := records[0]
+			require.Equal(t, "forwarding permission policy", record["msg"])
+			require.Equal(t, "forward", record["capability"])
+			require.Equal(t, "forward", record["operation"])
+			require.Equal(t, tt.outcome, record["outcome"])
+			require.Equal(t, []any{strconv.QuoteToASCII(address), strconv.QuoteToASCII(strconv.Itoa(listener.Addr().(*net.TCPAddr).Port))}, record["subjects"])
+			guest := ctx.values[authenticatedGuestKey{}].(authenticatedGuest)
+			require.Equal(t, strconv.QuoteToASCII(utils.FingerprintSHA256(guest.key)), record["fingerprint"])
+			require.Equal(t, `"connection"`, record["connection_id"])
+			requestID, err := strconv.Unquote(record["request_id"].(string))
+			require.NoError(t, err)
+			require.NotEmpty(t, requestID)
+			if tt.outcome == "allowed" {
+				require.Empty(t, record["reason"])
+				require.EqualValues(t, 1, open.accepts.Load())
+			} else {
+				require.NotEmpty(t, record["reason"])
+				require.Zero(t, open.accepts.Load())
+			}
+			if tt.cancelBefore || tt.hostBefore || tt.expired {
+				require.False(t, checked, "canceled request must be recorded without asking")
+			}
+			if tt.lateTransport || tt.lateHost {
+				require.True(t, checked)
+			}
+		})
+	}
+}
+
+func TestForwardingAuditBoundsUntrustedText(t *testing.T) {
+	for _, handler := range []string{"json", "text"} {
+		t.Run(handler, func(t *testing.T) {
+			for _, subject := range []bool{true, false} {
+				t.Run(fmt.Sprintf("subject_%v", subject), func(t *testing.T) {
+					hostile := "bad\x1b\r\n" + strings.Repeat("x", 8192) + "SECRET_TAIL"
+					var logs bytes.Buffer
+					var sink slog.Handler = slog.NewJSONHandler(&logs, nil)
+					if handler == "text" {
+						sink = slog.NewTextHandler(&logs, nil)
+					}
+					ctx, cancel := context.WithCancel(context.Background())
+					defer cancel()
+					c := forwardContext(t, ctx)
+					policy := forwardingPolicy{Checker: forwardPermissionFunc(func(_ context.Context, _ consent.Operation, _ consent.ClientInfo, subjects ...string) (consent.Decision, error) {
+						require.Equal(t, []string{"127.0.0.1", "22"}, subjects)
+						return consent.Deny, errors.New(hostile)
+					})}
+					address := "127.0.0.1"
+					if subject {
+						address = hostile
+					}
+					open := &forwardOpen{address: address, port: 22}
+					forwardingHandler(emitter.New(1), &Forwards{}, policy, context.Background(), slog.New(sink))(nil, nil, open, c)
+					data := logs.String()
+					require.NotEmpty(t, data)
+					require.Less(t, len(data), 4096)
+					require.NotContains(t, data, "SECRET_TAIL")
+					require.NotContains(t, data, "\x1b")
+					require.NotContains(t, data, "\r")
+					require.Equal(t, 1, strings.Count(data, "\n"), "guest fields cannot inject audit records")
+					if handler == "json" {
+						record := forwardingAuditRecords(t, data)[0]
+						field := record["reason"]
+						if subject {
+							field = record["subjects"].([]any)[0]
+						}
+						projected := field.(string)
+						require.NotContains(t, projected, "\x1b")
+						require.NotContains(t, projected, "\n")
+						require.NotContains(t, projected, "\r")
+						original, err := strconv.Unquote(projected)
+						require.NoError(t, err)
+						require.True(t, strings.HasPrefix(original, "bad\x1b\r\n"))
+						require.True(t, strings.HasSuffix(original, "..."))
+					}
+				})
+			}
+		})
+	}
+}
+
+func TestForwardingAuditPreservesManagerEvents(t *testing.T) {
+	listener, err := net.ListenTCP("tcp", &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	require.NoError(t, err)
+	defer func() { _ = listener.Close() }()
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&logs, nil))
+	manager := consent.NewManager(forwardPrompter(func(context.Context, consent.Prompt) (consent.Decision, error) { return consent.AllowConnection, nil }), logger)
+	defer manager.Close()
+	parent, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	c := forwardContext(t, parent)
+	handle := forwardingHandler(emitter.New(1), &Forwards{}, forwardingPolicy{Checker: manager}, context.Background(), logger)
+	for range 2 {
+		handle(nil, nil, &forwardOpen{address: "127.0.0.1", port: uint32(listener.Addr().(*net.TCPAddr).Port)}, c)
+	}
+	manager.Close()
+	records := forwardingAuditRecords(t, logs.String())
+	var boundary, managed []map[string]any
+	for _, record := range records {
+		switch record["msg"] {
+		case "forwarding permission policy":
+			boundary = append(boundary, record)
+		case "consent decision":
+			managed = append(managed, record)
+		}
+	}
+	require.Len(t, boundary, 2)
+	require.Len(t, managed, 2)
+	require.Equal(t, "allowed", boundary[0]["outcome"])
+	require.Equal(t, "allowed", boundary[1]["outcome"])
+	require.NotEqual(t, boundary[0]["request_id"], boundary[1]["request_id"], "same-connection opens retain separate audit identities")
+	require.Equal(t, "allow_connection", managed[0]["outcome"])
+	requestID, err := strconv.Unquote(managed[0]["request_id"].(string))
+	require.NoError(t, err)
+	require.NotEmpty(t, requestID, "manager still records its review identity")
+}
+
+type forwardingAuditWriterFunc func([]byte) (int, error)
+
+func (f forwardingAuditWriterFunc) Write(data []byte) (int, error) { return f(data) }
+
+func TestForwardingAuditCancellationDuringLogging(t *testing.T) {
+	for _, owner := range []string{"transport", "host"} {
+		t.Run(owner, func(t *testing.T) {
+			listener, err := net.ListenTCP("tcp", &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1)})
+			require.NoError(t, err)
+			defer func() { _ = listener.Close() }()
+			parent, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			host, cancelHost := context.WithCancel(context.Background())
+			defer cancelHost()
+			var logs bytes.Buffer
+			writer := forwardingAuditWriterFunc(func(data []byte) (int, error) {
+				if owner == "transport" {
+					cancel()
+				} else {
+					cancelHost()
+				}
+				return logs.Write(data)
+			})
+			logger := slog.New(slog.NewJSONHandler(writer, nil))
+			open := &forwardOpen{address: "127.0.0.1", port: uint32(listener.Addr().(*net.TCPAddr).Port)}
+			forwardingHandler(emitter.New(1), &Forwards{}, forwardingPolicy{AllowLoopback: true}, host, logger)(nil, nil, open, forwardContext(t, parent))
+			records := forwardingAuditRecords(t, logs.String())
+			require.NotEmpty(t, records)
+			require.Equal(t, "canceled", records[len(records)-1]["outcome"], "synchronous logging must not hide owner loss before dial")
+			require.Equal(t, records[0]["request_id"], records[len(records)-1]["request_id"])
+			require.Zero(t, open.accepts.Load())
+			require.NoError(t, listener.SetDeadline(time.Now().Add(20*time.Millisecond)))
+			conn, err := listener.Accept()
+			if conn != nil {
+				_ = conn.Close()
+			}
+			require.Error(t, err, "owner lost during audit write must prevent dial")
+		})
 	}
 }

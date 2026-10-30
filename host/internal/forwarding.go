@@ -2,14 +2,17 @@ package internal
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/netip"
 	"slices"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	gssh "charm.land/ssh"
@@ -159,10 +162,53 @@ func authorizeForward(ctx context.Context, p forwardingPolicy, client consent.Cl
 	return nil
 }
 
+// Boundary records cover grants and denials that never reach a consent manager,
+// including custom checkers. Manager records retain their own review identities;
+// requestID identifies this open even when no review exists or a grant is cached.
+func logForwardPermission(logger *slog.Logger, client consent.ClientInfo, requestID, address string, port uint32, err error) {
+	outcome := "allowed"
+	switch {
+	case errors.Is(err, consent.ErrUnavailable):
+		outcome = "unavailable"
+	case errors.Is(err, context.DeadlineExceeded), errors.Is(err, consent.ErrTimeout):
+		outcome = "timeout"
+	case errors.Is(err, context.Canceled), errors.Is(err, consent.ErrCanceled):
+		outcome = "canceled"
+	case errors.Is(err, consent.ErrOverloaded):
+		outcome = "overloaded"
+	case errors.Is(err, consent.ErrStale):
+		outcome = "stale"
+	case errors.Is(err, consent.ErrSubjectTooLarge):
+		outcome = "subject_too_large"
+	case err != nil:
+		outcome = "denied"
+	}
+	reason := ""
+	if err != nil {
+		reason = forwardLogText(err.Error())
+	}
+	logger.Info("forwarding permission policy", "outcome", outcome,
+		"capability", consent.CapabilityForward, "operation", consent.OpForward,
+		"subjects", []string{forwardLogText(address), forwardLogText(strconv.FormatUint(uint64(port), 10))},
+		"fingerprint", forwardLogText(client.Fingerprint), "connection_id", forwardLogText(client.ConnectionID),
+		"request_id", forwardLogText(requestID), "reason", reason)
+}
+
+func forwardLogText(text string) string {
+	if len(text) > 256 {
+		text = text[:256] + "..."
+	}
+	return strconv.QuoteToASCII(text)
+}
+
 // Pending opens have no per-channel CLOSE notification until acceptance. The
 // arrival deadline bounds consent and dial; accepted traffic retains only the
 // original transport and host lifetime.
-func forwardingHandler(events *emitter.Emitter, forwards *Forwards, policy forwardingPolicy, hostCtx context.Context) gssh.ChannelHandler {
+func forwardingHandler(events *emitter.Emitter, forwards *Forwards, policy forwardingPolicy, hostCtx context.Context, logger *slog.Logger) gssh.ChannelHandler {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	var requestSequence atomic.Uint64
 	return func(_ *gssh.Server, _ *ssh.ServerConn, channel ssh.NewChannel, ctx gssh.Context) {
 		arrived := time.Now()
 		presence, ok := ctx.Value(forwardingPresenceKey{}).(*forwardingPresence)
@@ -207,21 +253,29 @@ func forwardingHandler(events *emitter.Emitter, forwards *Forwards, policy forwa
 			}
 			return nil
 		}
-		if err := openError(); err != nil {
-			_ = channel.Reject(ssh.Prohibited, err.Error())
-			return
-		}
 		client := consent.ClientInfo{ConnectionID: ctx.SessionID(), Fingerprint: utils.FingerprintSHA256(guest.key)}
-		if err := authorizeForward(openCtx, policy, client, req.DestAddr, req.DestPort); err != nil {
-			_ = channel.Reject(ssh.Prohibited, err.Error())
-			return
+		requestID := "forward-" + strconv.FormatUint(requestSequence.Add(1), 10)
+		permissionErr := openError()
+		if permissionErr == nil {
+			permissionErr = authorizeForward(openCtx, policy, client, req.DestAddr, req.DestPort)
 		}
-		if err := openError(); err != nil {
-			_ = channel.Reject(ssh.Prohibited, err.Error())
+		if permissionErr == nil {
+			permissionErr = openError()
+		}
+		logForwardPermission(logger, client, requestID, req.DestAddr, req.DestPort, permissionErr)
+		if permissionErr != nil {
+			_ = channel.Reject(ssh.Prohibited, permissionErr.Error())
 			return
 		}
 		dest := net.JoinHostPort(req.DestAddr, strconv.FormatUint(uint64(req.DestPort), 10))
 		dialer := net.Dialer{Timeout: 10 * time.Second}
+		// A host-supplied audit sink can block or observe cancellation itself.
+		// Preserve the original-owner check immediately before dialing.
+		if err := openError(); err != nil {
+			logForwardPermission(logger, client, requestID, req.DestAddr, req.DestPort, err)
+			_ = channel.Reject(ssh.Prohibited, err.Error())
+			return
+		}
 		socket, err := dialer.DialContext(openCtx, "tcp", dest)
 		if err != nil {
 			_ = channel.Reject(ssh.ConnectionFailed, err.Error())
