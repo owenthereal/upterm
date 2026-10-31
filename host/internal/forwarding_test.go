@@ -230,26 +230,45 @@ func TestForwardingPolicyGrantTuples(t *testing.T) {
 func TestForwardingPolicyConsentLimit(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		prompts := make(chan struct{}, 2)
+		var reviews atomic.Int32
+		// A prompter honors cancellation however far it got: Close waits for
+		// every review, including those of flights re-formed after it filled.
 		manager := consent.NewManager(forwardPrompter(func(ctx context.Context, _ consent.Prompt) (consent.Decision, error) {
-			prompts <- struct{}{}
+			reviews.Add(1)
+			select {
+			case prompts <- struct{}{}:
+			case <-ctx.Done():
+				return consent.Deny, ctx.Err()
+			}
 			<-ctx.Done()
 			return consent.Deny, ctx.Err()
 		}), slog.New(slog.NewTextHandler(io.Discard, nil)))
 		defer manager.Close()
-		ctx, cancel := context.WithCancel(context.Background())
-		defer cancel()
-		results := make(chan error, consent.MaxWaitersPerConnection)
-		for range consent.MaxWaitersPerConnection {
+		client := consent.ClientInfo{Fingerprint: "guest", ConnectionID: "one"}
+		// Waiters join one at a time, so the flight's origin is always the
+		// oldest waiter still waiting.
+		cancels := make([]context.CancelFunc, consent.MaxWaitersPerConnection)
+		results := make([]chan error, consent.MaxWaitersPerConnection)
+		for i := range cancels {
+			ctx, cancel := context.WithCancel(context.Background())
+			cancels[i], results[i] = cancel, make(chan error, 1)
 			go func() {
-				results <- authorizeForward(ctx, forwardingPolicy{Checker: manager}, consent.ClientInfo{Fingerprint: "guest", ConnectionID: "one"}, "127.0.0.1", 22)
+				results[i] <- authorizeForward(ctx, forwardingPolicy{Checker: manager}, client, "127.0.0.1", 22)
 			}()
+			synctest.Wait()
 		}
-		synctest.Wait()
 		require.Len(t, prompts, 1, "same tuple coalesces")
-		require.ErrorIs(t, authorizeForward(ctx, forwardingPolicy{Checker: manager}, consent.ClientInfo{Fingerprint: "guest", ConnectionID: "one"}, "127.0.0.1", 22), consent.ErrOverloaded)
-		cancel()
-		for range consent.MaxWaitersPerConnection {
-			require.Error(t, <-results)
+		require.ErrorIs(t, authorizeForward(context.Background(), forwardingPolicy{Checker: manager}, client, "127.0.0.1", 22), consent.ErrOverloaded)
+		// Canceling each origin in turn re-forms the flight for the next waiter
+		// under a new prompt. Every one of those reviews has to end for Close.
+		for i, cancel := range cancels {
+			cancel()
+			synctest.Wait()
+			require.ErrorIs(t, <-results[i], consent.ErrCanceled)
+			for _, later := range results[i+1:] {
+				require.Empty(t, later, "canceling one waiter resolved another")
+			}
+			require.EqualValues(t, min(i+2, consent.MaxWaitersPerConnection), reviews.Load(), "the survivors' flight was not re-formed")
 		}
 	})
 }
