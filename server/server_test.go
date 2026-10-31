@@ -151,6 +151,59 @@ func TestServerSharesHostActivityBetweenProxyAndSSHD(t *testing.T) {
 	require.NotContains(t, logs.String(), `"connection":"node"`)
 }
 
+// A guest can reach the relay just as its host leaves, after the sshd has
+// asked the host, through the proxy, to take the guest's tunnel. The proxy
+// refuses the tunnel then, as the host is gone. The guest's connection fails as
+// it must, but nothing is wrong with the relay, so the sshd logs it as a
+// warning, not as one of its errors.
+func TestServerWarnsOfATunnelWhoseHostLeftBeforeAnswering(t *testing.T) {
+	logs := &logRecorder{}
+	ts := newServingTestServer(t, slog.New(logs))
+	signer, err := ssh.ParsePrivateKey([]byte(TestPrivateKeyContent))
+	require.NoError(t, err)
+
+	client, err := ssh.Dial("tcp", ts.sshAddr, &ssh.ClientConfig{
+		User:            "session",
+		ClientVersion:   upterm.HostSSHClientVersion,
+		Auth:            []ssh.AuthMethod{ssh.PublicKeys(signer)},
+		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+		Timeout:         5 * time.Second,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = client.Close() })
+	incoming := client.HandleChannelOpen(forwardedStreamlocalChannelType)
+
+	host := newProven(t)
+	ok, body := host.register(t, client, string(client.SessionID()), 1)
+	require.True(t, ok, string(body))
+	ok, msg := forwardRequest(t, client, streamlocalForwardChannelType, host.id())
+	require.True(t, ok, msg)
+
+	guest, err := ts.NetworkProvider.Session().Dial(host.id())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = guest.Close() })
+	select {
+	case <-incoming:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the guest's tunnel never reached the host")
+	}
+	// The host leaves with the tunnel's open unanswered.
+	require.NoError(t, client.Close())
+
+	opening := func() []string {
+		var lines []string
+		for _, line := range logs.atLeast(slog.LevelWarn) {
+			if strings.HasSuffix(line, " error opening channel") {
+				lines = append(lines, line)
+			}
+		}
+		return lines
+	}
+	require.Eventually(t, func() bool { return len(opening()) > 0 }, 5*time.Second, time.Millisecond,
+		"the sshd never learned that the tunnel was refused")
+	require.Equal(t, []string{"WARN error opening channel"}, opening())
+}
+
 // closeObservedListener records successful completion of the original listener's
 // Close. Every call still delegates and returns its own underlying result.
 // Emergency fixture cleanup closes Listener directly, never this observation.

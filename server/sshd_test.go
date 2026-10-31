@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -451,6 +452,47 @@ func forwardRequest(t *testing.T, client *ssh.Client, reqType, sessionID string)
 	ok, body, err := client.SendRequest(reqType, true, ssh.Marshal(&streamlocalChannelForwardMsg{SocketPath: sessionID}))
 	require.NoError(t, err)
 	return ok, string(body)
+}
+
+// A client that leaves mid-handshake, as a host or guest whose own connection
+// dropped does, ends the sshd's side of it with a closed connection. That is
+// the client's, so it is a warning. A client the sshd refuses stays an error:
+// the relay's own proxy is one, when the sshd doesn't trust its certificate.
+func Test_sshd_AClientThatLeavesMidHandshakeIsAWarning(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		connect func(t *testing.T, conn net.Conn)
+		want    []string
+	}{
+		{"a client that leaves", func(t *testing.T, conn net.Conn) {
+			require.NoError(t, conn.Close())
+		}, []string{"WARN connection failed"}},
+		{"a client the sshd refuses", func(t *testing.T, conn net.Conn) {
+			stranger, err := ssh.ParsePrivateKey([]byte(HostPrivateKeyContent))
+			require.NoError(t, err)
+			_, _, _, err = ssh.NewClientConn(conn, "sshd", &ssh.ClientConfig{
+				User:            "1234",
+				Auth:            []ssh.AuthMethod{ssh.PublicKeys(stranger)},
+				HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+			})
+			require.Error(t, err)
+		}, []string{"ERROR connection failed"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				logs := &logRecorder{}
+				s := newBubbleSSHD(t, func(d *sshd) { d.Logger = slog.New(logs) })
+				conn, err := s.dialRaw(t.Context())
+				require.NoError(t, err)
+				tc.connect(t, conn)
+				synctest.Wait() // The sshd has given up on the handshake.
+				failed := slices.DeleteFunc(logs.atLeast(slog.LevelDebug), func(line string) bool {
+					return !strings.HasSuffix(line, " connection failed")
+				})
+				require.Equal(t, tc.want, failed)
+			})
+		})
+	}
 }
 
 func Test_sshd_SessionsActiveGauge(t *testing.T) {
@@ -1199,6 +1241,109 @@ func Test_sshd_ClosesTunnelChannelWhenGuestLeaves(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("channel stayed open after the guest disconnected")
 	}
+}
+
+// A host's connection outlives every guest who comes and goes on it, so a
+// guest that leaves must release its tunnel then, not when its host does. Held
+// until then, each one keeps its goroutines and its in-memory connection's
+// buffers, and a long-lived host with many guests runs its relay out of memory.
+func Test_sshd_ReleasesAGuestThatLeftWhileItsHostStays(t *testing.T) {
+	const tunnel = "(*streamlocalForwardHandler).handleConnection"
+	synctest.Test(t, func(t *testing.T) {
+		s := newBubbleSSHD(t)
+		client := s.dial(t)
+		incoming := client.HandleChannelOpen(forwardedStreamlocalChannelType)
+		sessionID := s.createSession(t, client)
+		ok, body := forwardRequest(t, client, streamlocalForwardChannelType, sessionID)
+		require.True(t, ok, body)
+
+		guest, err := s.network.Session().Dial(sessionID)
+		require.NoError(t, err)
+		ch, reqs, err := (<-incoming).Accept()
+		require.NoError(t, err)
+		go ssh.DiscardRequests(reqs)
+		synctest.Wait()
+		require.Positive(t, goroutinesIn(tunnel), "the guest's tunnel isn't running, so its absence below would prove nothing")
+
+		require.NoError(t, guest.Close())
+		_, err = ch.Read(make([]byte, 1))
+		require.ErrorIs(t, err, io.EOF)
+		synctest.Wait()
+		require.Zero(t, goroutinesIn(tunnel), "the guest left, but its tunnel is held until its host disconnects")
+	})
+}
+
+// A host that cancels its tunnel can stay connected, so what served the tunnel
+// must end with the cancel, not with the host's connection.
+func Test_sshd_ReleasesACancelledForwardWhileItsHostStays(t *testing.T) {
+	const forward = "(*streamlocalForwardHandler).handle."
+	synctest.Test(t, func(t *testing.T) {
+		s := newBubbleSSHD(t)
+		client := s.dial(t)
+		sessionID := s.createSession(t, client)
+		ok, body := forwardRequest(t, client, streamlocalForwardChannelType, sessionID)
+		require.True(t, ok, body)
+		synctest.Wait()
+		require.Positive(t, goroutinesIn(forward), "the forward isn't running, so its absence below would prove nothing")
+
+		ok, body = forwardRequest(t, client, cancelStreamlocalForwardChannelType, sessionID)
+		require.True(t, ok, body)
+		synctest.Wait()
+		require.Zero(t, goroutinesIn(forward), "the forward was cancelled, but it is held until its host disconnects")
+	})
+}
+
+// The proxy refuses a guest's tunnel for a host whose connection is ending,
+// which is no fault of the relay's, so the sshd logs it as a warning. Any other
+// refusal is still one of its errors, even one given for the same reason.
+func Test_sshd_WarnsOfATunnelRefusedForAHostThatLeft(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		message string
+		want    string
+	}{
+		{"the proxy had seen the host leave", sshPeerDisconnected, "WARN error opening channel"},
+		{"the host refused it", "could not parse forwarded-streamlocal@openssh.com payload: ssh: short read", "ERROR error opening channel"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				logs := &logRecorder{}
+				s := newBubbleSSHD(t, func(d *sshd) { d.Logger = slog.New(logs) })
+				client := s.dial(t)
+				incoming := client.HandleChannelOpen(forwardedStreamlocalChannelType)
+				sessionID := s.createSession(t, client)
+				ok, body := forwardRequest(t, client, streamlocalForwardChannelType, sessionID)
+				require.True(t, ok, body)
+
+				guest, err := s.network.Session().Dial(sessionID)
+				require.NoError(t, err)
+				t.Cleanup(func() { _ = guest.Close() })
+				require.NoError(t, (<-incoming).Reject(ssh.ConnectionFailed, tc.message))
+				synctest.Wait()
+				require.Equal(t, []string{tc.want}, logs.atLeast(slog.LevelWarn))
+			})
+		})
+	}
+}
+
+// goroutinesIn counts the goroutines with fn anywhere on their stacks.
+func goroutinesIn(fn string) int {
+	buf := make([]byte, 1<<20)
+	for {
+		n := runtime.Stack(buf, true)
+		if n < len(buf) {
+			buf = buf[:n]
+			break
+		}
+		buf = make([]byte, 2*len(buf))
+	}
+	count := 0
+	for g := range strings.SplitSeq(string(buf), "\n\n") {
+		if strings.Contains(g, fn) {
+			count++
+		}
+	}
+	return count
 }
 
 func Test_sshd_ProvenRegistrationDerivesTheID(t *testing.T) {
