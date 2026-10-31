@@ -1,9 +1,11 @@
 package ftests
 
 import (
+	"bytes"
 	"fmt"
 	"net"
 	"net/url"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
@@ -74,4 +76,34 @@ func testForcedCommandSeesTheGuestsConnection(t *testing.T, hostShareURL, hostNo
 			assert.Equal(t, fmt.Sprintf("%s %d %s", guest.IP, guest.Port, relayPort), got["CLIENT"], "SSH_CLIENT")
 		})
 	}
+}
+
+// Preserve the guest's raw quoting and fixed launch directory, ignore env
+// requests per channel, and populate connection metadata on the pipe path.
+func testExecRawQuotingCwdEnv(t *testing.T, hostURL, node, joinURL string) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX quoting, pwd and shell environment syntax")
+	}
+	h := execFixture(t)
+	h.CommandDir = t.TempDir()
+	c := connectRelayGuest(t, shareHost(t, h, hostURL, node), joinURL)
+	s, err := c.sshClient.NewSession()
+	require.NoError(t, err)
+	defer func() { _ = s.Close() }()
+	_ = s.Setenv("UPTERM_GUEST_INJECTED", "bad") // Existing SSH layer may acknowledge it; process must ignore it.
+	var out bytes.Buffer
+	s.Stdout = &out
+	done := make(chan error, 1)
+	go func() {
+		done <- s.Run(`printf '%s\n' 'a b' 'literal $HOME; *' "$(pwd -P)" "${UPTERM_GUEST_INJECTED-unset}" "${SSH_TTY-unset}" "${SSH_ORIGINAL_COMMAND-unset}" "${SSH_CONNECTION-unset}"`)
+	}()
+	require.NoError(t, awaitRelayWait(t, done))
+	lines := strings.Split(strings.TrimSuffix(out.String(), "\n"), "\n")
+	require.Len(t, lines, 7)
+	require.Equal(t, []string{"a b", "literal $HOME; *"}, lines[:2])
+	dir, err := filepath.EvalSymlinks(h.CommandDir)
+	require.NoError(t, err)
+	require.Equal(t, dir, lines[2])
+	require.Equal(t, []string{"unset", "unset", "unset"}, lines[3:6])
+	require.NotEqual(t, "unset", lines[6])
 }
