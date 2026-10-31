@@ -419,6 +419,12 @@ After the first successful forward, the guest appears in session info and join/l
 
 ### Upgrading guest permissions and embeddings
 
+An explicit SSH command (`ssh -t … CMD`) no longer joins the shared terminal
+with `CMD` ignored: it runs `CMD` privately, after approval or with
+`--accept-exec`, and `--accept` doesn't grant it, so a detached `--accept`
+session denies it. Use plain `ssh` or `upterm join` to join the shared
+terminal.
+
 Forced commands now support pipes when the guest requests no PTY. File-transfer
 approval uses the primary host terminal instead of desktop dialogs; `--accept`
 remains the unattended file-transfer option. Guest-wide approvals survive
