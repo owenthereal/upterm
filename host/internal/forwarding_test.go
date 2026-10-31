@@ -533,9 +533,13 @@ type forwardingRig struct {
 	stopped chan struct{}
 	// handled closes once the forward's handler has returned.
 	handled chan struct{}
+	// reads, when the rig holds reads, is what the handler's reads of the
+	// channel wait for: nothing the guest sends leaves the channel until a
+	// test closes it.
+	reads chan struct{}
 }
 
-func startForwardingRig(t *testing.T, hostCtx context.Context) *forwardingRig {
+func startForwardingRig(t *testing.T, hostCtx context.Context, holdReads bool) *forwardingRig {
 	t.Helper()
 	_, private, err := ed25519.GenerateKey(rand.Reader)
 	require.NoError(t, err)
@@ -547,6 +551,9 @@ func startForwardingRig(t *testing.T, hostCtx context.Context) *forwardingRig {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = target.Close() })
 	rig := &forwardingRig{target: target, stopped: make(chan struct{}), handled: make(chan struct{})}
+	if holdReads {
+		rig.reads = make(chan struct{})
+	}
 	var opened atomic.Int32
 	var handlers sync.WaitGroup
 	handle := forwardingHandler(emitter.New(1), &Forwards{}, forwardingPolicy{AllowLoopback: true}, hostCtx, discardLogger())
@@ -567,7 +574,7 @@ func startForwardingRig(t *testing.T, hostCtx context.Context) *forwardingRig {
 			}
 			defer close(rig.handled)
 			var once sync.Once
-			handle(srv, conn, &stopObservedOpen{NewChannel: ch, stop: func() { once.Do(func() { close(rig.stopped) }) }}, ctx)
+			handle(srv, conn, &stopObservedOpen{NewChannel: ch, stop: func() { once.Do(func() { close(rig.stopped) }) }, reads: rig.reads}, ctx)
 		}},
 	}
 	serverDone := make(chan struct{})
@@ -580,10 +587,11 @@ func startForwardingRig(t *testing.T, hostCtx context.Context) *forwardingRig {
 }
 
 // stopObservedOpen accepts the real channel, reporting the handler's first
-// CloseWrite or Close of it.
+// CloseWrite or Close of it, and holding its reads until reads closes.
 type stopObservedOpen struct {
 	ssh.NewChannel
-	stop func()
+	stop  func()
+	reads <-chan struct{}
 }
 
 func (o *stopObservedOpen) Accept() (ssh.Channel, <-chan *ssh.Request, error) {
@@ -591,12 +599,20 @@ func (o *stopObservedOpen) Accept() (ssh.Channel, <-chan *ssh.Request, error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	return &stopObservedChannel{Channel: ch, stop: o.stop}, requests, nil
+	return &stopObservedChannel{Channel: ch, stop: o.stop, reads: o.reads}, requests, nil
 }
 
 type stopObservedChannel struct {
 	ssh.Channel
-	stop func()
+	stop  func()
+	reads <-chan struct{}
+}
+
+func (c *stopObservedChannel) Read(p []byte) (int, error) {
+	if c.reads != nil {
+		<-c.reads
+	}
+	return c.Channel.Read(p)
 }
 
 func (c *stopObservedChannel) CloseWrite() error { c.stop(); return c.Channel.CloseWrite() }
@@ -612,9 +628,8 @@ func (r *forwardingRig) awaitForwardStopped(t *testing.T) {
 	}
 }
 
-// forwardingUpload is more than the target's socket buffers can take without
-// it reading, and within one channel window, so the guest's write completes
-// with most of it still in the channel.
+// forwardingUpload is within one channel window, so the guest's write
+// completes without the forward having read any of it.
 func forwardingUpload() []byte {
 	upload := make([]byte, 1<<20)
 	for i := range upload {
@@ -628,7 +643,7 @@ func forwardingUpload() []byte {
 // the CLOSE, then EOF, however late it starts reading. Only the way back to
 // the guest, which can no longer be written to, stops at once.
 func TestForwardingChannelCloseDeliversWhatTheGuestSent(t *testing.T) {
-	rig := startForwardingRig(t, context.Background())
+	rig := startForwardingRig(t, context.Background(), true)
 	conn, err := rig.client.Dial("tcp", rig.target.Addr().String())
 	require.NoError(t, err)
 	target, err := rig.target.Accept()
@@ -638,9 +653,11 @@ func TestForwardingChannelCloseDeliversWhatTheGuestSent(t *testing.T) {
 	_, err = conn.Write(upload)
 	require.NoError(t, err)
 	require.NoError(t, conn.Close())
-	// The target reads nothing until the forward has acted on the CLOSE, so
-	// what is still in the channel then is what a cut-off would lose.
+	// The forward reads nothing from the channel until it has acted on the
+	// CLOSE, so all of the upload is still there then, however much the
+	// sockets to the target could have taken -- on Linux, close to a window.
 	rig.awaitForwardStopped(t)
+	close(rig.reads)
 	require.NoError(t, target.SetReadDeadline(time.Now().Add(forwardingRigTimeout)))
 	got, err := io.ReadAll(target)
 	require.NoError(t, err)
@@ -662,7 +679,7 @@ func TestForwardingTransportLossAndHostStopEndTheTransfer(t *testing.T) {
 			t.Run(fmt.Sprintf("%s/guest closed=%t", source, guestClosed), func(t *testing.T) {
 				hostCtx, stopHost := context.WithCancel(context.Background())
 				defer stopHost()
-				rig := startForwardingRig(t, hostCtx)
+				rig := startForwardingRig(t, hostCtx, false)
 				conn, err := rig.client.Dial("tcp", rig.target.Addr().String())
 				require.NoError(t, err)
 				target, err := rig.target.Accept()
