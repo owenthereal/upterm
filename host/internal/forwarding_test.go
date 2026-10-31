@@ -519,6 +519,10 @@ func TestForwardingAcceptedChannelCloseStopsTransfer(t *testing.T) {
 	}
 }
 
+// forwardingRigTimeout bounds every wait on a forwardingRig, so a forward that
+// wedges fails its own test rather than timing out the package.
+const forwardingRigTimeout = 10 * time.Second
+
 // forwardingRig is one guest connection to a server serving forwardingHandler
 // alone, and a target it may forward to. Only its first forward is observed.
 type forwardingRig struct {
@@ -603,7 +607,7 @@ func (r *forwardingRig) awaitForwardStopped(t *testing.T) {
 	t.Helper()
 	select {
 	case <-r.stopped:
-	case <-time.After(harnessTimeout):
+	case <-time.After(forwardingRigTimeout):
 		t.Fatal("forward never stopped its way back to the guest")
 	}
 }
@@ -637,14 +641,14 @@ func TestForwardingChannelCloseDeliversWhatTheGuestSent(t *testing.T) {
 	// The target reads nothing until the forward has acted on the CLOSE, so
 	// what is still in the channel then is what a cut-off would lose.
 	rig.awaitForwardStopped(t)
-	require.NoError(t, target.SetReadDeadline(time.Now().Add(harnessTimeout)))
+	require.NoError(t, target.SetReadDeadline(time.Now().Add(forwardingRigTimeout)))
 	got, err := io.ReadAll(target)
 	require.NoError(t, err)
 	require.Equal(t, len(upload), len(got), "bytes delivered")
 	require.True(t, bytes.Equal(upload, got), "delivered bytes differ from the upload")
 	select {
 	case <-rig.handled:
-	case <-time.After(harnessTimeout):
+	case <-time.After(forwardingRigTimeout):
 		t.Fatal("forward's handler outlived its delivered upload")
 	}
 }
@@ -682,17 +686,17 @@ func TestForwardingTransportLossAndHostStopEndTheTransfer(t *testing.T) {
 				}
 				select {
 				case <-rig.handled:
-				case <-time.After(harnessTimeout):
+				case <-time.After(forwardingRigTimeout):
 					t.Fatal("forward waited on a target that wasn't reading")
 				}
 				select {
 				case <-guestDone:
-				case <-time.After(harnessTimeout):
+				case <-time.After(forwardingRigTimeout):
 					t.Fatal("guest's side of the forward stayed open")
 				}
 				// The target's side is closed too: it reads what reached it,
 				// then its end, not the deadline.
-				require.NoError(t, target.SetReadDeadline(time.Now().Add(harnessTimeout)))
+				require.NoError(t, target.SetReadDeadline(time.Now().Add(forwardingRigTimeout)))
 				_, err = io.Copy(io.Discard, target)
 				var netErr net.Error
 				require.False(t, errors.As(err, &netErr) && netErr.Timeout(), "target's side stayed open: %v", err)
