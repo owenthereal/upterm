@@ -240,6 +240,15 @@ func (h *wsHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := g.Run(); err != nil {
+		// A host or guest leaving ends its WebSocket, and upterm's clients end
+		// it by closing the connection without a close frame, which reads as an
+		// abnormal closure. Either way the pipe has ended, not failed, and
+		// there is no one left to send a close frame to.
+		var closed *websocket.CloseError
+		if errors.As(err, &closed) {
+			h.Logger.Debug("websocket closed", "error", err)
+			return
+		}
 		h.wsError(wsc, err, "error piping")
 	}
 }

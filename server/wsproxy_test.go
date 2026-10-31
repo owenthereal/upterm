@@ -199,14 +199,14 @@ func (d *noDialer) DialContext(context.Context, *api.Identifier) (net.Conn, erro
 
 // openGuestWS opens the WebSocket a guest of an unknown session would, with
 // session as its user.
-func openGuestWS(t *testing.T, h *wsHandler, session string) *websocket.Conn {
+func openGuestWS(t *testing.T, h http.Handler, session string) *websocket.Conn {
 	t.Helper()
 	return openGuestWSWithAuth(t, h, session, "")
 }
 
 // openGuestWSWithAuth is openGuestWS with user and pass as the guest's
 // basic-auth credentials, which embedded mode rejoins into one SSH user.
-func openGuestWSWithAuth(t *testing.T, h *wsHandler, user, pass string) *websocket.Conn {
+func openGuestWSWithAuth(t *testing.T, h http.Handler, user, pass string) *websocket.Conn {
 	t.Helper()
 	srv := httptest.NewServer(h)
 	t.Cleanup(srv.Close)
@@ -474,6 +474,59 @@ func Test_WebSocketProxy_ANeighboursGuestIsDialedDirectly(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, int32(1), dialedNeighbour.Load(), "the neighbour was not dialed")
 	require.Zero(t, dialedInternal.Load(), "this node's internal listener was dialed")
+}
+
+// A guest leaving ends its WebSocket, and upterm's own clients end it by
+// closing the connection without a close frame, which reads as an abnormal
+// closure. Either way the pipe has ended, not failed, so it isn't reported. A
+// node's connection failing is the relay's own, and stays an error.
+func Test_WebSocketProxy_AGuestEndingItsWebSocketIsNotAnError(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		end  func(guest *websocket.Conn, node *net.TCPConn)
+		want []string
+	}{
+		{"the guest closes without a close frame", func(guest *websocket.Conn, _ *net.TCPConn) {
+			_ = guest.Close()
+		}, nil},
+		{"the guest sends a close frame", func(guest *websocket.Conn, _ *net.TCPConn) {
+			_ = guest.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""))
+		}, nil},
+		{"the node resets the connection", func(_ *websocket.Conn, node *net.TCPConn) {
+			_ = node.SetLinger(0)
+			_ = node.Close()
+		}, []string{"ERROR error piping"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ln, err := net.Listen("tcp", "127.0.0.1:0")
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = ln.Close() })
+
+			discard := slog.New(slog.DiscardHandler)
+			sm := newSessionManagerWithStore(newMemorySessionStore(discard), routing.NewEncodeDecoder(routing.ModeConsul))
+			user, err := sm.CreateSession(NewSession("session", ln.Addr().String(), "host", nil, nil))
+			require.NoError(t, err)
+			logs := &logRecorder{}
+			h := &wsHandler{ConnDialer: tcpConnDialer{}, SessionManager: sm, Logger: slog.New(logs)}
+			served := make(chan struct{})
+			guest := openGuestWS(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				defer close(served)
+				h.ServeHTTP(w, r)
+			}), user)
+
+			node, err := ln.Accept()
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = node.Close() })
+			tc.end(guest, node.(*net.TCPConn))
+
+			select {
+			case <-served:
+			case <-time.After(10 * time.Second):
+				t.Fatal("the handler is still piping")
+			}
+			require.Equal(t, tc.want, logs.atLeast(slog.LevelWarn))
+		})
+	}
 }
 
 // Every upterm client sends its version and credentials, so a request missing
