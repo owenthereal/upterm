@@ -26,6 +26,8 @@ UPTERMD_ROUTING            = "auto"
 # otherwise, in which case UPTERMD_ROUTING=auto selects embedded routing.
 UPTERMD_CONSUL_URL         = "${FLY_CONSUL_URL:-}"
 UPTERMD_CONSUL_SESSION_TTL = "1h"
+# Keeps Go's heap inside the machine; raise it with memory_mb below. See fly.toml.
+GOMEMLIMIT                 = "128MiB"
 
 # Routing Configuration:
 # UPTERMD_ROUTING=auto selects Consul routing when UPTERMD_CONSUL_URL is
