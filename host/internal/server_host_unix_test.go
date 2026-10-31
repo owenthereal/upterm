@@ -420,18 +420,19 @@ func TestReadOnlyPrivateCommandsDropInput(t *testing.T) {
 				var in io.Writer
 				var out io.Reader
 				var stderr recordingWriter
+				var piped *ssh.Session
 				if pty {
 					in, out = h.connectGuest(t)
 					readUntil(t, out, "\r\n"+notice+"\r\n")
 				} else {
-					s := execSession(t, h.guestClient(t), false)
-					s.Stderr = &stderr
+					piped = execSession(t, h.guestClient(t), false)
+					piped.Stderr = &stderr
 					var err error
-					in, err = s.StdinPipe()
+					in, err = piped.StdinPipe()
 					require.NoError(t, err)
-					out, err = s.StdoutPipe()
+					out, err = piped.StdoutPipe()
 					require.NoError(t, err)
-					require.NoError(t, s.Shell())
+					require.NoError(t, piped.Shell())
 				}
 				readUntil(t, out, "READY")
 				// More than a channel's window: only a host that reads it takes
@@ -447,6 +448,9 @@ func TestReadOnlyPrivateCommandsDropInput(t *testing.T) {
 				require.NoError(t, os.WriteFile(done, nil, 0o600))
 				require.NotContains(t, readUntil(t, out, "DONE"), "x")
 				if !pty {
+					// x/crypto copies stderr on a goroutine of its own; Wait is
+					// what says that copy has finished.
+					require.NoError(t, piped.Wait())
 					require.Equal(t, notice, string(stderr.bytes()))
 				}
 			})

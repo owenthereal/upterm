@@ -319,13 +319,13 @@ func (h execAuditHandler) WithGroup(name string) slog.Handler {
 
 func TestGuestExecAuditCancellationDuringLogging(t *testing.T) {
 	for _, policy := range []string{"pregrant", "forced", "consent"} {
-		for _, owner := range []string{"host", "stop", "transport", "channel", "deadline"} {
+		for _, owner := range []string{"host", "stop", "join timeout", "transport", "channel", "deadline"} {
 			t.Run(policy+"/"+owner, func(t *testing.T) {
 				synctest.Test(t, func(t *testing.T) {
 					host, cancelHost := context.WithCancel(t.Context())
 					defer cancelHost()
-					stop, cancelStop := context.WithCancel(t.Context())
-					defer cancelStop()
+					stop, cancelStop := context.WithCancelCause(t.Context())
+					defer cancelStop(nil)
 					transport, cancelTransport := context.WithCancel(t.Context())
 					defer cancelTransport()
 					closed := make(chan struct{})
@@ -340,7 +340,9 @@ func TestGuestExecAuditCancellationDuringLogging(t *testing.T) {
 						case "host":
 							cancelHost()
 						case "stop":
-							cancelStop()
+							cancelStop(nil)
+						case "join timeout":
+							cancelStop(ErrJoinTimeout)
 						case "transport":
 							cancelTransport()
 						case "channel":
@@ -423,9 +425,9 @@ func TestGuestExecAuditCanceledBeforeHandler(t *testing.T) {
 }
 
 // A request still waiting for approval when the host stops was ended by the
-// stop, not refused by policy. It is told nothing about approval, and its
-// status is the one any client arriving as the session ends gets: 1 for a
-// stop, 0 after a join timeout.
+// stop, not refused by policy. It is told nothing about approval, and as its
+// command never ran it exits 1 whatever ended the session -- a join timeout
+// too, though a shell arriving after one is sent 0.
 func TestGuestExecConsentEndedByHostStop(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
@@ -433,7 +435,7 @@ func TestGuestExecConsentEndedByHostStop(t *testing.T) {
 		code  int
 	}{
 		{"stopped", ErrSessionStopped, 1},
-		{"join timeout", ErrJoinTimeout, 0},
+		{"join timeout", ErrJoinTimeout, 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {

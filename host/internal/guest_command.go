@@ -248,10 +248,19 @@ func (h *sessionHandler) handlePrivateCommand(sess gssh.Session, selection guest
 	exitBeforeStart := func() {
 		// Preserve the original ctx-before-stop status precedence.
 		if ctx.Err() == nil && h.stopCtx != nil && h.stopCtx.Err() != nil {
-			h.exitLate(sess)
-		} else {
-			_ = sess.Exit(1)
+			if sessionRequestType(sess) != "exec" {
+				h.exitLate(sess)
+				return
+			}
+			// An exec that never ran never reports success, whatever ended the
+			// session: a stop, signal or cancellation is sent as exitLate sends
+			// it, and anything else, a join timeout included, is a plain 1.
+			if kind, sig, _, _ := h.endingCause(); kind.overrides() {
+				h.exitWith(sess, kind.end(sig), 1)
+				return
+			}
 		}
+		_ = sess.Exit(1)
 	}
 	if selectionErr != nil {
 		logPermission(selectionErr)
