@@ -137,7 +137,11 @@ func TestGuestProcessWindowsJob(t *testing.T) {
 		result, err := windows.WaitForSingleObject(handle, 2000)
 		require.NoError(t, err)
 		require.Equal(t, uint32(windows.WAIT_OBJECT_0), result)
-		require.Error(t, c.Wait())
+		// Closing the job ended a process that waits forever. The status it
+		// ended with is Windows' choice -- a kill-on-close job's processes have
+		// reported 0 -- so what is asserted is that Wait then reaps it.
+		_ = c.Wait()
+		require.NotNil(t, c.ProcessState, "the process the job ended must be reaped")
 	})
 	t.Run("assignment failure reaps child", func(t *testing.T) {
 		c := command()

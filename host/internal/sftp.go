@@ -247,6 +247,21 @@ func (s *SFTPSession) resolvePath(reqPath string) (string, error) {
 	return filepath.Clean(reqPath), nil
 }
 
+// localPaths is what a read-only denial records for the request's paths: the
+// local paths a permission check would have been given, so every policy
+// record names a file the same way. On Windows the request's own spelling,
+// /C:/dir/file, is never that.
+func (s *SFTPSession) localPaths(reqPaths ...string) []string {
+	local := make([]string, len(reqPaths))
+	for i, reqPath := range reqPaths {
+		local[i] = reqPath
+		if resolved, err := s.resolvePath(reqPath); err == nil {
+			local[i] = resolved
+		}
+	}
+	return local
+}
+
 // undoubleDriveLetter repairs a path a client sent in native Windows form.
 //
 // SFTP paths are POSIX on every platform, so an absolute path on a Windows
@@ -330,7 +345,7 @@ func (h *sftpFileWriter) Filewrite(r *sftp.Request) (io.WriterAt, error) {
 	defer cancel()
 	// Deny uploads in read-only mode
 	if h.session.readOnly {
-		h.session.logPermission(requestID, consent.OpUpload, []string{r.Filepath}, consent.ErrDenied)
+		h.session.logPermission(requestID, consent.OpUpload, h.session.localPaths(r.Filepath), consent.ErrDenied)
 		h.logger.Info("SFTP upload denied (read-only mode)", "path", r.Filepath)
 		return nil, sftp.ErrSSHFxPermissionDenied
 	}
@@ -393,7 +408,7 @@ func (h *sftpFileCmder) Filecmd(r *sftp.Request) error {
 		if r.Method == "Rename" || r.Method == "Symlink" || r.Method == "Link" {
 			subjects = append(subjects, r.Target)
 		}
-		h.session.logPermission(requestID, op, subjects, consent.ErrDenied)
+		h.session.logPermission(requestID, op, h.session.localPaths(subjects...), consent.ErrDenied)
 		h.logger.Info("SFTP command denied (read-only mode)", "method", r.Method, "path", r.Filepath)
 		return sftp.ErrSSHFxPermissionDenied
 	}
