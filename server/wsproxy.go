@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -172,7 +173,16 @@ func (h *wsHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				h.wsError(wsc, err, "error resolving SSH user")
 				return
 			}
-			h.Logger.Error("error resolving SSH user", "error", err)
+			// A session that isn't stored, or a user that names none, is the
+			// guest's to put right, and the SSH proxy tells it how, so it is a
+			// warning. A store that couldn't answer is an error.
+			level := slog.LevelWarn
+			var lookup *lookupError
+			var missing *ErrSessionNotFound
+			if errors.As(err, &lookup) && !errors.As(err, &missing) {
+				level = slog.LevelError
+			}
+			h.Logger.Log(r.Context(), level, "error resolving SSH user", "error", err)
 		} else {
 			id = &api.Identifier{
 				Id:       sessionID,
@@ -191,11 +201,12 @@ func (h *wsHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// route can't, and its hand-off buys only a second dial and a generic SSH
 	// rejection, which still keeps the dial error out of the close frame. An
 	// embedded-mode guest's node is its user's own choice, and there is
-	// nothing to refresh it from.
+	// nothing to refresh it from. The refused dial is a warning: the hand-off
+	// usually recovers it, and a guest it doesn't is logged as an error below.
 	if err != nil && id.Type == api.Identifier_CLIENT && id.NodeAddr != "" &&
 		h.SessionManager.GetRoutingMode() == routing.ModeConsul {
 		if handOff := h.sshProxyHandOff(id.Id); handOff != nil {
-			h.Logger.Error("error dialing the session's node", "error", err, "node", id.NodeAddr)
+			h.Logger.Warn("error dialing the session's node", "error", err, "node", id.NodeAddr)
 			conn, err = h.ConnDialer.Dial(handOff)
 		}
 	}
@@ -229,6 +240,15 @@ func (h *wsHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := g.Run(); err != nil {
+		// A host or guest leaving ends its WebSocket, and upterm's clients end
+		// it by closing the connection without a close frame, which reads as an
+		// abnormal closure. Either way the pipe has ended, not failed, and
+		// there is no one left to send a close frame to.
+		var closed *websocket.CloseError
+		if errors.As(err, &closed) {
+			h.Logger.Debug("websocket closed", "error", err)
+			return
+		}
 		h.wsError(wsc, err, "error piping")
 	}
 }
@@ -243,8 +263,11 @@ func (h *wsHandler) sshProxyHandOff(sessionID string) *api.Identifier {
 	return &api.Identifier{Id: sessionID, Type: api.Identifier_CLIENT}
 }
 
+// httpError turns away a request the handler won't upgrade. That is the
+// sender's to put right, and every upterm client sends what the handler
+// checks, so it is a warning: what gets here is mostly browsers and scanners.
 func (h *wsHandler) httpError(w http.ResponseWriter, err error) {
-	h.Logger.Error("http error", "error", err)
+	h.Logger.Warn("http error", "error", err)
 	w.WriteHeader(400)
 	_, _ = w.Write([]byte(err.Error()))
 }

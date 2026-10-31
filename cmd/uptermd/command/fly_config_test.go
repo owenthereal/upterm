@@ -1,6 +1,8 @@
 package command
 
 import (
+	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -124,12 +126,10 @@ func setFlyEnv(t *testing.T, consulURL string) {
 	t.Setenv("FLY_CONSUL_URL", consulURL)
 }
 
-// loadShippedFlyEnv reads the [env] block out of a committed TOML file and
-// applies it to the process environment, mimicking what Fly does at runtime.
-func loadShippedFlyEnv(t *testing.T, file string) {
+// readShippedFlyEnv is the [env] block of a committed TOML file, with its keys
+// lowercased, as viper reads them.
+func readShippedFlyEnv(t *testing.T, file string) map[string]string {
 	t.Helper()
-	resetUptermdEnv(t)
-
 	// viper already parses TOML; no new dependency is needed.
 	cfg := viper.New()
 	cfg.SetConfigFile(filepath.Join("..", "..", "..", file))
@@ -137,9 +137,17 @@ func loadShippedFlyEnv(t *testing.T, file string) {
 
 	env := cfg.GetStringMapString("env")
 	require.NotEmpty(t, env, "[env] block is missing")
+	return env
+}
+
+// loadShippedFlyEnv reads the [env] block out of a committed TOML file and
+// applies it to the process environment, mimicking what Fly does at runtime.
+func loadShippedFlyEnv(t *testing.T, file string) {
+	t.Helper()
+	resetUptermdEnv(t)
 
 	// viper lowercases keys; uppercase them back into real variables.
-	for k, v := range env {
+	for k, v := range readShippedFlyEnv(t, file) {
 		t.Setenv(strings.ToUpper(k), v)
 	}
 	t.Setenv("FLY_MACHINE_ID", "d891")
@@ -189,5 +197,30 @@ func TestShippedFlyConfigsDecode(t *testing.T) {
 			require.Equal(t, "d891.vm.upterm.internal:2222", opt.NodeAddr)
 			require.NoError(t, opt.Validate())
 		})
+	}
+}
+
+// TestShippedFlyConfigsGOMEMLIMITStarts starts a Go program with each committed
+// file's GOMEMLIMIT. The runtime reads it before main and refuses to start on a
+// value it can't parse, so a typo would stop every machine on deploy, before
+// uptermd could log anything.
+func TestShippedFlyConfigsGOMEMLIMITStarts(t *testing.T) {
+	starts := func(limit string) ([]byte, error) {
+		// This test binary, running no tests: all that runs is the runtime's
+		// own start.
+		child := exec.Command(os.Args[0], "-test.run=^$")
+		child.Env = append(os.Environ(), "GOMEMLIMIT="+limit)
+		return child.CombinedOutput()
+	}
+
+	out, err := starts("128MB")
+	require.Error(t, err, "a malformed GOMEMLIMIT started anyway, so a pass below would prove nothing")
+	require.Contains(t, string(out), "GOMEMLIMIT")
+
+	for _, file := range []string{"fly.toml", "fly.example.toml"} {
+		limit := readShippedFlyEnv(t, file)["gomemlimit"]
+		require.NotEmpty(t, limit, "%s sets no GOMEMLIMIT", file)
+		out, err := starts(limit)
+		require.NoError(t, err, "%s: GOMEMLIMIT=%s: %s", file, limit, out)
 	}
 }
