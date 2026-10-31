@@ -423,7 +423,6 @@ func TestReadOnlyPrivateCommandsDropInput(t *testing.T) {
 				var piped *ssh.Session
 				if pty {
 					in, out = h.connectGuest(t)
-					readUntil(t, out, "\r\n"+notice+"\r\n")
 				} else {
 					piped = execSession(t, h.guestClient(t), false)
 					piped.Stderr = &stderr
@@ -434,7 +433,13 @@ func TestReadOnlyPrivateCommandsDropInput(t *testing.T) {
 					require.NoError(t, err)
 					require.NoError(t, piped.Shell())
 				}
-				readUntil(t, out, "READY")
+				// One read up to READY: a read for the notice alone could take the
+				// command's output with it. With a terminal the notice comes
+				// first, on the same stream, and nothing else comes before READY.
+				seen := readUntil(t, out, "READY")
+				if pty {
+					require.Equal(t, "\r\n"+notice+"\r\n"+"READY", seen)
+				}
 				// More than a channel's window: only a host that reads it takes
 				// it all, and the terminal would echo any of it the command got.
 				typed := make(chan error, 1)
