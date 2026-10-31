@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -172,7 +173,16 @@ func (h *wsHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				h.wsError(wsc, err, "error resolving SSH user")
 				return
 			}
-			h.Logger.Error("error resolving SSH user", "error", err)
+			// A session that isn't stored, or a user that names none, is the
+			// guest's to put right, and the SSH proxy tells it how, so it is a
+			// warning. A store that couldn't answer is an error.
+			level := slog.LevelWarn
+			var lookup *lookupError
+			var missing *ErrSessionNotFound
+			if errors.As(err, &lookup) && !errors.As(err, &missing) {
+				level = slog.LevelError
+			}
+			h.Logger.Log(r.Context(), level, "error resolving SSH user", "error", err)
 		} else {
 			id = &api.Identifier{
 				Id:       sessionID,

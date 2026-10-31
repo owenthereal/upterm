@@ -322,6 +322,40 @@ func Test_WebSocketProxy_ADialTheHandOffRecoversIsAWarning(t *testing.T) {
 	require.Equal(t, []string{"WARN error dialing the session's node"}, logs.atLeast(slog.LevelWarn))
 }
 
+// A guest the handler can't resolve is handed to the SSH proxy, which refuses
+// it with the reason. A session that isn't stored, or a user that names none,
+// is the guest's to put right, so it is a warning. A store that couldn't
+// answer is the relay's own failure, and stays an error, which is what gets
+// reported.
+func Test_WebSocketProxy_AGuestsUnresolvedUserIsAWarning(t *testing.T) {
+	discard := slog.New(slog.DiscardHandler)
+	for _, tc := range []struct {
+		name       string
+		mode       routing.Mode
+		store      SessionStore
+		user, pass string
+		want       string
+	}{
+		{"a session that isn't stored", routing.ModeConsul, newMemorySessionStore(discard), "nosuchsession", "", "WARN error resolving SSH user"},
+		{"a user that names no session", routing.ModeEmbedded, newMemorySessionStore(discard), "session", "not base64!", "WARN error resolving SSH user"},
+		{"a store that can't answer", routing.ModeConsul, failingStore{newMemorySessionStore(discard)}, "session", "", "ERROR error resolving SSH user"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			logs := &logRecorder{}
+			c := openGuestWSWithAuth(t, &wsHandler{
+				ConnDialer:     sshProxyDialer{sshProxyAddr: standInSSHProxy(t), nodeAddrFromStore: tc.mode == routing.ModeConsul, Logger: discard},
+				SessionManager: newSessionManagerWithStore(tc.store, routing.NewEncodeDecoder(tc.mode)),
+				Logger:         slog.New(logs),
+			}, tc.user, tc.pass)
+
+			_, msg, err := c.ReadMessage()
+			require.NoError(t, err)
+			require.Equal(t, "from the SSH proxy", string(msg))
+			require.Equal(t, []string{tc.want}, logs.atLeast(slog.LevelWarn))
+		})
+	}
+}
+
 // logRecorder is a slog handler that keeps the level and message of each
 // record.
 type logRecorder struct {
