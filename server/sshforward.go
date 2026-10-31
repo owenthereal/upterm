@@ -246,6 +246,10 @@ type sshForwarder struct {
 // permit, so the count of live channels stays as unlimited as SSH itself.
 const maxSSHConcurrentChannelOpens = 64
 
+// sshPeerDisconnected is the rejection for an open that reaches the forwarder
+// once the connection has started shutting down.
+const sshPeerDisconnected = "SSH peer disconnected"
+
 // Once draining starts, stop opening channels and report completion of the
 // accepted channels independently of connection Wait. Keep rejecting incoming
 // opens until transport shutdown so the surviving mux never loses its reader.
@@ -266,7 +270,7 @@ func (f sshForwarder) channels(destination ssh.Conn, channels <-chan ssh.NewChan
 			go finish()
 			workers.Go(settle)
 			for channel := range channels {
-				_ = channel.Reject(ssh.ConnectionFailed, "SSH peer disconnected")
+				_ = channel.Reject(ssh.ConnectionFailed, sshPeerDisconnected)
 			}
 			<-done
 			return
@@ -336,7 +340,7 @@ func (f sshForwarder) channel(destination ssh.Conn, incoming ssh.NewChannel, acc
 		return
 	}
 	if !accepted.start() {
-		_ = incoming.Reject(ssh.ConnectionFailed, "SSH peer disconnected")
+		_ = incoming.Reject(ssh.ConnectionFailed, sshPeerDisconnected)
 		_ = remote.Close()
 		ssh.DiscardRequests(remoteRequests)
 		return
