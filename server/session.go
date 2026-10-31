@@ -869,15 +869,16 @@ func (c *consulSessionStore) Release(ctx context.Context, reg *Registration) err
 	return c.release(ctx, reg.ID(), reg.lease)
 }
 
-// releaseAttemptTimeout bounds each attempt to destroy a lock session. Callers
-// give a release DefaultConsulTimeout in all, so an attempt that gets no answer
-// leaves the others time to run.
-const releaseAttemptTimeout = DefaultConsulTimeout / DefaultMaxRetries
+// consulAttemptTimeout bounds each attempt of a Consul call whose callers give
+// it a deadline: DefaultConsulTimeout for a release, and shutdown's cleanup
+// deadline for the listing and the batch delete. An attempt that gets no
+// answer then leaves the others time to run.
+const consulAttemptTimeout = DefaultConsulTimeout / DefaultMaxRetries
 
 func (c *consulSessionStore) release(ctx context.Context, sessionID, lease string) error {
 	err := retry.Do(
 		func() error {
-			ctx, cancel := context.WithTimeout(ctx, releaseAttemptTimeout)
+			ctx, cancel := context.WithTimeout(ctx, consulAttemptTimeout)
 			defer cancel()
 			if _, err := c.client.Session().Destroy(lease, (&api.WriteOptions{}).WithContext(ctx)); err != nil {
 				return fmt.Errorf("failed to destroy consul lock session: %w", err)
@@ -1189,6 +1190,8 @@ func (c *consulSessionStore) deleteBatch(ctx context.Context, entries []heldEntr
 		)
 		err := retry.Do(
 			func() error {
+				ctx, cancel := context.WithTimeout(ctx, consulAttemptTimeout)
+				defer cancel()
 				var err error
 				ok, resp, _, err = c.client.KV().Txn(ops, (&api.QueryOptions{}).WithContext(ctx))
 				if err != nil {
@@ -1271,6 +1274,8 @@ func (c *consulSessionStore) list(ctx context.Context) ([]*Session, error) {
 
 	err := retry.Do(
 		func() error {
+			ctx, cancel := context.WithTimeout(ctx, consulAttemptTimeout)
+			defer cancel()
 			pairs, _, err := c.client.KV().List(c.SessionsKey(), (&api.QueryOptions{}).WithContext(ctx))
 			if err != nil {
 				return fmt.Errorf("failed to list sessions: %w", err)
