@@ -39,14 +39,36 @@ func execSession(t *testing.T, c *ssh.Client, pty bool) *ssh.Session {
 	return s
 }
 
+// What a refused guest is told is all it learns: each notice names the real
+// cause, and a remedy only where one could change the answer.
+const (
+	execDisabledNotice    = "upterm: guest exec is disabled for this session.\r\n"
+	execUnavailableNotice = "upterm: guest exec denied; nothing on the host can approve it now. The host can attach its terminal or run with --accept-exec.\r\n"
+	execDeniedNotice      = "upterm: the host denied this command.\r\n"
+	execTimeoutNotice     = "upterm: guest exec denied; the request timed out before it was approved.\r\n"
+)
+
 func TestGuestExecSSH(t *testing.T) {
-	for _, policy := range []string{"unavailable", "denied", "readonly", "no-exec", "accept-is-sftp-only"} {
+	for _, tc := range []struct{ policy, notice string }{
+		{"unavailable", execUnavailableNotice},
+		{"denied", execDeniedNotice},
+		{"timeout", execTimeoutNotice},
+		{"readonly", execDisabledNotice},
+		{"no-exec", execDisabledNotice},
+		{"accept-is-sftp-only", execUnavailableNotice},
+	} {
+		policy := tc.policy
 		t.Run("denial/"+policy, func(t *testing.T) {
 			marker := filepath.Join(t.TempDir(), "started")
 			srv := &Server{Command: readsALine("HOST", 0)}
 			if policy == "denied" {
 				srv.PermissionChecker = execPermissionFunc(func(context.Context, consent.Operation, consent.ClientInfo, ...string) (consent.Decision, error) {
 					return consent.Deny, nil
+				})
+			}
+			if policy == "timeout" {
+				srv.PermissionChecker = execPermissionFunc(func(context.Context, consent.Operation, consent.ClientInfo, ...string) (consent.Decision, error) {
+					return consent.Deny, consent.ErrTimeout
 				})
 			}
 			if policy == "readonly" {
@@ -69,7 +91,7 @@ func TestGuestExecSSH(t *testing.T) {
 			s.Stderr = &stderr
 			requireExitStatus(t, s.Run(fmt.Sprintf("touch %q", marker)), 1)
 			require.Empty(t, out.String())
-			require.Contains(t, stderr.String(), "exec")
+			require.Equal(t, tc.notice, stderr.String())
 			_, err := os.Stat(marker)
 			require.ErrorIs(t, err, os.ErrNotExist)
 		})

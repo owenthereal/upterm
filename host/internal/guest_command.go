@@ -28,12 +28,16 @@ type guestCommandSelection struct {
 	RawCommand                           string
 }
 
+// errGuestExecDisabled is --read-only's and --no-exec's denial. Nothing a
+// guest or the host's terminal does can lift it for this run.
+var errGuestExecDisabled = errors.New("guest exec is disabled")
+
 func selectGuestCommand(requestType, raw string, p guestCommandPolicy) (guestCommandSelection, error) {
 	selection := guestCommandSelection{RawCommand: raw}
 	switch requestType {
 	case "exec":
 		if p.ReadOnly || p.ExecDisabled {
-			return selection, fmt.Errorf("guest exec is disabled")
+			return selection, errGuestExecDisabled
 		}
 		if len(p.ForceCommand) > 0 {
 			selection.Argv = p.ForceCommand
@@ -142,6 +146,32 @@ func execLogText(text string) string {
 	return strconv.QuoteToASCII(text)
 }
 
+// execDenialNotice is what a guest whose command won't run is told, in the
+// order the audit classifies the same error. Hard policy comes before any
+// grant or prompt, so only a request that could have been approved is offered
+// a way to be.
+func execDenialNotice(err error) string {
+	switch {
+	case errors.Is(err, errGuestExecDisabled):
+		return "upterm: guest exec is disabled for this session.\r\n"
+	case errors.Is(err, consent.ErrUnavailable):
+		return "upterm: guest exec denied; nothing on the host can approve it now. The host can attach its terminal or run with --accept-exec.\r\n"
+	case errors.Is(err, context.DeadlineExceeded), errors.Is(err, consent.ErrTimeout):
+		return "upterm: guest exec denied; the request timed out before it was approved.\r\n"
+	case errors.Is(err, context.Canceled), errors.Is(err, consent.ErrCanceled):
+		return "upterm: guest exec request canceled.\r\n"
+	case errors.Is(err, consent.ErrOverloaded):
+		return "upterm: guest exec denied; too many permission requests are waiting. Try again later.\r\n"
+	case errors.Is(err, consent.ErrStale):
+		return "upterm: guest exec denied; the host's answer came after the request ended.\r\n"
+	case errors.Is(err, consent.ErrSubjectTooLarge):
+		return fmt.Sprintf("upterm: guest exec denied; the command is longer than the %d bytes approval can show.\r\n", consent.MaxSubjectBytes)
+	case errors.Is(err, consent.ErrDenied):
+		return "upterm: the host denied this command.\r\n"
+	}
+	return "upterm: guest exec denied.\r\n"
+}
+
 func (h *sessionHandler) handlePrivateCommand(sess gssh.Session, selection guestCommandSelection, selectionErr error) {
 	var auth *server.AuthRequest
 	client := consent.ClientInfo{ConnectionID: sess.Context().Value(gssh.ContextKeySessionID).(string)}
@@ -225,7 +255,13 @@ func (h *sessionHandler) handlePrivateCommand(sess gssh.Session, selection guest
 	}
 	if selectionErr != nil {
 		logPermission(selectionErr)
-		guestCommandDiagnostic(sess, "upterm: guest exec denied; approval in the primary host terminal or --accept-exec is required.\r\n")
+		// A request whose channel, transport or host has gone was ended by
+		// that, whatever the check returned: it ends as one arriving then does.
+		if operationError() != nil {
+			exitBeforeStart()
+			return
+		}
+		guestCommandDiagnostic(sess, execDenialNotice(selectionErr))
 		_ = sess.Exit(1)
 		return
 	}
