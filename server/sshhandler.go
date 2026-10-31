@@ -63,6 +63,25 @@ func isExpectedShutdownError(err error) bool {
 	return false
 }
 
+// sshOpenUnanswered is x/crypto's error for a channel open still waiting for
+// its answer when the connection ends (mux.go). There is no exported error to
+// match on, so match the text: if it ever drifts the refusal is simply logged
+// as an error, which is the safe direction to fail in.
+const sshOpenUnanswered = "ssh: unexpected packet in response to channel open: <nil>"
+
+// refusedForHostLeaving reports whether err is the SSH proxy refusing a channel
+// open because its connection from the host is ending. The open either reached
+// the proxy once that connection had started shutting down, or was waiting for
+// the host's answer when it ended, which the proxy passes on in x/crypto's
+// words.
+func refusedForHostLeaving(err error) bool {
+	var rejection *gossh.OpenChannelError
+	if !errors.As(err, &rejection) || rejection.Reason != gossh.ConnectionFailed {
+		return false
+	}
+	return rejection.Message == sshPeerDisconnected || rejection.Message == sshOpenUnanswered
+}
+
 func newStreamlocalForwardHandler(
 	work *sshSessionWork,
 	sessionManager *SessionManager,
@@ -124,7 +143,14 @@ func (h *streamlocalForwardHandler) handleConnection(ctx ssh.Context, conn *goss
 
 	ch, reqs, err := conn.OpenChannel(forwardedStreamlocalChannelType, payload)
 	if err != nil {
-		logger.Error("error opening channel", "error", err)
+		// A guest that arrives as its host leaves is turned away: there is no
+		// host to take its tunnel. Its connection fails as it must, but nothing
+		// is wrong with the relay, so it is a warning.
+		level := slog.LevelError
+		if refusedForHostLeaving(err) {
+			level = slog.LevelWarn
+		}
+		logger.Log(ctx, level, "error opening channel", "error", err)
 		return
 	}
 	defer func() {

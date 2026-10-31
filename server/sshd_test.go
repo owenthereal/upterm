@@ -1252,6 +1252,39 @@ func Test_sshd_ReleasesACancelledForwardWhileItsHostStays(t *testing.T) {
 	})
 }
 
+// The proxy refuses a guest's tunnel for a host whose connection is ending,
+// which is no fault of the relay's, so the sshd logs it as a warning. Any other
+// refusal is still one of its errors, even one given for the same reason.
+func Test_sshd_WarnsOfATunnelRefusedForAHostThatLeft(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		message string
+		want    string
+	}{
+		{"the proxy had seen the host leave", sshPeerDisconnected, "WARN error opening channel"},
+		{"the host refused it", "could not parse forwarded-streamlocal@openssh.com payload: ssh: short read", "ERROR error opening channel"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				logs := &logRecorder{}
+				s := newBubbleSSHD(t, func(d *sshd) { d.Logger = slog.New(logs) })
+				client := s.dial(t)
+				incoming := client.HandleChannelOpen(forwardedStreamlocalChannelType)
+				sessionID := s.createSession(t, client)
+				ok, body := forwardRequest(t, client, streamlocalForwardChannelType, sessionID)
+				require.True(t, ok, body)
+
+				guest, err := s.network.Session().Dial(sessionID)
+				require.NoError(t, err)
+				t.Cleanup(func() { _ = guest.Close() })
+				require.NoError(t, (<-incoming).Reject(ssh.ConnectionFailed, tc.message))
+				synctest.Wait()
+				require.Equal(t, []string{tc.want}, logs.atLeast(slog.LevelWarn))
+			})
+		})
+	}
+}
+
 // goroutinesIn counts the goroutines with fn anywhere on their stacks.
 func goroutinesIn(fn string) int {
 	buf := make([]byte, 1<<20)
