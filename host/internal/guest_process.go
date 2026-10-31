@@ -33,6 +33,10 @@ type guestProcessSpec struct {
 	// seen whether its copies were still writing. Nil in production; a test
 	// uses it to act at exactly that point.
 	onDrainBound func()
+	// beforeWait runs in the runner's waiter before it waits for the leader,
+	// so holding it holds the reap. Nil in production; a test uses it to keep
+	// a killed leader unreaped.
+	beforeWait func()
 }
 
 // runGuestProcess owns one private child. Admission, command selection, presence
@@ -79,6 +83,9 @@ func (h *sessionHandler) runGuestProcess(ctx context.Context, sess gssh.Session,
 	exited := make(chan struct{})
 	var waitErr error
 	go func() {
+		if spec.beforeWait != nil {
+			spec.beforeWait()
+		}
 		waitErr = process.Wait()
 		if spec.onWait != nil {
 			spec.onWait(waitErr)
@@ -255,33 +262,34 @@ func (h *sessionHandler) runGuestProcess(ctx context.Context, sess gssh.Session,
 			operationErr = ctx.Err()
 		}
 	}
-	select {
-	case <-exited:
-		code, normal := exitCode(waitErr)
-		if _, sig := signalOutcome(waitErr); sig != nil {
-			code, normal = 128+*sig, true
-		}
-		if !normal {
-			return 1, errors.Join(operationErr, waitErr)
-		}
-		if operationErr != nil {
-			if code == 0 {
-				code = 1
-			}
-			return code, operationErr
-		}
-		select {
-		case err := <-outputErrors:
-			if code == 0 {
-				code = 1
-			}
-			return code, err
-		default:
-		}
-		return code, nil
-	default:
-		return 1, errors.Join(operationErr, errors.New("guest command did not exit during cleanup"))
+	// A leader not yet reaped here was killed: terminateWith returns before
+	// its last step only once the leader is gone, and that step is SIGKILL.
+	// Its waits are bounded; what is left is the kernel's reap, and the
+	// runner waits for it, so that a teardown that has returned leaves no
+	// leader behind. Nothing is signalled from here on.
+	<-exited
+	code, normal := exitCode(waitErr)
+	if _, sig := signalOutcome(waitErr); sig != nil {
+		code, normal = 128+*sig, true
 	}
+	if !normal {
+		return 1, errors.Join(operationErr, waitErr)
+	}
+	if operationErr != nil {
+		if code == 0 {
+			code = 1
+		}
+		return code, operationErr
+	}
+	select {
+	case err := <-outputErrors:
+		if code == 0 {
+			code = 1
+		}
+		return code, err
+	default:
+	}
+	return code, nil
 }
 
 // errGuestOutputUndrained is a command's output cut off before the guest took

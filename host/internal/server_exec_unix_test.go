@@ -6,11 +6,14 @@ import (
 	"bytes"
 	gssh "charm.land/ssh"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -348,6 +351,107 @@ func TestGuestExecExitBeforeShutdownDuringDrain(t *testing.T) {
 			}
 		}
 	}
+}
+
+// A hosted command that exits on its own ends the session with no shutdown
+// published: only the session's context ends. A private command whose leader
+// had already exited, its output still draining, keeps the status it exited
+// with, as it does through a stop. One whose leader ended after, or whose
+// guest closed its channel, still fails.
+func TestGuestExecExitBeforeCommandLedEndDuringDrain(t *testing.T) {
+	for _, source := range []string{"command", "channel"} {
+		for _, after := range []bool{false, true} {
+			for _, code := range []int{0, 7} {
+				t.Run(fmt.Sprintf("source=%s/after=%t/code=%d", source, after, code), func(t *testing.T) {
+					synctest.Test(t, func(t *testing.T) {
+						observed := make(chan struct{})
+						drain := make(chan struct{})
+						done := make(chan struct{})
+						stop, cancelStop := context.WithCancel(t.Context())
+						defer cancelStop()
+						// The session's context as the server makes it, which
+						// a command's own exit ends without the stop's.
+						ctx, endSession := context.WithCancel(sessionContext(stop))
+						defer endSession()
+						order := &endOrder{}
+						order.watch(stop)
+						h := &sessionHandler{kind: kindGuest, ctx: ctx, stopCtx: stop, order: order, acceptExec: true, logger: discardLogger(), runPrivateProcess: func(ctx context.Context, _ gssh.Session, spec guestProcessSpec) (int, error) {
+							if after {
+								close(observed)
+								<-drain
+							}
+							var waitErr error
+							if code != 0 {
+								waitErr = &ExitError{Code: uint32(code)}
+							}
+							spec.onWait(waitErr)
+							if !after {
+								close(observed)
+								<-drain
+							}
+							require.ErrorIs(t, ctx.Err(), context.Canceled)
+							return 1, ctx.Err()
+						}}
+						guest := &exitRecordingGuest{fakeGuestSession: fakeGuestSession{ctx: fakeGuestContext{sessionID: "exit-and-command-end"}}, exited: make(chan int, 1)}
+						closed := make(chan struct{})
+						raw := &rawSession{Session: guest, closed: closed, requestType: "exec", requestReceivedAt: time.Now(), commandSelection: guestCommandSelection{NeedsExecConsent: true, Argv: []string{"controlled"}}}
+						go func() { defer close(done); h.HandleSession(raw) }()
+						<-observed
+						if source == "channel" {
+							close(closed)
+						}
+						endSession()
+						close(drain)
+						<-done
+						want := code
+						if after || source != "command" {
+							want = 1
+						}
+						require.Equal(t, want, <-guest.exited)
+					})
+				})
+			}
+		}
+	}
+}
+
+// What a guest sees when the hosted command exits on its own while its exec's
+// leader has exited and a background child still holds its output: the
+// leader's status, not a failure.
+func TestGuestExecStatusSurvivesTheCommandsOwnExit(t *testing.T) {
+	t.Setenv("SHELL", "/bin/sh")
+	dir := t.TempDir()
+	end := filepath.Join(dir, "end")
+	require.NoError(t, syscall.Mkfifo(end, 0o600))
+	// The hosted command exits 0 once the test opens and closes the FIFO.
+	h := startHost(t, &Server{Command: []string{"sh", "-c", `read -r line < "$0"; exit 0`, end}, AcceptExec: true})
+	s := execSession(t, h.guestClient(t), false)
+	out, err := s.StdoutPipe()
+	require.NoError(t, err)
+	leaderFile, childFile := filepath.Join(dir, "leader"), filepath.Join(dir, "child")
+	require.NoError(t, s.Start(fmt.Sprintf(`echo $$ > %q; sleep 30 & echo $! > %q; printf done; exit 0`, leaderFile, childFile)))
+	readUntil(t, out, "done")
+	t.Cleanup(func() {
+		if pid, err := readPIDFile(childFile); err == nil {
+			_ = syscall.Kill(pid, syscall.SIGKILL)
+		}
+	})
+	leader, err := readPIDFile(leaderFile)
+	require.NoError(t, err)
+	// Reaped, so its exit was observed before the session's end begins.
+	require.Eventually(t, func() bool { return errors.Is(syscall.Kill(leader, 0), syscall.ESRCH) }, harnessTimeout, 5*time.Millisecond)
+	w, err := os.OpenFile(end, os.O_WRONLY, 0)
+	require.NoError(t, err)
+	require.NoError(t, w.Close())
+	requireExitStatus(t, s.Wait(), 0)
+}
+
+func readPIDFile(file string) (int, error) {
+	data, err := os.ReadFile(file)
+	if err != nil {
+		return 0, err
+	}
+	return strconv.Atoi(strings.TrimSpace(string(data)))
 }
 
 func TestGuestExecCanceledBeforeStart(t *testing.T) {
