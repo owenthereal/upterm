@@ -1917,56 +1917,80 @@ func TestFakeConsulDefaultModeKeepsItsIndexes(t *testing.T) {
 	assert.Equal(t, uint64(6), consul.index())
 }
 
-// Each attempt to destroy a lock session has a deadline of its own within the
-// caller's. Sharing the caller's, an attempt that gets no answer would spend
-// all of it, and the release would never be retried.
-func TestReleaseRetriesADestroyThatGetsNoAnswer(t *testing.T) {
-	for _, tc := range []struct {
-		name     string
-		answered int // the first attempt that gets an answer; 0 for none
-		attempts int
-		err      error
+// Each attempt of a Consul call has a deadline of its own within its caller's.
+// Sharing the caller's, an attempt that gets no answer would spend all of it,
+// and the call would never be retried. Each call runs under the budget its
+// callers give it: DefaultConsulTimeout for a release, and shutdown's cleanup
+// deadline for the listing and the batch delete that share it.
+func TestConsulCallsRetryAnAttemptThatGetsNoAnswer(t *testing.T) {
+	for _, op := range []struct {
+		name    string
+		budget  time.Duration
+		request string // the call's one Consul request, method and path
+		answer  string
+		call    func(context.Context, *consulSessionStore) error
+		forgets bool // whether a call that succeeds drops the lease it held
+		fits    int  // the attempts that fit in budget when none is answered
 	}{
-		{name: "answered on a retry", answered: 2, attempts: 2},
-		{name: "never answered", attempts: 3, err: context.DeadlineExceeded},
+		{name: "release", budget: DefaultConsulTimeout, request: "PUT /v1/session/destroy/lease-1", answer: "true",
+			call: func(ctx context.Context, s *consulSessionStore) error {
+				return s.Release(ctx, &Registration{Session: &Session{ID: "id", NodeAddr: "node", Generation: 1}, lease: "lease-1"})
+			}, forgets: true, fits: 3},
+		{name: "list", budget: defaultSessionCleanupDeadline, request: "GET /v1/kv/fake/sessions", answer: "[]",
+			call: func(ctx context.Context, s *consulSessionStore) error {
+				_, err := s.list(ctx)
+				return err
+			}, fits: 2},
+		{name: "batch delete", budget: defaultSessionCleanupDeadline, request: "PUT /v1/txn", answer: `{"Results":[],"Errors":null}`,
+			call: func(ctx context.Context, s *consulSessionStore) error {
+				return s.batchDelete(ctx, []string{"id"})
+			}, forgets: true, fits: 2},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			synctest.Test(t, func(t *testing.T) {
-				var destroys []string
-				cfg := api.DefaultConfig()
-				cfg.HttpClient = &http.Client{Transport: closeRoundTripFunc(func(r *http.Request) (*http.Response, error) {
-					lease, ok := strings.CutPrefix(r.URL.Path, "/v1/session/destroy/")
-					if !ok || r.Method != http.MethodPut {
-						return nil, fmt.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
-					}
-					destroys = append(destroys, lease)
-					if tc.answered == 0 || len(destroys) < tc.answered {
-						<-r.Context().Done()
-						return nil, r.Context().Err()
-					}
-					return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("true")), Request: r}, nil
-				})}
-				client, err := api.NewClient(cfg)
-				require.NoError(t, err)
-				logger := slog.New(slog.DiscardHandler)
-				store := &consulSessionStore{client: client, apiHTTP: cfg.HttpClient, logger: logger, ttl: time.Minute, keyPrefix: "fake",
-					cache: newSessionCache(logger), held: make(map[string]map[string]heldWrite)}
-				reg := &Registration{Session: &Session{ID: "id", NodeAddr: "node", Generation: 1}, lease: "lease-1"}
-
-				// As every caller bounds a release.
-				ctx, cancel := context.WithTimeout(context.Background(), DefaultConsulTimeout)
-				defer cancel()
-				start := time.Now()
-				err = store.Release(ctx, reg)
-				if tc.err == nil {
+		for _, tc := range []struct {
+			name     string
+			answered int // the first attempt that gets an answer; 0 for none
+		}{
+			{name: "answered on a retry", answered: 2},
+			{name: "never answered"},
+		} {
+			t.Run(op.name+"/"+tc.name, func(t *testing.T) {
+				synctest.Test(t, func(t *testing.T) {
+					attempts := 0
+					cfg := api.DefaultConfig()
+					cfg.HttpClient = &http.Client{Transport: closeRoundTripFunc(func(r *http.Request) (*http.Response, error) {
+						if got := r.Method + " " + r.URL.Path; got != op.request {
+							return nil, fmt.Errorf("unexpected request %s", got)
+						}
+						attempts++
+						if tc.answered == 0 || attempts < tc.answered {
+							<-r.Context().Done()
+							return nil, r.Context().Err()
+						}
+						return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(op.answer)), Request: r}, nil
+					})}
+					client, err := api.NewClient(cfg)
 					require.NoError(t, err)
-				} else {
-					require.ErrorIs(t, err, tc.err)
-				}
-				assert.LessOrEqual(t, time.Since(start), DefaultConsulTimeout, "the release outlived its caller's deadline")
-				assert.Equal(t, slices.Repeat([]string{"lease-1"}, tc.attempts), destroys)
+					logger := slog.New(slog.DiscardHandler)
+					store := &consulSessionStore{client: client, apiHTTP: cfg.HttpClient, logger: logger, ttl: time.Minute, keyPrefix: "fake",
+						cache: newSessionCache(logger), held: map[string]map[string]heldWrite{"id": {"lease-1": {}}}}
+
+					ctx, cancel := context.WithTimeout(context.Background(), op.budget)
+					defer cancel()
+					start := time.Now()
+					err = op.call(ctx, store)
+					assert.LessOrEqual(t, time.Since(start), op.budget, "the call outlived its caller's deadline")
+					if tc.answered == 0 {
+						require.ErrorIs(t, err, context.DeadlineExceeded)
+						assert.Equal(t, op.fits, attempts)
+						assert.True(t, holdsLease(store, "id", "lease-1"), "a call that never got an answer dropped its lease")
+						return
+					}
+					require.NoError(t, err)
+					assert.Equal(t, tc.answered, attempts)
+					assert.Equal(t, !op.forgets, holdsLease(store, "id", "lease-1"))
+				})
 			})
-		})
+		}
 	}
 }
 
