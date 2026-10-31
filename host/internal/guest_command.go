@@ -310,12 +310,15 @@ func (h *sessionHandler) handlePrivateCommand(sess gssh.Session, selection guest
 	if selection.ForcedExec {
 		env = append(env, "SSH_ORIGINAL_COMMAND="+selection.RawCommand)
 	}
-	var ended, afterShutdown, observedOutcome atomic.Bool
+	// endedInSession: the leader's exit was seen while the session's context
+	// still stood, before any end of the session could reach the runner.
+	var ended, afterShutdown, endedInSession, observedOutcome atomic.Bool
 	var observedCode atomic.Int64
 	var joinedID string
 	spec := guestProcessSpec{Argv: selection.Argv, Env: env, Dir: h.commandDir, ReadOnly: h.readonly,
 		onWait: func(waitErr error) {
 			afterShutdown.Store(h.order.commandEnded())
+			endedInSession.Store(h.ctx.Err() == nil)
 			code, normal := exitCode(waitErr)
 			if _, sig := signalOutcome(waitErr); sig != nil {
 				code, normal = 128+*sig, true
@@ -362,19 +365,20 @@ func (h *sessionHandler) handlePrivateCommand(sess gssh.Session, selection guest
 		}
 	}
 	kind, _, _, _ := h.endingCause()
-	if kind.overrides() {
-		switch {
-		case !ended.Load() || afterShutdown.Load():
-			code = 1
-		case observedOutcome.Load() && errors.Is(err, context.Canceled) && h.ctx.Err() != nil && sess.Context().Err() == nil:
-			// The leader had already ended before host shutdown. Its output was
-			// still draining when host cancellation reached the runner. A peer's
-			// own channel/transport cancellation must still remain a failure.
-			select {
-			case <-channelClosed(sess):
-			default:
-				code = int(observedCode.Load())
-			}
+	overrides := kind.overrides()
+	switch {
+	case overrides && (!ended.Load() || afterShutdown.Load()):
+		code = 1
+	case (overrides && ended.Load() || endedInSession.Load()) && observedOutcome.Load() && errors.Is(err, context.Canceled) && h.ctx.Err() != nil && sess.Context().Err() == nil:
+		// The leader had already ended before the session did -- a host stop
+		// or signal, or the hosted command's own exit, which publishes no
+		// shutdown and ends only the session's context. Its output was still
+		// draining when that cancellation reached the runner. A peer's own
+		// channel/transport cancellation must still remain a failure.
+		select {
+		case <-channelClosed(sess):
+		default:
+			code = int(observedCode.Load())
 		}
 	}
 	_ = sess.Exit(code)
