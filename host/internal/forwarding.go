@@ -371,8 +371,17 @@ func forwardingHandler(events *emitter.Emitter, forwards *Forwards, policy forwa
 				select {
 				case request, ok := <-requests:
 					if !ok {
-						// Requests close on accepted channel CLOSE, not stdin EOF.
-						cancel()
+						// Requests close on accepted channel CLOSE, not stdin
+						// EOF. What the guest sent before it is still in the
+						// channel, ahead of the EOF the CLOSE marked, and the
+						// copy to the target delivers it before half-closing.
+						// Only the way back stops now: the channel takes no
+						// more writes, so stop reading the target. A deadline
+						// rather than CloseRead, which on Windows resets the
+						// connection if the target sends more, cutting off
+						// that delivery. Transport loss and a host stop still
+						// close both ends at once, delivered or not.
+						_ = socket.SetReadDeadline(time.Now())
 						return
 					}
 					if request.WantReply {
