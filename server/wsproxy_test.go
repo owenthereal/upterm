@@ -199,14 +199,14 @@ func (d *noDialer) DialContext(context.Context, *api.Identifier) (net.Conn, erro
 
 // openGuestWS opens the WebSocket a guest of an unknown session would, with
 // session as its user.
-func openGuestWS(t *testing.T, h *wsHandler, session string) *websocket.Conn {
+func openGuestWS(t *testing.T, h http.Handler, session string) *websocket.Conn {
 	t.Helper()
 	return openGuestWSWithAuth(t, h, session, "")
 }
 
 // openGuestWSWithAuth is openGuestWS with user and pass as the guest's
 // basic-auth credentials, which embedded mode rejoins into one SSH user.
-func openGuestWSWithAuth(t *testing.T, h *wsHandler, user, pass string) *websocket.Conn {
+func openGuestWSWithAuth(t *testing.T, h http.Handler, user, pass string) *websocket.Conn {
 	t.Helper()
 	srv := httptest.NewServer(h)
 	t.Cleanup(srv.Close)
@@ -295,6 +295,100 @@ func Test_WebSocketProxy_UnreachableNodeGoesToSSHProxy(t *testing.T) {
 	require.Equal(t, "from the SSH proxy", string(msg))
 }
 
+// A node that refuses a dial the hand-off then recovers is a route that needed
+// refreshing, not a failure, so it is a warning. An error is what gets
+// reported, and a guest that never gets in is still reported, as "error
+// dialing".
+func Test_WebSocketProxy_ADialTheHandOffRecoversIsAWarning(t *testing.T) {
+	gone, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	unreachable := gone.Addr().String()
+	require.NoError(t, gone.Close())
+
+	discard := slog.New(slog.DiscardHandler)
+	sm := newSessionManagerWithStore(newMemorySessionStore(discard), routing.NewEncodeDecoder(routing.ModeConsul))
+	user, err := sm.CreateSession(NewSession("session", unreachable, "host", nil, nil))
+	require.NoError(t, err)
+	logs := &logRecorder{}
+	c := openGuestWS(t, &wsHandler{
+		ConnDialer:     sshProxyDialer{sshProxyAddr: standInSSHProxy(t), nodeAddrFromStore: true, Logger: discard},
+		SessionManager: sm,
+		Logger:         slog.New(logs),
+	}, user)
+
+	_, msg, err := c.ReadMessage()
+	require.NoError(t, err)
+	require.Equal(t, "from the SSH proxy", string(msg))
+	require.Equal(t, []string{"WARN error dialing the session's node"}, logs.atLeast(slog.LevelWarn))
+}
+
+// A guest the handler can't resolve is handed to the SSH proxy, which refuses
+// it with the reason. A session that isn't stored, or a user that names none,
+// is the guest's to put right, so it is a warning. A store that couldn't
+// answer is the relay's own failure, and stays an error, which is what gets
+// reported.
+func Test_WebSocketProxy_AGuestsUnresolvedUserIsAWarning(t *testing.T) {
+	discard := slog.New(slog.DiscardHandler)
+	for _, tc := range []struct {
+		name       string
+		mode       routing.Mode
+		store      SessionStore
+		user, pass string
+		want       string
+	}{
+		{"a session that isn't stored", routing.ModeConsul, newMemorySessionStore(discard), "nosuchsession", "", "WARN error resolving SSH user"},
+		{"a user that names no session", routing.ModeEmbedded, newMemorySessionStore(discard), "session", "not base64!", "WARN error resolving SSH user"},
+		{"a store that can't answer", routing.ModeConsul, failingStore{newMemorySessionStore(discard)}, "session", "", "ERROR error resolving SSH user"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			logs := &logRecorder{}
+			c := openGuestWSWithAuth(t, &wsHandler{
+				ConnDialer:     sshProxyDialer{sshProxyAddr: standInSSHProxy(t), nodeAddrFromStore: tc.mode == routing.ModeConsul, Logger: discard},
+				SessionManager: newSessionManagerWithStore(tc.store, routing.NewEncodeDecoder(tc.mode)),
+				Logger:         slog.New(logs),
+			}, tc.user, tc.pass)
+
+			_, msg, err := c.ReadMessage()
+			require.NoError(t, err)
+			require.Equal(t, "from the SSH proxy", string(msg))
+			require.Equal(t, []string{tc.want}, logs.atLeast(slog.LevelWarn))
+		})
+	}
+}
+
+// logRecorder is a slog handler that keeps the level and message of each
+// record.
+type logRecorder struct {
+	mu      sync.Mutex
+	records []slog.Record
+}
+
+func (r *logRecorder) Enabled(context.Context, slog.Level) bool { return true }
+
+func (r *logRecorder) Handle(_ context.Context, record slog.Record) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.records = append(r.records, record)
+	return nil
+}
+
+func (r *logRecorder) WithAttrs([]slog.Attr) slog.Handler { return r }
+
+func (r *logRecorder) WithGroup(string) slog.Handler { return r }
+
+// atLeast is "LEVEL message" for each record at level or above, in order.
+func (r *logRecorder) atLeast(level slog.Level) []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var lines []string
+	for _, record := range r.records {
+		if record.Level >= level {
+			lines = append(lines, record.Level.String()+" "+record.Message)
+		}
+	}
+	return lines
+}
+
 // standInNode listens as some other address would, greeting what it accepts
 // and counting it, so a test can tell which address a dial actually reached.
 func standInNode(t *testing.T) (string, *atomic.Int32) {
@@ -380,6 +474,83 @@ func Test_WebSocketProxy_ANeighboursGuestIsDialedDirectly(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, int32(1), dialedNeighbour.Load(), "the neighbour was not dialed")
 	require.Zero(t, dialedInternal.Load(), "this node's internal listener was dialed")
+}
+
+// A guest leaving ends its WebSocket, and upterm's own clients end it by
+// closing the connection without a close frame, which reads as an abnormal
+// closure. Either way the pipe has ended, not failed, so it isn't reported. A
+// node's connection failing is the relay's own, and stays an error.
+func Test_WebSocketProxy_AGuestEndingItsWebSocketIsNotAnError(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		end  func(guest *websocket.Conn, node *net.TCPConn)
+		want []string
+	}{
+		{"the guest closes without a close frame", func(guest *websocket.Conn, _ *net.TCPConn) {
+			_ = guest.Close()
+		}, nil},
+		{"the guest sends a close frame", func(guest *websocket.Conn, _ *net.TCPConn) {
+			_ = guest.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""))
+		}, nil},
+		{"the node resets the connection", func(_ *websocket.Conn, node *net.TCPConn) {
+			_ = node.SetLinger(0)
+			_ = node.Close()
+		}, []string{"ERROR error piping"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ln, err := net.Listen("tcp", "127.0.0.1:0")
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = ln.Close() })
+
+			discard := slog.New(slog.DiscardHandler)
+			sm := newSessionManagerWithStore(newMemorySessionStore(discard), routing.NewEncodeDecoder(routing.ModeConsul))
+			user, err := sm.CreateSession(NewSession("session", ln.Addr().String(), "host", nil, nil))
+			require.NoError(t, err)
+			logs := &logRecorder{}
+			h := &wsHandler{ConnDialer: tcpConnDialer{}, SessionManager: sm, Logger: slog.New(logs)}
+			served := make(chan struct{})
+			guest := openGuestWS(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				defer close(served)
+				h.ServeHTTP(w, r)
+			}), user)
+
+			node, err := ln.Accept()
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = node.Close() })
+			tc.end(guest, node.(*net.TCPConn))
+
+			select {
+			case <-served:
+			case <-time.After(10 * time.Second):
+				t.Fatal("the handler is still piping")
+			}
+			require.Equal(t, tc.want, logs.atLeast(slog.LevelWarn))
+		})
+	}
+}
+
+// Every upterm client sends its version and credentials, so a request missing
+// either is something else on the relay's port, a browser or a scanner. It is
+// turned away as a warning, not reported as one of the relay's errors.
+func Test_WebSocketProxy_ARequestThatIsNotUptermsIsAWarning(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		header http.Header
+	}{
+		{"no client version", http.Header{}},
+		{"no credentials", http.Header{upterm.HeaderUptermClientVersion: {upterm.ClientSSHClientVersion}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			logs := &logRecorder{}
+			req := httptest.NewRequest(http.MethodGet, "/", nil)
+			req.Header = tc.header
+			rec := httptest.NewRecorder()
+			(&wsHandler{Logger: slog.New(logs)}).ServeHTTP(rec, req)
+
+			require.Equal(t, http.StatusBadRequest, rec.Code)
+			require.Equal(t, []string{"WARN http error"}, logs.atLeast(slog.LevelWarn))
+		})
+	}
 }
 
 // The page's ssh line names the relay's SSH address: the Host header's own

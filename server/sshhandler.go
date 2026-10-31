@@ -63,6 +63,25 @@ func isExpectedShutdownError(err error) bool {
 	return false
 }
 
+// sshOpenUnanswered is x/crypto's error for a channel open still waiting for
+// its answer when the connection ends (mux.go). There is no exported error to
+// match on, so match the text: if it ever drifts the refusal is simply logged
+// as an error, which is the safe direction to fail in.
+const sshOpenUnanswered = "ssh: unexpected packet in response to channel open: <nil>"
+
+// refusedForHostLeaving reports whether err is the SSH proxy refusing a channel
+// open because its connection from the host is ending. The open either reached
+// the proxy once that connection had started shutting down, or was waiting for
+// the host's answer when it ended, which the proxy passes on in x/crypto's
+// words.
+func refusedForHostLeaving(err error) bool {
+	var rejection *gossh.OpenChannelError
+	if !errors.As(err, &rejection) || rejection.Reason != gossh.ConnectionFailed {
+		return false
+	}
+	return rejection.Message == sshPeerDisconnected || rejection.Message == sshOpenUnanswered
+}
+
 func newStreamlocalForwardHandler(
 	work *sshSessionWork,
 	sessionManager *SessionManager,
@@ -124,7 +143,14 @@ func (h *streamlocalForwardHandler) handleConnection(ctx ssh.Context, conn *goss
 
 	ch, reqs, err := conn.OpenChannel(forwardedStreamlocalChannelType, payload)
 	if err != nil {
-		logger.Error("error opening channel", "error", err)
+		// A guest that arrives as its host leaves is turned away: there is no
+		// host to take its tunnel. Its connection fails as it must, but nothing
+		// is wrong with the relay, so it is a warning.
+		level := slog.LevelError
+		if refusedForHostLeaving(err) {
+			level = slog.LevelWarn
+		}
+		logger.Log(ctx, level, "error opening channel", "error", err)
 		return
 	}
 	defer func() {
@@ -143,12 +169,16 @@ func (h *streamlocalForwardHandler) handleConnection(ctx ssh.Context, conn *goss
 
 	var g run.Group
 
-	// Context cancellation handler
+	// Context cancellation handler. ctx is the host's connection, which
+	// outlives every guest on it, so the interrupt has to end this actor too:
+	// otherwise Run waits for the host to disconnect, holding the guest's
+	// connection and channel until it does.
 	{
-		g.Add(func() error {
-			<-ctx.Done()
-			return ctx.Err()
-		}, closeBoth)
+		execute, interrupt := run.ContextHandler(ctx)
+		g.Add(execute, func(err error) {
+			interrupt(err)
+			closeBoth(err)
+		})
 	}
 
 	// SSH request handler
@@ -238,12 +268,14 @@ func (h *streamlocalForwardHandler) handle(work *sshWorkRef, ctx ssh.Context, sr
 			return false, []byte(err.Error())
 		}
 
+		// ctx is the host's connection, which can outlive the tunnel: a cancel
+		// or a takeover closes the listener while the host stays. The
+		// interrupt ends this actor too, so the group ends with the listener.
 		var g run.Group
 		{
-			g.Add(func() error {
-				<-ctx.Done()
-				return ctx.Err()
-			}, func(err error) {
+			execute, interrupt := run.ContextHandler(ctx)
+			g.Add(execute, func(err error) {
+				interrupt(err)
 				h.closeListener(reg)
 			})
 		}
