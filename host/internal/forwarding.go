@@ -379,8 +379,13 @@ func forwardingHandler(events *emitter.Emitter, forwards *Forwards, policy forwa
 						// more writes, so stop reading the target. A deadline
 						// rather than CloseRead, which on Windows resets the
 						// connection if the target sends more, cutting off
-						// that delivery. Transport loss and a host stop still
-						// close both ends at once, delivered or not.
+						// that delivery. A target that sends more anyway
+						// leaves it unread when the socket closes, and the
+						// kernel then resets the connection, which can cut
+						// off upload not yet sent -- as with OpenSSH's sshd.
+						// A guest that wants the target's reply sends EOF and
+						// reads it before closing. Transport loss and a host
+						// stop still close both ends at once, delivered or not.
 						_ = socket.SetReadDeadline(time.Now())
 						return
 					}
