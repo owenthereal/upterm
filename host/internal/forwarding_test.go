@@ -519,6 +519,192 @@ func TestForwardingAcceptedChannelCloseStopsTransfer(t *testing.T) {
 	}
 }
 
+// forwardingRigTimeout bounds every wait on a forwardingRig, so a forward that
+// wedges fails its own test rather than timing out the package.
+const forwardingRigTimeout = 10 * time.Second
+
+// forwardingRig is one guest connection to a server serving forwardingHandler
+// alone, and a target it may forward to. Only its first forward is observed.
+type forwardingRig struct {
+	client *ssh.Client
+	target net.Listener
+	// stopped closes the first time the handler ends the forward's way back
+	// to the guest: a CloseWrite or Close of the channel.
+	stopped chan struct{}
+	// handled closes once the forward's handler has returned.
+	handled chan struct{}
+}
+
+func startForwardingRig(t *testing.T, hostCtx context.Context) *forwardingRig {
+	t.Helper()
+	_, private, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+	signer, err := ssh.NewSignerFromKey(private)
+	require.NoError(t, err)
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	target, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = target.Close() })
+	rig := &forwardingRig{target: target, stopped: make(chan struct{}), handled: make(chan struct{})}
+	var opened atomic.Int32
+	var handlers sync.WaitGroup
+	handle := forwardingHandler(emitter.New(1), &Forwards{}, forwardingPolicy{AllowLoopback: true}, hostCtx, discardLogger())
+	srv := &gssh.Server{
+		HostSigners:      []gssh.Signer{signer},
+		PublicKeyHandler: func(gssh.Context, gssh.PublicKey) bool { return true },
+		ConnCallback: func(ctx gssh.Context, conn net.Conn) net.Conn {
+			ctx.SetValue(forwardingPresenceKey{}, &forwardingPresence{})
+			ctx.SetValue(authenticatedGuestKey{}, authenticatedGuest{auth: &server.AuthRequest{}, key: signer.PublicKey()})
+			return conn
+		},
+		ChannelHandlers: map[string]gssh.ChannelHandler{"direct-tcpip": func(srv *gssh.Server, conn *ssh.ServerConn, ch ssh.NewChannel, ctx gssh.Context) {
+			handlers.Add(1)
+			defer handlers.Done()
+			if opened.Add(1) != 1 {
+				handle(srv, conn, ch, ctx)
+				return
+			}
+			defer close(rig.handled)
+			var once sync.Once
+			handle(srv, conn, &stopObservedOpen{NewChannel: ch, stop: func() { once.Do(func() { close(rig.stopped) }) }}, ctx)
+		}},
+	}
+	serverDone := make(chan struct{})
+	go func() { _ = srv.Serve(listener); close(serverDone) }()
+	t.Cleanup(func() { _ = srv.Close(); _ = listener.Close(); <-serverDone; handlers.Wait() })
+	rig.client, err = ssh.Dial("tcp", listener.Addr().String(), &ssh.ClientConfig{User: "guest", Auth: []ssh.AuthMethod{ssh.PublicKeys(signer)}, HostKeyCallback: ssh.InsecureIgnoreHostKey(), Timeout: time.Second})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = rig.client.Close() })
+	return rig
+}
+
+// stopObservedOpen accepts the real channel, reporting the handler's first
+// CloseWrite or Close of it.
+type stopObservedOpen struct {
+	ssh.NewChannel
+	stop func()
+}
+
+func (o *stopObservedOpen) Accept() (ssh.Channel, <-chan *ssh.Request, error) {
+	ch, requests, err := o.NewChannel.Accept()
+	if err != nil {
+		return nil, nil, err
+	}
+	return &stopObservedChannel{Channel: ch, stop: o.stop}, requests, nil
+}
+
+type stopObservedChannel struct {
+	ssh.Channel
+	stop func()
+}
+
+func (c *stopObservedChannel) CloseWrite() error { c.stop(); return c.Channel.CloseWrite() }
+func (c *stopObservedChannel) Close() error      { c.stop(); return c.Channel.Close() }
+
+// awaitForwardStopped waits for the handler to end the way back to the guest.
+func (r *forwardingRig) awaitForwardStopped(t *testing.T) {
+	t.Helper()
+	select {
+	case <-r.stopped:
+	case <-time.After(forwardingRigTimeout):
+		t.Fatal("forward never stopped its way back to the guest")
+	}
+}
+
+// forwardingUpload is more than the target's socket buffers can take without
+// it reading, and within one channel window, so the guest's write completes
+// with most of it still in the channel.
+func forwardingUpload() []byte {
+	upload := make([]byte, 1<<20)
+	for i := range upload {
+		upload[i] = byte(i % 251)
+	}
+	return upload
+}
+
+// A guest that closes its forward straight after writing to it has still sent
+// all of it: the target is given everything the channel had received before
+// the CLOSE, then EOF, however late it starts reading. Only the way back to
+// the guest, which can no longer be written to, stops at once.
+func TestForwardingChannelCloseDeliversWhatTheGuestSent(t *testing.T) {
+	rig := startForwardingRig(t, context.Background())
+	conn, err := rig.client.Dial("tcp", rig.target.Addr().String())
+	require.NoError(t, err)
+	target, err := rig.target.Accept()
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = target.Close() })
+	upload := forwardingUpload()
+	_, err = conn.Write(upload)
+	require.NoError(t, err)
+	require.NoError(t, conn.Close())
+	// The target reads nothing until the forward has acted on the CLOSE, so
+	// what is still in the channel then is what a cut-off would lose.
+	rig.awaitForwardStopped(t)
+	require.NoError(t, target.SetReadDeadline(time.Now().Add(forwardingRigTimeout)))
+	got, err := io.ReadAll(target)
+	require.NoError(t, err)
+	require.Equal(t, len(upload), len(got), "bytes delivered")
+	require.True(t, bytes.Equal(upload, got), "delivered bytes differ from the upload")
+	select {
+	case <-rig.handled:
+	case <-time.After(forwardingRigTimeout):
+		t.Fatal("forward's handler outlived its delivered upload")
+	}
+}
+
+// Transport loss and a host stop end a forward at once, whatever its target
+// has yet to read -- with the guest's CLOSE still being delivered, too. They
+// close both ends rather than wait for a target that has stopped reading.
+func TestForwardingTransportLossAndHostStopEndTheTransfer(t *testing.T) {
+	for _, source := range []string{"transport", "host"} {
+		for _, guestClosed := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/guest closed=%t", source, guestClosed), func(t *testing.T) {
+				hostCtx, stopHost := context.WithCancel(context.Background())
+				defer stopHost()
+				rig := startForwardingRig(t, hostCtx)
+				conn, err := rig.client.Dial("tcp", rig.target.Addr().String())
+				require.NoError(t, err)
+				target, err := rig.target.Accept()
+				require.NoError(t, err)
+				t.Cleanup(func() { _ = target.Close() })
+				_, err = conn.Write(forwardingUpload())
+				require.NoError(t, err)
+				guestDone := make(chan struct{})
+				if guestClosed {
+					close(guestDone)
+					require.NoError(t, conn.Close())
+					rig.awaitForwardStopped(t)
+				} else {
+					go func() { defer close(guestDone); _, _ = io.Copy(io.Discard, conn) }()
+				}
+				// The target never reads before this.
+				if source == "transport" {
+					require.NoError(t, rig.client.Close())
+				} else {
+					stopHost()
+				}
+				select {
+				case <-rig.handled:
+				case <-time.After(forwardingRigTimeout):
+					t.Fatal("forward waited on a target that wasn't reading")
+				}
+				select {
+				case <-guestDone:
+				case <-time.After(forwardingRigTimeout):
+					t.Fatal("guest's side of the forward stayed open")
+				}
+				// The target's side is closed too: it reads what reached it,
+				// then its end, not the deadline.
+				require.NoError(t, target.SetReadDeadline(time.Now().Add(forwardingRigTimeout)))
+				_, err = io.Copy(io.Discard, target)
+				var netErr net.Error
+				require.False(t, errors.As(err, &netErr) && netErr.Timeout(), "target's side stayed open: %v", err)
+			})
+		}
+	}
+}
+
 func forwardingAuditRecords(t *testing.T, data string) []map[string]any {
 	t.Helper()
 	var records []map[string]any
