@@ -455,7 +455,8 @@ func forwardRequest(t *testing.T, client *ssh.Client, reqType, sessionID string)
 }
 
 // A client that leaves mid-handshake, as a host or guest whose own connection
-// dropped does, ends the sshd's side of it with a closed connection. That is
+// dropped does, ends the sshd's side of it with a closed connection, or, during
+// authentication, with an auth error that names nothing it refused. That is
 // the client's, so it is a warning. A client the sshd refuses stays an error:
 // the relay's own proxy is one, when the sshd doesn't trust its certificate.
 func Test_sshd_AClientThatLeavesMidHandshakeIsAWarning(t *testing.T) {
@@ -466,6 +467,13 @@ func Test_sshd_AClientThatLeavesMidHandshakeIsAWarning(t *testing.T) {
 	}{
 		{"a client that leaves", func(t *testing.T, conn net.Conn) {
 			require.NoError(t, conn.Close())
+		}, []string{"WARN connection failed"}},
+		{"a client that leaves without offering a key", func(t *testing.T, conn net.Conn) {
+			_, _, _, err := ssh.NewClientConn(conn, "sshd", &ssh.ClientConfig{
+				User:            "1234",
+				HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+			})
+			require.Error(t, err)
 		}, []string{"WARN connection failed"}},
 		{"a client the sshd refuses", func(t *testing.T, conn net.Conn) {
 			stranger, err := ssh.ParsePrivateKey([]byte(HostPrivateKeyContent))
