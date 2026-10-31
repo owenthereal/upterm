@@ -172,6 +172,23 @@ func execDenialNotice(err error) string {
 	return "upterm: guest exec denied.\r\n"
 }
 
+// exitUnstarted ends a private command the session's end got to before it
+// started. A shell is a late arrival, sent what exitLate sends one. An exec
+// that never ran never reports success: a stop, signal or cancellation is sent
+// as exitLate sends it, and anything else, a join timeout included, is a
+// plain 1.
+func (h *sessionHandler) exitUnstarted(sess gssh.Session) {
+	if sessionRequestType(sess) != "exec" {
+		h.exitLate(sess)
+		return
+	}
+	if kind, sig, _, _ := h.endingCause(); kind.overrides() {
+		h.exitWith(sess, kind.end(sig), 1)
+		return
+	}
+	_ = sess.Exit(1)
+}
+
 func (h *sessionHandler) handlePrivateCommand(sess gssh.Session, selection guestCommandSelection, selectionErr error) {
 	var auth *server.AuthRequest
 	client := consent.ClientInfo{ConnectionID: sess.Context().Value(gssh.ContextKeySessionID).(string)}
@@ -210,7 +227,7 @@ func (h *sessionHandler) handlePrivateCommand(sess gssh.Session, selection guest
 	}
 	if h.ctx.Err() != nil || h.stopCtx != nil && h.stopCtx.Err() != nil {
 		logPermission(operationError())
-		h.exitLate(sess)
+		h.exitUnstarted(sess)
 		return
 	}
 	ctx, cancel := sessionOperationContext(h.ctx, sess)
@@ -248,19 +265,10 @@ func (h *sessionHandler) handlePrivateCommand(sess gssh.Session, selection guest
 	exitBeforeStart := func() {
 		// Preserve the original ctx-before-stop status precedence.
 		if ctx.Err() == nil && h.stopCtx != nil && h.stopCtx.Err() != nil {
-			if sessionRequestType(sess) != "exec" {
-				h.exitLate(sess)
-				return
-			}
-			// An exec that never ran never reports success, whatever ended the
-			// session: a stop, signal or cancellation is sent as exitLate sends
-			// it, and anything else, a join timeout included, is a plain 1.
-			if kind, sig, _, _ := h.endingCause(); kind.overrides() {
-				h.exitWith(sess, kind.end(sig), 1)
-				return
-			}
+			h.exitUnstarted(sess)
+		} else {
+			_ = sess.Exit(1)
 		}
-		_ = sess.Exit(1)
 	}
 	if selectionErr != nil {
 		logPermission(selectionErr)
