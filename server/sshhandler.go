@@ -143,12 +143,16 @@ func (h *streamlocalForwardHandler) handleConnection(ctx ssh.Context, conn *goss
 
 	var g run.Group
 
-	// Context cancellation handler
+	// Context cancellation handler. ctx is the host's connection, which
+	// outlives every guest on it, so the interrupt has to end this actor too:
+	// otherwise Run waits for the host to disconnect, holding the guest's
+	// connection and channel until it does.
 	{
-		g.Add(func() error {
-			<-ctx.Done()
-			return ctx.Err()
-		}, closeBoth)
+		execute, interrupt := run.ContextHandler(ctx)
+		g.Add(execute, func(err error) {
+			interrupt(err)
+			closeBoth(err)
+		})
 	}
 
 	// SSH request handler
@@ -238,12 +242,14 @@ func (h *streamlocalForwardHandler) handle(work *sshWorkRef, ctx ssh.Context, sr
 			return false, []byte(err.Error())
 		}
 
+		// ctx is the host's connection, which can outlive the tunnel: a cancel
+		// or a takeover closes the listener while the host stays. The
+		// interrupt ends this actor too, so the group ends with the listener.
 		var g run.Group
 		{
-			g.Add(func() error {
-				<-ctx.Done()
-				return ctx.Err()
-			}, func(err error) {
+			execute, interrupt := run.ContextHandler(ctx)
+			g.Add(execute, func(err error) {
+				interrupt(err)
 				h.closeListener(reg)
 			})
 		}

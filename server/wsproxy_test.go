@@ -295,6 +295,66 @@ func Test_WebSocketProxy_UnreachableNodeGoesToSSHProxy(t *testing.T) {
 	require.Equal(t, "from the SSH proxy", string(msg))
 }
 
+// A node that refuses a dial the hand-off then recovers is a route that needed
+// refreshing, not a failure, so it is a warning. An error is what gets
+// reported, and a guest that never gets in is still reported, as "error
+// dialing".
+func Test_WebSocketProxy_ADialTheHandOffRecoversIsAWarning(t *testing.T) {
+	gone, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	unreachable := gone.Addr().String()
+	require.NoError(t, gone.Close())
+
+	discard := slog.New(slog.DiscardHandler)
+	sm := newSessionManagerWithStore(newMemorySessionStore(discard), routing.NewEncodeDecoder(routing.ModeConsul))
+	user, err := sm.CreateSession(NewSession("session", unreachable, "host", nil, nil))
+	require.NoError(t, err)
+	logs := &logRecorder{}
+	c := openGuestWS(t, &wsHandler{
+		ConnDialer:     sshProxyDialer{sshProxyAddr: standInSSHProxy(t), nodeAddrFromStore: true, Logger: discard},
+		SessionManager: sm,
+		Logger:         slog.New(logs),
+	}, user)
+
+	_, msg, err := c.ReadMessage()
+	require.NoError(t, err)
+	require.Equal(t, "from the SSH proxy", string(msg))
+	require.Equal(t, []string{"WARN error dialing the session's node"}, logs.atLeast(slog.LevelWarn))
+}
+
+// logRecorder is a slog handler that keeps the level and message of each
+// record.
+type logRecorder struct {
+	mu      sync.Mutex
+	records []slog.Record
+}
+
+func (r *logRecorder) Enabled(context.Context, slog.Level) bool { return true }
+
+func (r *logRecorder) Handle(_ context.Context, record slog.Record) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.records = append(r.records, record)
+	return nil
+}
+
+func (r *logRecorder) WithAttrs([]slog.Attr) slog.Handler { return r }
+
+func (r *logRecorder) WithGroup(string) slog.Handler { return r }
+
+// atLeast is "LEVEL message" for each record at level or above, in order.
+func (r *logRecorder) atLeast(level slog.Level) []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var lines []string
+	for _, record := range r.records {
+		if record.Level >= level {
+			lines = append(lines, record.Level.String()+" "+record.Message)
+		}
+	}
+	return lines
+}
+
 // standInNode listens as some other address would, greeting what it accepts
 // and counting it, so a test can tell which address a dial actually reached.
 func standInNode(t *testing.T) (string, *atomic.Int32) {
