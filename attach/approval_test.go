@@ -207,6 +207,50 @@ func TestApprovalVisibleSubjects(t *testing.T) {
 	require.Equal(t, 4096, strings.Count(lines, `\xfe`))
 }
 
+// Each choice names the grant it makes. A file grant is for the paths shown,
+// not for the one operation that asked, so it says what else it allows.
+func TestApprovalGrantWording(t *testing.T) {
+	plain := []string{
+		"upterm: c ABCD then Enter: allow this connection, capability, and complete subject tuple.",
+		"upterm: g ABCD then Enter: allow this authenticated guest and capability until this host session ends.",
+	}
+	readOnly := "upterm: a read-only session still allows downloads only."
+	for _, tc := range []struct {
+		name, capability, operation string
+		subjects                    []string
+		want                        []string
+	}{
+		{"exec", "exec", "exec", []string{"bash"}, plain},
+		{"forward", "forward", "forward", []string{"127.0.0.1", "22"}, plain},
+		{"one path", "sftp", "download", []string{"/notes.txt"}, []string{
+			"upterm: c ABCD then Enter: allow every file operation on this path, including writes and deletes, for this connection.",
+			"upterm: g ABCD then Enter: allow every file operation on any path, including writes and deletes, for this authenticated guest until this host session ends.",
+			readOnly,
+		}},
+		{"two paths", "sftp", "rename", []string{"/a", "/b"}, []string{
+			"upterm: c ABCD then Enter: allow renaming, linking or symlinking subject[0] to subject[1] for this connection.",
+			"upterm: g ABCD then Enter: allow every file operation on any path, including writes and deletes, for this authenticated guest until this host session ends.",
+			readOnly,
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			state := approvalTestState("grant")
+			state.Current.Capability, state.Current.Operation = tc.capability, tc.operation
+			state.Current.Subjects = nil
+			for _, subject := range tc.subjects {
+				state.Current.Subjects = append(state.Current.Subjects, []byte(subject))
+			}
+			lines := approvalLines(state, "ABCD")
+			for _, want := range tc.want {
+				require.Contains(t, lines, want)
+			}
+			if tc.capability != "sftp" {
+				require.NotContains(t, lines, readOnly)
+			}
+		})
+	}
+}
+
 func TestApprovalDisplayOutcomes(t *testing.T) {
 	for _, kind := range []string{"short", "failed", "OSC", "DCS", "CSI", "UTF8"} {
 		t.Run(kind, func(t *testing.T) {
