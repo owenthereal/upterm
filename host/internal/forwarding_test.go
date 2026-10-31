@@ -534,9 +534,20 @@ type forwardingRig struct {
 	// handled closes once the forward's handler has returned.
 	handled chan struct{}
 	// reads, when the rig holds reads, is what the handler's reads of the
-	// channel wait for: nothing the guest sends leaves the channel until a
-	// test closes it.
-	reads chan struct{}
+	// channel wait for: nothing the guest sends leaves the channel until
+	// releaseReads, which the rig's cleanup also calls.
+	reads       chan struct{}
+	releaseOnce sync.Once
+}
+
+// releaseReads lets the handler read the channel, if the rig was holding its
+// reads. Any number of calls.
+func (r *forwardingRig) releaseReads() {
+	r.releaseOnce.Do(func() {
+		if r.reads != nil {
+			close(r.reads)
+		}
+	})
 }
 
 func startForwardingRig(t *testing.T, hostCtx context.Context, holdReads bool) *forwardingRig {
@@ -580,6 +591,11 @@ func startForwardingRig(t *testing.T, hostCtx context.Context, holdReads bool) *
 	serverDone := make(chan struct{})
 	go func() { _ = srv.Serve(listener); close(serverDone) }()
 	t.Cleanup(func() { _ = srv.Close(); _ = listener.Close(); <-serverDone; handlers.Wait() })
+	// Registered after the server's cleanup, so it runs before it: a read
+	// held here isn't woken by closing the transport, and the server's
+	// cleanup waits for the handler making it. A test that fails before
+	// releasing the reads then fails, rather than hanging.
+	t.Cleanup(rig.releaseReads)
 	rig.client, err = ssh.Dial("tcp", listener.Addr().String(), &ssh.ClientConfig{User: "guest", Auth: []ssh.AuthMethod{ssh.PublicKeys(signer)}, HostKeyCallback: ssh.InsecureIgnoreHostKey(), Timeout: time.Second})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = rig.client.Close() })
@@ -657,7 +673,7 @@ func TestForwardingChannelCloseDeliversWhatTheGuestSent(t *testing.T) {
 	// CLOSE, so all of the upload is still there then, however much the
 	// sockets to the target could have taken -- on Linux, close to a window.
 	rig.awaitForwardStopped(t)
-	close(rig.reads)
+	rig.releaseReads()
 	require.NoError(t, target.SetReadDeadline(time.Now().Add(forwardingRigTimeout)))
 	got, err := io.ReadAll(target)
 	require.NoError(t, err)
@@ -670,16 +686,19 @@ func TestForwardingChannelCloseDeliversWhatTheGuestSent(t *testing.T) {
 	}
 }
 
-// Transport loss and a host stop end a forward at once, whatever its target
-// has yet to read -- with the guest's CLOSE still being delivered, too. They
-// close both ends rather than wait for a target that has stopped reading.
+// Transport loss and a host stop end a forward at once, whatever it has yet
+// to deliver -- with the guest's CLOSE still being delivered, too. They close
+// both ends rather than wait for a drain. The forward's reads of the channel
+// are held across the stop, so no drain can finish and end the transfer
+// first: only the stop can, and both ends must have seen it before the reads
+// are let go.
 func TestForwardingTransportLossAndHostStopEndTheTransfer(t *testing.T) {
 	for _, source := range []string{"transport", "host"} {
 		for _, guestClosed := range []bool{false, true} {
 			t.Run(fmt.Sprintf("%s/guest closed=%t", source, guestClosed), func(t *testing.T) {
 				hostCtx, stopHost := context.WithCancel(context.Background())
 				defer stopHost()
-				rig := startForwardingRig(t, hostCtx, false)
+				rig := startForwardingRig(t, hostCtx, true)
 				conn, err := rig.client.Dial("tcp", rig.target.Addr().String())
 				require.NoError(t, err)
 				target, err := rig.target.Accept()
@@ -691,32 +710,34 @@ func TestForwardingTransportLossAndHostStopEndTheTransfer(t *testing.T) {
 				if guestClosed {
 					close(guestDone)
 					require.NoError(t, conn.Close())
+					// The forward has taken the CLOSE and owes the target the
+					// whole upload, which it can't read yet.
 					rig.awaitForwardStopped(t)
 				} else {
 					go func() { defer close(guestDone); _, _ = io.Copy(io.Discard, conn) }()
 				}
-				// The target never reads before this.
 				if source == "transport" {
 					require.NoError(t, rig.client.Close())
 				} else {
 					stopHost()
 				}
-				select {
-				case <-rig.handled:
-				case <-time.After(forwardingRigTimeout):
-					t.Fatal("forward waited on a target that wasn't reading")
-				}
+				// The stop closed the target's side: it reads its end, a clean
+				// one, since the target sent nothing that went unread -- not
+				// the deadline.
+				require.NoError(t, target.SetReadDeadline(time.Now().Add(forwardingRigTimeout)))
+				_, err = io.Copy(io.Discard, target)
+				require.NoError(t, err, "target's side wasn't closed at the stop")
 				select {
 				case <-guestDone:
 				case <-time.After(forwardingRigTimeout):
 					t.Fatal("guest's side of the forward stayed open")
 				}
-				// The target's side is closed too: it reads what reached it,
-				// then its end, not the deadline.
-				require.NoError(t, target.SetReadDeadline(time.Now().Add(forwardingRigTimeout)))
-				_, err = io.Copy(io.Discard, target)
-				var netErr net.Error
-				require.False(t, errors.As(err, &netErr) && netErr.Timeout(), "target's side stayed open: %v", err)
+				rig.releaseReads()
+				select {
+				case <-rig.handled:
+				case <-time.After(forwardingRigTimeout):
+					t.Fatal("forward's handler outlived the stop")
+				}
 			})
 		}
 	}
