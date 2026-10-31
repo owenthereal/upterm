@@ -524,13 +524,13 @@ func (s *sshd) Serve(ln net.Listener) error {
 			_ = s.Exit(1) // disable ssh login
 		},
 		// A client that leaves mid-handshake, as a host or guest whose own
-		// connection dropped does, closes it under the sshd. That is the
-		// client's, so it is a warning. Any other failure stays an error, a
-		// refusal among them: the relay's own proxy is refused when the sshd
-		// doesn't trust its certificate.
+		// connection dropped does, closes it under the sshd, during
+		// authentication too. That is the client's, so it is a warning. Any
+		// other failure stays an error, a refusal among them: the relay's own
+		// proxy is refused when the sshd doesn't trust its certificate.
 		ConnectionFailedCallback: func(conn net.Conn, err error) {
 			level := slog.LevelError
-			if isExpectedShutdownError(err) {
+			if isExpectedShutdownError(err) || leftBeforeAuthenticating(err) {
 				level = slog.LevelWarn
 			}
 			s.Logger.Log(context.Background(), level, "connection failed", "error", err)
@@ -835,4 +835,22 @@ func (s *sshd) handleCreateSession(work *sshWorkRef, ctx ssh.Context, srv *ssh.S
 	}
 
 	return true, b
+}
+
+// leftBeforeAuthenticating reports whether err is a client that left during
+// authentication without offering anything the sshd refused. x/crypto reports
+// a client whose connection ends mid-authentication as a ServerAuthError of
+// what each of its attempts failed with, and an attempt that offers nothing
+// fails with ErrNoAuth; a refused key fails with the refusal instead.
+func leftBeforeAuthenticating(err error) bool {
+	var auth *gossh.ServerAuthError
+	if !errors.As(err, &auth) {
+		return false
+	}
+	for _, e := range auth.Errors {
+		if !errors.Is(e, gossh.ErrNoAuth) {
+			return false
+		}
+	}
+	return true
 }
