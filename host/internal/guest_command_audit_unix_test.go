@@ -468,6 +468,10 @@ func TestGuestExecConsentEndedByHostStop(t *testing.T) {
 				h := &sessionHandler{kind: kindGuest, ctx: t.Context(), stopCtx: stop, logger: slog.New(slog.NewJSONHandler(output, nil)), permissionChecker: execPermissionFunc(func(ctx context.Context, _ consent.Operation, _ consent.ClientInfo, _ ...string) (consent.Decision, error) {
 					close(asked)
 					<-ctx.Done()
+					// Ended by the stop itself, not the approval deadline.
+					if cause := context.Cause(ctx); !errors.Is(cause, tc.cause) {
+						t.Errorf("permission wait ended by %v, not the stop", cause)
+					}
 					return consent.Deny, consent.ErrCanceled
 				}), runPrivateProcess: func(context.Context, gssh.Session, guestProcessSpec) (int, error) { called = true; return 0, nil }}
 				notices := &recordingWriter{}
@@ -487,4 +491,53 @@ func TestGuestExecConsentEndedByHostStop(t *testing.T) {
 			})
 		})
 	}
+}
+
+// A command that exits on its own ends the session with no stop: the
+// session's context ends and the stop's never does. A request still waiting
+// for approval then is ended by that at once, as one is by a stop, rather than
+// holding up the session's end until it gives up waiting for private
+// commands.
+func TestGuestExecConsentEndedByCommandExit(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		stop, cancelStop := context.WithCancelCause(t.Context())
+		defer cancelStop(nil)
+		// The session's context as the server makes it: one a stop doesn't
+		// end, cancelled once its sessions are released.
+		sessCtx, endSession := context.WithCancel(sessionContext(stop))
+		defer endSession()
+		asked := make(chan struct{})
+		output := &recordingWriter{}
+		called := false
+		h := &sessionHandler{kind: kindGuest, ctx: sessCtx, stopCtx: stop, logger: slog.New(slog.NewJSONHandler(output, nil)), permissionChecker: execPermissionFunc(func(ctx context.Context, _ consent.Operation, _ consent.ClientInfo, _ ...string) (consent.Decision, error) {
+			close(asked)
+			<-ctx.Done()
+			return consent.Deny, consent.ErrCanceled
+		}), runPrivateProcess: func(context.Context, gssh.Session, guestProcessSpec) (int, error) { called = true; return 0, nil }}
+		notices := &recordingWriter{}
+		guest := &exitRecordingGuest{fakeGuestSession: fakeGuestSession{ctx: fakeGuestContext{sessionID: "command-exit"}, out: notices}, exited: make(chan int, 1)}
+		raw := &rawSession{Session: guest, closed: make(chan struct{}), requestType: "exec", requestReceivedAt: time.Now(), commandSelection: guestCommandSelection{NeedsExecConsent: true, Argv: []string{"controlled"}, RawCommand: "original"}}
+		handled := make(chan struct{})
+		go func() { defer close(handled); h.HandleSession(raw) }()
+		<-asked
+		ended := time.Now()
+		endSession()
+		// The status is sent before any time passes; only the wait for its
+		// close to be answered is left.
+		synctest.Wait()
+		select {
+		case code := <-guest.exited:
+			require.Equal(t, 1, code)
+		default:
+			// Not Fatal: the handler still has to be let finish.
+			t.Error("request still waiting for approval after the session ended")
+		}
+		<-handled
+		require.Less(t, time.Since(ended), forceCommandStopBound(hangupGrace, forceCommandStopGrace))
+		require.False(t, called)
+		require.Empty(t, string(notices.bytes()))
+		records := execAuditRecords(t, output, "exec permission policy")
+		require.Len(t, records, 1)
+		requireExecAudit(t, records[0], "canceled", "original")
+	})
 }
