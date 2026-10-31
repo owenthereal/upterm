@@ -454,6 +454,47 @@ func forwardRequest(t *testing.T, client *ssh.Client, reqType, sessionID string)
 	return ok, string(body)
 }
 
+// A client that leaves mid-handshake, as a host or guest whose own connection
+// dropped does, ends the sshd's side of it with a closed connection. That is
+// the client's, so it is a warning. A client the sshd refuses stays an error:
+// the relay's own proxy is one, when the sshd doesn't trust its certificate.
+func Test_sshd_AClientThatLeavesMidHandshakeIsAWarning(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		connect func(t *testing.T, conn net.Conn)
+		want    []string
+	}{
+		{"a client that leaves", func(t *testing.T, conn net.Conn) {
+			require.NoError(t, conn.Close())
+		}, []string{"WARN connection failed"}},
+		{"a client the sshd refuses", func(t *testing.T, conn net.Conn) {
+			stranger, err := ssh.ParsePrivateKey([]byte(HostPrivateKeyContent))
+			require.NoError(t, err)
+			_, _, _, err = ssh.NewClientConn(conn, "sshd", &ssh.ClientConfig{
+				User:            "1234",
+				Auth:            []ssh.AuthMethod{ssh.PublicKeys(stranger)},
+				HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+			})
+			require.Error(t, err)
+		}, []string{"ERROR connection failed"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				logs := &logRecorder{}
+				s := newBubbleSSHD(t, func(d *sshd) { d.Logger = slog.New(logs) })
+				conn, err := s.dialRaw(t.Context())
+				require.NoError(t, err)
+				tc.connect(t, conn)
+				synctest.Wait() // The sshd has given up on the handshake.
+				failed := slices.DeleteFunc(logs.atLeast(slog.LevelDebug), func(line string) bool {
+					return !strings.HasSuffix(line, " connection failed")
+				})
+				require.Equal(t, tc.want, failed)
+			})
+		})
+	}
+}
+
 func Test_sshd_SessionsActiveGauge(t *testing.T) {
 	s := newTestSSHD(t)
 	require.Equal(t, 0.0, s.gauge(t), "gauge should be exported as 0 before any session")

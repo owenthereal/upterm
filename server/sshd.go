@@ -523,8 +523,17 @@ func (s *sshd) Serve(ln net.Listener) error {
 		Handler: func(s ssh.Session) {
 			_ = s.Exit(1) // disable ssh login
 		},
+		// A client that leaves mid-handshake, as a host or guest whose own
+		// connection dropped does, closes it under the sshd. That is the
+		// client's, so it is a warning. Any other failure stays an error, a
+		// refusal among them: the relay's own proxy is refused when the sshd
+		// doesn't trust its certificate.
 		ConnectionFailedCallback: func(conn net.Conn, err error) {
-			s.Logger.Error("connection failed", "error", err)
+			level := slog.LevelError
+			if isExpectedShutdownError(err) {
+				level = slog.LevelWarn
+			}
+			s.Logger.Log(context.Background(), level, "connection failed", "error", err)
 		},
 		// Before the handshake, so that every byte the SSH transport reads, the
 		// handshake's too, is recorded for the pings to judge the host by.
