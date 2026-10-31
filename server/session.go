@@ -869,11 +869,17 @@ func (c *consulSessionStore) Release(ctx context.Context, reg *Registration) err
 	return c.release(ctx, reg.ID(), reg.lease)
 }
 
+// releaseAttemptTimeout bounds each attempt to destroy a lock session. Callers
+// give a release DefaultConsulTimeout in all, so an attempt that gets no answer
+// leaves the others time to run.
+const releaseAttemptTimeout = DefaultConsulTimeout / DefaultMaxRetries
+
 func (c *consulSessionStore) release(ctx context.Context, sessionID, lease string) error {
-	wo := (&api.WriteOptions{}).WithContext(ctx)
 	err := retry.Do(
 		func() error {
-			if _, err := c.client.Session().Destroy(lease, wo); err != nil {
+			ctx, cancel := context.WithTimeout(ctx, releaseAttemptTimeout)
+			defer cancel()
+			if _, err := c.client.Session().Destroy(lease, (&api.WriteOptions{}).WithContext(ctx)); err != nil {
 				return fmt.Errorf("failed to destroy consul lock session: %w", err)
 			}
 			return nil
