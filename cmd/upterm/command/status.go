@@ -281,6 +281,6 @@ func keysLine(escape byte, suspend bool) string {
 	if suspend {
 		keys = append(keys, e+"^Z suspend")
 	}
-	keys = append(keys, e+e+" send "+e, e+"? this list")
+	keys = append(keys, e+"a review permissions", e+e+" send "+e, e+"? this list")
 	return "upterm: keys: " + strings.Join(keys, "  ")
 }

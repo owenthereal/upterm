@@ -289,6 +289,9 @@ type hostClients struct {
 	// onPrimaryChanged wakes observers after a primary assignment or removal,
 	// outside both elector locks. Observers re-read primaryID after waking.
 	onPrimaryChanged func()
+	// The broker has an independent subscription so diagnostic/test observers
+	// cannot replace the approval-loss notification. Set before serving.
+	onApprovalPrimaryChanged func()
 
 	// electMu serialises elections, which block for up to
 	// promoteFlushTimeout per candidate and must not run concurrently.
@@ -332,6 +335,9 @@ func (h *hostClients) remove(c *hostClient) {
 		h.reportPrimary(false)
 	}
 	h.mu.Unlock()
+	if changed && h.onApprovalPrimaryChanged != nil {
+		h.onApprovalPrimaryChanged()
+	}
 	if changed && h.onPrimaryChanged != nil {
 		h.onPrimaryChanged()
 	}
@@ -371,6 +377,9 @@ func (h *hostClients) primaryID() string {
 // path, nothing here is about to end the process, so the line still lands.
 func (h *hostClients) elect() {
 	if elected := h.electOne(); elected != "" {
+		if h.onApprovalPrimaryChanged != nil {
+			h.onApprovalPrimaryChanged()
+		}
 		if h.onPrimaryChanged != nil {
 			h.onPrimaryChanged()
 		}

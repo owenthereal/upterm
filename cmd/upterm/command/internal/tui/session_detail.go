@@ -131,7 +131,7 @@ func guestsRow(p GuestPermissions) string {
 
 	approval := "allowed without asking"
 	if p.ApprovalRequired {
-		approval = "approval required"
+		approval = "primary terminal approval required"
 	}
 	var files string
 	switch p.FileTransfer {

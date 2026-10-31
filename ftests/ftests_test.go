@@ -751,6 +751,7 @@ type Host struct {
 	AllowLocalTCPForwarding  bool
 	ReadOnly                 bool
 	SFTPDisabled             bool // Disable SFTP subsystem
+	SFTPAutoAccept           bool // Explicit SFTP pregrant; zero keeps protected operations denied
 	HideClientIP             bool
 	// Reconnect paces the tunnel's liveness and its redials; a field left
 	// zero takes host.ReconnectTiming's default.
@@ -876,6 +877,7 @@ func (c *Host) Share(url string) error {
 		AllowLocalTCPForwarding: c.AllowLocalTCPForwarding,
 		ReadOnly:                c.ReadOnly,
 		SFTPDisabled:            c.SFTPDisabled,
+		AutoAccept:              c.SFTPAutoAccept,
 		HideClientIP:            c.HideClientIP,
 		AttachSocketFile:        attachSocket,
 		AwaitInitialClient:      true,

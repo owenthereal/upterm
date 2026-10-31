@@ -493,9 +493,9 @@ func TestAccessShowsWheneverAnyoneCanJoin(t *testing.T) {
 }
 
 func TestGuestsRow(t *testing.T) {
-	require.Equal(t, "can type; files: approval required; no port forwarding",
+	require.Equal(t, "can type; files: primary terminal approval required; no port forwarding",
 		guestsRow(GuestPermissions{FileTransfer: "all", ApprovalRequired: true}))
-	require.Equal(t, "watch only; files: downloads only, approval required; no port forwarding",
+	require.Equal(t, "watch only; files: downloads only, primary terminal approval required; no port forwarding",
 		guestsRow(GuestPermissions{ReadOnly: true, FileTransfer: "downloads", ApprovalRequired: true}))
 	require.Equal(t, "can type; files: allowed without asking; port forwarding allowed",
 		guestsRow(GuestPermissions{FileTransfer: "all", LocalForwarding: true}))
@@ -533,7 +533,7 @@ func Test_guestsRow_EveryCombination(t *testing.T) {
 
 					waits := "allowed without asking"
 					if approval {
-						waits = "approval required"
+						waits = "primary terminal approval required"
 					}
 					wantFiles := map[string]string{
 						FileTransferOff:       "files: off",
@@ -578,7 +578,7 @@ func Test_renderSessionDetail_GuestsRowPosition(t *testing.T) {
 		row("Authorized Keys:", "alice:") +
 		row("", "- SHA256:abc") +
 		row("Access:", "open: anyone with the session ID can join") +
-		row("Guests:", "can type; files: approval required; no port forwarding") +
+		row("Guests:", "can type; files: primary terminal approval required; no port forwarding") +
 		"\n➤ SSH:\n    ssh sid-1@example.com\n"
 	assert.Equal(t, want, renderSessionDetail(detail, 80))
 

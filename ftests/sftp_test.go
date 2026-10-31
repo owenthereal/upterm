@@ -119,6 +119,7 @@ func testSFTPNativeWindowsPath(t *testing.T, hostShareURL, hostNodeAddr, clientJ
 		PrivateKeys:              []string{HostPrivateKey},
 		AdminSocketFile:          adminSocketFile,
 		PermittedClientPublicKey: ClientPublicKeyContent,
+		SFTPAutoAccept:           true,
 	}
 	require.NoError(h.Share(hostShareURL))
 	defer h.Close()
@@ -169,6 +170,7 @@ func testSFTPDownload(t *testing.T, hostShareURL, hostNodeAddr, clientJoinURL st
 		PrivateKeys:              []string{HostPrivateKey},
 		AdminSocketFile:          adminSocketFile,
 		PermittedClientPublicKey: ClientPublicKeyContent,
+		SFTPAutoAccept:           true,
 	}
 	err = h.Share(hostShareURL)
 	require.NoError(err)
@@ -218,6 +220,7 @@ func testSFTPUpload(t *testing.T, hostShareURL, hostNodeAddr, clientJoinURL stri
 		PrivateKeys:              []string{HostPrivateKey},
 		AdminSocketFile:          adminSocketFile,
 		PermittedClientPublicKey: ClientPublicKeyContent,
+		SFTPAutoAccept:           true,
 	}
 	err := h.Share(hostShareURL)
 	require.NoError(err)
@@ -278,6 +281,7 @@ func testSFTPReadOnly(t *testing.T, hostShareURL, hostNodeAddr, clientJoinURL st
 		PrivateKeys:              []string{HostPrivateKey},
 		AdminSocketFile:          adminSocketFile,
 		PermittedClientPublicKey: ClientPublicKeyContent,
+		SFTPAutoAccept:           true,
 		ReadOnly:                 true, // Enable read-only mode
 	}
 	err = h.Share(hostShareURL)
@@ -440,6 +444,7 @@ func testSFTPSetstat(t *testing.T, hostShareURL, hostNodeAddr, clientJoinURL str
 		PrivateKeys:              []string{HostPrivateKey},
 		AdminSocketFile:          adminSocketFile,
 		PermittedClientPublicKey: ClientPublicKeyContent,
+		SFTPAutoAccept:           true,
 	}
 	err = h.Share(hostShareURL)
 	require.NoError(err)

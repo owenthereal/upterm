@@ -18,7 +18,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-const keysLineWithSuspend = "upterm: keys: ~. detach  ~^Z suspend  ~~ send ~  ~? this list"
+const keysLineWithSuspend = "upterm: keys: ~. detach  ~^Z suspend  ~a review permissions  ~~ send ~  ~? this list"
 
 // fiveGuests is five client rows, as clientDesc writes them.
 func fiveGuests() []string {
@@ -249,7 +249,7 @@ func TestStatusOfAnotherLaunchIsUnavailable(t *testing.T) {
 	require.NoError(t, err)
 
 	lines := statusLines(context.Background(), statusSource{Name: "s", LaunchID: "another-launch", AdminSocket: rec.AdminSocket, Escape: '~'}, nil)
-	require.Equal(t, []string{"upterm: session status unavailable", "upterm: keys: ~. detach  ~~ send ~  ~? this list"}, lines)
+	require.Equal(t, []string{"upterm: session status unavailable", "upterm: keys: ~. detach  ~a review permissions  ~~ send ~  ~? this list"}, lines)
 }
 
 func TestManyGuestsAreSummarised(t *testing.T) {
@@ -311,6 +311,6 @@ func TestRenderStatusStates(t *testing.T) {
 // only where this terminal can be suspended.
 func TestStatusKeysLineIsTheTerminalsOwn(t *testing.T) {
 	v := statusView{Unavailable: true}
-	require.Equal(t, "upterm: keys: ^. detach  ^^Z suspend  ^^ send ^  ^? this list", renderStatus(v, '^', true)[1])
-	require.Equal(t, "upterm: keys: ~. detach  ~~ send ~  ~? this list", renderStatus(v, '~', false)[1])
+	require.Equal(t, "upterm: keys: ^. detach  ^^Z suspend  ^a review permissions  ^^ send ^  ^? this list", renderStatus(v, '^', true)[1])
+	require.Equal(t, "upterm: keys: ~. detach  ~a review permissions  ~~ send ~  ~? this list", renderStatus(v, '~', false)[1])
 }

@@ -504,7 +504,7 @@ type GetSessionResponse struct {
 	StartConfirmed               *bool   `protobuf:"varint,19,opt,name=start_confirmed,json=startConfirmed,proto3,oneof" json:"start_confirmed,omitempty"`                            // the host answered the start prompt, rather than passing --accept
 	ReadOnly                     *bool   `protobuf:"varint,20,opt,name=read_only,json=readOnly,proto3,oneof" json:"read_only,omitempty"`
 	FileTransfer                 *string `protobuf:"bytes,21,opt,name=file_transfer,json=fileTransfer,proto3,oneof" json:"file_transfer,omitempty"`                                                      // off, downloads, all
-	FileTransferApprovalRequired *bool   `protobuf:"varint,22,opt,name=file_transfer_approval_required,json=fileTransferApprovalRequired,proto3,oneof" json:"file_transfer_approval_required,omitempty"` // each guest file transfer waits for the host's dialog
+	FileTransferApprovalRequired *bool   `protobuf:"varint,22,opt,name=file_transfer_approval_required,json=fileTransferApprovalRequired,proto3,oneof" json:"file_transfer_approval_required,omitempty"` // each guest file transfer waits for approval in the primary host terminal
 	LocalForwarding              *bool   `protobuf:"varint,23,opt,name=local_forwarding,json=localForwarding,proto3,oneof" json:"local_forwarding,omitempty"`
 	unknownFields                protoimpl.UnknownFields
 	sizeCache                    protoimpl.SizeCache

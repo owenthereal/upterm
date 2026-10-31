@@ -359,10 +359,10 @@ func TestSessionViewShowsGuestsOnlyForADaemonThatReportsThem(t *testing.T) {
 	}{
 		{"can type, approval for files", permissionsResponse(false, "all", true, false),
 			&tui.GuestPermissions{FileTransfer: tui.FileTransferAll, ApprovalRequired: true},
-			"can type; files: approval required; no port forwarding"},
+			"can type; files: primary terminal approval required; no port forwarding"},
 		{"watch only", permissionsResponse(true, "downloads", true, false),
 			&tui.GuestPermissions{ReadOnly: true, FileTransfer: tui.FileTransferDownloads, ApprovalRequired: true},
-			"watch only; files: downloads only, approval required; no port forwarding"},
+			"watch only; files: downloads only, primary terminal approval required; no port forwarding"},
 		{"watch only with forwarding", permissionsResponse(true, "downloads", false, true),
 			&tui.GuestPermissions{ReadOnly: true, FileTransfer: tui.FileTransferDownloads, LocalForwarding: true},
 			"watch only; files: downloads only, allowed without asking; port forwarding allowed"},

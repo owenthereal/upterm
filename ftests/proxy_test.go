@@ -405,6 +405,7 @@ func testProxyLargeTransfer(t *testing.T, hostShareURL, hostNodeAddr, clientJoin
 		PrivateKeys:              []string{HostPrivateKey},
 		AdminSocketFile:          adminSocketFile,
 		PermittedClientPublicKey: ClientPublicKeyContent,
+		SFTPAutoAccept:           true,
 	}, hostShareURL, hostNodeAddr)
 
 	c := &Client{PrivateKeys: []string{ClientPrivateKey}}

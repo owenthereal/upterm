@@ -199,3 +199,15 @@ func TestSessionCurrentHelpShowsTheVariableNotItsValue(t *testing.T) {
 	require.NotContains(t, stdout, "/secret/admin.sock")
 	require.Contains(t, stdout, `(default "$UPTERM_ADMIN_SOCKET")`)
 }
+
+func TestApprovalHelp(t *testing.T) {
+	for _, path := range []string{"upterm host", "upterm attach"} {
+		text := findCommand(t, path).Long
+		require.Contains(t, text, "~a")
+		require.Contains(t, text, "~~a")
+		require.Contains(t, text, "confirmation")
+		require.Contains(t, text, "approval is unavailable")
+	}
+	require.Contains(t, keysLine('!', true), "!a review permissions")
+	require.Contains(t, keyHint('~', true), "~~a")
+}

@@ -1,6 +1,8 @@
 package internal
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -8,36 +10,46 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
+	"sync/atomic"
 	"time"
 
 	gssh "charm.land/ssh"
-	hostsftp "github.com/owenthereal/upterm/host/sftp"
+	"github.com/owenthereal/upterm/host/consent"
 	"github.com/owenthereal/upterm/utils"
 	"github.com/pkg/sftp"
 )
 
+const sftpApprovalHint = "SFTP needs approval in the primary host terminal; the host can attach with approval escapes enabled or use --accept"
+
+// A boundary ID names one protected operation, independently of the Manager's
+// coalesced review IDs. Process-wide sequencing also separates concurrent
+// channels on the same transport without adding state to copied handlers.
+var sftpRequestSequence atomic.Uint64
+
+func nextSFTPRequestID() string {
+	return "sftp-" + strconv.FormatUint(sftpRequestSequence.Add(1), 10)
+}
+
 // SFTPSession tracks permission state for a single SFTP session
 type SFTPSession struct {
-	readOnly          bool                       // Only allow downloads (no upload/delete)
-	permissionChecker hostsftp.PermissionChecker // Optional: prompts user for permission (nil = auto-allow)
-	clientInfo        hostsftp.ClientInfo        // Client information for permission dialogs
+	readOnly          bool // Only allow downloads (no upload/delete)
+	permissionChecker consent.PermissionChecker
+	clientInfo        consent.ClientInfo
 	logger            *slog.Logger
+	ctx               context.Context
+	autoAccept        bool
 }
 
 // HandleSFTP handles SFTP subsystem requests
 func (h *sessionHandler) HandleSFTP(sess gssh.Session) {
 	sessionID := sess.Context().Value(gssh.ContextKeySessionID).(string)
 
-	// Clean up permission cache when session ends
-	if h.sftpPermissionChecker != nil {
-		defer h.sftpPermissionChecker.ClearSession(sessionID)
-	}
-
-	// Get client info for permission dialogs. The fingerprint is the guest's
+	// Get client info for terminal approval. The fingerprint is the guest's
 	// own key, as the client list shows it: sess.PublicKey() is the
 	// certificate the relay minted for its hop to the host.
-	clientInfo := hostsftp.ClientInfo{
-		SessionID: sessionID,
+	clientInfo := consent.ClientInfo{
+		ConnectionID: sessionID,
 	}
 	guest, isGuest := sess.Context().Value(authenticatedGuestKey{}).(authenticatedGuest)
 	if isGuest && guest.key != nil {
@@ -46,10 +58,17 @@ func (h *sessionHandler) HandleSFTP(sess gssh.Session) {
 
 	h.logger.Info("SFTP session started", "readonly", h.readonly, "client", clientInfo.Fingerprint)
 
+	// Channel CLOSE cancels workers independently of pkg/sftp's own request
+	// cancellation, which happens only after its workers have returned.
+	ctx, cancel := sessionOperationContext(h.stopCtx, sess)
+	defer cancel()
+
 	// Create permission-checking handlers
 	sftpSession := &SFTPSession{
 		readOnly:          h.readonly,
-		permissionChecker: h.sftpPermissionChecker,
+		ctx:               ctx,
+		autoAccept:        h.sftpAutoAccept,
+		permissionChecker: h.permissionChecker,
 		clientInfo:        clientInfo,
 		logger:            h.logger,
 	}
@@ -86,28 +105,119 @@ func (h *sessionHandler) HandleSFTP(sess gssh.Session) {
 	h.logger.Info("SFTP session ended")
 }
 
-// checkPermission prompts user for permission if needed.
-// For two-path operations (rename, symlink, link), pass both source and target paths.
-func (s *SFTPSession) checkPermission(op hostsftp.Operation, paths ...string) error {
-	// No checker = auto-allow (headless/CI mode)
-	if s.permissionChecker == nil {
+// operationContext combines the request lifetime with channel and host loss.
+// Consent gets its own deadline; an allowed transfer retains this context.
+func (s *SFTPSession) operationContext(parent context.Context) (context.Context, context.CancelFunc) {
+	ctx, cancel := context.WithCancel(parent)
+	stop := context.AfterFunc(s.ctx, cancel)
+	if s.ctx.Err() != nil {
+		cancel()
+	}
+	return ctx, func() { stop(); cancel() }
+}
+
+// checkPermission retains the original handler-entry deadline across queueing
+// and re-coalescing. Paired operations always supply their complete tuple.
+func (s *SFTPSession) checkPermission(ctx context.Context, arrived time.Time, requestID string, op consent.Operation, paths ...string) (resultErr error) {
+	defer func() { s.logPermission(requestID, op, paths, resultErr) }()
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	if op.Capability() != consent.CapabilitySFTP {
+		return consent.ErrDenied
+	}
+	if s.readOnly && op != consent.OpDownload {
+		return consent.ErrDenied
+	}
+	if s.autoAccept {
 		return nil
 	}
-
-	// Check permission (the checker handles caching of "Allow All" decisions)
-	result, err := s.permissionChecker.CheckPermission(op, s.clientInfo, paths...)
-	if err != nil {
-		// Nobody could be asked: no display, or no dialog tool to draw the
-		// dialog. Deny rather than assume consent; a host that wants
-		// transfers without being asked passes --accept, which replaces
-		// the dialog with a checker that allows everything.
-		s.logger.Warn("SFTP operation denied: no permission dialog could be shown; pass --accept to allow transfers without asking",
-			"op", op.String(), "paths", paths, "client", s.clientInfo.Fingerprint, "error", err)
-		return fmt.Errorf("permission dialog unavailable: %w", err)
+	if s.permissionChecker == nil {
+		return fmt.Errorf("%w: %s", consent.ErrUnavailable, sftpApprovalHint)
 	}
+	permissionCtx, cancel := context.WithDeadline(ctx, arrived.Add(consent.PermissionTimeout))
+	defer cancel()
+	if permissionCtx.Err() != nil {
+		return permissionCtx.Err()
+	}
+	decision, err := s.permissionChecker.CheckPermission(permissionCtx, op, s.clientInfo, paths...)
+	if err == nil {
+		err = permissionCtx.Err()
+		if deadline, ok := permissionCtx.Deadline(); err == nil && ok && !time.Now().Before(deadline) {
+			err = context.DeadlineExceeded
+		}
+	}
+	// The original contexts are authoritative even if an AfterFunc is still queued.
+	if err == nil {
+		err = ctx.Err()
+	}
+	if err == nil {
+		err = s.ctx.Err()
+	}
+	if errors.Is(err, consent.ErrUnavailable) {
+		return fmt.Errorf("%w: %s", err, sftpApprovalHint)
+	}
+	if err != nil {
+		return err
+	}
+	if decision != consent.AllowConnection && decision != consent.AllowGuest {
+		return consent.ErrDenied
+	}
+	return nil
+}
 
-	if result == hostsftp.PermissionDenied {
-		return fmt.Errorf("permission denied by user")
+// Consent failures are actionable in the host log. Writing a diagnostic to an
+// unread SSH stderr stream here could otherwise hold permission cleanup open.
+func (s *SFTPSession) logPermission(requestID string, op consent.Operation, paths []string, err error) {
+	outcome := "allowed"
+	switch {
+	case errors.Is(err, consent.ErrStale):
+		outcome = "stale"
+	case errors.Is(err, consent.ErrSubjectTooLarge):
+		outcome = "subject_too_large"
+	case errors.Is(err, consent.ErrUnavailable):
+		outcome = "unavailable"
+	case errors.Is(err, context.DeadlineExceeded), errors.Is(err, consent.ErrTimeout):
+		outcome = "timeout"
+	case errors.Is(err, context.Canceled), errors.Is(err, consent.ErrCanceled):
+		outcome = "canceled"
+	case errors.Is(err, consent.ErrOverloaded):
+		outcome = "overloaded"
+	case err != nil:
+		outcome = "denied"
+	}
+	subjects := make([]string, 0, 2)
+	for i, path := range paths {
+		if i == 2 {
+			break
+		}
+		subjects = append(subjects, sftpLogText(path))
+	}
+	reason := ""
+	if err != nil {
+		reason = sftpLogText(err.Error())
+	}
+	s.logger.Info("SFTP permission policy", "outcome", outcome, "capability", consent.CapabilitySFTP, "operation", op, "subjects", subjects, "fingerprint", sftpLogText(s.clientInfo.Fingerprint), "connection_id", sftpLogText(s.clientInfo.ConnectionID), "request_id", requestID, "reason", reason)
+}
+func sftpLogText(text string) string {
+	if len(text) > 256 {
+		text = text[:256] + "..."
+	}
+	return strconv.QuoteToASCII(text)
+}
+
+// pkg/sftp preserves Error() as the status message and finds the wrapped fxerr
+// for its status code. Use its normal reply path, without a separate SSH write.
+func sftpPermissionError(err error) error {
+	if errors.Is(err, consent.ErrUnavailable) {
+		return fmt.Errorf("%w: %s", sftp.ErrSSHFxPermissionDenied, sftpApprovalHint)
+	}
+	return sftp.ErrSSHFxPermissionDenied
+}
+
+func sftpOperationError(ctx context.Context, r *sftp.Request, s *SFTPSession) error {
+	if ctx.Err() != nil || r.Context().Err() != nil || s.ctx.Err() != nil {
+		return sftp.ErrSSHFxPermissionDenied
 	}
 	return nil
 }
@@ -135,6 +245,21 @@ func (s *SFTPSession) resolvePath(reqPath string) (string, error) {
 	}
 
 	return filepath.Clean(reqPath), nil
+}
+
+// localPaths is what a read-only denial records for the request's paths: the
+// local paths a permission check would have been given, so every policy
+// record names a file the same way. On Windows the request's own spelling,
+// /C:/dir/file, is never that.
+func (s *SFTPSession) localPaths(reqPaths ...string) []string {
+	local := make([]string, len(reqPaths))
+	for i, reqPath := range reqPaths {
+		local[i] = reqPath
+		if resolved, err := s.resolvePath(reqPath); err == nil {
+			local[i] = resolved
+		}
+	}
+	return local
 }
 
 // undoubleDriveLetter repairs a path a client sent in native Windows form.
@@ -185,18 +310,25 @@ type sftpFileReader struct {
 }
 
 func (h *sftpFileReader) Fileread(r *sftp.Request) (io.ReaderAt, error) {
+	arrived := time.Now()
+	requestID := nextSFTPRequestID()
+	ctx, cancel := h.session.operationContext(r.Context())
+	defer cancel()
 	path, err := h.session.resolvePath(r.Filepath)
 	if err != nil {
 		return nil, sftp.ErrSSHFxPermissionDenied
 	}
 
-	// Check permission (shows zenity dialog if needed)
-	if err := h.session.checkPermission(hostsftp.OpDownload, path); err != nil {
+	// Check permission before opening the file.
+	if err := h.session.checkPermission(ctx, arrived, requestID, consent.OpDownload, path); err != nil {
 		h.logger.Info("SFTP download denied", "path", path)
-		return nil, sftp.ErrSSHFxPermissionDenied
+		return nil, sftpPermissionError(err)
 	}
 
 	h.logger.Info("SFTP download", "path", path)
+	if err := sftpOperationError(ctx, r, h.session); err != nil {
+		return nil, err
+	}
 	return os.Open(path)
 }
 
@@ -207,8 +339,13 @@ type sftpFileWriter struct {
 }
 
 func (h *sftpFileWriter) Filewrite(r *sftp.Request) (io.WriterAt, error) {
+	arrived := time.Now()
+	requestID := nextSFTPRequestID()
+	ctx, cancel := h.session.operationContext(r.Context())
+	defer cancel()
 	// Deny uploads in read-only mode
 	if h.session.readOnly {
+		h.session.logPermission(requestID, consent.OpUpload, h.session.localPaths(r.Filepath), consent.ErrDenied)
 		h.logger.Info("SFTP upload denied (read-only mode)", "path", r.Filepath)
 		return nil, sftp.ErrSSHFxPermissionDenied
 	}
@@ -223,9 +360,9 @@ func (h *sftpFileWriter) Filewrite(r *sftp.Request) (io.WriterAt, error) {
 
 	logger = logger.With("resolved_path", path)
 
-	if err := h.session.checkPermission(hostsftp.OpUpload, path); err != nil {
+	if err := h.session.checkPermission(ctx, arrived, requestID, consent.OpUpload, path); err != nil {
 		logger.Info("SFTP upload denied")
-		return nil, sftp.ErrSSHFxPermissionDenied
+		return nil, sftpPermissionError(err)
 	}
 
 	logger.Info("SFTP upload")
@@ -247,6 +384,9 @@ func (h *sftpFileWriter) Filewrite(r *sftp.Request) (io.WriterAt, error) {
 		osFlags |= os.O_EXCL
 	}
 
+	if err := sftpOperationError(ctx, r, h.session); err != nil {
+		return nil, err
+	}
 	return os.OpenFile(path, osFlags, 0644)
 }
 
@@ -257,8 +397,18 @@ type sftpFileCmder struct {
 }
 
 func (h *sftpFileCmder) Filecmd(r *sftp.Request) error {
+	arrived := time.Now()
+	requestID := nextSFTPRequestID()
+	ctx, cancel := h.session.operationContext(r.Context())
+	defer cancel()
+	op := sftpCommandOperation(r.Method)
 	// Deny all modifications in read-only mode
 	if h.session.readOnly {
+		subjects := []string{r.Filepath}
+		if r.Method == "Rename" || r.Method == "Symlink" || r.Method == "Link" {
+			subjects = append(subjects, r.Target)
+		}
+		h.session.logPermission(requestID, op, h.session.localPaths(subjects...), consent.ErrDenied)
 		h.logger.Info("SFTP command denied (read-only mode)", "method", r.Method, "path", r.Filepath)
 		return sftp.ErrSSHFxPermissionDenied
 	}
@@ -278,40 +428,27 @@ func (h *sftpFileCmder) Filecmd(r *sftp.Request) error {
 		}
 	}
 
-	// Map request method to operation
-	var op hostsftp.Operation
-	switch r.Method {
-	case "Remove":
-		op = hostsftp.OpDelete
-	case "Mkdir":
-		op = hostsftp.OpMkdir
-	case "Rename":
-		op = hostsftp.OpRename
-	case "Rmdir":
-		op = hostsftp.OpRmdir
-	case "Symlink":
-		op = hostsftp.OpSymlink
-	case "Link":
-		op = hostsftp.OpLink
-	case "Setstat":
-		op = hostsftp.OpSetstat
-	default:
+	if op == "" {
 		h.logger.Info("SFTP unsupported command", "method", r.Method, "path", path)
 		return sftp.ErrSSHFxOpUnsupported
 	}
 
 	// Check permission - pass both paths for two-path operations
 	if isTwoPathOp {
-		err = h.session.checkPermission(op, path, targetPath)
+		err = h.session.checkPermission(ctx, arrived, requestID, op, path, targetPath)
 	} else {
-		err = h.session.checkPermission(op, path)
+		err = h.session.checkPermission(ctx, arrived, requestID, op, path)
 	}
 	if err != nil {
 		h.logger.Info("SFTP command denied", "method", r.Method, "path", path)
-		return sftp.ErrSSHFxPermissionDenied
+		return sftpPermissionError(err)
 	}
 
 	h.logger.Info("SFTP command", "method", r.Method, "path", path)
+
+	if err := sftpOperationError(ctx, r, h.session); err != nil {
+		return err
+	}
 
 	// Execute the operation
 	switch r.Method {
@@ -334,6 +471,9 @@ func (h *sftpFileCmder) Filecmd(r *sftp.Request) error {
 
 		// Handle size change (truncate) - use flags to detect if size was set (allows truncate to 0)
 		if flags.Size {
+			if err := sftpOperationError(ctx, r, h.session); err != nil {
+				return err
+			}
 			if err := os.Truncate(path, int64(attrs.Size)); err != nil {
 				return err
 			}
@@ -341,6 +481,9 @@ func (h *sftpFileCmder) Filecmd(r *sftp.Request) error {
 
 		// Handle ownership change
 		if flags.UidGid {
+			if err := sftpOperationError(ctx, r, h.session); err != nil {
+				return err
+			}
 			if err := os.Chown(path, int(attrs.UID), int(attrs.GID)); err != nil {
 				return err
 			}
@@ -348,6 +491,9 @@ func (h *sftpFileCmder) Filecmd(r *sftp.Request) error {
 
 		// Handle permission change
 		if flags.Permissions {
+			if err := sftpOperationError(ctx, r, h.session); err != nil {
+				return err
+			}
 			if err := os.Chmod(path, attrs.FileMode()); err != nil {
 				return err
 			}
@@ -355,6 +501,9 @@ func (h *sftpFileCmder) Filecmd(r *sftp.Request) error {
 
 		// Handle timestamp change
 		if flags.Acmodtime {
+			if err := sftpOperationError(ctx, r, h.session); err != nil {
+				return err
+			}
 			atime := attrs.AccessTime()
 			mtime := attrs.ModTime()
 			if err := os.Chtimes(path, atime, mtime); err != nil {
@@ -366,6 +515,27 @@ func (h *sftpFileCmder) Filecmd(r *sftp.Request) error {
 	}
 
 	return sftp.ErrSSHFxOpUnsupported
+}
+
+func sftpCommandOperation(method string) consent.Operation {
+	switch method {
+	case "Remove":
+		return consent.OpDelete
+	case "Mkdir":
+		return consent.OpMkdir
+	case "Rename":
+		return consent.OpRename
+	case "Rmdir":
+		return consent.OpRmdir
+	case "Symlink":
+		return consent.OpSymlink
+	case "Link":
+		return consent.OpLink
+	case "Setstat":
+		return consent.OpSetstat
+	default:
+		return ""
+	}
 }
 
 // sftpFileLister handles directory listing and stat

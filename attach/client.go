@@ -14,6 +14,7 @@ import (
 	"log/slog"
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/owenthereal/upterm/internal/termsize"
@@ -27,13 +28,14 @@ const dialTimeout = 10 * time.Second
 
 // Client attaches a pair of streams to a running session.
 type Client struct {
-	Socket  string
-	Stdin   io.Reader
-	Stdout  io.Writer
-	Pty     *Pty
-	Resizes <-chan termsize.Size
-	Escape  byte
-	Logger  *slog.Logger
+	Socket    string
+	Stdin     io.Reader
+	Stdout    io.Writer
+	Pty       *Pty
+	Resizes   <-chan termsize.Size
+	Escape    byte
+	Approvals bool
+	Logger    *slog.Logger
 
 	// HostKeys is the daemon's public keys, from the session record: a record
 	// from a current daemon carries exactly one entry, the session host key
@@ -133,20 +135,35 @@ func (c *Client) Run(ctx context.Context) (Result, error) {
 	// handler returns at once and this is the only reader of reqs.
 	holdLoop, sessionEnded := requestLoopHold, sessionEndedHook
 	ends := newEndReader(reqs)
-	go ends.run(holdLoop)
 	noRequests := make(chan *ssh.Request)
 	close(noRequests)
 	client := ssh.NewClient(conn, chans, noRequests)
 	defer func() { _ = client.Close() }()
+	var approvals ApprovalReview
+	go ends.run(holdLoop)
+	if c.Approvals && c.Pty != nil && c.Stdin != nil && c.Escape != 0 {
+		setup := time.AfterFunc(time.Until(setupBy), func() { _ = client.Close() })
+		ok, _, registerErr := client.SendRequest(upterm.ApprovalRegisterRequest, true, nil)
+		setup.Stop()
+		if registerErr != nil {
+			return Result{}, fmt.Errorf("registering terminal approvals: %w", registerErr)
+		}
+		if ok {
+			control := newApprovalControl(client.SendRequest)
+			ends.approvals.Store(control)
+			approvals = control
+		}
+	}
 
 	res, err := (&Terminal{
-		Stdin:   c.Stdin,
-		Stdout:  c.Stdout,
-		Pty:     c.Pty,
-		Resizes: c.Resizes,
-		Escape:  c.Escape,
-		Suspend: c.Suspend,
-		Status:  c.Status,
+		Stdin:     c.Stdin,
+		Stdout:    c.Stdout,
+		Pty:       c.Pty,
+		Resizes:   c.Resizes,
+		Escape:    c.Escape,
+		Approvals: approvals,
+		Suspend:   c.Suspend,
+		Status:    c.Status,
 		// Interactive: this client displays on a terminal and forwards its
 		// keystrokes.
 		DeclareInteractive: c.Pty != nil && c.Stdin != nil,
@@ -187,7 +204,8 @@ const endDrainTimeout = time.Second
 // endReader answers the connection's global requests and keeps the cause the
 // daemon gives for ending the session.
 type endReader struct {
-	reqs <-chan *ssh.Request
+	reqs      <-chan *ssh.Request
+	approvals atomic.Pointer[approvalControl]
 	// asks is how drain gets the loop's attention, with a channel the loop
 	// closes once it has caught up. Unbuffered: the loop takes one only
 	// between requests, so a request being handled is finished first.
@@ -234,6 +252,11 @@ func (e *endReader) run(hold func()) {
 // handle keeps the daemon's session-end request and says so in its reply, and
 // refuses everything else, as x/crypto's own handler would.
 func (e *endReader) handle(req *ssh.Request) {
+	if req.Type == upterm.ApprovalStateRequest {
+		control := e.approvals.Load()
+		_ = req.Reply(control != nil && control.accept(req.Payload), nil)
+		return
+	}
 	if req.Type != upterm.SessionEndRequestType {
 		_ = req.Reply(false, nil)
 		return

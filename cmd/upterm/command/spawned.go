@@ -396,9 +396,9 @@ func keyHint(escape byte, sshTTY bool) string {
 		return ""
 	}
 	e := string(escape)
-	hint := "upterm: " + e + ". detaches, " + e + "? shows the session's status and keys"
+	hint := "upterm: " + e + ". detaches, " + e + "? shows the session's status and keys, " + e + "a reviews guest permissions"
 	if sshTTY && escape == '~' {
-		hint += "; with ssh's default ~ escape, type ~~. and ~~?"
+		hint += "; with ssh's default ~ escape, type ~~., ~~? and ~~a"
 	}
 	return hint
 }

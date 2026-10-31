@@ -15,8 +15,8 @@ import (
 
 	gssh "charm.land/ssh"
 	"github.com/owenthereal/upterm/host/api"
+	"github.com/owenthereal/upterm/host/consent"
 	"github.com/owenthereal/upterm/host/internal/replay"
-	"github.com/owenthereal/upterm/host/sftp"
 	"github.com/owenthereal/upterm/server"
 	"github.com/owenthereal/upterm/upterm"
 	"github.com/owenthereal/upterm/utils"
@@ -112,8 +112,14 @@ type Server struct {
 	OnGuestServerStopped func(error)
 
 	// SFTP configuration
-	SFTPDisabled          bool                   // Disable SFTP subsystem entirely
-	SFTPPermissionChecker sftp.PermissionChecker // Optional: prompts user for SFTP permissions (nil = auto-allow)
+	SFTPDisabled bool // Disable SFTP subsystem entirely
+	// PermissionChecker supplies custom consent policy. Nil denies ungranted operations.
+	PermissionChecker consent.PermissionChecker
+	// TerminalConsent selects consent on the primary local terminal; mutually exclusive with PermissionChecker.
+	TerminalConsent bool
+
+	// SFTPAutoAccept grants SFTP only, after hard policy checks.
+	SFTPAutoAccept bool
 
 	// cmd is the hosted command, kept so its outcome can be read after
 	// ServeWithContext returns.
@@ -124,6 +130,7 @@ type Server struct {
 	// state is read from outside the serving goroutine, and a pointer written
 	// there would be a race with every such read.
 	hostClients hostClients
+	approvals   *approvalBroker
 
 	// order is the session's shutdown cause, as host publishes it, and the
 	// order of each command's end against it. A value, so that it exists
@@ -194,6 +201,9 @@ func logReplayFallback(logger *slog.Logger) func(error) {
 // guest, and — when host is not nil — the host door on host, for clients that
 // are already on this machine.
 func (s *Server) ServeWithContext(ctx context.Context, guest, host net.Listener) error {
+	if s.TerminalConsent && s.PermissionChecker != nil {
+		return errors.New("TerminalConsent and PermissionChecker are mutually exclusive")
+	}
 	timing := s.timing.orDefault()
 	replayBudget := s.replayBudget
 	if replayBudget == 0 {
@@ -294,30 +304,49 @@ func (s *Server) ServeWithContext(ctx context.Context, guest, host net.Listener)
 	// Both doors share this: the session ends for one reason, and the guest
 	// actor's interrupt is what decides when sessions are released.
 	sessCtx, cancel := context.WithCancel(sessionContext(ctx))
+	// Establish the local primary owner before constructing its broker. Consent
+	// lives for this host session, outside the guest tunnel's reconnect loop.
+	s.hostClients.logger = s.Logger
+	s.hostClients.promoteFlushTimeout = timing.promoteFlush
+	s.hostClients.onPrimary = pacer.setPrimary
+	permissionChecker := s.PermissionChecker
+	if s.TerminalConsent {
+		var prompter consent.Prompter
+		if host != nil {
+			s.approvals = newApprovalBroker(&s.hostClients, s.Logger)
+			prompter = s.approvals
+			defer s.approvals.Close()
+		}
+		manager := consent.NewManager(prompter, s.Logger)
+		defer manager.Close()
+		permissionChecker = manager
+	}
+
 	sh := sessionHandler{
-		forceCommand:          s.ForceCommand,
-		forceCommands:         &guestHandlers{},
-		sharedGuests:          &guestHandlers{},
-		hostHandlers:          &guestHandlers{},
-		timing:                timing,
-		replayBudget:          replayBudget,
-		commandEnv:            s.CommandEnv,
-		hideClientIP:          s.HideClientIP,
-		ptmx:                  shared,
-		eventEmmiter:          s.EventEmitter,
-		terminals:             newTerminalWindows(s.Logger),
-		writers:               writers,
-		pacer:                 pacer,
-		keepAliveDuration:     s.KeepAliveDuration,
-		ctx:                   sessCtx,
-		stopCtx:               ctx,
-		order:                 &s.order,
-		logger:                s.Logger,
-		readonly:              s.ReadOnly,
-		sftpPermissionChecker: s.SFTPPermissionChecker,
-		kind:                  kindGuest,
-		cmdDone:               cmdDone,
-		commandResult:         cmd.Result,
+		forceCommand:      s.ForceCommand,
+		forceCommands:     &guestHandlers{},
+		sharedGuests:      &guestHandlers{},
+		hostHandlers:      &guestHandlers{},
+		timing:            timing,
+		replayBudget:      replayBudget,
+		commandEnv:        s.CommandEnv,
+		hideClientIP:      s.HideClientIP,
+		ptmx:              shared,
+		eventEmmiter:      s.EventEmitter,
+		terminals:         newTerminalWindows(s.Logger),
+		writers:           writers,
+		pacer:             pacer,
+		keepAliveDuration: s.KeepAliveDuration,
+		ctx:               sessCtx,
+		stopCtx:           ctx,
+		order:             &s.order,
+		logger:            s.Logger,
+		readonly:          s.ReadOnly,
+		permissionChecker: permissionChecker,
+		sftpAutoAccept:    s.SFTPAutoAccept,
+		kind:              kindGuest,
+		cmdDone:           cmdDone,
+		commandResult:     cmd.Result,
 	}
 
 	ss := []gssh.Signer{s.HostKey}
@@ -350,6 +379,13 @@ func (s *Server) ServeWithContext(ctx context.Context, guest, host net.Listener)
 			ConnCallback: func(ctx gssh.Context, conn net.Conn) net.Conn {
 				// Installed before authentication or any concurrent channel handlers.
 				ctx.SetValue(forwardingPresenceKey{}, &forwardingPresence{})
+				if permissionChecker != nil {
+					context.AfterFunc(ctx, func() {
+						if _, authenticated := ctx.Value(authenticatedGuestKey{}).(authenticatedGuest); authenticated {
+							permissionChecker.ClearConnection(ctx.SessionID())
+						}
+					})
+				}
 				return conn
 			},
 			LocalPortForwardingCallback: func(ctx gssh.Context, destinationHost string, destinationPort uint32) bool {
@@ -482,25 +518,29 @@ func (s *Server) ServeWithContext(ctx context.Context, guest, host net.Listener)
 		hostSH.kind = kindHost
 		hostSH.readonly = false
 		hostSH.forceCommand = nil
-		hostSH.sftpPermissionChecker = nil
+		hostSH.permissionChecker = nil
 		hostSH.subsystems = nil
 		// The gate: the first client through this door is what the command's
 		// start is waiting for.
 		hostSH.onHostClientAttached = func() { firstOnce.Do(func() { close(firstHostClient) }) }
 		// And the elector: exactly one of the clients on this door paces the
 		// command and is sent its live terminal queries.
-		s.hostClients.logger = s.Logger
-		s.hostClients.promoteFlushTimeout = timing.promoteFlush
-		// The pacer stands aside while there is a primary, which paces the
-		// command itself, so it is told of every change.
-		s.hostClients.onPrimary = pacer.setPrimary
 		hostSH.hostClients = &s.hostClients
+		hostSH.approvals = s.approvals
+		var approvalConn gssh.ConnCallback
+		var approvalRequests map[string]gssh.RequestHandler
+		if s.approvals != nil {
+			approvalConn = s.approvals.localConnection
+			approvalRequests = map[string]gssh.RequestHandler{upterm.ApprovalRegisterRequest: s.approvals.HandleRequest, upterm.ApprovalAnswerRequest: s.approvals.HandleRequest}
+		}
 
 		hostServer := gssh.Server{
 			HostSigners:      ss,
 			Handler:          hostSH.HandleSession,
 			Version:          upterm.HostSSHServerVersion,
 			PublicKeyHandler: (&hostPublicKeyHandler{}).HandlePublicKey,
+			ConnCallback:     approvalConn,
+			RequestHandlers:  approvalRequests,
 			ChannelHandlers:  map[string]gssh.ChannelHandler{"session": rawSessionHandler},
 			// Admits a client's shell with the session's end, as the guest
 			// door does a guest's.
@@ -719,6 +759,9 @@ func (h *sessionHandler) guestTracker() *guestHandlers {
 // handler with no trackers -- a test's -- admits everything. The host door
 // admits its clients the same way, with its own tracker.
 func (h *sessionHandler) admitGuest(sess gssh.Session, requestType string) bool {
+	if h.approvals != nil && !h.approvals.admitSession(sess) {
+		return false
+	}
 	handlers := h.guestTracker()
 	if handlers == nil {
 		return true
@@ -726,7 +769,16 @@ func (h *sessionHandler) admitGuest(sess gssh.Session, requestType string) bool 
 	if requestType == "subsystem" && !h.servesSubsystem(sess.Subsystem()) {
 		return false
 	}
-	return handlers.admit(sess)
+	key := sess
+	if raw, ok := sess.(*rawSession); ok {
+		key = raw.Session
+		if !handlers.admit(key) {
+			return false
+		}
+		raw.admission = handlers
+		return true
+	}
+	return handlers.admit(key)
 }
 
 // servesSubsystem reports whether the door has a handler for the named
@@ -755,14 +807,16 @@ func (h *sessionHandler) startAdmitted(handle gssh.SubsystemHandler) gssh.Subsys
 // the handler unconditionally (charm.land/ssh v0.4.3 session.go:261-296), and
 // taking the admission is the first thing the handler does.
 func (h *sessionHandler) takeAdmission(sess gssh.Session) func() {
+	if raw, ok := sess.(*rawSession); ok {
+		if raw.admission == nil {
+			return nil
+		}
+		return raw.admission.take(raw.Session)
+	}
+	// Sessions constructed directly by tests have no channel-owned state.
 	handlers := h.guestTracker()
 	if handlers == nil {
 		return nil
-	}
-	// The door's handler is given the session charm admitted wrapped, so
-	// that its output goes straight to the channel; the key is charm's own.
-	if raw, ok := sess.(*rawSession); ok {
-		sess = raw.Session
 	}
 	return handlers.take(sess)
 }
@@ -962,6 +1016,7 @@ type sessionHandler struct {
 	// hostClients, set on the host door only, is the elector every client that
 	// could be primary registers with.
 	hostClients *hostClients
+	approvals   *approvalBroker
 
 	// forceCommands is what the session's end waits on for the forced
 	// commands' teardowns: each is hung up and sends its guest a reset once
@@ -978,7 +1033,8 @@ type sessionHandler struct {
 	replayBudget time.Duration
 
 	// SFTP configuration
-	sftpPermissionChecker sftp.PermissionChecker // Optional: prompts user for SFTP permissions
+	permissionChecker consent.PermissionChecker
+	sftpAutoAccept    bool
 
 	// subsystems are the guest door's subsystem handlers, by name, so that
 	// admitGuest refuses one the door doesn't serve. Nil in a test's handler.
@@ -1715,9 +1771,10 @@ func channelClosed(sess gssh.Session) <-chan struct{} {
 // awaitChannelClosed waits, up to timeout, for a session's channel to be
 // closed from the far side: for closed to close, or for winCh to, which charm
 // does for a session with a pty as the channel's request loop ends. It drains
-// winCh as it waits: charm delivers a window change from inside the request
-// loop, so one nobody reads would park the loop, and the close with it. A nil
-// winCh is one already seen closed, or a session with no pty; with closed nil
+// winCh as it waits, including for unwrapped test sessions whose producer
+// could otherwise block delivering a size. rawSession consumes Charm's window
+// channel independently of this wait. A nil winCh is one already seen closed,
+// or a session with no pty; with closed nil
 // too, there is nothing to wait for.
 func awaitChannelClosed(closed <-chan struct{}, winCh <-chan gssh.Window, timeout time.Duration) {
 	if closed == nil && winCh == nil {
