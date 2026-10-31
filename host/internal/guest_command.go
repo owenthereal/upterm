@@ -304,6 +304,15 @@ func (h *sessionHandler) handlePrivateCommand(sess gssh.Session, selection guest
 			}
 		},
 	}
+	if h.readonly {
+		// What a read-only shared terminal says, before any of the command's
+		// output. Without a terminal it goes to stderr, out of that output.
+		if _, _, pty := sess.Pty(); pty {
+			writeGuestNotice(sess, sess, "\r\nupterm: this session is read-only; what you type isn't sent.\r\n\r\n")
+		} else {
+			guestCommandDiagnostic(sess, "upterm: this session is read-only; what you type isn't sent.\r\n")
+		}
+	}
 	runner := h.runPrivateProcess
 	if runner == nil {
 		runner = h.runGuestProcess
