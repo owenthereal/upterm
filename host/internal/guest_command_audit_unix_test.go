@@ -65,7 +65,7 @@ func requireExecAudit(t *testing.T, record map[string]any, outcome, raw string) 
 
 func TestGuestExecAudit(t *testing.T) {
 	for _, tc := range []struct {
-		name, outcome                                        string
+		name, outcome, notice                                string
 		accept, force, readonly, disabled, nilChecker, empty bool
 		decision                                             consent.Decision
 		err                                                  error
@@ -74,22 +74,22 @@ func TestGuestExecAudit(t *testing.T) {
 		{name: "forced exec", outcome: "allowed", force: true},
 		{name: "empty pregranted exec", outcome: "allowed", accept: true, empty: true},
 		{name: "empty forced exec", outcome: "allowed", force: true, empty: true},
-		{name: "read-only before force and pregrant", outcome: "denied", readonly: true, accept: true, force: true},
-		{name: "no-exec before force and pregrant", outcome: "denied", disabled: true, accept: true, force: true},
-		{name: "nil checker", outcome: "unavailable", nilChecker: true},
+		{name: "read-only before force and pregrant", outcome: "denied", notice: execDisabledNotice, readonly: true, accept: true, force: true},
+		{name: "no-exec before force and pregrant", outcome: "denied", notice: execDisabledNotice, disabled: true, accept: true, force: true},
+		{name: "nil checker", outcome: "unavailable", notice: execUnavailableNotice, nilChecker: true},
 		{name: "custom connection grant", outcome: "allowed", decision: consent.AllowConnection},
 		{name: "custom guest grant", outcome: "allowed", decision: consent.AllowGuest},
-		{name: "custom denial", outcome: "denied"},
-		{name: "host denial", outcome: "denied", err: consent.ErrDenied},
-		{name: "unavailable", outcome: "unavailable", err: consent.ErrUnavailable},
-		{name: "context timeout", outcome: "timeout", err: context.DeadlineExceeded},
-		{name: "consent timeout", outcome: "timeout", err: consent.ErrTimeout},
-		{name: "context canceled", outcome: "canceled", err: context.Canceled},
-		{name: "consent canceled", outcome: "canceled", err: consent.ErrCanceled},
-		{name: "overloaded", outcome: "overloaded", err: consent.ErrOverloaded},
-		{name: "late answer", outcome: "stale", err: consent.ErrStale},
-		{name: "subject overflow", outcome: "subject_too_large", err: consent.ErrSubjectTooLarge},
-		{name: "other denial", outcome: "denied", err: errors.New("checker failed")},
+		{name: "custom denial", outcome: "denied", notice: execDeniedNotice},
+		{name: "host denial", outcome: "denied", notice: execDeniedNotice, err: consent.ErrDenied},
+		{name: "unavailable", outcome: "unavailable", notice: execUnavailableNotice, err: consent.ErrUnavailable},
+		{name: "context timeout", outcome: "timeout", notice: execTimeoutNotice, err: context.DeadlineExceeded},
+		{name: "consent timeout", outcome: "timeout", notice: execTimeoutNotice, err: consent.ErrTimeout},
+		{name: "context canceled", outcome: "canceled", notice: "upterm: guest exec request canceled.\r\n", err: context.Canceled},
+		{name: "consent canceled", outcome: "canceled", notice: "upterm: guest exec request canceled.\r\n", err: consent.ErrCanceled},
+		{name: "overloaded", outcome: "overloaded", notice: "upterm: guest exec denied; too many permission requests are waiting. Try again later.\r\n", err: consent.ErrOverloaded},
+		{name: "late answer", outcome: "stale", notice: "upterm: guest exec denied; the host's answer came after the request ended.\r\n", err: consent.ErrStale},
+		{name: "subject overflow", outcome: "subject_too_large", notice: "upterm: guest exec denied; the command is longer than the 8192 bytes approval can show.\r\n", err: consent.ErrSubjectTooLarge},
+		{name: "other denial", outcome: "denied", notice: "upterm: guest exec denied.\r\n", err: errors.New("checker failed")},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			output := &recordingWriter{}
@@ -116,6 +116,8 @@ func TestGuestExecAudit(t *testing.T) {
 			h := startHost(t, srv)
 			client := h.guestClient(t)
 			session := execSession(t, client, false)
+			var stderr recordingWriter
+			session.Stderr = &stderr
 			got, err := session.Output(raw)
 			if tc.outcome == "allowed" {
 				require.NoError(t, err)
@@ -131,6 +133,7 @@ func TestGuestExecAudit(t *testing.T) {
 				requireExitStatus(t, err, 1)
 				require.Empty(t, got)
 			}
+			require.Equal(t, tc.notice, string(stderr.bytes()))
 			records := execAuditRecords(t, output, "exec permission policy")
 			require.Len(t, records, 1)
 			requireExecAudit(t, records[0], tc.outcome, raw)
@@ -411,6 +414,50 @@ func TestGuestExecAuditCanceledBeforeHandler(t *testing.T) {
 				h.HandleSession(raw)
 				require.False(t, called)
 				require.Equal(t, 1, <-guest.exited)
+				records := execAuditRecords(t, output, "exec permission policy")
+				require.Len(t, records, 1)
+				requireExecAudit(t, records[0], "canceled", "original")
+			})
+		})
+	}
+}
+
+// A request still waiting for approval when the host stops was ended by the
+// stop, not refused by policy. It is told nothing about approval, and its
+// status is the one any client arriving as the session ends gets: 1 for a
+// stop, 0 after a join timeout.
+func TestGuestExecConsentEndedByHostStop(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		cause error
+		code  int
+	}{
+		{"stopped", ErrSessionStopped, 1},
+		{"join timeout", ErrJoinTimeout, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				stop, cancelStop := context.WithCancelCause(t.Context())
+				defer cancelStop(nil)
+				asked := make(chan struct{})
+				output := &recordingWriter{}
+				called := false
+				h := &sessionHandler{kind: kindGuest, ctx: t.Context(), stopCtx: stop, logger: slog.New(slog.NewJSONHandler(output, nil)), permissionChecker: execPermissionFunc(func(ctx context.Context, _ consent.Operation, _ consent.ClientInfo, _ ...string) (consent.Decision, error) {
+					close(asked)
+					<-ctx.Done()
+					return consent.Deny, consent.ErrCanceled
+				}), runPrivateProcess: func(context.Context, gssh.Session, guestProcessSpec) (int, error) { called = true; return 0, nil }}
+				notices := &recordingWriter{}
+				guest := &exitRecordingGuest{fakeGuestSession: fakeGuestSession{ctx: fakeGuestContext{sessionID: "stopping"}, out: notices}, exited: make(chan int, 1)}
+				raw := &rawSession{Session: guest, closed: make(chan struct{}), requestType: "exec", requestReceivedAt: time.Now(), commandSelection: guestCommandSelection{NeedsExecConsent: true, Argv: []string{"controlled"}, RawCommand: "original"}}
+				handled := make(chan struct{})
+				go func() { defer close(handled); h.HandleSession(raw) }()
+				<-asked
+				cancelStop(tc.cause)
+				<-handled
+				require.False(t, called)
+				require.Equal(t, tc.code, <-guest.exited)
+				require.Empty(t, string(notices.bytes()))
 				records := execAuditRecords(t, output, "exec permission policy")
 				require.Len(t, records, 1)
 				requireExecAudit(t, records[0], "canceled", "original")

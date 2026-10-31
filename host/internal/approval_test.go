@@ -361,8 +361,6 @@ func TestApprovalControlDoesNotBlockShutdown(t *testing.T) {
 		a := approvalConnect(t, h, true, true, true, true)
 		approvalPrimary(t, h, a.id)
 		a.gate.pauseReads()
-		_, _, err := a.client.SendRequest("approval-pause-barrier", true, nil)
-		require.NoError(t, err)
 		result := approvalStart(h.srv.approvals, context.Background(), "unread")
 		require.Equal(t, consent.Deny, approvalResultRead(t, result).decision)
 		a.gate.resumeReads()

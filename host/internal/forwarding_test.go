@@ -514,38 +514,47 @@ func forwardingAuditRecords(t *testing.T, data string) []map[string]any {
 	return records
 }
 
+// What a refused guest is told: the session's own rule, or why approval
+// didn't happen in its terms, never the internal error behind it.
+const (
+	forwardUnavailableRefusal = "upterm: port forwarding denied; nothing on the host can approve it now. The host can attach its terminal or run with --allow-loopback-tcp-forwarding."
+	forwardDeniedRefusal      = "upterm: the host denied this port forward."
+	forwardTimeoutRefusal     = "upterm: port forwarding denied; the request timed out before it was approved."
+	forwardCanceledRefusal    = "upterm: port forwarding request canceled."
+)
+
 func TestForwardingAuditPolicyOutcomes(t *testing.T) {
 	for _, tt := range []struct {
-		name, outcome, address                                     string
+		name, outcome, address, refusal                            string
 		policy                                                     forwardingPolicy
 		decision                                                   consent.Decision
 		err                                                        error
 		cancelBefore, hostBefore, expired, lateTransport, lateHost bool
 	}{
-		{name: "read-only", outcome: "denied", policy: forwardingPolicy{ReadOnly: true, AllowAny: true}},
-		{name: "disabled", outcome: "denied", policy: forwardingPolicy{Disabled: true, AllowLoopback: true}},
-		{name: "ineligible hostname", outcome: "denied", address: "localhost", policy: forwardingPolicy{AllowLoopback: true}},
+		{name: "read-only", outcome: "denied", refusal: "upterm: this session is read-only, so it doesn't allow port forwarding", policy: forwardingPolicy{ReadOnly: true, AllowAny: true}},
+		{name: "disabled", outcome: "denied", refusal: "upterm: port forwarding is disabled for this session", policy: forwardingPolicy{Disabled: true, AllowLoopback: true}},
+		{name: "ineligible hostname", outcome: "denied", refusal: "upterm: forwarding requires a literal loopback IP address", address: "localhost", policy: forwardingPolicy{AllowLoopback: true}},
 		{name: "unrestricted pregrant", outcome: "allowed", policy: forwardingPolicy{AllowAny: true}},
 		{name: "loopback pregrant", outcome: "allowed", policy: forwardingPolicy{AllowLoopback: true}},
-		{name: "nil checker", outcome: "unavailable"},
+		{name: "nil checker", outcome: "unavailable", refusal: forwardUnavailableRefusal},
 		{name: "custom connection grant", outcome: "allowed", decision: consent.AllowConnection},
 		{name: "custom guest grant", outcome: "allowed", decision: consent.AllowGuest},
-		{name: "custom host denial", outcome: "denied", err: consent.ErrDenied},
-		{name: "custom deny decision", outcome: "denied"},
-		{name: "custom unavailable", outcome: "unavailable", err: fmt.Errorf("primary: %w", consent.ErrUnavailable)},
-		{name: "custom canceled", outcome: "canceled", err: context.Canceled},
-		{name: "custom consent canceled", outcome: "canceled", err: consent.ErrCanceled},
-		{name: "custom timeout", outcome: "timeout", err: context.DeadlineExceeded},
-		{name: "custom consent timeout", outcome: "timeout", err: consent.ErrTimeout},
-		{name: "custom overloaded", outcome: "overloaded", err: consent.ErrOverloaded},
-		{name: "custom late answer", outcome: "stale", err: consent.ErrStale},
-		{name: "custom subject overflow", outcome: "subject_too_large", err: consent.ErrSubjectTooLarge},
-		{name: "custom other failure", outcome: "denied", err: errors.New("checker failed")},
-		{name: "transport canceled before checker", outcome: "canceled", cancelBefore: true},
-		{name: "host canceled before checker", outcome: "canceled", hostBefore: true},
-		{name: "deadline expired before checker", outcome: "timeout", expired: true},
-		{name: "custom late transport allowance", outcome: "canceled", decision: consent.AllowGuest, lateTransport: true},
-		{name: "custom late host allowance", outcome: "canceled", decision: consent.AllowGuest, lateHost: true},
+		{name: "custom host denial", outcome: "denied", refusal: forwardDeniedRefusal, err: consent.ErrDenied},
+		{name: "custom deny decision", outcome: "denied", refusal: forwardDeniedRefusal},
+		{name: "custom unavailable", outcome: "unavailable", refusal: forwardUnavailableRefusal, err: fmt.Errorf("primary: %w", consent.ErrUnavailable)},
+		{name: "custom canceled", outcome: "canceled", refusal: forwardCanceledRefusal, err: context.Canceled},
+		{name: "custom consent canceled", outcome: "canceled", refusal: forwardCanceledRefusal, err: consent.ErrCanceled},
+		{name: "custom timeout", outcome: "timeout", refusal: forwardTimeoutRefusal, err: context.DeadlineExceeded},
+		{name: "custom consent timeout", outcome: "timeout", refusal: forwardTimeoutRefusal, err: consent.ErrTimeout},
+		{name: "custom overloaded", outcome: "overloaded", refusal: "upterm: port forwarding denied; too many permission requests are waiting. Try again later.", err: consent.ErrOverloaded},
+		{name: "custom late answer", outcome: "stale", refusal: "upterm: port forwarding denied; the host's answer came after the request ended.", err: consent.ErrStale},
+		{name: "custom subject overflow", outcome: "subject_too_large", refusal: "upterm: port forwarding denied; the destination is too long to review.", err: consent.ErrSubjectTooLarge},
+		{name: "custom other failure", outcome: "denied", refusal: "upterm: port forwarding denied.", err: errors.New("checker failed")},
+		{name: "transport canceled before checker", outcome: "canceled", refusal: forwardCanceledRefusal, cancelBefore: true},
+		{name: "host canceled before checker", outcome: "canceled", refusal: forwardCanceledRefusal, hostBefore: true},
+		{name: "deadline expired before checker", outcome: "timeout", refusal: forwardTimeoutRefusal, expired: true},
+		{name: "custom late transport allowance", outcome: "canceled", refusal: forwardCanceledRefusal, decision: consent.AllowGuest, lateTransport: true},
+		{name: "custom late host allowance", outcome: "canceled", refusal: forwardCanceledRefusal, decision: consent.AllowGuest, lateHost: true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			listener, err := net.ListenTCP("tcp", &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1)})
@@ -610,6 +619,7 @@ func TestForwardingAuditPolicyOutcomes(t *testing.T) {
 				require.NotEmpty(t, record["reason"])
 				require.Zero(t, open.accepts.Load())
 			}
+			require.Equal(t, tt.refusal, open.rejection)
 			if tt.cancelBefore || tt.hostBefore || tt.expired {
 				require.False(t, checked, "canceled request must be recorded without asking")
 			}

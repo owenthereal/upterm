@@ -1185,19 +1185,37 @@ func (t *Terminal) forwardInput(ctx context.Context, sess *ssh.Session, stdin io
 		if len(chunk.p) > 0 {
 			out, action := review.input(chunk, filter)
 			if action == EscapeDetach {
-				// The prefix is still program-owned. Queue and flush it within the
-				// existing bound so a stopped program cannot hold the detach.
+				// The bytes before the escape are the session's — the Enter
+				// that preceded ~. — but a detach that has been detected
+				// must reach the cancellation machinery whether or not the
+				// session is still taking input, so they are queued and
+				// waited for rather than written here. With the backlog
+				// already full they are dropped like any other byte: the
+				// policy does not change for the last read, and a session
+				// that has taken nothing for a megabyte will not take this.
 				q.append(out)
 				flush()
 				return true
 			}
-			// Never wait on a full program-input queue from the keyboard owner.
 			if !q.append(out) && !dropped {
+				// Dropped rather than waited on, deliberately: a session that
+				// is not reading will never see these bytes, and blocking for
+				// it is the defect this queue exists to fix — OpenSSH stops
+				// reading the terminal here, which is no better. Once per
+				// attachment, and bounded: this runs on the goroutine that
+				// has to stay responsive.
 				dropped = true
-				logging.WarnWithin(logger, logging.LogBound, "dropping input: the session is not taking it", "backlog-bytes", lim.inputBacklog)
+				logging.WarnWithin(logger, logging.LogBound, "dropping input: the session is not taking it",
+					"backlog-bytes", lim.inputBacklog)
 			}
 			if action == EscapeStatus && showing.CompareAndSwap(false, true) {
-				go func() { defer showing.Store(false); t.showStatus(ctx, o, safeWait, turnWait, logger) }()
+				// Off this goroutine, which has to stay free for ~. and for
+				// the session's end, however long the lookup and the
+				// terminal take.
+				go func() {
+					defer showing.Store(false)
+					t.showStatus(ctx, o, safeWait, turnWait, logger)
+				}()
 			}
 			if action == EscapeSuspend {
 				if review.active {
@@ -1213,6 +1231,10 @@ func (t *Terminal) forwardInput(ctx context.Context, sess *ssh.Session, stdin io
 			if ctx.Err() != nil {
 				return false
 			}
+			// Stdin ended: the terminal is gone. An escape byte held back
+			// was real input; it is delivered under the same bound, for
+			// the same reason. Nothing is held for the session while a
+			// review owns the keyboard: its keys never reach the filter.
 			if !review.active {
 				q.append(filter.Flush())
 			}
@@ -1220,6 +1242,7 @@ func (t *Terminal) forwardInput(ctx context.Context, sess *ssh.Session, stdin io
 			return true
 		}
 		if q.stopped() {
+			// The session went away under us; Wait says how.
 			return false
 		}
 	}

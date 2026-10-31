@@ -15,6 +15,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/olebedev/emitter"
@@ -293,20 +294,30 @@ func newGatedConn(c net.Conn) *gatedConn {
 }
 
 func (g *gatedConn) Read(p []byte) (int, error) {
-	select {
-	case <-g.pause:
-		<-g.resume
-	default:
-	}
+	g.held()
 	n, err := g.Conn.Read(p)
+	// A read already waiting on the socket when the gate closed returns with
+	// whatever arrives next. It is held too: otherwise that one packet -- a
+	// reply, a window adjustment -- still reaches the mux after pauseReads.
+	g.held()
 	if err != nil {
 		g.transportEndsOnce.Do(func() { close(g.transportEnded) })
 	}
 	return n, err
 }
 
-// pauseReads stops the client's mux dead. Nothing is read off the socket from
-// here on, so the channel window is never adjusted and the host's writes park.
+// held parks a read from pauseReads until resumeReads.
+func (g *gatedConn) held() {
+	select {
+	case <-g.pause:
+		<-g.resume
+	default:
+	}
+}
+
+// pauseReads stops the client's mux dead. Nothing reaches it from here on,
+// not even what a read already waiting on the socket receives, so the channel
+// window is never adjusted, no request is answered, and the host's writes park.
 func (g *gatedConn) pauseReads() { g.pauseOnce.Do(func() { close(g.pause) }) }
 
 // resumeReads lets the mux run again, so the client can find out what became
@@ -318,6 +329,47 @@ func (g *gatedConn) resumeReads() { g.resumeOnce.Do(func() { close(g.resume) }) 
 // Only observable after resumeReads: a paused mux reads nothing, including an
 // EOF.
 func (g *gatedConn) transportClosed() <-chan struct{} { return g.transportEnded }
+
+// parkedConn is a socket whose read says when it is waiting, so a test can
+// close the gate on a read that is already under way.
+type parkedConn struct {
+	net.Conn
+	waiting chan struct{}
+	arrive  chan []byte
+}
+
+func (c *parkedConn) Read(p []byte) (int, error) {
+	c.waiting <- struct{}{}
+	return copy(p, <-c.arrive), nil
+}
+
+// The client's read loop spends its life parked in Read, so that is where
+// pauseReads almost always finds it. What arrives next is the one packet a
+// test pauses to keep from the mux -- a request's reply, a window adjustment
+// -- and handing it over anyway lets the mux act on it.
+func TestGatedConnHoldsAReadAlreadyWaiting(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		socket := &parkedConn{waiting: make(chan struct{}), arrive: make(chan []byte)}
+		gate := newGatedConn(socket)
+		delivered := make(chan string, 1)
+		go func() {
+			buf := make([]byte, 16)
+			n, _ := gate.Read(buf)
+			delivered <- string(buf[:n])
+		}()
+		<-socket.waiting
+		gate.pauseReads()
+		socket.arrive <- []byte("reply")
+		synctest.Wait()
+		select {
+		case got := <-delivered:
+			t.Fatalf("a paused gate handed the mux %q", got)
+		default:
+		}
+		gate.resumeReads()
+		require.Equal(t, "reply", <-delivered)
+	})
+}
 
 // dialOption tunes one connection, on either door.
 type dialOption func(*dialConfig)

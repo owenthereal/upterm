@@ -477,11 +477,25 @@ func approvalLines(state upterm.ApprovalState, code string) []string {
 	if request.Capability == "exec" {
 		lines = append(lines, "upterm: execution trust: the guest can supply further input and code.")
 	}
-	lines = append(lines, "upterm: d "+code+" then Enter: deny this request.", "upterm: c "+code+" then Enter: allow this connection, capability, and complete subject tuple.")
+	connectionGrant := "allow this connection, capability, and complete subject tuple."
+	guestGrant := "allow this authenticated guest and capability until this host session ends."
+	if request.Capability == "sftp" {
+		// A file grant is for the paths shown, not the operation that asked:
+		// a download's approval also lets this connection overwrite or delete.
+		connectionGrant = "allow every file operation on this path, including writes and deletes, for this connection."
+		if len(request.Subjects) == 2 {
+			connectionGrant = "allow renaming, linking or symlinking subject[0] to subject[1] for this connection."
+		}
+		guestGrant = "allow every file operation on any path, including writes and deletes, for this authenticated guest until this host session ends."
+	}
+	lines = append(lines, "upterm: d "+code+" then Enter: deny this request.", "upterm: c "+code+" then Enter: "+connectionGrant)
 	if request.Fingerprint != "" {
-		lines = append(lines, "upterm: g "+code+" then Enter: allow this authenticated guest and capability until this host session ends.")
+		lines = append(lines, "upterm: g "+code+" then Enter: "+guestGrant)
 	} else {
 		lines = append(lines, "upterm: guest-wide permission is unavailable for an unidentified guest.")
+	}
+	if request.Capability == "sftp" {
+		lines = append(lines, "upterm: a read-only session still allows downloads only.")
 	}
 	lines = append(lines, "upterm: Escape leaves review without answering.")
 	// Protocol subject bounds expand to at most 32 KiB when quoted. Keep the

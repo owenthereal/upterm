@@ -142,6 +142,10 @@ func (h *sessionHandler) runGuestProcess(ctx context.Context, sess gssh.Session,
 		if pipes != nil {
 			_ = pipes.stdin.Close()
 		}
+		// Still read the guest's input, discarding it, as a read-only shared
+		// terminal does: a guest who types would otherwise fill the channel's
+		// window. Released the same way as the copy below.
+		go func() { _, _ = io.Copy(io.Discard, uio.NewContextReader(workCtx, sess)) }()
 	} else {
 		go func() {
 			// The SSH read itself is released by channel teardown. Canceling this
