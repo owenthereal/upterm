@@ -274,7 +274,7 @@ func TestConsentOriginCancellation(t *testing.T) {
 		survivorResolvedByStaleAnswer := len(survivor)
 		unrelatedResolvedByCancellation := len(unrelated)
 		// Release even deliberately cancellation-ignoring prompt workers before
-		// asserting, so security mutations fail without leaking test goroutines.
+		// asserting, so assertion failures cannot leak test goroutines.
 		reply(fresh, AllowConnection)
 		reply(separate, Deny)
 		require.Zero(t, grantsFromStaleAnswer)
