@@ -11,6 +11,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -348,22 +349,22 @@ func TestGuestToolProcess(t *testing.T) {
 	case mode == "binary":
 		_, _ = os.Stdout.Write(bytes.Repeat([]byte{0, 1, 127, 255, 13, 10}, 65536))
 		_, _ = os.Stderr.Write(bytes.Repeat([]byte{255, 0, 'e', 'r', 'r', 13, 10}, 32768))
-		os.Exit(23)
+		exitGuestTool(23)
 	case strings.HasPrefix(mode, "probe-"):
 		i, err := strconv.Atoi(strings.TrimPrefix(mode, "probe-"))
 		if err != nil {
-			os.Exit(127)
+			exitGuestTool(127)
 		}
 		_, _ = fmt.Fprintf(os.Stdout, "probe-%d", i)
 		_, _ = fmt.Fprintf(os.Stderr, "err-%d", i)
-		os.Exit(i + 20)
+		exitGuestTool(i + 20)
 	case mode == "hold" || mode == "foreground":
 		_, _ = os.Stdout.Write([]byte("R"))
 		_, _ = io.Copy(io.Discard, os.Stdin)
 		if mode == "hold" {
-			os.Exit(23)
+			exitGuestTool(23)
 		}
-		os.Exit(0)
+		exitGuestTool(0)
 	case mode == "login":
 		_, _ = io.WriteString(os.Stdout, "login only")
 	case mode == "explicit":
@@ -372,14 +373,21 @@ func TestGuestToolProcess(t *testing.T) {
 		_, _ = io.WriteString(os.Stdout, "sibling still usable")
 	case mode == "reconnected":
 		_, _ = io.WriteString(os.Stdout, "reconnected")
-		os.Exit(23)
+		exitGuestTool(23)
 	case mode == "status23":
-		os.Exit(23)
+		exitGuestTool(23)
 	default:
 		_, _ = io.WriteString(os.Stdout, mode)
 	}
-	os.Exit(0)
+	exitGuestTool(0)
 }
+
+// exitGuestTool ends a guest tool without os.Exit's exit hooks. Under CI this
+// binary is built with coverage, and os.Exit would have every tool write
+// coverage data into the one directory GOCOVERDIR names. Tools exiting together
+// race to create its meta-data file there; on Windows the loser prints the
+// failure to the stderr these tests compare byte for byte.
+func exitGuestTool(code int) { syscall.Exit(code) }
 
 func guestToolArgv(t *testing.T, mode string) []string {
 	t.Helper()
