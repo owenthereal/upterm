@@ -245,12 +245,22 @@ func (h *sessionHandler) handlePrivateCommand(sess gssh.Session, selection guest
 		if !h.acceptExec {
 			consentDeadline = arrived.Add(consent.PermissionTimeout)
 		}
+		// The wait ends with the channel or transport, a host stop or the
+		// session, whichever ends first. A stop is its parent, so a stop ends
+		// it at once and with the stop's cause: ctx outlives a stop until the
+		// session's sessions are released. But a command that exits on its
+		// own ends only ctx, so ctx ends the wait too.
 		permissionParent := ctx
 		if h.stopCtx != nil {
 			permissionParent = h.stopCtx
 		}
 		permissionCtx, releasePermission := sessionOperationContext(permissionParent, sess)
+		stopSessionWatch := context.AfterFunc(ctx, releasePermission)
+		if ctx.Err() != nil {
+			releasePermission()
+		}
 		selectionErr = h.checkExecPermission(permissionCtx, arrived, client, selection.RawCommand)
+		stopSessionWatch()
 		releasePermission()
 	}
 	requestError := func() error {
