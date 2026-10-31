@@ -16,6 +16,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/hashicorp/consul/api"
@@ -1914,6 +1915,59 @@ func TestFakeConsulDefaultModeKeepsItsIndexes(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, uint64(6), second.index)
 	assert.Equal(t, uint64(6), consul.index())
+}
+
+// Each attempt to destroy a lock session has a deadline of its own within the
+// caller's. Sharing the caller's, an attempt that gets no answer would spend
+// all of it, and the release would never be retried.
+func TestReleaseRetriesADestroyThatGetsNoAnswer(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		answered int // the first attempt that gets an answer; 0 for none
+		attempts int
+		err      error
+	}{
+		{name: "answered on a retry", answered: 2, attempts: 2},
+		{name: "never answered", attempts: 3, err: context.DeadlineExceeded},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				var destroys []string
+				cfg := api.DefaultConfig()
+				cfg.HttpClient = &http.Client{Transport: closeRoundTripFunc(func(r *http.Request) (*http.Response, error) {
+					lease, ok := strings.CutPrefix(r.URL.Path, "/v1/session/destroy/")
+					if !ok || r.Method != http.MethodPut {
+						return nil, fmt.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+					}
+					destroys = append(destroys, lease)
+					if tc.answered == 0 || len(destroys) < tc.answered {
+						<-r.Context().Done()
+						return nil, r.Context().Err()
+					}
+					return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("true")), Request: r}, nil
+				})}
+				client, err := api.NewClient(cfg)
+				require.NoError(t, err)
+				logger := slog.New(slog.DiscardHandler)
+				store := &consulSessionStore{client: client, apiHTTP: cfg.HttpClient, logger: logger, ttl: time.Minute, keyPrefix: "fake",
+					cache: newSessionCache(logger), held: make(map[string]map[string]heldWrite)}
+				reg := &Registration{Session: &Session{ID: "id", NodeAddr: "node", Generation: 1}, lease: "lease-1"}
+
+				// As every caller bounds a release.
+				ctx, cancel := context.WithTimeout(context.Background(), DefaultConsulTimeout)
+				defer cancel()
+				start := time.Now()
+				err = store.Release(ctx, reg)
+				if tc.err == nil {
+					require.NoError(t, err)
+				} else {
+					require.ErrorIs(t, err, tc.err)
+				}
+				assert.LessOrEqual(t, time.Since(start), DefaultConsulTimeout, "the release outlived its caller's deadline")
+				assert.Equal(t, slices.Repeat([]string{"lease-1"}, tc.attempts), destroys)
+			})
+		})
+	}
 }
 
 // Consul's index can go backwards, so what this instance holds can't be
