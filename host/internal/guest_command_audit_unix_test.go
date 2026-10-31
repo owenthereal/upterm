@@ -397,26 +397,47 @@ func TestGuestExecAuditCancellationDuringLogging(t *testing.T) {
 }
 
 func TestGuestExecAuditCanceledBeforeHandler(t *testing.T) {
-	for _, source := range []string{"host", "channel"} {
-		t.Run(source, func(t *testing.T) {
+	for _, tc := range []struct {
+		source, request string
+		code            int
+	}{
+		{"host", "exec", 1},
+		{"channel", "exec", 1},
+		// A join timeout's late arrivals are sent 0, but an exec that arrives
+		// then never ran, so it never reports success.
+		{"join timeout", "exec", 1},
+		{"join timeout", "shell", 0},
+	} {
+		t.Run(tc.source+"/"+tc.request, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
-				ctx, cancel := context.WithCancel(t.Context())
-				defer cancel()
+				ctx, cancel := context.WithCancelCause(t.Context())
+				defer cancel(nil)
 				closed := make(chan struct{})
-				if source == "host" {
-					cancel()
-				} else {
+				switch tc.source {
+				case "host":
+					cancel(nil)
+				case "join timeout":
+					cancel(ErrJoinTimeout)
+				default:
 					close(closed)
 				}
 				output := &recordingWriter{}
 				called := false
 				h := &sessionHandler{kind: kindGuest, ctx: ctx, stopCtx: ctx, logger: slog.New(slog.NewJSONHandler(output, nil)), acceptExec: true, runPrivateProcess: func(context.Context, gssh.Session, guestProcessSpec) (int, error) { called = true; return 0, nil }}
 				guest := &exitRecordingGuest{fakeGuestSession: fakeGuestSession{ctx: fakeGuestContext{sessionID: "canceled"}}, exited: make(chan int, 1)}
-				raw := &rawSession{Session: &execAuditQuietSession{Session: guest}, closed: closed, requestType: "exec", requestReceivedAt: time.Now(), commandSelection: guestCommandSelection{NeedsExecConsent: true, Argv: []string{"controlled"}, RawCommand: "original"}}
+				selection := guestCommandSelection{NeedsExecConsent: true, Argv: []string{"controlled"}, RawCommand: "original"}
+				if tc.request == "shell" {
+					selection = guestCommandSelection{Argv: []string{"controlled"}}
+				}
+				raw := &rawSession{Session: &execAuditQuietSession{Session: guest}, closed: closed, requestType: tc.request, requestReceivedAt: time.Now(), commandSelection: selection}
 				h.HandleSession(raw)
 				require.False(t, called)
-				require.Equal(t, 1, <-guest.exited)
+				require.Equal(t, tc.code, <-guest.exited)
 				records := execAuditRecords(t, output, "exec permission policy")
+				if tc.request == "shell" {
+					require.Empty(t, records)
+					return
+				}
 				require.Len(t, records, 1)
 				requireExecAudit(t, records[0], "canceled", "original")
 			})
