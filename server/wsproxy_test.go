@@ -442,6 +442,30 @@ func Test_WebSocketProxy_ANeighboursGuestIsDialedDirectly(t *testing.T) {
 	require.Zero(t, dialedInternal.Load(), "this node's internal listener was dialed")
 }
 
+// Every upterm client sends its version and credentials, so a request missing
+// either is something else on the relay's port, a browser or a scanner. It is
+// turned away as a warning, not reported as one of the relay's errors.
+func Test_WebSocketProxy_ARequestThatIsNotUptermsIsAWarning(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		header http.Header
+	}{
+		{"no client version", http.Header{}},
+		{"no credentials", http.Header{upterm.HeaderUptermClientVersion: {upterm.ClientSSHClientVersion}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			logs := &logRecorder{}
+			req := httptest.NewRequest(http.MethodGet, "/", nil)
+			req.Header = tc.header
+			rec := httptest.NewRecorder()
+			(&wsHandler{Logger: slog.New(logs)}).ServeHTTP(rec, req)
+
+			require.Equal(t, http.StatusBadRequest, rec.Code)
+			require.Equal(t, []string{"WARN http error"}, logs.atLeast(slog.LevelWarn))
+		})
+	}
+}
+
 // The page's ssh line names the relay's SSH address: the Host header's own
 // port when it has one, and 443 when it doesn't. The wss URLs take the header
 // as it is.

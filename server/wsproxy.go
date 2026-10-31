@@ -244,8 +244,11 @@ func (h *wsHandler) sshProxyHandOff(sessionID string) *api.Identifier {
 	return &api.Identifier{Id: sessionID, Type: api.Identifier_CLIENT}
 }
 
+// httpError turns away a request the handler won't upgrade. That is the
+// sender's to put right, and every upterm client sends what the handler
+// checks, so it is a warning: what gets here is mostly browsers and scanners.
 func (h *wsHandler) httpError(w http.ResponseWriter, err error) {
-	h.Logger.Error("http error", "error", err)
+	h.Logger.Warn("http error", "error", err)
 	w.WriteHeader(400)
 	_, _ = w.Write([]byte(err.Error()))
 }
