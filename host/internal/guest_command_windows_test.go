@@ -10,8 +10,8 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// Native Windows execution is part of the platform gate; cross-compilation
-// proves only that this test and the implementation build there.
+// Only a native Windows run executes this test; cross-compilation proves only
+// that it and the implementation build there.
 func TestGuestCommandWindowsInterpreter(t *testing.T) {
 	argv, err := guestExecArgv("")
 	require.NoError(t, err)
