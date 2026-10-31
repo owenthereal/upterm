@@ -3,7 +3,6 @@ package internal
 import (
 	"context"
 	"errors"
-	"fmt"
 	"io"
 	"log/slog"
 	"net"
@@ -118,17 +117,25 @@ type forwardingPolicy struct {
 	Checker                                     consent.PermissionChecker
 }
 
+// The session's own forwarding rules. Each says itself to a refused guest.
+var (
+	errForwardReadOnly    = errors.New("upterm: this session is read-only, so it doesn't allow port forwarding")
+	errForwardDisabled    = errors.New("upterm: port forwarding is disabled for this session")
+	errForwardDestination = errors.New("invalid forwarding destination")
+	errForwardNotLoopback = errors.New("upterm: forwarding requires a literal loopback IP address")
+)
+
 // The address and decimal port form the complete consent subject, and the same
 // tuple is used by the dial. Never resolve names to qualify for loopback trust.
 func authorizeForward(ctx context.Context, p forwardingPolicy, client consent.ClientInfo, address string, port uint32) error {
 	if p.ReadOnly {
-		return fmt.Errorf("upterm: this session is read-only, so it doesn't allow port forwarding")
+		return errForwardReadOnly
 	}
 	if p.Disabled {
-		return fmt.Errorf("upterm: port forwarding is disabled for this session")
+		return errForwardDisabled
 	}
 	if port == 0 || port > 65535 || address == "" || strings.ContainsRune(address, 0) {
-		return fmt.Errorf("invalid forwarding destination")
+		return errForwardDestination
 	}
 	if err := ctx.Err(); err != nil {
 		return err
@@ -138,7 +145,7 @@ func authorizeForward(ctx context.Context, p forwardingPolicy, client consent.Cl
 	}
 	ip, err := netip.ParseAddr(address)
 	if err != nil || ip.Zone() != "" || ip.Is4In6() || !ip.IsLoopback() {
-		return fmt.Errorf("upterm: forwarding requires a literal loopback IP address")
+		return errForwardNotLoopback
 	}
 	if p.AllowLoopback {
 		return nil
@@ -199,6 +206,34 @@ func forwardLogText(text string) string {
 		text = text[:256] + "..."
 	}
 	return strconv.QuoteToASCII(text)
+}
+
+// forwardRefusal is what a guest whose forward is refused is told, in the
+// order the audit classifies the same error: one of the session's rules, or
+// why approval didn't happen, never the internal or custom error text itself.
+func forwardRefusal(err error) string {
+	for _, rule := range []error{errForwardReadOnly, errForwardDisabled, errForwardDestination, errForwardNotLoopback} {
+		if errors.Is(err, rule) {
+			return rule.Error()
+		}
+	}
+	switch {
+	case errors.Is(err, consent.ErrUnavailable):
+		return "upterm: port forwarding denied; nothing on the host can approve it now. The host can attach its terminal or run with --allow-loopback-tcp-forwarding."
+	case errors.Is(err, context.DeadlineExceeded), errors.Is(err, consent.ErrTimeout):
+		return "upterm: port forwarding denied; the request timed out before it was approved."
+	case errors.Is(err, context.Canceled), errors.Is(err, consent.ErrCanceled):
+		return "upterm: port forwarding request canceled."
+	case errors.Is(err, consent.ErrOverloaded):
+		return "upterm: port forwarding denied; too many permission requests are waiting. Try again later."
+	case errors.Is(err, consent.ErrStale):
+		return "upterm: port forwarding denied; the host's answer came after the request ended."
+	case errors.Is(err, consent.ErrSubjectTooLarge):
+		return "upterm: port forwarding denied; the destination is too long to review."
+	case errors.Is(err, consent.ErrDenied):
+		return "upterm: the host denied this port forward."
+	}
+	return "upterm: port forwarding denied."
 }
 
 // Pending opens have no per-channel CLOSE notification until acceptance. The
@@ -264,7 +299,7 @@ func forwardingHandler(events *emitter.Emitter, forwards *Forwards, policy forwa
 		}
 		logForwardPermission(logger, client, requestID, req.DestAddr, req.DestPort, permissionErr)
 		if permissionErr != nil {
-			_ = channel.Reject(ssh.Prohibited, permissionErr.Error())
+			_ = channel.Reject(ssh.Prohibited, forwardRefusal(permissionErr))
 			return
 		}
 		dest := net.JoinHostPort(req.DestAddr, strconv.FormatUint(uint64(req.DestPort), 10))
@@ -273,7 +308,7 @@ func forwardingHandler(events *emitter.Emitter, forwards *Forwards, policy forwa
 		// Preserve the original-owner check immediately before dialing.
 		if err := openError(); err != nil {
 			logForwardPermission(logger, client, requestID, req.DestAddr, req.DestPort, err)
-			_ = channel.Reject(ssh.Prohibited, err.Error())
+			_ = channel.Reject(ssh.Prohibited, forwardRefusal(err))
 			return
 		}
 		socket, err := dialer.DialContext(openCtx, "tcp", dest)
@@ -283,7 +318,7 @@ func forwardingHandler(events *emitter.Emitter, forwards *Forwards, policy forwa
 		}
 		defer func() { _ = socket.Close() }()
 		if err := openError(); err != nil {
-			_ = channel.Reject(ssh.Prohibited, err.Error())
+			_ = channel.Reject(ssh.Prohibited, forwardRefusal(err))
 			return
 		}
 		stream, requests, err := channel.Accept()

@@ -456,7 +456,7 @@ func testClientLocalPortForwardDisabled(t *testing.T, hostShareURL, hostNodeAddr
 	}
 
 	require.Error(err)
-	assert.ErrorContains(err, "consent unavailable")
+	assert.ErrorContains(err, "upterm: port forwarding denied; nothing on the host can approve it now.")
 }
 
 // testGuestKeepaliveIsAnswered pins what a guest's liveness check relies on: a
