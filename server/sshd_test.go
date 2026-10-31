@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -1199,6 +1200,76 @@ func Test_sshd_ClosesTunnelChannelWhenGuestLeaves(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("channel stayed open after the guest disconnected")
 	}
+}
+
+// A host's connection outlives every guest who comes and goes on it, so a
+// guest that leaves must release its tunnel then, not when its host does. Held
+// until then, each one keeps its goroutines and its in-memory connection's
+// buffers, and a long-lived host with many guests runs its relay out of memory.
+func Test_sshd_ReleasesAGuestThatLeftWhileItsHostStays(t *testing.T) {
+	const tunnel = "(*streamlocalForwardHandler).handleConnection"
+	synctest.Test(t, func(t *testing.T) {
+		s := newBubbleSSHD(t)
+		client := s.dial(t)
+		incoming := client.HandleChannelOpen(forwardedStreamlocalChannelType)
+		sessionID := s.createSession(t, client)
+		ok, body := forwardRequest(t, client, streamlocalForwardChannelType, sessionID)
+		require.True(t, ok, body)
+
+		guest, err := s.network.Session().Dial(sessionID)
+		require.NoError(t, err)
+		ch, reqs, err := (<-incoming).Accept()
+		require.NoError(t, err)
+		go ssh.DiscardRequests(reqs)
+		synctest.Wait()
+		require.Positive(t, goroutinesIn(tunnel), "the guest's tunnel isn't running, so its absence below would prove nothing")
+
+		require.NoError(t, guest.Close())
+		_, err = ch.Read(make([]byte, 1))
+		require.ErrorIs(t, err, io.EOF)
+		synctest.Wait()
+		require.Zero(t, goroutinesIn(tunnel), "the guest left, but its tunnel is held until its host disconnects")
+	})
+}
+
+// A host that cancels its tunnel can stay connected, so what served the tunnel
+// must end with the cancel, not with the host's connection.
+func Test_sshd_ReleasesACancelledForwardWhileItsHostStays(t *testing.T) {
+	const forward = "(*streamlocalForwardHandler).handle."
+	synctest.Test(t, func(t *testing.T) {
+		s := newBubbleSSHD(t)
+		client := s.dial(t)
+		sessionID := s.createSession(t, client)
+		ok, body := forwardRequest(t, client, streamlocalForwardChannelType, sessionID)
+		require.True(t, ok, body)
+		synctest.Wait()
+		require.Positive(t, goroutinesIn(forward), "the forward isn't running, so its absence below would prove nothing")
+
+		ok, body = forwardRequest(t, client, cancelStreamlocalForwardChannelType, sessionID)
+		require.True(t, ok, body)
+		synctest.Wait()
+		require.Zero(t, goroutinesIn(forward), "the forward was cancelled, but it is held until its host disconnects")
+	})
+}
+
+// goroutinesIn counts the goroutines with fn anywhere on their stacks.
+func goroutinesIn(fn string) int {
+	buf := make([]byte, 1<<20)
+	for {
+		n := runtime.Stack(buf, true)
+		if n < len(buf) {
+			buf = buf[:n]
+			break
+		}
+		buf = make([]byte, 2*len(buf))
+	}
+	count := 0
+	for g := range strings.SplitSeq(string(buf), "\n\n") {
+		if strings.Contains(g, fn) {
+			count++
+		}
+	}
+	return count
 }
 
 func Test_sshd_ProvenRegistrationDerivesTheID(t *testing.T) {
