@@ -359,7 +359,12 @@ func (m *Manager) review(f *flight) {
 		m.reconcileLocked(&a)
 		m.mu.Unlock()
 		a.run(m)
-		m.log(f.prompt.Operation, f.prompt.Client, f.origin.subjects, f.prompt.ID, Deny, ErrStale)
+		// Its waiters have recorded their own timeout or cancellation. A prompt
+		// that returned because of it has nothing to add; one that returned an
+		// answer was answered late.
+		if err == nil || errors.Is(err, ErrStale) {
+			m.log(f.prompt.Operation, f.prompt.Client, f.origin.subjects, f.prompt.ID, Deny, ErrStale)
+		}
 		return
 	}
 	if err != nil {

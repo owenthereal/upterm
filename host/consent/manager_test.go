@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -430,28 +431,84 @@ func (b *lockedLog) Write(p []byte) (int, error) {
 	return b.buf.Write(p)
 }
 func (b *lockedLog) String() string { b.mu.Lock(); defer b.mu.Unlock(); return b.buf.String() }
+func consentOutcomes(t *testing.T, logs, requestID string) []string {
+	t.Helper()
+	var outcomes []string
+	for _, line := range strings.Split(strings.TrimSpace(logs), "\n") {
+		var record map[string]any
+		require.NoError(t, json.Unmarshal([]byte(line), &record))
+		if record["msg"] == "consent decision" && record["request_id"] == strconv.QuoteToASCII(requestID) {
+			outcomes = append(outcomes, record["outcome"].(string))
+		}
+	}
+	return outcomes
+}
+
 func TestConsentLogging(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		var output lockedLog
-		p := newPrompter()
-		p.ignoreCancellation = true
-		m := NewManager(p, slog.New(slog.NewJSONHandler(&output, nil)))
-		defer m.Close()
-		for _, err := range []error{ErrUnavailable, ErrDenied, ErrTimeout, ErrCanceled, ErrOverloaded, ErrSubjectTooLarge, ErrStale} {
-			result := check(m, context.Background(), OpExec, guest, err.Error())
-			r := next(t, p)
-			r.answer <- answer{Deny, err}
-			synctest.Wait()
-			denied(t, result, err)
-		}
-		logs := output.String()
-		for _, outcome := range []string{"unavailable", "denied", "timeout", "canceled", "overloaded", "subject_too_large", "stale"} {
-			require.Contains(t, logs, `"outcome":"`+outcome+`"`)
-		}
-		for _, field := range []string{"capability", "operation", "subjects", "fingerprint", "connection_id", "request_id"} {
-			require.Contains(t, logs, `"`+field+`"`)
-		}
+	t.Run("outcomes", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			var output lockedLog
+			p := newPrompter()
+			p.ignoreCancellation = true
+			m := NewManager(p, slog.New(slog.NewJSONHandler(&output, nil)))
+			defer m.Close()
+			for _, err := range []error{ErrUnavailable, ErrDenied, ErrTimeout, ErrCanceled, ErrOverloaded, ErrSubjectTooLarge, ErrStale} {
+				result := check(m, context.Background(), OpExec, guest, err.Error())
+				r := next(t, p)
+				r.answer <- answer{Deny, err}
+				synctest.Wait()
+				denied(t, result, err)
+			}
+			logs := output.String()
+			for _, outcome := range []string{"unavailable", "denied", "timeout", "canceled", "overloaded", "subject_too_large", "stale"} {
+				require.Contains(t, logs, `"outcome":"`+outcome+`"`)
+			}
+			for _, field := range []string{"capability", "operation", "subjects", "fingerprint", "connection_id", "request_id"} {
+				require.Contains(t, logs, `"`+field+`"`)
+			}
+		})
 	})
+	// A request that times out or is canceled is recorded once, by its waiter.
+	// Its prompt then returning because of that is no answer; only an answer
+	// the prompter gives for the ended request is a late one.
+	timeout := func(context.CancelFunc) { time.Sleep(PermissionTimeout) }
+	cancellation := func(cancel context.CancelFunc) { cancel() }
+	for _, tc := range []struct {
+		name string
+		end  func(context.CancelFunc)
+		late *answer // nil: the prompt returns on its own cancellation
+		want []string
+	}{
+		{"timeout", timeout, nil, []string{"timeout"}},
+		{"cancellation", cancellation, nil, []string{"canceled"}},
+		{"allow after timeout", timeout, &answer{AllowGuest, nil}, []string{"timeout", "stale"}},
+		{"deny after cancellation", cancellation, &answer{Deny, nil}, []string{"canceled", "stale"}},
+		{"stale answer after cancellation", cancellation, &answer{Deny, ErrStale}, []string{"canceled", "stale"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				var output lockedLog
+				p := newPrompter()
+				p.ignoreCancellation = tc.late != nil
+				m := NewManager(p, slog.New(slog.NewJSONHandler(&output, nil)))
+				defer m.Close()
+				ctx, cancel := context.WithCancel(context.Background())
+				defer cancel()
+				result := check(m, ctx, OpExec, guest, "ended")
+				r := next(t, p)
+				tc.end(cancel)
+				synctest.Wait()
+				<-result
+				if tc.late != nil {
+					r.answer <- *tc.late
+				}
+				synctest.Wait()
+				require.Equal(t, tc.want, consentOutcomes(t, output.String(), r.prompt.ID))
+				require.Empty(t, m.guests)
+				require.Empty(t, m.grants)
+			})
+		})
+	}
 }
 
 // An unrelated waiter cancellation cannot retire the displayed origin.
