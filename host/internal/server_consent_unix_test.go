@@ -150,7 +150,7 @@ func testPermissionCancellation(t *testing.T, kind string, flood bool) {
 		require.Eventually(t, func() bool {
 			pty, _, _ := callbackSession.Pty()
 			return pty.Window.Width == 777 && pty.Window.Height == 333
-		}, time.Second, time.Millisecond)
+		}, harnessTimeout, time.Millisecond)
 	}
 	probe, err := client.NewSession()
 	require.NoError(t, err)
@@ -170,7 +170,7 @@ func testPermissionCancellation(t *testing.T, kind string, flood bool) {
 	}
 	siblingChannelProbe()
 	require.NoError(t, sess.Close())
-	require.Eventually(t, func() bool { return operationCtx.Err() != nil }, time.Second, time.Millisecond)
+	require.Eventually(t, func() bool { return operationCtx.Err() != nil }, harnessTimeout, time.Millisecond)
 	siblingChannelProbe()
 	require.NoError(t, probeInput.Close())
 	require.NoError(t, probe.Wait())
@@ -182,7 +182,7 @@ func testPermissionCancellation(t *testing.T, kind string, flood bool) {
 		t.Fatal("permission handler did not finish")
 	}
 	require.Zero(t, effects.Load())
-	require.True(t, h.sharedGuests.wait(time.Second))
+	require.True(t, h.sharedGuests.wait(harnessTimeout))
 }
 
 // Hold callbacks after registration to put shutdown exactly between
@@ -257,7 +257,7 @@ func TestSessionAdmissionShutdownRace(t *testing.T) {
 			releaseOnce.Do(func() { close(release) })
 			wg.Wait()
 			require.True(t, <-waited)
-			require.Eventually(t, func() bool { return admitted.Load() == completed.Load() }, time.Second, time.Millisecond)
+			require.Eventually(t, func() bool { return admitted.Load() == completed.Load() }, harnessTimeout, time.Millisecond)
 			require.GreaterOrEqual(t, admitted.Load(), int32(16))
 			require.Equal(t, admitted.Load(), completed.Load())
 		})
