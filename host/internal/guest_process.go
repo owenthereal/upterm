@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -28,6 +29,10 @@ type guestProcessSpec struct {
 	ReadOnly  bool
 	onWait    func(error)
 	onStarted func()
+	// onDrainBound runs as the pipe drain bound fires, after the runner has
+	// seen whether its copies were still writing. Nil in production; a test
+	// uses it to act at exactly that point.
+	onDrainBound func()
 }
 
 // runGuestProcess owns one private child. Admission, command selection, presence
@@ -177,14 +182,15 @@ func (h *sessionHandler) runGuestProcess(ctx context.Context, sess gssh.Session,
 			}
 		}()
 	}
+	var writes guestWrites
 	if isPTY {
 		modes := uio.NewModeTracker()
 		copyOutput(sess, io.TeeReader(output, modes), modes.Restore)
 	} else {
-		copyOutput(sess, output, nil)
+		copyOutput(writes.track(sess), output, nil)
 	}
 	if pipes != nil {
-		copyOutput(sess.Stderr(), uio.NewContextReader(outCtx, pipes.stderr), nil)
+		copyOutput(writes.track(sess.Stderr()), uio.NewContextReader(outCtx, pipes.stderr), nil)
 	}
 	go func() { copies.Wait(); close(drained) }()
 	var operationErr error
@@ -209,6 +215,17 @@ func (h *sessionHandler) runGuestProcess(ctx context.Context, sess gssh.Session,
 		select {
 		case <-drained:
 		case <-timer.C:
+			// A copy still writing to the guest holds output the guest hasn't
+			// taken, and the bound cuts off the rest behind it: that is not a
+			// complete result, even if this write finishes before the close.
+			// One waiting to read has passed on everything it was given, as when
+			// a background descendant keeps the pipe open.
+			if writes.inFlight() && operationErr == nil {
+				operationErr = errGuestOutputUndrained
+			}
+			if spec.onDrainBound != nil {
+				spec.onDrainBound()
+			}
 		}
 		timer.Stop()
 	}
@@ -222,7 +239,7 @@ func (h *sessionHandler) runGuestProcess(ctx context.Context, sess gssh.Session,
 	case <-time.After(forceCommandDrainIdle):
 		_ = sess.Close()
 		if operationErr == nil {
-			operationErr = errors.New("guest output did not drain")
+			operationErr = errGuestOutputUndrained
 		}
 		select {
 		case <-drained:
@@ -265,6 +282,29 @@ func (h *sessionHandler) runGuestProcess(ctx context.Context, sess gssh.Session,
 	default:
 		return 1, errors.Join(operationErr, errors.New("guest command did not exit during cleanup"))
 	}
+}
+
+// errGuestOutputUndrained is a command's output cut off before the guest took
+// all of it.
+var errGuestOutputUndrained = errors.New("guest output did not drain")
+
+// guestWrites counts the pipe copies inside a write to the guest, so the drain
+// bound can tell output the guest is holding back from a pipe that is only
+// still open.
+type guestWrites struct{ n atomic.Int32 }
+
+func (g *guestWrites) track(w io.Writer) io.Writer { return guestWrite{w, g} }
+func (g *guestWrites) inFlight() bool              { return g.n.Load() > 0 }
+
+type guestWrite struct {
+	w      io.Writer
+	writes *guestWrites
+}
+
+func (w guestWrite) Write(p []byte) (int, error) {
+	w.writes.n.Add(1)
+	defer w.writes.n.Add(-1)
+	return w.w.Write(p)
 }
 
 // guestProcessOwner prevents late SSH signals or escalation steps from using a
