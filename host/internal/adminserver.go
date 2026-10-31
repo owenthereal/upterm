@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/owenthereal/upterm/host/api"
+	"github.com/owenthereal/upterm/host/consent"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -84,10 +85,16 @@ const (
 // guests may do.
 type Permissions struct {
 	// AutoAccept says nobody answered the start prompt (--accept).
-	AutoAccept              bool
-	ReadOnly                bool
-	SFTPDisabled            bool
-	AllowLocalTCPForwarding bool
+	AutoAccept                 bool
+	ReadOnly                   bool
+	SFTPDisabled               bool
+	AllowLocalTCPForwarding    bool
+	AllowLoopbackTCPForwarding bool
+	ForwardingDisabled         bool
+	AcceptExec                 bool
+	ExecDisabled               bool
+	TerminalConsent            bool
+	PermissionChecker          consent.PermissionChecker
 	// FileTransferApprovalRequired says each guest file transfer waits for
 	// approval in the primary host terminal. It means nothing when SFTP is disabled.
 	FileTransferApprovalRequired bool
@@ -95,7 +102,9 @@ type Permissions struct {
 
 // Report sets the permission fields of r. It is the one derivation of them:
 // the response the host builds at startup carries them, and GetSession copies
-// them from it, because they cannot change while the session runs.
+// them from it, because they cannot change while the session runs. Approval
+// describes configured policy even when its method is unavailable; no cached
+// consent grants or current terminal/prompt state are consulted.
 func (p Permissions) Report(r *api.GetSessionResponse) {
 	transfer := FileTransferAll
 	switch {
@@ -106,7 +115,42 @@ func (p Permissions) Report(r *api.GetSessionResponse) {
 	}
 	r.StartConfirmed = proto.Bool(!p.AutoAccept)
 	r.ReadOnly = proto.Bool(p.ReadOnly)
-	r.LocalForwarding = proto.Bool(p.AllowLocalTCPForwarding)
+	shell := "shared"
+	if len(r.LoginCommand) > 0 {
+		shell = "login"
+	}
+	if len(r.ForceCommand) > 0 {
+		shell = "forced"
+	}
+	execution := "approval"
+	switch {
+	case p.ReadOnly || p.ExecDisabled:
+		execution = "off"
+	case len(r.ForceCommand) > 0:
+		execution = "forced"
+	case p.AcceptExec:
+		execution = "granted"
+	}
+	forwarding := "loopback-approval"
+	switch {
+	case p.ReadOnly || p.ForwardingDisabled:
+		forwarding = "off"
+	case p.AllowLocalTCPForwarding:
+		forwarding = "all"
+	case p.AllowLoopbackTCPForwarding:
+		forwarding = "loopback"
+	}
+	method := "unavailable"
+	if p.TerminalConsent {
+		method = "terminal"
+	} else if p.PermissionChecker != nil {
+		method = "custom"
+	}
+	r.GuestShell = proto.String(shell)
+	r.Execution = proto.String(execution)
+	r.TcpForwarding = proto.String(forwarding)
+	r.ApprovalMethod = proto.String(method)
+	r.LocalForwarding = proto.Bool(forwarding == "all")
 	r.FileTransfer = proto.String(transfer)
 	// With no transfer there is nothing to wait for.
 	r.FileTransferApprovalRequired = proto.Bool(transfer != FileTransferOff && p.FileTransferApprovalRequired)
@@ -273,6 +317,7 @@ func (s *adminServiceServer) GetSession(ctx context.Context, in *api.GetSessionR
 		SshUser:          sshUser,
 		Command:          s.Session.Command,
 		ForceCommand:     s.Session.ForceCommand,
+		LoginCommand:     s.Session.LoginCommand,
 		AuthorizedKeys:   s.Session.AuthorizedKeys,
 		ConnectedClients: s.Forwards.describe(s.ClientRepo.Clients()),
 		SftpDisabled:     s.Session.SftpDisabled,
@@ -284,6 +329,10 @@ func (s *adminServiceServer) GetSession(ctx context.Context, in *api.GetSessionR
 		StartConfirmed:               s.Session.StartConfirmed,
 		ReadOnly:                     s.Session.ReadOnly,
 		LocalForwarding:              s.Session.LocalForwarding,
+		GuestShell:                   s.Session.GuestShell,
+		Execution:                    s.Session.Execution,
+		TcpForwarding:                s.Session.TcpForwarding,
+		ApprovalMethod:               s.Session.ApprovalMethod,
 		FileTransfer:                 s.Session.FileTransfer,
 		FileTransferApprovalRequired: s.Session.FileTransferApprovalRequired,
 	}

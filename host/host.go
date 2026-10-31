@@ -143,16 +143,18 @@ type Host struct {
 	// keep it, so a Host run twice presents two keys; a caller that needs
 	// the public half before Run — the CLI, to pin its own attach — sets it
 	// and it is used as given.
-	HostKey                 ssh.Signer
-	HostKeyCallback         ssh.HostKeyCallback
-	AuthorizedKeys          []*AuthorizedKey
-	AdminSocketFile         string
-	SessionCreatedCallback  func(context.Context, *api.GetSessionResponse) error
-	ClientJoinedCallback    func(*api.Client)
-	ClientLeftCallback      func(*api.Client)
-	Logger                  *slog.Logger
-	ReadOnly                bool
-	AllowLocalTCPForwarding bool
+	HostKey                    ssh.Signer
+	HostKeyCallback            ssh.HostKeyCallback
+	AuthorizedKeys             []*AuthorizedKey
+	AdminSocketFile            string
+	SessionCreatedCallback     func(context.Context, *api.GetSessionResponse) error
+	ClientJoinedCallback       func(*api.Client)
+	ClientLeftCallback         func(*api.Client)
+	Logger                     *slog.Logger
+	ReadOnly                   bool
+	AllowLocalTCPForwarding    bool
+	AllowLoopbackTCPForwarding bool
+	ForwardingDisabled         bool
 	// TunnelCallback is told when the tunnel to the relay is lost, and when
 	// it is back. It is called on a goroutine of the host's own, one event at
 	// a time and in the order they happened, so a callback that takes a while
@@ -686,6 +688,7 @@ func (c *Host) Run(ctx context.Context) (runErr error) {
 			Name:         c.Name,
 			Command:      c.Command,
 			ForceCommand: c.ForceCommand,
+			LoginCommand: c.LoginCommand,
 		})
 		cancelClaim()
 		if err != nil {
@@ -882,6 +885,7 @@ func (c *Host) Run(ctx context.Context) (runErr error) {
 		SshUser:        sessResp.SshUser,
 		Command:        c.Command,
 		ForceCommand:   c.ForceCommand,
+		LoginCommand:   c.LoginCommand,
 		AuthorizedKeys: toApiAuthorizedKeys(c.AuthorizedKeys),
 		SftpDisabled:   c.SFTPDisabled,
 		// The same emptiness the guest door admits anyone on.
@@ -893,6 +897,12 @@ func (c *Host) Run(ctx context.Context) (runErr error) {
 		SFTPDisabled:                 c.SFTPDisabled,
 		AllowLocalTCPForwarding:      c.AllowLocalTCPForwarding,
 		FileTransferApprovalRequired: c.FileTransferApprovalRequired,
+		AllowLoopbackTCPForwarding:   c.AllowLoopbackTCPForwarding,
+		ForwardingDisabled:           c.ForwardingDisabled,
+		AcceptExec:                   c.AcceptExec,
+		ExecDisabled:                 c.ExecDisabled,
+		TerminalConsent:              c.TerminalConsent,
+		PermissionChecker:            c.PermissionChecker,
 	}.Report(session)
 	// The name the session holds, which is not c.Name when Run was handed a
 	// socket (the name is then ignored) or generated one (c.Name is empty).
@@ -1173,33 +1183,35 @@ func (c *Host) Run(ctx context.Context) (runErr error) {
 		// actor still observes the parent and initiates ordinary teardown.
 		ctx, cancel := context.WithCancelCause(context.WithoutCancel(ctx))
 		sshServer = internal.Server{
-			Command:                 c.Command,
-			CommandEnv:              commandEnv,
-			ForceCommand:            c.ForceCommand,
-			LoginCommand:            c.LoginCommand,
-			CommandDir:              commandDir,
-			AcceptExec:              c.AcceptExec,
-			ExecDisabled:            c.ExecDisabled,
-			HideClientIP:            c.HideClientIP,
-			HostKey:                 hostKey,
-			AuthorizedKeys:          aks,
-			GuestCertAuthority:      relayAuthority.IsUserAuthority,
-			EventEmitter:            eventEmitter,
-			KeepAliveDuration:       c.KeepAliveDuration,
-			Logger:                  logger.With("component", "server"),
-			ReadOnly:                c.ReadOnly,
-			AllowLocalTCPForwarding: c.AllowLocalTCPForwarding,
-			Forwards:                forwards,
-			PtySize:                 c.PtySize,
-			PinPtySize:              c.PinPtySize,
-			Term:                    c.Term,
-			AwaitInitialClient:      c.AwaitInitialClient,
-			InitialClientTimeout:    c.InitialClientTimeout,
-			StopGrace:               c.StopGrace,
-			SFTPDisabled:            c.SFTPDisabled,
-			PermissionChecker:       c.PermissionChecker,
-			TerminalConsent:         c.TerminalConsent,
-			SFTPAutoAccept:          c.AutoAccept,
+			Command:                    c.Command,
+			CommandEnv:                 commandEnv,
+			ForceCommand:               c.ForceCommand,
+			LoginCommand:               c.LoginCommand,
+			CommandDir:                 commandDir,
+			AcceptExec:                 c.AcceptExec,
+			ExecDisabled:               c.ExecDisabled,
+			HideClientIP:               c.HideClientIP,
+			HostKey:                    hostKey,
+			AuthorizedKeys:             aks,
+			GuestCertAuthority:         relayAuthority.IsUserAuthority,
+			EventEmitter:               eventEmitter,
+			KeepAliveDuration:          c.KeepAliveDuration,
+			Logger:                     logger.With("component", "server"),
+			ReadOnly:                   c.ReadOnly,
+			AllowLocalTCPForwarding:    c.AllowLocalTCPForwarding,
+			AllowLoopbackTCPForwarding: c.AllowLoopbackTCPForwarding,
+			ForwardingDisabled:         c.ForwardingDisabled,
+			Forwards:                   forwards,
+			PtySize:                    c.PtySize,
+			PinPtySize:                 c.PinPtySize,
+			Term:                       c.Term,
+			AwaitInitialClient:         c.AwaitInitialClient,
+			InitialClientTimeout:       c.InitialClientTimeout,
+			StopGrace:                  c.StopGrace,
+			SFTPDisabled:               c.SFTPDisabled,
+			PermissionChecker:          c.PermissionChecker,
+			TerminalConsent:            c.TerminalConsent,
+			SFTPAutoAccept:             c.AutoAccept,
 			OnCommandStarted: func() {
 				cmdOnce.Do(func() { close(cmdReady) })
 				if c.CommandStartedCallback != nil {

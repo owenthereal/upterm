@@ -4,12 +4,14 @@ package internal
 
 import (
 	"bytes"
+	"context"
 	"io"
 	"net"
 	"testing"
 	"time"
 
 	"github.com/owenthereal/upterm/host/api"
+	"github.com/owenthereal/upterm/host/consent"
 	"github.com/owenthereal/upterm/upterm"
 	"github.com/pkg/sftp"
 	"github.com/stretchr/testify/require"
@@ -188,15 +190,31 @@ func TestDisabledSFTPSessionDoesNotJoin(t *testing.T) {
 	}
 }
 
-// A refused forward names the flag that would allow it, for the guest to pass
-// on to the host.
-func TestARefusedForwardNamesTheFlag(t *testing.T) {
-	h := startHost(t, &Server{Command: readsALine("READY", 0)})
-	_, err := h.guestClient(t).Dial("tcp", "127.0.0.1:1")
-	var open *ssh.OpenChannelError
-	require.ErrorAs(t, err, &open)
-	require.Equal(t, ssh.Prohibited, open.Reason)
-	require.Equal(t, "upterm: this session doesn't allow port forwarding; the host can allow it with --allow-local-tcp-forwarding.", open.Message)
+// A refused forward says what actually stopped it, in the guest's terms, and
+// a remedy only where one applies.
+func TestARefusedForwardPreservesConsentReason(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		checker consent.PermissionChecker
+		want    string
+	}{
+		{"unavailable", nil, forwardUnavailableRefusal},
+		{"timeout", forwardPermissionFunc(func(context.Context, consent.Operation, consent.ClientInfo, ...string) (consent.Decision, error) {
+			return consent.Deny, consent.ErrTimeout
+		}), forwardTimeoutRefusal},
+		{"denied", forwardPermissionFunc(func(context.Context, consent.Operation, consent.ClientInfo, ...string) (consent.Decision, error) {
+			return consent.Deny, nil
+		}), forwardDeniedRefusal},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := startHost(t, &Server{Command: readsALine("READY", 0), PermissionChecker: tc.checker})
+			_, err := h.guestClient(t).Dial("tcp", "127.0.0.1:1")
+			var open *ssh.OpenChannelError
+			require.ErrorAs(t, err, &open)
+			require.Equal(t, ssh.Prohibited, open.Reason)
+			require.Equal(t, tc.want, open.Message)
+		})
+	}
 }
 
 // A read-only session can't allow forwarding: the host would have to drop
@@ -208,7 +226,7 @@ func TestAReadOnlySessionsRefusedForwardSaysSo(t *testing.T) {
 	var open *ssh.OpenChannelError
 	require.ErrorAs(t, err, &open)
 	require.Equal(t, ssh.Prohibited, open.Reason)
-	require.Equal(t, "upterm: this session is read-only, so it doesn't allow port forwarding.", open.Message)
+	require.Equal(t, "upterm: this session is read-only, so it doesn't allow port forwarding", open.Message)
 }
 
 // A forward the session allows but the dial fails keeps the library's own
