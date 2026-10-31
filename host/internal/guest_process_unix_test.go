@@ -423,6 +423,43 @@ func TestGuestProcessDrainBound(t *testing.T) {
 	}
 }
 
+// A teardown that has had to kill its leader waits for the kernel to reap it:
+// a runner that has returned leaves no leader behind, however late the reap
+// comes after the kill.
+func TestGuestProcessTeardownAwaitsTheReap(t *testing.T) {
+	for _, pty := range []bool{false, true} {
+		t.Run(fmt.Sprintf("pty=%v", pty), func(t *testing.T) {
+			reap := make(chan struct{})
+			var once sync.Once
+			release := func() { once.Do(func() { close(reap) }) }
+			t.Cleanup(release)
+			// Ignores the hangup and SIGTERM, so only the kill ends it.
+			spec := guestShell(`trap '' HUP TERM; printf 'READY %s;' $$; exec sleep 60`)
+			spec.beforeWait = func() { <-reap }
+			sess, results, cancel := guestProcessSession(t, spec, pty, nil)
+			out, err := sess.StdoutPipe()
+			require.NoError(t, err)
+			require.NoError(t, sess.Start("ignored"))
+			seen := readUntil(t, out, ";")
+			pid, err := strconv.Atoi(strings.TrimSuffix(seen[strings.Index(seen, "READY ")+len("READY "):], ";"))
+			require.NoError(t, err)
+			cancel()
+			// Released long after the escalation's last bound, by which time a
+			// runner that doesn't wait for the reap has returned.
+			timer := time.AfterFunc(time.Second, release)
+			defer timer.Stop()
+			r := guestResult(t, results)
+			select {
+			case <-reap:
+				require.ErrorIs(t, syscall.Kill(pid, 0), syscall.ESRCH, "runner returned with its leader unreaped")
+			default:
+				t.Error("runner returned before its killed leader was reaped")
+			}
+			require.NotZero(t, r.code)
+		})
+	}
+}
+
 func TestGuestProcessExitDuringEscalation(t *testing.T) {
 	t.Run("late signals never reach the reaped group", func(t *testing.T) {
 		fake := newSignalPTY(0)
