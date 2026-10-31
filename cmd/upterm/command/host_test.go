@@ -1459,3 +1459,32 @@ func TestConfirmationOutcomeOfAProgramKilled(t *testing.T) {
 	err = confirmationOutcome(nil, fmt.Errorf("%w: %w", tea.ErrProgramKilled, context.Canceled))
 	require.EqualError(t, err, "session confirmation failed: program was killed: context canceled")
 }
+
+func TestHostGuestCommandOptions(t *testing.T) {
+	for _, args := range [][]string{
+		{"--login-command=", "--accept"},
+		{"--force-command=", "--accept"},
+		{"--login-command=   ", "--accept"},
+		{"--force-command=   ", "--accept"},
+		{"--login-command='unclosed", "--accept"},
+		{"--login-command=login", "--force-command=force", "--accept"},
+	} {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			cmd := hostCmd()
+			require.NoError(t, cmd.ParseFlags(args))
+			err := validateShareRequiredFlags(cmd, nil)
+			if err == nil {
+				_, err = parseHostOptions([]string{"sh"})
+			}
+			require.Error(t, err)
+		})
+	}
+	cmd := hostCmd()
+	require.NoError(t, cmd.ParseFlags([]string{"--login-command=tool 'a b'", "--accept-exec", "--no-exec"}))
+	opts, err := parseHostOptions([]string{"sh"})
+	require.NoError(t, err)
+	require.Equal(t, []string{"tool", "a b"}, opts.loginCommand)
+	require.True(t, flagAcceptExec)
+	require.True(t, flagNoExec)
+	hostCmd()
+}

@@ -3,11 +3,15 @@
 package internal
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"fmt"
 	"io"
 	"net"
+	"os"
+	"path/filepath"
 	"slices"
 	"sync"
 	"syscall"
@@ -392,6 +396,71 @@ func TestHostDoorIgnoresReadOnly(t *testing.T) {
 	_, err := io.WriteString(in, "host-types\n")
 	require.NoError(t, err)
 	readUntil(t, out, "got:host-types")
+}
+
+// A read-only session's own commands for a guest's shell -- a login or a
+// forced command -- are watched as its shared terminal is: the guest is told,
+// before any output, that its typing isn't sent, and what it types is read
+// and dropped, never left to fill the channel. Without a terminal the notice
+// goes to stderr, out of the command's output.
+func TestReadOnlyPrivateCommandsDropInput(t *testing.T) {
+	const notice = "upterm: this session is read-only; what you type isn't sent.\r\n"
+	for _, mode := range []string{"login", "forced"} {
+		for _, pty := range []bool{true, false} {
+			t.Run(fmt.Sprintf("%s pty=%v", mode, pty), func(t *testing.T) {
+				done := filepath.Join(t.TempDir(), "done")
+				argv := []string{"sh", "-c", `printf READY; while [ ! -e "$1" ]; do sleep 0.05; done; printf DONE`, "sh", done}
+				srv := &Server{Command: readsALine("HOST", 0), ReadOnly: true}
+				if mode == "login" {
+					srv.LoginCommand = argv
+				} else {
+					srv.ForceCommand = argv
+				}
+				h := startHost(t, srv)
+				var in io.Writer
+				var out io.Reader
+				var stderr recordingWriter
+				var piped *ssh.Session
+				if pty {
+					in, out = h.connectGuest(t)
+				} else {
+					piped = execSession(t, h.guestClient(t), false)
+					piped.Stderr = &stderr
+					var err error
+					in, err = piped.StdinPipe()
+					require.NoError(t, err)
+					out, err = piped.StdoutPipe()
+					require.NoError(t, err)
+					require.NoError(t, piped.Shell())
+				}
+				// One read up to READY: a read for the notice alone could take the
+				// command's output with it. With a terminal the notice comes
+				// first, on the same stream, and nothing else comes before READY.
+				seen := readUntil(t, out, "READY")
+				if pty {
+					require.Equal(t, "\r\n"+notice+"\r\n"+"READY", seen)
+				}
+				// More than a channel's window: only a host that reads it takes
+				// it all, and the terminal would echo any of it the command got.
+				typed := make(chan error, 1)
+				go func() { _, err := in.Write(bytes.Repeat([]byte("x"), 4<<20)); typed <- err }()
+				select {
+				case err := <-typed:
+					require.NoError(t, err)
+				case <-time.After(harnessTimeout):
+					t.Fatal("the guest's input was never read")
+				}
+				require.NoError(t, os.WriteFile(done, nil, 0o600))
+				require.NotContains(t, readUntil(t, out, "DONE"), "x")
+				if !pty {
+					// x/crypto copies stderr on a goroutine of its own; Wait is
+					// what says that copy has finished.
+					require.NoError(t, piped.Wait())
+					require.Equal(t, notice, string(stderr.bytes()))
+				}
+			})
+		}
+	}
 }
 
 // The host door failing at runtime does not end the session.

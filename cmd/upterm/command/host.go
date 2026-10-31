@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	// Imported by non-test code on purpose: testing.Testing() is the
 	// designed way to ask whether this binary is a test binary, and since
 	// Go 1.13 importing the package registers no flags.
@@ -94,6 +95,8 @@ func (e UserInterruptedError) Unwrap() error {
 var (
 	flagServer                  string
 	flagForceCommand            string
+	flagLoginCommand            string
+	flagAcceptExec, flagNoExec  bool
 	flagPrivateKeys             []string
 	flagKnownHostsFilename      string
 	flagAuthorizedKeys          string
@@ -155,6 +158,10 @@ What guests may do: type into the session, or only watch it with
 --read-only; transfer files with sftp or scp, with your access (downloads
 only with --read-only, none with --no-sftp); and forward TCP ports (ssh -L)
 to what this machine can reach, only with --allow-local-tcp-forwarding.
+Guest shell requests share the hosted terminal by default. --login-command runs a
+host-chosen program instead. Explicit exec needs approval or --accept-exec; stdin
+can contain further code. --read-only and --no-exec deny explicit exec.
+
 Unless --accept, a guest's ` + transferApprovalHelp + `; ` + transferDeniedHelp + `.
 
 The session runs in a process of its own, and this terminal is attached to
@@ -208,6 +215,10 @@ reports the command's status.`,
 
 	cmd.PersistentFlags().StringVarP(&flagServer, "server", "", "ssh://uptermd.upterm.dev:22", "Relay to host the session on: ssh://HOST[:PORT], ws://HOST[:PORT] or wss://HOST[:PORT]. Without a port, ssh uses 22, ws 80 and wss 443.")
 	cmd.PersistentFlags().StringVarP(&flagForceCommand, "force-command", "f", "", "Run this command for each guest who joins, on a terminal of its own, instead of showing them the session's command (e.g. 'tmux attach -t pair-programming', for a tmux session of that name).")
+	cmd.PersistentFlags().StringVar(&flagLoginCommand, "login-command", "", "Run this host-chosen command for guest shell requests, without exec approval. Mutually exclusive with --force-command; explicit guest exec still needs approval.")
+	cmd.PersistentFlags().BoolVar(&flagAcceptExec, "accept-exec", false, "Let guests execute private commands without approval. Command stdin can contain further code; this grants execution trust.")
+	cmd.PersistentFlags().BoolVar(&flagNoExec, "no-exec", false, "Deny explicit guest exec requests, including forced exec. Host-chosen login and forced shell commands still run.")
+
 	cmd.PersistentFlags().StringSliceVarP(&flagPrivateKeys, "private-key", "i", defaultPrivateKeys(), "Identity files to authenticate to the relay with. "+identitiesOnlyHelp+" By default it offers the agent's keys alone when the agent holds any, and otherwise the listed files that load, or a generated key when none do.")
 	cmd.PersistentFlags().StringVarP(&flagKnownHostsFilename, "known-hosts", "", defaultKnownHost(), knownHostsHelp)
 	// Keep help and generated docs portable without changing the runtime defaults.
@@ -237,7 +248,7 @@ reports the command's status.`,
 
 	// One run's choices, not standing configuration. --join-timeout stays
 	// bound to env and config: CI sets it there.
-	perRun(cmd.PersistentFlags(), "name", "detach", "output")
+	perRun(cmd.PersistentFlags(), "name", "detach", "output", "login-command", "accept-exec", "no-exec")
 
 	// The provider list comes from host.ProviderList so --help, the generated
 	// docs and the parser's own error messages cannot disagree about which
@@ -500,6 +511,10 @@ func validateShareRequiredFlags(c *cobra.Command, args []string) error {
 		result = multierror.Append(result, err)
 	}
 
+	if _, err := parseGuestCommands(c); err != nil {
+		result = multierror.Append(result, err)
+	}
+
 	return result
 }
 
@@ -530,6 +545,8 @@ type hostOptions struct {
 	joinTimeout  time.Duration
 	command      []string
 	forceCommand []string
+	loginCommand []string
+	commandDir   string
 	proxyURL     *url.URL
 	refs         []host.UserRef
 	ptySize      termsize.Size
@@ -540,6 +557,10 @@ type hostOptions struct {
 func parseHostOptions(args []string) (hostOptions, error) {
 	var opts hostOptions
 	var err error
+	opts.commandDir, err = filepath.Abs("")
+	if err != nil {
+		return opts, err
+	}
 	if opts.proxyURL, err = parseProxyURL(flagProxy); err != nil {
 		return opts, err
 	}
@@ -552,6 +573,9 @@ func parseHostOptions(args []string) (hostOptions, error) {
 		if len(opts.command) == 0 {
 			return opts, fmt.Errorf("no command is specified")
 		}
+	}
+	if opts.loginCommand, err = parseGuestCommands(nil); err != nil {
+		return opts, err
 	}
 	if opts.forceCommand, err = parseForceCommand(flagForceCommand); err != nil {
 		return opts, err
@@ -581,7 +605,31 @@ func parseForceCommand(s string) ([]string, error) {
 	if err != nil {
 		return nil, fmt.Errorf("error parsing command %s: %w", s, err)
 	}
+	if len(command) == 0 || strings.TrimSpace(command[0]) == "" {
+		return nil, fmt.Errorf("command must name an executable")
+	}
 	return command, nil
+}
+
+func parseGuestCommands(cmd *cobra.Command) ([]string, error) {
+	if flagLoginCommand != "" && flagForceCommand != "" {
+		return nil, errors.New("--login-command and --force-command are mutually exclusive")
+	}
+	if cmd != nil {
+		for _, name := range []string{"login-command", "force-command"} {
+			flag := cmd.Flags().Lookup(name)
+			if flag == nil {
+				flag = cmd.PersistentFlags().Lookup(name)
+			}
+			if flag != nil && flag.Changed && strings.TrimSpace(flag.Value.String()) == "" {
+				return nil, fmt.Errorf("--%s must name an executable", name)
+			}
+		}
+	}
+	if _, err := parseForceCommand(flagForceCommand); err != nil {
+		return nil, err
+	}
+	return parseForceCommand(flagLoginCommand)
 }
 
 // resolveAuthorizedKeys reads the authorized keys file and fetches every
