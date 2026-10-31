@@ -151,14 +151,38 @@ func TestSFTPAudit(t *testing.T) {
 		second := requireSFTPAudit(t, records[1], "upload", "denied", []string{path})
 		require.NotEqual(t, first, second)
 	})
+	// A read-only denial is recorded before any permission check, but under the
+	// local paths one would have seen, not the request's own spelling. On
+	// Windows those differ for every path: the request says /C:/dir/file.
+	t.Run("readonly records the local paths a permission check sees", func(t *testing.T) {
+		output := &recordingWriter{}
+		logger := slog.New(slog.NewJSONHandler(output, nil))
+		s := &SFTPSession{ctx: t.Context(), logger: logger, readOnly: true}
+		dir := t.TempDir()
+		wire := "/" + filepath.ToSlash(dir)
+		request := sftp.NewRequest("Rename", dir)
+		request.Filepath, request.Target = wire+"/x/../source", wire+"/./target"
+		require.Error(t, (&sftpFileCmder{session: s, logger: logger}).Filecmd(request))
+		upload := sftp.NewRequest("Put", dir)
+		upload.Filepath = wire + "/x/../source"
+		_, err := (&sftpFileWriter{session: s, logger: logger}).Filewrite(upload)
+		require.Error(t, err)
+		records := sftpAuditRecords(t, output)
+		require.Len(t, records, 2)
+		requireSFTPAudit(t, records[0], "rename", "denied", []string{filepath.Join(dir, "source"), filepath.Join(dir, "target")})
+		requireSFTPAudit(t, records[1], "upload", "denied", []string{filepath.Join(dir, "source")})
+	})
 	t.Run("untrusted projections stay bounded without changing policy subjects", func(t *testing.T) {
 		output := &recordingWriter{}
 		logger := slog.New(slog.NewJSONHandler(output, nil))
 		source := "/source\x1b[2J\n\u202e" + strings.Repeat("x", 4000)
 		target := "/target\r\x00" + strings.Repeat("z", 4000)
+		// The policy sees the local form of each request path: on Windows,
+		// /source is \source. Projecting it for the record changes nothing.
+		localSource, localTarget := filepath.FromSlash(source), filepath.FromSlash(target)
 		fingerprint, connection := "guest\x1b\n"+strings.Repeat("g", 4000), "connection\r\u202e"+strings.Repeat("c", 4000)
 		s := &SFTPSession{ctx: t.Context(), logger: logger, clientInfo: consent.ClientInfo{Fingerprint: fingerprint, ConnectionID: connection}, permissionChecker: sftpConsentChecker{check: func(_ context.Context, _ consent.Operation, client consent.ClientInfo, paths ...string) (consent.Decision, error) {
-			require.Equal(t, []string{source, target}, paths)
+			require.Equal(t, []string{localSource, localTarget}, paths)
 			require.Equal(t, fingerprint, client.Fingerprint)
 			require.Equal(t, connection, client.ConnectionID)
 			return consent.Deny, errors.New("reason\x1b\n" + strings.Repeat("e", 4000))
@@ -168,7 +192,7 @@ func TestSFTPAudit(t *testing.T) {
 		require.Error(t, (&sftpFileCmder{session: s, logger: logger}).Filecmd(request))
 		records := sftpAuditRecords(t, output)
 		require.Len(t, records, 1)
-		requireSFTPAudit(t, records[0], "rename", "denied", []string{source, target})
+		requireSFTPAudit(t, records[0], "rename", "denied", []string{localSource, localTarget})
 		for _, key := range []string{"fingerprint", "connection_id", "reason"} {
 			value := records[0][key].(string)
 			require.Less(t, len(value), 1600)
