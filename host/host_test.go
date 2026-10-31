@@ -2043,22 +2043,37 @@ func TestHostConsentConfiguration(t *testing.T) {
 	require.ErrorContains(t, h.Run(t.Context()), "mutually exclusive")
 }
 
+// An empty command is no command, as it always was for ForceCommand: an
+// embedder's strings.Fields("") must not stop the session or conflict with the
+// other flag. Each case also sets a consent conflict, which Run checks next,
+// so a command that passes is shown passing without a session being run.
 func TestHostGuestCommandOptions(t *testing.T) {
+	const (
+		conflict   = "LoginCommand and ForceCommand are mutually exclusive"
+		executable = "guest command must name an executable"
+		passed     = "TerminalConsent and PermissionChecker are mutually exclusive"
+	)
 	for _, tc := range []struct {
 		name         string
 		login, force []string
+		want         string
 	}{
-		{"conflict", []string{"login"}, []string{"force"}},
-		{"empty login", []string{}, nil}, {"empty force", nil, []string{}},
-		{"whitespace login", []string{"  "}, nil}, {"empty argv0 force", nil, []string{""}},
+		{"conflict", []string{"login"}, []string{"force"}, conflict},
+		{"whitespace login", []string{"  "}, nil, executable},
+		{"empty argv0 force", nil, []string{""}, executable},
+		{"empty login", []string{}, nil, passed},
+		{"empty force", nil, []string{}, passed},
+		{"empty login with force", []string{}, []string{"force"}, passed},
+		{"empty force with login", []string{"login"}, []string{}, passed},
+		{"both empty", []string{}, []string{}, passed},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			h := &Host{Host: "ssh://unreachable.invalid:22", Name: "must-not-be-claimed", LoginCommand: tc.login, ForceCommand: tc.force}
-			err := h.Run(t.Context())
-			require.Error(t, err)
-			require.True(t, strings.Contains(err.Error(), "mutually exclusive") || strings.Contains(err.Error(), "executable"))
+			checker := consent.NewManager(nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+			defer checker.Close()
+			h := &Host{Host: "ssh://unreachable.invalid:22", Name: "must-not-be-claimed", LoginCommand: tc.login, ForceCommand: tc.force,
+				TerminalConsent: true, PermissionChecker: checker}
+			require.EqualError(t, h.Run(t.Context()), tc.want)
 			require.Nil(t, h.SessionDir)
 		})
 	}
-
 }

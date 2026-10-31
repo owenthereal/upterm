@@ -586,11 +586,12 @@ func (c *Host) claimTimeout() time.Duration {
 // A caller that supplied AdminSocketFile keeps it across runs, since managing
 // the path is what supplying it means.
 func (c *Host) Run(ctx context.Context) (runErr error) {
-	if c.LoginCommand != nil && c.ForceCommand != nil {
+	// An empty command is no command, as the guest door reads one.
+	if len(c.LoginCommand) > 0 && len(c.ForceCommand) > 0 {
 		return errors.New("LoginCommand and ForceCommand are mutually exclusive")
 	}
 	for _, argv := range [][]string{c.LoginCommand, c.ForceCommand} {
-		if argv != nil && (len(argv) == 0 || strings.TrimSpace(argv[0]) == "") {
+		if len(argv) > 0 && strings.TrimSpace(argv[0]) == "" {
 			return errors.New("guest command must name an executable")
 		}
 	}
