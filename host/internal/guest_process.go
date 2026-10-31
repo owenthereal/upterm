@@ -37,6 +37,10 @@ type guestProcessSpec struct {
 	// so holding it holds the reap. Nil in production; a test uses it to keep
 	// a killed leader unreaped.
 	beforeWait func()
+	// onReapWait runs as the runner starts waiting, after its escalation, for
+	// a leader it hasn't seen reaped. Nil in production; a test uses it to let
+	// a held reap happen inside that wait.
+	onReapWait func()
 }
 
 // runGuestProcess owns one private child. Admission, command selection, presence
@@ -211,6 +215,13 @@ func (h *sessionHandler) runGuestProcess(ctx context.Context, sess gssh.Session,
 		cancelWork()
 		terminateWith(process, closer, exited, timing.hangup, timing.forceCommandStop, logger, spec.Argv[0])
 	}
+	// A leader still running after terminateWith has been sent SIGKILL, but
+	// the kill can fail -- a leader that is root under sudo refuses every
+	// signal -- and the kernel can hold a killed one in exit. Its reap gets
+	// until reapBy, a guest's flush from here, running alongside the drain
+	// below: the session's wait for private commands leaves that much after
+	// the drain, so the guest is still sent its status.
+	reapBy := time.Now().Add(guestFlushTimeout)
 	cancelWork()
 	if pipes != nil {
 		_ = pipes.stdin.Close()
@@ -262,12 +273,22 @@ func (h *sessionHandler) runGuestProcess(ctx context.Context, sess gssh.Session,
 			operationErr = ctx.Err()
 		}
 	}
-	// A leader not yet reaped here was killed: terminateWith returns before
-	// its last step only once the leader is gone, and that step is SIGKILL.
-	// Its waits are bounded; what is left is the kernel's reap, and the
-	// runner waits for it, so that a teardown that has returned leaves no
-	// leader behind. Nothing is signalled from here on.
-	<-exited
+	// A leader not yet reaped here has been sent SIGKILL: terminateWith
+	// returns before its last step only once the leader is gone. One that
+	// the kill reached is reaped in milliseconds, so the runner waits for it,
+	// and a teardown that has returned leaves no leader behind; one it didn't
+	// (see reapBy) is left to its waiter, reported as not having exited.
+	// Nothing is signalled from here on.
+	select {
+	case <-exited:
+	default:
+		if spec.onReapWait != nil {
+			spec.onReapWait()
+		}
+		if !reapedBy(exited, reapBy) {
+			return 1, errors.Join(operationErr, errors.New("guest command did not exit during cleanup"))
+		}
+	}
 	code, normal := exitCode(waitErr)
 	if _, sig := signalOutcome(waitErr); sig != nil {
 		code, normal = 128+*sig, true
@@ -290,6 +311,24 @@ func (h *sessionHandler) runGuestProcess(ctx context.Context, sess gssh.Session,
 	default:
 	}
 	return code, nil
+}
+
+// reapedBy reports whether exited has closed by deadline, taking it over the
+// deadline when both have come.
+func reapedBy(exited <-chan struct{}, deadline time.Time) bool {
+	timer := time.NewTimer(time.Until(deadline))
+	defer timer.Stop()
+	select {
+	case <-exited:
+		return true
+	case <-timer.C:
+	}
+	select {
+	case <-exited:
+		return true
+	default:
+		return false
+	}
 }
 
 // errGuestOutputUndrained is a command's output cut off before the guest took

@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -424,8 +425,8 @@ func TestGuestProcessDrainBound(t *testing.T) {
 }
 
 // A teardown that has had to kill its leader waits for the kernel to reap it:
-// a runner that has returned leaves no leader behind, however late the reap
-// comes after the kill.
+// a runner that has returned leaves no leader behind, however late after the
+// kill the reap comes, as long as it comes within the runner's bound.
 func TestGuestProcessTeardownAwaitsTheReap(t *testing.T) {
 	for _, pty := range []bool{false, true} {
 		t.Run(fmt.Sprintf("pty=%v", pty), func(t *testing.T) {
@@ -436,6 +437,9 @@ func TestGuestProcessTeardownAwaitsTheReap(t *testing.T) {
 			// Ignores the hangup and SIGTERM, so only the kill ends it.
 			spec := guestShell(`trap '' HUP TERM; printf 'READY %s;' $$; exec sleep 60`)
 			spec.beforeWait = func() { <-reap }
+			// The reap comes only once the runner is waiting for it.
+			var awaited atomic.Bool
+			spec.onReapWait = func() { awaited.Store(true); release() }
 			sess, results, cancel := guestProcessSession(t, spec, pty, nil)
 			out, err := sess.StdoutPipe()
 			require.NoError(t, err)
@@ -444,20 +448,80 @@ func TestGuestProcessTeardownAwaitsTheReap(t *testing.T) {
 			pid, err := strconv.Atoi(strings.TrimSuffix(seen[strings.Index(seen, "READY ")+len("READY "):], ";"))
 			require.NoError(t, err)
 			cancel()
-			// Released long after the escalation's last bound, by which time a
-			// runner that doesn't wait for the reap has returned.
-			timer := time.AfterFunc(time.Second, release)
-			defer timer.Stop()
 			r := guestResult(t, results)
-			select {
-			case <-reap:
-				require.ErrorIs(t, syscall.Kill(pid, 0), syscall.ESRCH, "runner returned with its leader unreaped")
-			default:
-				t.Error("runner returned before its killed leader was reaped")
-			}
+			require.True(t, awaited.Load(), "runner returned without waiting for its killed leader's reap")
+			require.ErrorIs(t, syscall.Kill(pid, 0), syscall.ESRCH, "runner returned with its leader unreaped")
+			require.NotContains(t, fmt.Sprint(r.err), "did not exit during cleanup")
 			require.NotZero(t, r.code)
 		})
 	}
+}
+
+// A leader the escalation can't get reaped -- one that is root under sudo
+// refuses every signal, and the kernel can hold a killed one in exit -- still
+// ends its private command within the session's wait for private commands:
+// the runner reports it as not having exited, the guest is sent 1, and the
+// handler gives up its admission.
+func TestGuestExecUnreapedLeaderStillEnds(t *testing.T) {
+	t.Setenv("SHELL", "/bin/sh")
+	timings := []struct {
+		name   string
+		timing serverTiming
+	}{
+		{"default", serverTiming{}},
+		{"50ms", serverTiming{hangup: 50 * time.Millisecond, forceCommandStop: 50 * time.Millisecond}},
+		{"40ms", serverTiming{hangup: 40 * time.Millisecond, forceCommandStop: 80 * time.Millisecond}},
+		{"80ms", serverTiming{hangup: 80 * time.Millisecond, forceCommandStop: 160 * time.Millisecond}},
+	}
+	for _, tc := range timings {
+		for _, pty := range []bool{false, true} {
+			t.Run(fmt.Sprintf("timing=%s/pty=%v", tc.name, pty), func(t *testing.T) { testUnreapedLeaderStillEnds(t, tc.timing, pty) })
+		}
+	}
+}
+
+func testUnreapedLeaderStillEnds(t *testing.T, timing serverTiming, pty bool) {
+	// Never released while the runner waits: as far as the runner can
+	// tell, its leader can't be killed.
+	hold := make(chan struct{})
+	var once sync.Once
+	t.Cleanup(func() { once.Do(func() { close(hold) }) })
+	stop, cancelStop := context.WithCancelCause(t.Context())
+	defer cancelStop(nil)
+	sessCtx, endSession := context.WithCancel(sessionContext(stop))
+	defer endSession()
+	results := make(chan guestProcessResult, 1)
+	h := &sessionHandler{kind: kindGuest, ctx: sessCtx, stopCtx: stop, acceptExec: true, timing: timing, logger: discardLogger(), privateCommands: &guestHandlers{}, sharedGuests: &guestHandlers{}}
+	h.runPrivateProcess = func(ctx context.Context, sess gssh.Session, spec guestProcessSpec) (int, error) {
+		spec.beforeWait = func() { <-hold }
+		code, err := h.runGuestProcess(ctx, sess, spec)
+		results <- guestProcessResult{code, err}
+		return code, err
+	}
+	client := permissionServer(t, &gssh.Server{Handler: h.HandleSession, SessionRequestCallback: h.admitGuest})
+	s, err := client.NewSession()
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = s.Close() })
+	if pty {
+		require.NoError(t, s.RequestPty("xterm", 24, 80, ssh.TerminalModes{}))
+	}
+	out, err := s.StdoutPipe()
+	require.NoError(t, err)
+	require.NoError(t, s.Start(`trap '' HUP TERM; printf 'READY;'; exec sleep 60`))
+	readUntil(t, out, "READY;")
+	// The host stops, and the session's end waits for its private
+	// commands as the server's does.
+	resolved := timing.orDefault()
+	bound := forceCommandStopBound(resolved.hangup, resolved.forceCommandStop)
+	stopped := time.Now()
+	cancelStop(ErrSessionStopped)
+	endSession()
+	require.True(t, h.privateCommands.wait(bound), "the session's end gave up waiting for the private command")
+	t.Logf("private command ended %v into the session's %v wait", time.Since(stopped).Round(time.Millisecond), bound)
+	r := <-results
+	require.Equal(t, 1, r.code)
+	require.ErrorContains(t, r.err, "guest command did not exit during cleanup")
+	requireExitStatus(t, s.Wait(), 1)
 }
 
 func TestGuestProcessExitDuringEscalation(t *testing.T) {
