@@ -25,6 +25,28 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
+// A command that ran and ended with an error of its own is not one that
+// couldn't start, even with the 126 or 127 a start failure reports.
+func TestAGuestCommandThatRanIsNotToldItCouldntStart(t *testing.T) {
+	for _, code := range []int{126, 127} {
+		t.Run(strconv.Itoa(code), func(t *testing.T) {
+			h := &sessionHandler{kind: kindGuest, ctx: t.Context(), stopCtx: t.Context(), acceptExec: true, logger: discardLogger(),
+				privateCommands: &guestHandlers{}, sharedGuests: &guestHandlers{},
+				runPrivateProcess: func(context.Context, gssh.Session, guestProcessSpec) (int, error) {
+					return code, errors.New("guest output did not drain")
+				}}
+			client := permissionServer(t, &gssh.Server{Handler: h.HandleSession, SessionRequestCallback: h.admitGuest})
+			s, err := client.NewSession()
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = s.Close() })
+			var stderr bytes.Buffer
+			s.Stderr = &stderr
+			requireExitStatus(t, s.Run("true"), code)
+			require.Empty(t, stderr.String())
+		})
+	}
+}
+
 func execAuditRecords(t *testing.T, output *recordingWriter, message string) []map[string]any {
 	t.Helper()
 	var records []map[string]any
