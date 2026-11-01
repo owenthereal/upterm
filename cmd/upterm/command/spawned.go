@@ -522,7 +522,8 @@ func (s *spawnedSession) printStarted(ctx context.Context, claimed *api.Claimed,
 			info.JoinCommand = detail.JoinCommand
 			info.Open = detail.Open
 		}
-		// Present whatever the status, as the connect strings are.
+		// Present whatever the status, as the connect strings are, unless
+		// the relay's SSH user is one sshConfigFor won't write.
 		if block, err := sshConfigFor(sess, claimed.Name); err == nil {
 			info.SSHConfig = block
 		}

@@ -1124,7 +1124,8 @@ func displaySession(ctx context.Context, session *api.GetSessionResponse, name s
 	detail.Name = name
 	// --detach leaves this terminal as soon as the session runs, and a door
 	// is reached from elsewhere: its banner says how, with what upterm
-	// session ssh-config prints.
+	// session ssh-config prints. Where it would print none, as for a relay's
+	// SSH user sshConfigFor won't write, the section is left out.
 	if flagDetach && doorShaped(session) {
 		if text, err := sshConfigText(session, name); err == nil {
 			detail.SSHConfig = text

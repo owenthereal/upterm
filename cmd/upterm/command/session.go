@@ -306,7 +306,8 @@ type currentInfo struct {
 	// keeps a connect string that can't connect, and a daemon that doesn't
 	// report its status doesn't say whether its can. SSHConfig is the Host
 	// block for ~/.ssh/config, under the session's name, or its ID when the
-	// daemon doesn't give one.
+	// daemon doesn't give one, and is left out when sshConfigFor won't write
+	// that name or the relay's SSH user.
 	SSHCommand  string `json:"sshCommand,omitempty"`
 	JoinCommand string `json:"joinCommand,omitempty"`
 	SSHConfig   string `json:"sshConfig,omitempty"`
@@ -1246,7 +1247,8 @@ type sessionInfo struct {
 	JoinCommand  string `json:"joinCommand,omitempty"`
 	// SSHConfig is the Host block for ~/.ssh/config that reaches the
 	// session under its name, as `session ssh-config` prints it. Present with
-	// the connect strings.
+	// the connect strings, unless the relay's SSH user is one sshConfigFor
+	// won't write.
 	SSHConfig string `json:"sshConfig,omitempty"`
 	// Host is the relay the session was started against, as the daemon
 	// reports it (`session current` prints the same value under the same

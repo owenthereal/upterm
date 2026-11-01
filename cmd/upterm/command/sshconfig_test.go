@@ -2,6 +2,7 @@ package command
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -30,6 +31,22 @@ const otherAuthorityKey = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIIYDCWOa+7MWp4LZr
 // embeddedSSHUser is the SSH user an embedded-mode relay routes the example
 // session by: its ID and, encoded, the node 10.0.0.5:2222 it is on.
 const embeddedSSHUser = exampleSessionID + ":MTAuMC4wLjU6MjIyMg=="
+
+// ownerNameSSHUser is the SSH user of a relay that routes a session by its
+// owner and name.
+const ownerNameSSHUser = "alice+home"
+
+// unwritableSSHUsers are SSH users a relay could give that ssh_config doesn't
+// read as one word. Written into a Host block, each would add lines of the
+// relay's choosing to it, or leave a block that makes ssh refuse the whole
+// file it is pasted into.
+var unwritableSSHUsers = []struct{ name, user string }{
+	{"a newline", exampleSessionID + "\n  ProxyCommand nc relay.example.com 22"},
+	{"a double quote", exampleSessionID + `"`},
+	{"a leading #", "#" + exampleSessionID},
+	{"a percent sign", exampleSessionID + "%h"},
+	{"a space", exampleSessionID + " " + exampleSessionID},
+}
 
 // The daemon reports the relay key its check trusted, as the known_hosts line
 // for the relay as it dialled it, and how it came to trust it: the line was
@@ -122,6 +139,8 @@ func TestSSHConfigGolden(t *testing.T) {
 		// one that vouches for it.
 		{"unknown-trust", relayAnswer("ssh://uptermd.upterm.dev:22", exampleSessionID, "uptermd.upterm.dev "+publicRelayKey, "pinned-elsewhere"), nil},
 		{"alias", relayAnswer("ssh://uptermd.upterm.dev:22", exampleSessionID, "uptermd.upterm.dev "+publicRelayKey, "known"), []string{"--alias", "laptop-home"}},
+		// A relay that routes by owner and name.
+		{"owner-name", relayAnswer("ssh://uptermd.upterm.dev:22", ownerNameSSHUser, "uptermd.upterm.dev "+publicRelayKey, "known"), nil},
 	} {
 		t.Run(tc.golden, func(t *testing.T) {
 			setupSessionRoots(t)
@@ -185,6 +204,170 @@ func TestSSHConfigRefusals(t *testing.T) {
 			require.Equal(t, tc.code, code)
 			require.Empty(t, stdout)
 			require.Equal(t, tc.want+"\n", stderr)
+		})
+	}
+}
+
+// A relay's SSH user that ssh_config doesn't read as one word is never
+// written into a Host block: `session ssh-config` refuses, naming the session
+// as it was given, and never the value. The same goes for the user upterm
+// makes from the session's ID for a relay that doesn't send one.
+func TestSSHConfigRefusesAnSSHUserItWontWrite(t *testing.T) {
+	type refusal struct {
+		name, arg string
+		resp      *api.GetSessionResponse
+	}
+	var refusals []refusal
+	for _, u := range unwritableSSHUsers {
+		for _, arg := range []string{"home", exampleSessionID} {
+			refusals = append(refusals, refusal{u.name + "/by " + arg, arg,
+				relayAnswer("ssh://uptermd.upterm.dev:22", u.user, "uptermd.upterm.dev "+publicRelayKey, "known")})
+		}
+	}
+	madeFromTheID := relayAnswer("ssh://uptermd.upterm.dev:22", "", "uptermd.upterm.dev "+publicRelayKey, "known")
+	madeFromTheID.SessionId = "#" + exampleSessionID
+	refusals = append(refusals, refusal{"a user made from the session's ID", "home", madeFromTheID})
+
+	for _, tc := range refusals {
+		t.Run(tc.name, func(t *testing.T) {
+			setupSessionRoots(t)
+			withConfig(t, "")
+			servedReady(t, "home", tc.resp)
+			stdout, stderr, code := runCLI(t, "session", "ssh-config", tc.arg)
+			require.Equal(t, 1, code, stderr)
+			require.Empty(t, stdout)
+			require.Equal(t, "upterm: the relay gave session "+tc.arg+" an SSH user that upterm won't write into an ssh config\n", stderr)
+		})
+	}
+}
+
+// The users a Host block takes are the ones relays give: a session ID, an
+// embedded relay's ID and node, the node in URL-safe base64 with its '='
+// padding, and an owner+name. Nothing else is written, an empty user
+// included: sshUser never makes one, but a block with one would have a User
+// line that ssh refuses.
+func TestSSHConfigWritesOnlyTheSSHUsersRelaysGive(t *testing.T) {
+	for _, user := range []string{
+		exampleSessionID,
+		embeddedSSHUser,
+		exampleSessionID + ":" + base64.URLEncoding.EncodeToString([]byte{0xfb, 0xff}),
+		ownerNameSSHUser,
+	} {
+		require.True(t, sshUserRe.MatchString(user), "%q", user)
+	}
+	require.False(t, sshUserRe.MatchString(""), "an empty user")
+	for _, u := range unwritableSSHUsers {
+		require.False(t, sshUserRe.MatchString(u.user), u.name)
+	}
+}
+
+// cliJSON is what the command line args prints as one JSON object, or for
+// a list, its only element.
+func cliJSON(t *testing.T, args ...string) map[string]any {
+	t.Helper()
+	stdout, stderr, code := runCLI(t, args...)
+	require.Equal(t, 0, code, stderr)
+	var v any
+	require.NoError(t, json.Unmarshal([]byte(stdout), &v), stdout)
+	if list, ok := v.([]any); ok {
+		require.Len(t, list, 1, stdout)
+		v = list[0]
+	}
+	return v.(map[string]any)
+}
+
+// The JSON doesn't carry such a block either: sshConfig is left out wherever
+// it would be, and the relay's key is reported as it is for any session. A
+// user a relay gives that ssh_config does read as one word is written as it
+// is.
+func TestSessionJSONLeavesOutAnSSHConfigItWontWrite(t *testing.T) {
+	// The JSON of each command that reports sshConfig, for a session named
+	// home whose daemon answers with resp.
+	commands := []struct {
+		name string
+		json func(t *testing.T, resp *api.GetSessionResponse) map[string]any
+	}{
+		{"session current", currentJSON},
+		{"session info", func(t *testing.T, resp *api.GetSessionResponse) map[string]any {
+			setupSessionRoots(t)
+			withConfig(t, "")
+			servedReady(t, "home", resp)
+			return cliJSON(t, "session", "info", "home", "-o", "json")
+		}},
+		{"session list", func(t *testing.T, resp *api.GetSessionResponse) map[string]any {
+			setupSessionRoots(t)
+			withConfig(t, "")
+			servedReady(t, "home", resp)
+			return cliJSON(t, "session", "list", "-o", "json")
+		}},
+	}
+	const pin = "uptermd.upterm.dev " + publicRelayKey
+	for _, c := range commands {
+		t.Run(c.name, func(t *testing.T) {
+			for _, u := range unwritableSSHUsers {
+				t.Run(u.name, func(t *testing.T) {
+					m := c.json(t, relayAnswer("ssh://uptermd.upterm.dev:22", u.user, pin, "known"))
+					require.NotContains(t, m, "sshConfig")
+					require.Equal(t, pin, m["knownHosts"])
+					require.Equal(t, "known", m["relayKeyTrust"])
+				})
+			}
+			t.Run("an owner+name", func(t *testing.T) {
+				m := c.json(t, relayAnswer("ssh://uptermd.upterm.dev:22", ownerNameSSHUser, pin, "known"))
+				require.Equal(t, "Host home\n  HostName uptermd.upterm.dev\n  User "+ownerNameSSHUser, m["sshConfig"])
+			})
+		})
+	}
+
+	// --detach -o json, from the daemon it started.
+	t.Run("host --detach", func(t *testing.T) {
+		const pin = "[127.0.0.1]:2222 " + publicRelayKey
+		detached := func(t *testing.T, user string) map[string]any {
+			stdout := detachJSON(t, func(r *api.GetSessionResponse) {
+				r.SshUser = user
+				r.RelayKnownHosts, r.RelayKeyTrust = proto.String(pin), proto.String("known")
+			})
+			var m map[string]any
+			require.NoError(t, json.Unmarshal([]byte(stdout), &m), stdout)
+			return m
+		}
+		for _, u := range unwritableSSHUsers {
+			t.Run(u.name, func(t *testing.T) {
+				m := detached(t, u.user)
+				require.NotContains(t, m, "sshConfig")
+				require.Equal(t, pin, m["knownHosts"])
+				require.Equal(t, "known", m["relayKeyTrust"])
+			})
+		}
+		t.Run("an owner+name", func(t *testing.T) {
+			require.Equal(t, "Host s\n  HostName 127.0.0.1\n  User "+ownerNameSSHUser+"\n  Port 2222", detached(t, ownerNameSSHUser)["sshConfig"])
+		})
+	})
+}
+
+// A daemon that gives no name has its block named by the session's ID, which
+// is the relay's: only when it is a name --alias could give.
+func TestCurrentJSONNamesTheBlockByTheSessionIDOnlyWhenSSHTakesIt(t *testing.T) {
+	for _, tc := range []struct {
+		name, id string
+		want     string // empty for no sshConfig
+	}{
+		{"an ID", exampleSessionID, "Host " + exampleSessionID + "\n  HostName uptermd.upterm.dev\n  User " + exampleSessionID},
+		{"an ID with a newline", exampleSessionID + "\nHost *", ""},
+		{"an ID with a leading #", "#" + exampleSessionID, ""},
+		{"an ID with a space", exampleSessionID + " *", ""},
+		{"an ID that is a pattern", "*", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			resp := relayAnswer("ssh://uptermd.upterm.dev:22", exampleSessionID, "uptermd.upterm.dev "+publicRelayKey, "known")
+			resp.SessionId, resp.Name = tc.id, nil
+			m := currentJSON(t, resp)
+			if tc.want == "" {
+				require.NotContains(t, m, "sshConfig")
+			} else {
+				require.Equal(t, tc.want, m["sshConfig"])
+			}
+			require.Equal(t, "uptermd.upterm.dev "+publicRelayKey, m["knownHosts"])
 		})
 	}
 }
@@ -286,6 +469,27 @@ func TestTheDetachBannerShowsADoorsSSHConfig(t *testing.T) {
 				want += "    " + line + "\n"
 			}
 			require.Contains(t, out, want)
+		})
+	}
+}
+
+// A door's banner leaves its ssh config out when the relay's SSH user isn't
+// one it writes, rather than show a block that would add the relay's lines
+// to a config.
+func TestTheDetachBannerLeavesOutAnSSHConfigItWontWrite(t *testing.T) {
+	prevDetach, prevAccept := flagDetach, flagAccept
+	t.Cleanup(func() { flagDetach, flagAccept = prevDetach, prevAccept })
+	flagDetach, flagAccept = true, true
+
+	for _, u := range unwritableSSHUsers {
+		t.Run(u.name, func(t *testing.T) {
+			resp := relayAnswer("ssh://uptermd.upterm.dev:22", u.user, "uptermd.upterm.dev "+publicRelayKey, "known")
+			resp.LoginCommand = []string{"herdr"}
+			out := captureStdout(t, func() { require.NoError(t, displaySession(context.Background(), resp, "home")) })
+			require.Contains(t, out, "Session: "+exampleSessionID+"\n", "the banner is printed")
+			require.NotContains(t, out, "SSH config")
+			require.NotContains(t, out, "Host home")
+			require.NotContains(t, out, "known_hosts")
 		})
 	}
 }

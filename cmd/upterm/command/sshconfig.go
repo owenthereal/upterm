@@ -70,8 +70,8 @@ Exits 4 when no session has the name, and 1 for any other failure.`,
 	return cmd
 }
 
-// aliasRe is what --alias may be: one word ssh takes as a host's name, not as
-// an option or a pattern.
+// aliasRe is what a Host block's alias may be, --alias's included: one word
+// ssh takes as a host's name, not as an option or a pattern.
 var aliasRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
 
 func sshConfigRunE(ctx context.Context, arg, alias string) error {
@@ -101,6 +101,11 @@ func sshConfigRunE(ctx context.Context, arg, alias string) error {
 		alias = r.Name
 	}
 	text, err := sshConfigText(live, alias)
+	if errors.Is(err, errUnwritableUser) {
+		// The session as it was asked for, and not the user, which is the
+		// relay's to choose.
+		return fmt.Errorf("the relay gave session %s an SSH user that upterm won't write into an ssh config", arg)
+	}
 	if err != nil {
 		return err
 	}
@@ -137,6 +142,20 @@ func sshConfigText(sess *api.GetSessionResponse, alias string) (string, error) {
 	return "# ~/.ssh/config\n" + block + "\n# ~/.ssh/known_hosts, once per device\n" + pin + "\n", nil
 }
 
+// sshUserRe is what a Host block's User may be: the characters of the
+// session IDs upterm relays give, of an embedded relay's ID and node, the
+// node in URL-safe base64 with its '=' padding, and of an owner+name. None of
+// them ends the line, quotes, or starts a comment or a token; configValue
+// quotes the '='.
+var sshUserRe = regexp.MustCompile(`^[A-Za-z0-9._~+=:-]+$`)
+
+// errUnwritableUser and errUnwritableAlias are why sshConfigFor wrote no
+// block. Neither repeats the value it refused.
+var (
+	errUnwritableUser  = errors.New("the relay gave the session an SSH user that upterm won't write into an ssh config")
+	errUnwritableAlias = errors.New("the name the session would have in an ssh config isn't one upterm writes there")
+)
+
 // sshConfigFor is the Host block of ~/.ssh/config that reaches the session
 // sess describes, as alias: the relay's host, the user the relay routes the
 // session by (the ssh line's), the port when it isn't ssh's own, and for a ws
@@ -144,6 +163,11 @@ func sshConfigText(sess *api.GetSessionResponse, alias string) (string, error) {
 // up in known_hosts by that host and port, so they match the pin, which is
 // keyed by the host and port the host dialled. No newline follows the last
 // line.
+//
+// The user is the relay's, and so is the alias when a daemon that gives no
+// name has its session named by its ID. A block is written only when
+// sshUserRe takes the user and aliasRe the alias, so that neither can add
+// lines of its own to the config it is pasted into, or make ssh refuse it.
 func sshConfigFor(sess *api.GetSessionResponse, alias string) (string, error) {
 	u, scheme, _, port, err := parseURL(sess.GetHost())
 	if err != nil {
@@ -152,7 +176,13 @@ func sshConfigFor(sess *api.GetSessionResponse, alias string) (string, error) {
 	if scheme != "ssh" && scheme != "ws" && scheme != "wss" {
 		return "", fmt.Errorf("the session's relay %s is not one ssh can reach", sess.GetHost())
 	}
+	if !aliasRe.MatchString(alias) {
+		return "", errUnwritableAlias
+	}
 	user := sshUser(sess)
+	if !sshUserRe.MatchString(user) {
+		return "", errUnwritableUser
+	}
 	lines := []string{
 		"Host " + alias,
 		// ssh expands percent tokens in HostName, so an address's zone keeps
