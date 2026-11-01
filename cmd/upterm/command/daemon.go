@@ -136,7 +136,9 @@ func buildDaemonHost(ctx context.Context, name string, opts hostOptions, child *
 		return nil, err
 	}
 
-	fileTransferApprovalRequired := !flagAccept
+	// --accept grants file transfers too, as well as a start nobody is asked
+	// about.
+	allowSFTP := flagAllowSFTP || flagAccept
 
 	// Generated here rather than left to Run: the parent pins the door's keys
 	// from what Listening reports, and it must be this run's session host
@@ -166,7 +168,7 @@ func buildDaemonHost(ctx context.Context, name string, opts hostOptions, child *
 		ForceCommand:      opts.forceCommand,
 		LoginCommand:      opts.loginCommand,
 		CommandDir:        opts.commandDir,
-		AcceptExec:        flagAcceptExec,
+		AcceptExec:        flagAllowExec,
 		ExecDisabled:      flagNoExec,
 		HideClientIP:      shouldHideClientIP(),
 		Signers:           signers,
@@ -175,6 +177,7 @@ func buildDaemonHost(ctx context.Context, name string, opts hostOptions, child *
 		HostKeyCallback:   hkcb,
 		AuthorizedKeys:    authorizedKeys,
 		AutoAccept:        flagAccept,
+		SFTPAutoAccept:    allowSFTP,
 		KeepAliveDuration: 50 * time.Second,
 		ProxyURL:          opts.proxyURL,
 		SessionClaimedCallback: func(dir *sessiondir.Dir) {
@@ -208,8 +211,8 @@ func buildDaemonHost(ctx context.Context, name string, opts hostOptions, child *
 		TunnelCallback:             tunnelNotifier(name),
 		Logger:                     logger,
 		ReadOnly:                   flagReadOnly,
-		AllowLocalTCPForwarding:    flagAllowLocalTCPForwarding,
-		AllowLoopbackTCPForwarding: flagAllowLoopbackTCPForwarding,
+		AllowLocalTCPForwarding:    flagAllowForwarding == forwardAny || flagAllowLocalTCPForwarding,
+		AllowLoopbackTCPForwarding: flagAllowForwarding == forwardLoopback,
 		ForwardingDisabled:         flagNoForwarding,
 		PtySize:                    opts.ptySize,
 		PinPtySize:                 flagPtySize != "",
@@ -218,7 +221,7 @@ func buildDaemonHost(ctx context.Context, name string, opts hostOptions, child *
 		TerminalConsent:            true,
 		// Set alongside terminal consent, so that what readers are told is
 		// what a guest's transfer will do.
-		FileTransferApprovalRequired: fileTransferApprovalRequired,
+		FileTransferApprovalRequired: !allowSFTP,
 		// A foreground parent attaches before the command starts; a detached
 		// one has nothing to attach.
 		AwaitInitialClient: !flagDetach,

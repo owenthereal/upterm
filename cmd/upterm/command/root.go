@@ -27,6 +27,11 @@ import (
 // flags that already are Changed.
 var suppliedFlags = map[string]bool{}
 
+// commandLineFlags records which of them the command line set: a
+// contradiction between two of those is the command's own, and one with a
+// value from env or config is not (see validateGrants).
+var commandLineFlags = map[string]bool{}
+
 func Root() *cobra.Command {
 	rootCmd := &cobra.Command{
 		Use:   "upterm",
@@ -58,6 +63,10 @@ file: see 'upterm config --help'.`,
 				return nil
 			}
 
+			// What the command line set, before env and config set the rest.
+			commandLine := make(map[string]bool)
+			cmd.Flags().Visit(func(f *pflag.Flag) { commandLine[f.Name] = true })
+
 			// Bind all flags to environment variables with UPTERM_ prefix. A
 			// config or env error fails only a command that reads config, and never
 			// `upterm config`, which repairs the file.
@@ -65,7 +74,7 @@ file: see 'upterm config --help'.`,
 			if err != nil && readsConfig(cmd) && !isConfigCommand(cmd) {
 				return err
 			}
-			suppliedFlags = supplied
+			suppliedFlags, commandLineFlags = supplied, commandLine
 			runningCmd = cmd
 			warnDeprecations(cmd.ErrOrStderr(), deps)
 

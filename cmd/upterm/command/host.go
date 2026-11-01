@@ -93,32 +93,32 @@ func (e UserInterruptedError) Unwrap() error {
 }
 
 var (
-	flagServer                     string
-	flagForceCommand               string
-	flagLoginCommand               string
-	flagAcceptExec, flagNoExec     bool
-	flagPrivateKeys                []string
-	flagKnownHostsFilename         string
-	flagAuthorizedKeys             string
-	flagAuthorizedUsers            []string
-	flagCodebergUsers              []string
-	flagGitHubUsers                []string
-	flagGitLabUsers                []string
-	flagSourceHutUsers             []string
-	flagReadOnly                   bool
-	flagAccept                     bool
-	flagSkipHostKeyCheck           bool
-	flagProxy                      string
-	flagNoSFTP                     bool
-	flagAllowLocalTCPForwarding    bool
-	flagAllowLoopbackTCPForwarding bool
-	flagNoForwarding               bool
-	flagPtySize                    string
-	flagTerm                       string
-	flagName                       string
-	flagDetach                     bool
-	flagHostOutput                 string
-	flagJoinTimeout                time.Duration
+	flagServer                  string
+	flagForceCommand            string
+	flagLoginCommand            string
+	flagAllowExec, flagNoExec   bool
+	flagPrivateKeys             []string
+	flagKnownHostsFilename      string
+	flagAuthorizedKeys          string
+	flagAuthorizedUsers         []string
+	flagCodebergUsers           []string
+	flagGitHubUsers             []string
+	flagGitLabUsers             []string
+	flagSourceHutUsers          []string
+	flagReadOnly                bool
+	flagAccept                  bool
+	flagSkipHostKeyCheck        bool
+	flagProxy                   string
+	flagAllowSFTP, flagNoSFTP   bool
+	flagAllowForwarding         forwardingGrant
+	flagAllowLocalTCPForwarding bool
+	flagNoForwarding            bool
+	flagPtySize                 string
+	flagTerm                    string
+	flagName                    string
+	flagDetach                  bool
+	flagHostOutput              string
+	flagJoinTimeout             time.Duration
 	// flagHostEscapeChar carries its flag's default here as well as in the
 	// registration below, so parseEscapeChar has a value to accept when the
 	// var is read without hostCmd having run — which is every unit test that
@@ -126,13 +126,31 @@ var (
 	flagHostEscapeChar = "~"
 )
 
-// How a guest's file transfers are approved, as host's help says it in its
-// description and at --accept, --read-only and --no-sftp. Approval grants a
-// path tuple on this connection, or SFTP for the guest until the session ends.
+// forwardingGrant is --allow-forwarding's value: the forwards guests may open
+// without approval. Empty grants none.
+type forwardingGrant string
+
 const (
-	transferApprovalHelp = "file transfers need your approval in the primary host terminal, which can allow the displayed paths on this connection, or SFTP for this guest until the host session ends"
-	transferDeniedHelp   = "without a primary terminal with approval escapes enabled, ungranted transfers are denied; attach with escapes enabled or use --accept"
+	// forwardLoopback is forwards to this machine's literal loopback
+	// addresses, 127.0.0.0/8 and ::1.
+	forwardLoopback forwardingGrant = "loopback"
+	// forwardAny is forwards to anything this machine can reach.
+	forwardAny forwardingGrant = "any"
 )
+
+func (g *forwardingGrant) Set(s string) error {
+	switch v := forwardingGrant(s); v {
+	case forwardLoopback, forwardAny:
+		*g = v
+		return nil
+	}
+	return errors.New("must be loopback or any")
+}
+
+func (g *forwardingGrant) String() string { return string(*g) }
+
+// Type is the placeholder --help shows for the value.
+func (g *forwardingGrant) Type() string { return "loopback|any" }
 
 func hostCmd() *cobra.Command {
 	cmd := &cobra.Command{
@@ -143,8 +161,9 @@ through a relay, so that guests can join it from their own terminals with
 upterm join or plain ssh.
 
 upterm prints the session, with the commands guests join it with, and asks
-before starting it; --accept starts it without asking. The relay is
---server, and upterm authenticates to it with the first of these it has:
+before starting it; --accept starts it without asking, plus --allow-sftp. The
+relay is --server, and upterm authenticates to it with the first of these it
+has:
   1. The SSH agent's keys, when an agent is running and holds any
   2. Otherwise, the private key files that load: ~/.ssh/id_{ed25519,ed25519_sk,ecdsa,ecdsa_sk,dsa,rsa}
   3. Otherwise, a generated key
@@ -156,17 +175,19 @@ Who can join: anyone with the session's connect string, unless
 --authorized-keys (an authorized_keys file) or --authorized-user names the
 keys a guest must have.
 
-What guests may do: type into the session, or only watch it with
---read-only; transfer files with sftp or scp, with your access (downloads
-only with --read-only, none with --no-sftp); and forward TCP ports (ssh -L)
-to literal loopback destinations after approval or with
---allow-loopback-tcp-forwarding, or to anything this machine can reach with
---allow-local-tcp-forwarding. --no-forwarding and --read-only deny forwarding.
-Guest shell requests share the hosted terminal by default. --login-command runs a
-host-chosen program instead. Explicit exec needs approval or --accept-exec; stdin
-can contain further code. --read-only and --no-exec deny explicit exec.
-
-Unless --accept, a guest's ` + transferApprovalHelp + `; ` + transferDeniedHelp + `.
+What guests can do: type into the session, or only watch it with
+--read-only. A guest's plain ssh shares this terminal, or runs the program
+--login-command names instead. Anything more needs a grant:
+  commands     ssh SESSION CMD, VS Code, herdr --remote, run as you
+               (--allow-exec, --no-exec)
+  files        scp and sftp, with your access (--allow-sftp, --no-sftp)
+  forwarding   ssh -L 8080:127.0.0.1:8080, to this machine's loopback
+               addresses (--allow-forwarding=loopback, --no-forwarding)
+--allow-X lets guests do X without asking, --no-X never lets them, and with
+neither, upterm asks in your terminal. Forwards anywhere else are refused
+unless --allow-forwarding=any, which lets guests reach anything this machine
+can, without asking. --read-only also turns off commands, uploads and
+forwarding.
 
 The session runs in a process of its own, and this terminal is attached to
 it. NAME is the session's name, which upterm prints (--name chooses it).
@@ -203,7 +224,7 @@ reports the command's status.`,
   upterm host --force-command 'tmux attach -t pair-programming' -- tmux new -t pair-programming
 
   # Let guests forward TCP ports (ssh -L) to what this machine can reach:
-  upterm host --allow-local-tcp-forwarding
+  upterm host --allow-forwarding=any
 
   # Host on another relay, over a WebSocket:
   upterm host --server wss://relay.example.com
@@ -220,7 +241,7 @@ reports the command's status.`,
 	cmd.PersistentFlags().StringVarP(&flagServer, "server", "", "ssh://uptermd.upterm.dev:22", "Relay to host the session on: ssh://HOST[:PORT], ws://HOST[:PORT] or wss://HOST[:PORT]. Without a port, ssh uses 22, ws 80 and wss 443.")
 	cmd.PersistentFlags().StringVarP(&flagForceCommand, "force-command", "f", "", "Run this host-chosen command for guest shell and exec requests, with a private PTY when requested and pipes otherwise. --no-exec and --read-only still deny explicit exec. Mutually exclusive with --login-command.")
 	cmd.PersistentFlags().StringVar(&flagLoginCommand, "login-command", "", "Run this host-chosen command for guest shell requests, without exec approval. Mutually exclusive with --force-command; explicit guest exec still needs approval.")
-	cmd.PersistentFlags().BoolVar(&flagAcceptExec, "accept-exec", false, "Let guests execute private commands without approval. Command stdin can contain further code; this grants execution trust.")
+	cmd.PersistentFlags().BoolVar(&flagAllowExec, "allow-exec", false, "Let guests run commands (ssh SESSION CMD, VS Code, herdr --remote) without approval. Each runs as you, and its stdin can carry further code.")
 	cmd.PersistentFlags().BoolVar(&flagNoExec, "no-exec", false, "Deny explicit guest exec requests, including forced exec. Host-chosen login and forced shell commands still run.")
 
 	cmd.PersistentFlags().StringSliceVarP(&flagPrivateKeys, "private-key", "i", defaultPrivateKeys(), "Identity files to authenticate to the relay with. "+identitiesOnlyHelp+" By default it offers the agent's keys alone when the agent holds any, and otherwise the listed files that load, or a generated key when none do.")
@@ -234,14 +255,19 @@ reports the command's status.`,
 	registerAuthUserFlag(cmd.PersistentFlags(), &flagGitHubUsers, "github-user", "Authorize specified GitHub users by allowing their public keys to connect. Configure GitHub CLI environment variables as needed; see https://cli.github.com/manual/gh_help_environment for details.")
 	registerAuthUserFlag(cmd.PersistentFlags(), &flagGitLabUsers, "gitlab-user", "Authorize specified GitLab users by allowing their public keys to connect.")
 	registerAuthUserFlag(cmd.PersistentFlags(), &flagSourceHutUsers, "srht-user", "Authorize specified SourceHut users by allowing their public keys to connect.")
-	cmd.PersistentFlags().BoolVar(&flagAccept, "accept", false, "Start the session without asking, and let guests transfer files without your approval. Without it, a guest's "+transferApprovalHelp+"; "+transferDeniedHelp+".")
-	cmd.PersistentFlags().BoolVarP(&flagReadOnly, "read-only", "r", false, "Let guests only watch: they can't type into the session, and can only download files. Unless --accept, a guest's "+transferApprovalHelp+"; "+transferDeniedHelp+". Can't be used with --allow-local-tcp-forwarding.")
+	cmd.PersistentFlags().BoolVar(&flagAccept, "accept", false, "Start the session without asking, plus --allow-sftp.")
+	cmd.PersistentFlags().BoolVarP(&flagReadOnly, "read-only", "r", false, "Let guests only watch: they can't type into the session, run commands or forward ports, and can only download files.")
 	cmd.PersistentFlags().BoolVar(&flagHideClientIP, "hide-client-ip", false, "Hide guests' IP addresses from upterm's output, and from forced commands' SSH_CONNECTION and SSH_CLIENT. "+hideClientIPDefaultHelp)
 	cmd.PersistentFlags().BoolVar(&flagSkipHostKeyCheck, "skip-host-key-check", false, skipHostKeyCheckHelp)
 	cmd.PersistentFlags().StringVar(&flagProxy, "proxy", "", proxyHelp)
-	cmd.PersistentFlags().BoolVar(&flagNoSFTP, "no-sftp", false, "Turn off file transfer (sftp and scp) for guests. Without it, guests transfer files with your access (downloads only with --read-only), and unless --accept, a guest's "+transferApprovalHelp+"; "+transferDeniedHelp+".")
-	cmd.PersistentFlags().BoolVar(&flagAllowLocalTCPForwarding, "allow-local-tcp-forwarding", false, "Let guests forward TCP ports (ssh -L) through the session, to whatever this machine can reach. Can't be used with --read-only.")
-	cmd.PersistentFlags().BoolVar(&flagAllowLoopbackTCPForwarding, "allow-loopback-tcp-forwarding", false, "Let guests forward TCP ports to literal 127.0.0.0/8 or ::1 destinations without approval.")
+	cmd.PersistentFlags().BoolVar(&flagAllowSFTP, "allow-sftp", false, "Let guests transfer files (scp, sftp) without approval, with your access; downloads only with --read-only.")
+	cmd.PersistentFlags().BoolVar(&flagNoSFTP, "no-sftp", false, "Turn off file transfer (sftp and scp) for guests.")
+	// Var keeps whatever the variable holds, so it is reset here as the
+	// other registrations reset theirs.
+	flagAllowForwarding = ""
+	cmd.PersistentFlags().Var(&flagAllowForwarding, "allow-forwarding", "Let guests forward ports (ssh -L) without approval: loopback, to this machine's literal 127.0.0.0/8 and ::1 addresses; any, to anything this machine can reach.")
+	_ = cmd.RegisterFlagCompletionFunc("allow-forwarding", completeValues(string(forwardLoopback), string(forwardAny)))
+	cmd.PersistentFlags().BoolVar(&flagAllowLocalTCPForwarding, "allow-local-tcp-forwarding", false, "--allow-forwarding=any, by its earlier name.")
 	cmd.PersistentFlags().BoolVar(&flagNoForwarding, "no-forwarding", false, "Deny guest TCP forwarding, including pregranted and approved destinations.")
 	cmd.PersistentFlags().StringVar(&flagPtySize, "pty-size", "", "Pin the session's terminal size as COLSxROWS (e.g. 132x43); resize requests are then ignored. Defaults to the attached terminal's size, or 80x24 when there is none.")
 	cmd.PersistentFlags().StringVar(&flagTerm, "term", "", "Set TERM for the hosted command. Defaults to the inherited TERM, or "+defaultTerm+" when TERM is unset or "+dumbTerm+".")
@@ -254,7 +280,13 @@ reports the command's status.`,
 
 	// One run's choices, not standing configuration. --join-timeout stays
 	// bound to env and config: CI sets it there.
-	perRun(cmd.PersistentFlags(), "name", "detach", "output", "login-command", "accept-exec", "no-exec", "allow-loopback-tcp-forwarding", "no-forwarding")
+	perRun(cmd.PersistentFlags(), "name", "detach", "output", "login-command", "allow-exec", "allow-sftp", "no-exec", "allow-forwarding", "no-forwarding")
+
+	// --allow-forwarding=any's released name, kept working, and as the config
+	// key it was, for the scripts and files that say it. Hidden, and not
+	// marked deprecated: pflag would say so for the config key too, which has
+	// no other spelling, since --allow-forwarding is the command line's only.
+	_ = cmd.PersistentFlags().MarkHidden("allow-local-tcp-forwarding")
 
 	// The provider list comes from host.ProviderList so --help, the generated
 	// docs and the parser's own error messages cannot disagree about which
@@ -427,6 +459,70 @@ func validateReadOnlyForwarding(readOnly, forwarding bool) error {
 	return nil
 }
 
+// grantConflict is a guest grant and a denial of the same thing, which wins.
+type grantConflict struct {
+	grant, denial   string // the flags' names
+	granted, denied bool
+	what            string // what the denial denies
+}
+
+func grantConflicts() []grantConflict {
+	forwards := flagAllowForwarding != ""
+	return []grantConflict{
+		{"allow-exec", "no-exec", flagAllowExec, flagNoExec, "guest commands"},
+		{"allow-exec", "read-only", flagAllowExec, flagReadOnly, "guest commands"},
+		{"allow-sftp", "no-sftp", flagAllowSFTP, flagNoSFTP, "file transfers"},
+		{"allow-forwarding", "no-forwarding", forwards, flagNoForwarding, "port forwarding"},
+		{"allow-forwarding", "read-only", forwards, flagReadOnly, "port forwarding"},
+		{"allow-local-tcp-forwarding", "no-forwarding", flagAllowLocalTCPForwarding, flagNoForwarding, "port forwarding"},
+		{"allow-local-tcp-forwarding", "read-only", flagAllowLocalTCPForwarding, flagReadOnly, "port forwarding"},
+	}
+}
+
+// validateGrants checks each guest grant against a denial of the same thing.
+// Both on the command line, the command contradicts itself: an error. With
+// one from the environment or the config file, which origin says, the denial
+// wins and the session starts, with a warning naming where that side came
+// from. With neither on the command line the file contradicts itself, which
+// is the error config edit reports for it: only read-only and
+// allow-local-tcp-forwarding are both keys.
+func validateGrants(origin func(name string) string) (errs []error, warnings []string) {
+	for _, c := range grantConflicts() {
+		if !c.granted || !c.denied {
+			continue
+		}
+		grantFrom, denialFrom := origin(c.grant), origin(c.denial)
+		switch {
+		case grantFrom == "" && denialFrom == "":
+			errs = append(errs, fmt.Errorf("--%s and --%s contradict each other; pick one", c.grant, c.denial))
+		case grantFrom == "":
+			warnings = append(warnings, fmt.Sprintf("upterm: --%s has no effect: %s (from %s) denies %s", c.grant, c.denial, denialFrom, c.what))
+		case denialFrom == "":
+			warnings = append(warnings, fmt.Sprintf("upterm: %s (from %s) has no effect: --%s denies %s", c.grant, grantFrom, c.denial, c.what))
+		}
+	}
+	if origin("read-only") != "" && origin("allow-local-tcp-forwarding") != "" {
+		if err := validateReadOnlyForwarding(flagReadOnly, flagAllowLocalTCPForwarding); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errs, warnings
+}
+
+// flagOrigin is where this run's value of the flag name came from: "" for
+// the command line, else the environment variable or the config file that
+// set it, the variable when both did, as it is the one that wins. A flag
+// nothing set reads as the command line's: it holds its default.
+func flagOrigin(name string) string {
+	if commandLineFlags[name] || !suppliedFlags[name] {
+		return ""
+	}
+	if os.Getenv(envVarName(name)) != "" {
+		return envVarName(name)
+	}
+	return utils.UptermConfigFilePath()
+}
+
 func validateDetachAccept(detach, accept bool) error {
 	if detach && !accept {
 		return errors.New("--detach requires --accept: a session nobody is watching cannot be confirmed interactively")
@@ -489,8 +585,20 @@ func validateShareRequiredFlags(c *cobra.Command, args []string) error {
 		result = multierror.Append(result, err)
 	}
 
-	if err := validateReadOnlyForwarding(flagReadOnly, flagAllowLocalTCPForwarding); err != nil {
+	grantErrs, warnings := validateGrants(flagOrigin)
+	for _, err := range grantErrs {
 		result = multierror.Append(result, err)
+	}
+	// The parent's only: the daemon makes the same checks on the same argv,
+	// env and config, and its stderr is the log.
+	if !isDaemonProcess() {
+		stderr := io.Writer(os.Stderr)
+		if c != nil {
+			stderr = c.ErrOrStderr()
+		}
+		for _, line := range warnings {
+			_, _ = fmt.Fprintln(stderr, line)
+		}
 	}
 
 	if err := validateSessionNameFlag(flagName); err != nil {

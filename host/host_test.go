@@ -26,6 +26,7 @@ import (
 	"github.com/owenthereal/upterm/server"
 	"github.com/owenthereal/upterm/upterm"
 	"github.com/owenthereal/upterm/utils"
+	"github.com/pkg/sftp"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/crypto/ssh"
@@ -1823,6 +1824,51 @@ func TestSessionReportsAcceptedWithNoFileTransfer(t *testing.T) {
 
 	f.finish(t, "0")
 	require.NoError(t, f.result(t))
+}
+
+// A guest's file transfer runs without approval when the host grants file
+// transfers alone (--allow-sftp), as it does when the host started the
+// session without asking (--accept). With neither, nothing here can approve
+// it, and it is refused.
+func TestSFTPAutoAcceptLetsTransfersRunWithoutApproval(t *testing.T) {
+	for _, tc := range []struct {
+		name                       string
+		autoAccept, sftpAutoAccept bool
+		allowed                    bool
+	}{
+		{name: "neither"},
+		{name: "file transfers granted", sftpAutoAccept: true, allowed: true},
+		{name: "started without asking", autoAccept: true, allowed: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newJoinTimeoutHost(t)
+			f.h.AutoAccept = tc.autoAccept
+			f.h.SFTPAutoAccept = tc.sftpAutoAccept
+			f.start(t)
+			awaitJoinTimeoutSignal(t, f.ready, "readiness")
+
+			transfer, err := sftp.NewClient(f.guestClient(t))
+			require.NoError(t, err)
+			path := filepath.Join(t.TempDir(), "upload")
+			file, err := transfer.Create(path)
+			if tc.allowed {
+				require.NoError(t, err)
+				_, err = file.Write([]byte("sent"))
+				require.NoError(t, err)
+				require.NoError(t, file.Close())
+				got, err := os.ReadFile(path)
+				require.NoError(t, err)
+				require.Equal(t, "sent", string(got))
+			} else {
+				require.Error(t, err)
+				require.NoFileExists(t, path)
+			}
+			require.NoError(t, transfer.Close())
+
+			f.finish(t, "0")
+			require.NoError(t, f.result(t))
+		})
+	}
 }
 
 func TestJoinTimeoutIsPublishedPendingThenCounting(t *testing.T) {

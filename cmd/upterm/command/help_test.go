@@ -173,19 +173,24 @@ func TestSessionCurrentNamesEveryTemplateVariable(t *testing.T) {
 	require.ElementsMatch(t, fields, listed)
 }
 
-// host's help says the same about approving file transfers wherever it
-// says it: in its description and at --accept, --read-only and --no-sftp.
-func TestFileTransferApprovalIsToldTheSameEverywhere(t *testing.T) {
-	host := findCommand(t, "upterm host")
-	for what, text := range map[string]string{
-		"help":        host.Long,
-		"--accept":    host.Flag("accept").Usage,
-		"--read-only": host.Flag("read-only").Usage,
-		"--no-sftp":   host.Flag("no-sftp").Usage,
-	} {
-		require.Contains(t, oneSpaced(text), transferApprovalHelp, what)
-		require.Contains(t, oneSpaced(text), transferDeniedHelp, what)
-	}
+// host's help says how guests' grants work once, in its description: no
+// flag repeats it, and nothing still says it the long way, once for file
+// transfers alone, at --accept, --read-only and --no-sftp as well.
+func TestHostHelpStatesTheGrantRuleOnce(t *testing.T) {
+	const rule = "--allow-X lets guests do X without asking, --no-X never lets them, and with neither, upterm asks in your terminal."
+	setupSessionRoots(t)
+	withConfig(t, "")
+	stdout, _, code := runCLI(t, "host", "--help")
+	require.Equal(t, 0, code)
+	require.Equal(t, 1, strings.Count(oneSpaced(stdout), rule), stdout)
+	require.Contains(t, oneSpaced(findCommand(t, "upterm host").Long), rule)
+	require.NotContains(t, stdout, "Unless --accept")
+	require.NotContains(t, oneSpaced(stdout), "need your approval in the primary host terminal, which can allow the displayed paths")
+}
+
+// --accept's help says what it does, all of it.
+func TestAcceptSaysWhatItGrants(t *testing.T) {
+	require.Equal(t, "Start the session without asking, plus --allow-sftp.", findCommand(t, "upterm host").Flag("accept").Usage)
 }
 
 // The help shows where --admin-socket's default comes from, never the path
@@ -214,8 +219,9 @@ func TestApprovalHelp(t *testing.T) {
 
 func TestGuestExecHostHelp(t *testing.T) {
 	cmd := hostCmd()
-	require.Contains(t, cmd.Long, "stdin")
 	require.Contains(t, cmd.PersistentFlags().Lookup("login-command").Usage, "host-chosen")
-	require.Contains(t, cmd.PersistentFlags().Lookup("accept-exec").Usage, "further code")
+	allowExec := cmd.PersistentFlags().Lookup("allow-exec")
+	require.NotNil(t, allowExec)
+	require.Contains(t, allowExec.Usage, "stdin can carry further code")
 	require.Contains(t, cmd.PersistentFlags().Lookup("no-exec").Usage, "forced exec")
 }
