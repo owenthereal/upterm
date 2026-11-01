@@ -264,7 +264,7 @@ func TestSFTPConsentSSH(t *testing.T) {
 func TestSFTPConsentQueuedBehindReview(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		clients := &hostClients{primary: &hostClient{id: "primary"}}
-		b := newApprovalBroker(clients, discardLogger())
+		b := newApprovalBroker(clients, nil, false, discardLogger())
 		owner := &approvalTransport{ctx: &approvalTestContext{baseContext: t.Context(), id: "primary"}, registered: true, session: true, eligible: true, wake: make(chan struct{}, 1), done: make(chan struct{})}
 		b.transports[owner] = struct{}{}
 		type queuedRequest struct {

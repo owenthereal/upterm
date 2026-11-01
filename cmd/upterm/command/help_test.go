@@ -207,6 +207,7 @@ func TestSessionCurrentHelpShowsTheVariableNotItsValue(t *testing.T) {
 	require.Contains(t, stdout, `(default "$UPTERM_ADMIN_SOCKET")`)
 }
 
+// The ~a help says what each answer decides, in the review's own words.
 func TestApprovalHelp(t *testing.T) {
 	for _, path := range []string{"upterm host", "upterm attach"} {
 		text := findCommand(t, path).Long
@@ -214,8 +215,10 @@ func TestApprovalHelp(t *testing.T) {
 		require.Contains(t, text, "~~a")
 		require.Contains(t, text, "confirmation")
 		require.Contains(t, text, "approval is unavailable")
+		require.Contains(t, oneSpaced(text), "y CODE Enter allows it on its connection; a CODE Enter allows that guest every request of its kind (commands, files or forwards) until the session ends; n CODE Enter denies it; Esc decides later, and the request still expires.")
+		require.NotContains(t, text, "complete tuple")
 	}
-	require.Contains(t, keysLine('!', true), "!a review permissions")
+	require.Contains(t, keysLine('!', true), "!a review requests")
 	require.Contains(t, keyHint('~', true), "~~a")
 }
 

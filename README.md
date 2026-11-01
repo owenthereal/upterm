@@ -349,11 +349,13 @@ commands remain available, with read-only input suppressed.
 
 Ungranted exec, literal loopback forwarding and file operations without
 `--accept` request approval at the **primary local host terminal**. Type `~a`
-at the start of a line to review the oldest pending request. Follow its fresh
-confirmation code: `c CODE` allows this connection, capability and complete
-subject tuple; `g CODE` allows this authenticated guest key and capability
-until the host session ends, across reconnects. An exec grant never grants
-SFTP or forwarding. Escape leaves a request pending. Requests expire 60 seconds
+at the start of a line to review the oldest pending request. The review names
+the guest by the `--authorized-user` or `--authorized-keys` entry its key is
+on, or else by the key. Answer with its fresh confirmation code: `y CODE` then
+Enter allows this request on its connection; `a CODE` then Enter allows that
+guest key the same kind of request until the host session ends, across
+reconnects; `n CODE` then Enter denies it. An exec grant never grants SFTP or
+forwarding. Esc leaves a request pending. Requests expire 60 seconds
 after arrival at the host permission boundary, including queueing and review;
 earlier protocol buffering is outside that deadline.
 

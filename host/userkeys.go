@@ -188,10 +188,16 @@ func (f *Fetcher) AuthorizedKeys(ctx context.Context, refs []UserRef) ([]*Author
 }
 
 func (f *Fetcher) fetch(ctx context.Context, logger *slog.Logger, ref UserRef) (*AuthorizedKey, error) {
+	fetch := f.genericUserKeys
 	if ref.Provider == "github" {
-		return f.githubUserKeys(ctx, logger, ref)
+		fetch = f.githubUserKeys
 	}
-	return f.genericUserKeys(ctx, logger, ref)
+	ak, err := fetch(ctx, logger, ref)
+	if err != nil {
+		return nil, err
+	}
+	ak.guest = ref.guest()
+	return ak, nil
 }
 
 // genericUserKeys reads the {base}/{user}.keys endpoint every supported forge

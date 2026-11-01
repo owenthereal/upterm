@@ -73,6 +73,10 @@ type Server struct {
 	// agent would be asked each time.
 	HostKey        ssh.Signer
 	AuthorizedKeys []ssh.PublicKey
+	// GuestLabels names, by fingerprint, the guest each of AuthorizedKeys
+	// belongs to, as the host's configuration does, for the terminal
+	// approval review to say who is asking.
+	GuestLabels map[string]string
 	// GuestCertAuthority reports whether a key may vouch for a guest
 	// certificate's AuthRequest -- in production, the relay key the host key
 	// callback accepted, via RelayAuthority. Nil admits no guest: the only
@@ -330,7 +334,7 @@ func (s *Server) ServeWithContext(ctx context.Context, guest, host net.Listener)
 	if s.TerminalConsent {
 		var prompter consent.Prompter
 		if host != nil {
-			s.approvals = newApprovalBroker(&s.hostClients, s.Logger)
+			s.approvals = newApprovalBroker(&s.hostClients, s.GuestLabels, len(s.AuthorizedKeys) == 0, s.Logger)
 			prompter = s.approvals
 			defer s.approvals.Close()
 		}

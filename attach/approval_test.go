@@ -36,11 +36,16 @@ func approvalTestState(id string) upterm.ApprovalState {
 func approvalTestOutput(w io.Writer) *output {
 	return &output{w: w, modes: uio.NewModeTracker(), turn: make(chan struct{}, 1), released: make(chan struct{}), statusClosing: make(chan struct{}), failed: make(chan struct{})}
 }
+
+// approvalTestReviewShown is in every review: the deny key's line, which
+// carries the confirmation code.
+const approvalTestReviewShown = "upterm:   n "
+
 func approvalTestCode(t *testing.T, s string) string {
 	t.Helper()
-	i := strings.LastIndex(s, "upterm: d ")
+	i := strings.LastIndex(s, approvalTestReviewShown)
 	require.GreaterOrEqual(t, i, 0, s)
-	return s[i+10 : i+14]
+	return s[i+len(approvalTestReviewShown) : i+len(approvalTestReviewShown)+4]
 }
 func approvalTestRun(t *testing.T, w io.Writer) (*approvalTestReview, *io.PipeWriter, *syncSink, func()) {
 	t.Helper()
@@ -97,12 +102,12 @@ func TestApprovalRenderBeforeAnswer(t *testing.T) {
 		synctest.Wait()
 		display := <-sink.entered
 		code := approvalTestCode(t, display)
-		_, _ = pw.Write([]byte("g " + code + "\r"))
+		_, _ = pw.Write([]byte("a " + code + "\r"))
 		synctest.Wait()
 		require.Empty(t, r.answers, "display write is still in flight")
 		sink.release <- struct{}{}
 		synctest.Wait()
-		_, _ = pw.Write([]byte("c " + code + "\r"))
+		_, _ = pw.Write([]byte("y " + code + "\r"))
 		synctest.Wait()
 		require.Len(t, r.answers, 1)
 		require.Equal(t, upterm.ApprovalAnswer{ID: "first", Decision: "connection"}, <-r.answers)
@@ -133,7 +138,7 @@ func TestApprovalReviewQueue(t *testing.T) {
 		_, _ = pw.Write([]byte("~a"))
 		synctest.Wait()
 		code := approvalTestCode(t, sink.String())
-		_, _ = pw.Write([]byte("g " + code[:2]))
+		_, _ = pw.Write([]byte("a " + code[:2]))
 		synctest.Wait()
 		next := approvalTestState("second")
 		next.Revision = 2
@@ -144,10 +149,10 @@ func TestApprovalReviewQueue(t *testing.T) {
 		require.Empty(t, r.answers)
 		nextCode := approvalTestCode(t, sink.String())
 		require.NotEqual(t, code, nextCode)
-		_, _ = pw.Write([]byte("g " + code + "\r"))
+		_, _ = pw.Write([]byte("a " + code + "\r"))
 		synctest.Wait()
 		require.Empty(t, r.answers)
-		_, _ = pw.Write([]byte("d " + nextCode + "\r"))
+		_, _ = pw.Write([]byte("n " + nextCode + "\r"))
 		synctest.Wait()
 		require.Equal(t, upterm.ApprovalAnswer{ID: "second", Decision: "deny"}, <-r.answers)
 		state.Revision = 3
@@ -169,23 +174,24 @@ func TestApprovalKeepsProgramIO(t *testing.T) {
 		defer stop()
 		r.updates <- approvalTestState("first")
 		synctest.Wait()
-		_, _ = pw.Write([]byte("program\r~ag FAKE\r"))
+		_, _ = pw.Write([]byte("program\r~aa FAKE\r"))
 		synctest.Wait()
 		require.Equal(t, "program\r", program.String())
 		code := approvalTestCode(t, sink.String())
 		require.Empty(t, r.answers)
-		_, _ = pw.Write([]byte("\x1b]52;c;g " + code + "\r\a\x1b[200~g " + code + "\r\x1b[201~"))
+		_, _ = pw.Write([]byte("\x1b]52;c;a " + code + "\r\a\x1b[200~a " + code + "\r\x1b[201~"))
 		synctest.Wait()
 		require.Empty(t, r.answers)
-		_, _ = pw.Write([]byte("c " + code + "\r"))
+		_, _ = pw.Write([]byte("y " + code + "\r"))
 		synctest.Wait()
 		require.Len(t, r.answers, 1)
-		require.NotContains(t, program.String(), "c "+code)
+		require.NotContains(t, program.String(), "y "+code)
 	})
 }
 
 // A full tuple is displayed losslessly, including invalid bytes, literal escape
-// text and Unicode controls. An unidentified peer never gets a guest promise.
+// text and Unicode controls, and so is a key or label that isn't plain text.
+// An unidentified peer is never offered a guest-wide answer.
 func TestApprovalVisibleSubjects(t *testing.T) {
 	state := approvalTestState("bytes")
 	state.Current.Fingerprint = "key\n\x1b\u202e"
@@ -193,62 +199,132 @@ func TestApprovalVisibleSubjects(t *testing.T) {
 	state.Current.Capability = "sftp"
 	state.Current.Subjects = [][]byte{{0xff}, []byte("\ufffd\\xff\n\x1b\u202e")}
 	lines := strings.Join(approvalLines(state, "ABCD"), "\n")
-	require.Contains(t, lines, `subject[0] = "\xff"`)
-	require.Contains(t, lines, `subject[1] = "\ufffd\\xff\n\x1b\u202e"`)
-	require.Contains(t, lines, `guest "key\n\x1b\u202e"`)
+	require.Contains(t, lines, `wants to rename "\xff" to "\ufffd\\xff\n\x1b\u202e"`)
+	require.Contains(t, lines, `upterm: a guest with key "key\n\x1b\u202e" wants to`)
 	require.NotContains(t, lines, "\x1b")
+	require.NotContains(t, lines, "\u202e")
+	state.Current.Guest = "alice\u202e (github:alice)"
+	lines = strings.Join(approvalLines(state, "ABCD"), "\n")
+	require.Contains(t, lines, `upterm: "alice\u202e (github:alice)" wants to`)
+	require.NotContains(t, lines, "\u202e")
+	state.Current.Guest = ""
 	state.Current.Fingerprint = ""
 	lines = strings.Join(approvalLines(state, "ABCD"), "\n")
 	require.Contains(t, lines, "unidentified")
-	require.NotContains(t, lines, "g ABCD")
+	require.NotContains(t, lines, "a ABCD")
 	state.Current.Subjects = [][]byte{bytes.Repeat([]byte{0xff}, 4096), bytes.Repeat([]byte{0xfe}, 4096)}
 	lines = strings.Join(approvalLines(state, "ABCD"), "\n")
 	require.Equal(t, 4096, strings.Count(lines, `\xff`))
 	require.Equal(t, 4096, strings.Count(lines, `\xfe`))
 }
 
-// Each choice names the grant it makes. A file grant is for the paths shown,
-// not for the one operation that asked, so it says what else it allows.
-func TestApprovalGrantWording(t *testing.T) {
-	plain := []string{
-		"upterm: c ABCD then Enter: allow this connection, capability, and complete subject tuple.",
-		"upterm: g ABCD then Enter: allow this authenticated guest and capability until this host session ends.",
+// The review says who is asking, by the host's own label for its key or by
+// the key, saying when anyone with the session ID can join; what it wants, in
+// the words of what it does; and what each answer allows. A file answer is
+// for the paths shown, not for the one operation that asked, so it says what
+// else it allows.
+func TestApprovalReviewSaysWhatItDecides(t *testing.T) {
+	keys := func(allowOne, allowGuest string) []string {
+		return []string{
+			"upterm:   y ABCD Enter   " + allowOne,
+			"upterm:   a ABCD Enter   " + allowGuest,
+			"upterm:   n ABCD Enter   deny",
+			"upterm:   Esc            decide later (it still expires)",
+		}
 	}
-	readOnly := "upterm: a read-only session still allows downloads only."
+	const shell = "upterm: Allowing it lets this guest send more commands through it, so treat it as giving a shell."
+	execKeys := keys("allow this command, on this connection only", "allow this guest to run any command until this session ends")
+	pathKeys := keys("allow every file operation on this path, including writes and deletes, on this connection only", "allow this guest every file operation on any path, including writes and deletes, until this session ends")
+	pairKeys := keys("allow renaming, linking or symlinking the first path to the second, on this connection only", "allow this guest every file operation on any path, including writes and deletes, until this session ends")
+	const readOnly = "upterm: a read-only session still allows downloads only."
+	alice := upterm.ApprovalRequest{Fingerprint: "SHA256:3Jx9", Guest: "alice (github:alice)"}
 	for _, tc := range []struct {
-		name, capability, operation string
-		subjects                    []string
-		want                        []string
+		name      string
+		who       upterm.ApprovalRequest
+		operation string
+		subjects  []string
+		pending   uint32
+		want      []string
 	}{
-		{"exec", "exec", "exec", []string{"bash"}, plain},
-		{"forward", "forward", "forward", []string{"127.0.0.1", "22"}, plain},
-		{"one path", "sftp", "download", []string{"/notes.txt"}, []string{
-			"upterm: c ABCD then Enter: allow every file operation on this path, including writes and deletes, for this connection.",
-			"upterm: g ABCD then Enter: allow every file operation on any path, including writes and deletes, for this authenticated guest until this host session ends.",
-			readOnly,
+		{"exec by a listed guest", alice, "exec", []string{"bash"}, 2, append([]string{
+			`upterm: alice (github:alice) wants to run a command on this machine: "bash"`, shell, "upterm: 57s left; 1 more waiting.",
+		}, execKeys...)},
+		{"exec on an open session", upterm.ApprovalRequest{Fingerprint: "SHA256:3Jx9", Unlisted: true}, "exec", []string{"make test"}, 1, append([]string{
+			`upterm: a guest with key SHA256:3Jx9 (anyone with the session ID can join) wants to run a command on this machine: "make test"`, shell, "upterm: 57s left; 0 more waiting.",
+		}, execKeys...)},
+		{"exec by a key with no label", upterm.ApprovalRequest{Fingerprint: "SHA256:3Jx9"}, "exec", []string{"bash"}, 1, append([]string{
+			`upterm: a guest with key SHA256:3Jx9 wants to run a command on this machine: "bash"`, shell, "upterm: 57s left; 0 more waiting.",
+		}, execKeys...)},
+		{"exec by an unidentified guest", upterm.ApprovalRequest{}, "exec", []string{"bash"}, 1, []string{
+			`upterm: an unidentified guest (no authenticated key) wants to run a command on this machine: "bash"`, shell, "upterm: 57s left; 0 more waiting.",
+			"upterm:   y ABCD Enter   allow this command, on this connection only",
+			"upterm:   n ABCD Enter   deny",
+			"upterm:   Esc            decide later (it still expires)",
+			"upterm: an unidentified guest can't be allowed beyond this connection.",
 		}},
-		{"two paths", "sftp", "rename", []string{"/a", "/b"}, []string{
-			"upterm: c ABCD then Enter: allow renaming, linking or symlinking subject[0] to subject[1] for this connection.",
-			"upterm: g ABCD then Enter: allow every file operation on any path, including writes and deletes, for this authenticated guest until this host session ends.",
-			readOnly,
-		}},
+		{"forward", alice, "forward", []string{"127.0.0.1", "5432"}, 1, append([]string{
+			"upterm: alice (github:alice) wants to reach 127.0.0.1:5432 on this machine", "upterm: 57s left; 0 more waiting.",
+		}, keys("allow this destination, on this connection only", "allow this guest to reach any loopback port on this machine until this session ends")...)},
+		{"forward to IPv6", alice, "forward", []string{"::1", "22"}, 1, append([]string{
+			"upterm: alice (github:alice) wants to reach [::1]:22 on this machine", "upterm: 57s left; 0 more waiting.",
+		}, keys("allow this destination, on this connection only", "allow this guest to reach any loopback port on this machine until this session ends")...)},
+		{"upload", alice, "upload", []string{"/home/alice/notes.txt"}, 1, append(append([]string{
+			`upterm: alice (github:alice) wants to write "/home/alice/notes.txt"`, "upterm: 57s left; 0 more waiting.",
+		}, pathKeys...), readOnly)},
+		{"download", alice, "download", []string{"/notes.txt"}, 1, append(append([]string{
+			`upterm: alice (github:alice) wants to read "/notes.txt"`, "upterm: 57s left; 0 more waiting.",
+		}, pathKeys...), readOnly)},
+		{"delete", alice, "delete", []string{"/notes.txt"}, 1, append(append([]string{`upterm: alice (github:alice) wants to delete "/notes.txt"`, "upterm: 57s left; 0 more waiting."}, pathKeys...), readOnly)},
+		{"mkdir", alice, "mkdir", []string{"/d"}, 1, append(append([]string{`upterm: alice (github:alice) wants to create the directory "/d"`, "upterm: 57s left; 0 more waiting."}, pathKeys...), readOnly)},
+		{"rmdir", alice, "rmdir", []string{"/d"}, 1, append(append([]string{`upterm: alice (github:alice) wants to remove the directory "/d"`, "upterm: 57s left; 0 more waiting."}, pathKeys...), readOnly)},
+		{"setstat", alice, "setstat", []string{"/d"}, 1, append(append([]string{`upterm: alice (github:alice) wants to change the attributes of "/d"`, "upterm: 57s left; 0 more waiting."}, pathKeys...), readOnly)},
+		{"rename", alice, "rename", []string{"/a", "/b"}, 1, append(append([]string{`upterm: alice (github:alice) wants to rename "/a" to "/b"`, "upterm: 57s left; 0 more waiting."}, pairKeys...), readOnly)},
+		{"symlink", alice, "symlink", []string{"/a", "/b"}, 1, append(append([]string{`upterm: alice (github:alice) wants to make "/a" a symlink to "/b"`, "upterm: 57s left; 0 more waiting."}, pairKeys...), readOnly)},
+		{"link", alice, "link", []string{"/a", "/b"}, 1, append(append([]string{`upterm: alice (github:alice) wants to make "/a" a hard link to "/b"`, "upterm: 57s left; 0 more waiting."}, pairKeys...), readOnly)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			state := approvalTestState("grant")
-			state.Current.Capability, state.Current.Operation = tc.capability, tc.operation
-			state.Current.Subjects = nil
-			for _, subject := range tc.subjects {
-				state.Current.Subjects = append(state.Current.Subjects, []byte(subject))
-			}
-			lines := approvalLines(state, "ABCD")
-			for _, want := range tc.want {
-				require.Contains(t, lines, want)
-			}
-			if tc.capability != "sftp" {
-				require.NotContains(t, lines, readOnly)
-			}
+			synctest.Test(t, func(t *testing.T) {
+				request := tc.who
+				request.ID, request.Operation, request.DeadlineUnixMilli = "review", tc.operation, time.Now().Add(57*time.Second).UnixMilli()
+				request.Capability = map[string]string{"exec": "exec", "forward": "forward"}[tc.operation]
+				if request.Capability == "" {
+					request.Capability = "sftp"
+				}
+				for _, subject := range tc.subjects {
+					request.Subjects = append(request.Subjects, []byte(subject))
+				}
+				require.Equal(t, tc.want, approvalLines(upterm.ApprovalState{Revision: 1, Pending: tc.pending, Current: &request}, "ABCD"))
+			})
 		})
 	}
+}
+
+// Only the review's own keys answer it, with the code it shows: the letters
+// an earlier review used, a guest-wide answer for a guest with no key, a wrong
+// code and a bare letter all change nothing, and the program is sent none of
+// them.
+func TestApprovalAnswersOnlyItsOwnKeys(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		sink := &syncSink{}
+		r, pw, program, stop := approvalTestRun(t, sink)
+		defer stop()
+		state := approvalTestState("first")
+		state.Current.Fingerprint = ""
+		r.updates <- state
+		synctest.Wait()
+		_, _ = pw.Write([]byte("~a"))
+		synctest.Wait()
+		code := approvalTestCode(t, sink.String())
+		for _, typed := range []string{"c " + code, "g " + code, "d " + code, "a " + code, "y ZZZZ", "y", "yes"} {
+			_, _ = pw.Write([]byte(typed + "\r"))
+			synctest.Wait()
+		}
+		require.Empty(t, r.answers)
+		_, _ = pw.Write([]byte("y " + code + "\r"))
+		synctest.Wait()
+		require.Equal(t, upterm.ApprovalAnswer{ID: "first", Decision: "connection"}, <-r.answers)
+		require.Empty(t, program.String())
+	})
 }
 
 func TestApprovalDisplayOutcomes(t *testing.T) {
@@ -273,7 +349,7 @@ func TestApprovalDisplayOutcomes(t *testing.T) {
 				done := <-r.display
 				require.NotEqual(t, localCompleted, done.result)
 				if prefix != "" {
-					require.NotContains(t, sink.String(), "upterm: guest")
+					require.NotContains(t, sink.String(), approvalTestReviewShown)
 				}
 			})
 		})
@@ -306,7 +382,7 @@ func TestApprovalConfirmationSplits(t *testing.T) {
 				synctest.Wait()
 				_, _ = pw.Write([]byte("~a"))
 				synctest.Wait()
-				confirmation := "g " + approvalTestCode(t, sink.String()) + "\r"
+				confirmation := "a " + approvalTestCode(t, sink.String()) + "\r"
 				_, _ = pw.Write([]byte(confirmation[:split]))
 				synctest.Wait()
 				_, _ = pw.Write([]byte(confirmation[split:]))
@@ -332,16 +408,16 @@ func TestApprovalLateSequenceAndReentry(t *testing.T) {
 		_, _ = pw.Write([]byte("\x1b"))
 		time.Sleep(51 * time.Millisecond)
 		synctest.Wait()
-		_, _ = pw.Write([]byte("]52;c;g " + old + "\r~a"))
+		_, _ = pw.Write([]byte("]52;c;a " + old + "\r~a"))
 		synctest.Wait()
 		require.Empty(t, r.answers)
-		require.NotContains(t, sink.String()[strings.LastIndex(sink.String(), "upterm: guest"):], "new request")
+		require.NotContains(t, sink.String()[strings.LastIndex(sink.String(), approvalTestReviewShown):], "new request")
 		_, _ = pw.Write([]byte("\a~a"))
 		synctest.Wait()
 		code := approvalTestCode(t, sink.String())
 		require.NotEqual(t, old, code)
-		require.Contains(t, program.String(), "\x1b]52;c;g "+old+"\r~a\a")
-		_, _ = pw.Write([]byte("c " + code + "\r"))
+		require.Contains(t, program.String(), "\x1b]52;c;a "+old+"\r~a\a")
+		_, _ = pw.Write([]byte("y " + code + "\r"))
 		synctest.Wait()
 		require.Len(t, r.answers, 1)
 	})
@@ -360,7 +436,7 @@ func TestApprovalExpiryAndGuestResolution(t *testing.T) {
 				_, _ = pw.Write([]byte("~a"))
 				synctest.Wait()
 				code := approvalTestCode(t, sink.String())
-				_, _ = pw.Write([]byte("g " + code[:2]))
+				_, _ = pw.Write([]byte("a " + code[:2]))
 				synctest.Wait()
 				switch end {
 				case "expiry":
@@ -414,7 +490,7 @@ func TestApprovalOutputContinuesAndStatusWaits(t *testing.T) {
 		require.Contains(t, sink.String(), "PROGRAM DURING REVIEW")
 		close(lookup)
 		synctest.Wait()
-		_, _ = pw.Write([]byte("c " + code + "\r"))
+		_, _ = pw.Write([]byte("y " + code + "\r"))
 		synctest.Wait()
 		require.Len(t, review.answers, 1)
 		cancel()
@@ -461,7 +537,7 @@ func TestApprovalFailedDisplayNeverArms(t *testing.T) {
 				_, _ = pw.Write([]byte("~a"))
 				synctest.Wait()
 				code := approvalTestCode(t, sink.String())
-				_, _ = pw.Write([]byte("g " + code + "\r"))
+				_, _ = pw.Write([]byte("a " + code + "\r"))
 				synctest.Wait()
 				require.Empty(t, review.answers, "an unsuccessful display cannot arm input")
 			})
@@ -498,10 +574,10 @@ func TestApprovalSameReadFraming(t *testing.T) {
 					_, _ = pw.Write([]byte("~a" + framing.start[:split]))
 					synctest.Wait()
 					code := approvalTestCode(t, sink.String())
-					_, _ = pw.Write([]byte(framing.start[split:] + "g " + code + "\r" + framing.end))
+					_, _ = pw.Write([]byte(framing.start[split:] + "a " + code + "\r" + framing.end))
 					synctest.Wait()
 					require.Empty(t, r.answers)
-					_, _ = pw.Write([]byte("c " + code + "\r"))
+					_, _ = pw.Write([]byte("y " + code + "\r"))
 					synctest.Wait()
 					require.Len(t, r.answers, 1)
 				})
@@ -522,7 +598,7 @@ func TestApprovalMalformedSequence(t *testing.T) {
 		code := approvalTestCode(t, sink.String())
 		_, _ = pw.Write([]byte("\x1b[\x1b]52;c;"))
 		synctest.Wait()
-		_, _ = pw.Write([]byte("\rg " + code + "\r\a"))
+		_, _ = pw.Write([]byte("\ra " + code + "\r\a"))
 		synctest.Wait()
 		require.Empty(t, r.answers)
 	})
@@ -565,12 +641,12 @@ func TestApprovalStaleDisplayCompletion(t *testing.T) {
 		sink.release <- struct{}{}
 		synctest.Wait()
 		code := approvalTestCode(t, <-sink.entered)
-		_, _ = pw.Write([]byte("c " + first + "\rc " + code + "\r"))
+		_, _ = pw.Write([]byte("y " + first + "\ry " + code + "\r"))
 		synctest.Wait()
 		require.Empty(t, review.answers, "the first completion must not arm the still-undisplayed replacement")
 		sink.release <- struct{}{}
 		synctest.Wait()
-		_, _ = pw.Write([]byte("c " + code + "\r"))
+		_, _ = pw.Write([]byte("y " + code + "\r"))
 		synctest.Wait()
 		require.Len(t, review.answers, 1)
 		require.Equal(t, "second", (<-review.answers).ID)
@@ -625,7 +701,7 @@ func TestApprovalSuspendAndDetach(t *testing.T) {
 	waitFor(t, func() bool { return strings.Contains(sink.String(), "pending") }, "notification")
 	_, err := pw.Write([]byte("!a"))
 	require.NoError(t, err)
-	waitFor(t, func() bool { return strings.Contains(sink.String(), "upterm: d ") }, "review")
+	waitFor(t, func() bool { return strings.Contains(sink.String(), approvalTestReviewShown) }, "review")
 	oldCode := approvalTestCode(t, sink.String())
 	_, err = pw.Write([]byte("!\x1a"))
 	require.NoError(t, err)
@@ -636,10 +712,10 @@ func TestApprovalSuspendAndDetach(t *testing.T) {
 	}
 	_, err = pw.Write([]byte("program\r!a"))
 	require.NoError(t, err)
-	waitFor(t, func() bool { return strings.Count(sink.String(), "upterm: d ") >= 2 }, "re-entry")
+	waitFor(t, func() bool { return strings.Count(sink.String(), approvalTestReviewShown) >= 2 }, "re-entry")
 	code := approvalTestCode(t, sink.String())
 	require.NotEqual(t, oldCode, code)
-	_, err = pw.Write([]byte("g " + oldCode + "\r!."))
+	_, err = pw.Write([]byte("a " + oldCode + "\r!."))
 	require.NoError(t, err)
 	res := awaitResult(t, done)
 	require.Equal(t, Detached, res.Reason)
@@ -661,18 +737,18 @@ func TestApprovalExpiryAdvancesReview(t *testing.T) {
 		old := approvalTestCode(t, sink.String())
 		time.Sleep(2 * time.Second)
 		synctest.Wait()
-		_, _ = pw.Write([]byte("g " + old + "\r"))
+		_, _ = pw.Write([]byte("a " + old + "\r"))
 		synctest.Wait()
 		require.Empty(t, r.answers)
-		require.NotContains(t, program.String(), "g "+old)
+		require.NotContains(t, program.String(), "a "+old)
 		next := approvalTestState("next")
 		next.Revision = 2
 		r.updates <- next
 		synctest.Wait()
-		require.Contains(t, sink.String(), "upterm: d ")
+		require.Contains(t, sink.String(), approvalTestReviewShown)
 		code := approvalTestCode(t, sink.String())
 		require.NotEqual(t, old, code)
-		_, _ = pw.Write([]byte("c " + code + "\r"))
+		_, _ = pw.Write([]byte("y " + code + "\r"))
 		synctest.Wait()
 		require.Len(t, r.answers, 1)
 	})
@@ -687,12 +763,12 @@ func TestApprovalPrimaryLossRetiresRequest(t *testing.T) {
 		synctest.Wait()
 		_, _ = pw.Write([]byte("~a"))
 		synctest.Wait()
-		before := strings.Count(sink.String(), "upterm: d ")
+		before := strings.Count(sink.String(), approvalTestReviewShown)
 		close(r.updates)
 		synctest.Wait()
 		_, _ = pw.Write([]byte("~a"))
 		synctest.Wait()
-		require.Equal(t, before, strings.Count(sink.String(), "upterm: d "))
+		require.Equal(t, before, strings.Count(sink.String(), approvalTestReviewShown))
 	})
 }
 
@@ -708,10 +784,10 @@ func TestApprovalInputEpoch(t *testing.T) {
 		r.code = "ABCD"
 		r.epoch.Store(2)
 		filter := NewEscapeFilter('~', false, WithApproval())
-		_, _ = r.input(approvalRead{p: []byte("g ABCD\r"), epoch: 1}, filter)
+		_, _ = r.input(approvalRead{p: []byte("a ABCD\r"), epoch: 1}, filter)
 		synctest.Wait()
 		require.Empty(t, review.answers, "queued before display completion")
-		_, _ = r.input(approvalRead{p: []byte("c ABCD\r"), epoch: 2}, filter)
+		_, _ = r.input(approvalRead{p: []byte("y ABCD\r"), epoch: 2}, filter)
 		synctest.Wait()
 		require.Len(t, review.answers, 1)
 		require.Equal(t, "shown", (<-review.answers).ID)
@@ -752,7 +828,7 @@ func TestApprovalKittyReleaseEvents(t *testing.T) {
 				synctest.Wait()
 				_, _ = pw.Write([]byte("~a"))
 				synctest.Wait()
-				confirmation := "g " + approvalTestCode(t, sink.String()) + "\r"
+				confirmation := "a " + approvalTestCode(t, sink.String()) + "\r"
 				var whole string
 				for _, key := range []byte(confirmation) {
 					press := fmt.Sprintf("\x1b[%d;1:1u", key)
@@ -812,7 +888,7 @@ func TestApprovalSequenceEpochBoundary(t *testing.T) {
 				synctest.Wait()
 				require.Empty(t, review.answers, "a pre-display key prefix cannot acquire the completion read's epoch")
 				require.Empty(t, program.String())
-				_, _ = pw.Write([]byte("c " + code + "\r"))
+				_, _ = pw.Write([]byte("y " + code + "\r"))
 				synctest.Wait()
 				require.Len(t, review.answers, 1)
 				require.Equal(t, "first", (<-review.answers).ID)
@@ -871,16 +947,16 @@ func TestApprovalNormalFramesKeepProgramOwnership(t *testing.T) {
 					// If the shortcut was incorrectly recognized, use the displayed code
 					// to prove that subsequent marked-body input still cannot answer it.
 					code := "ABCD"
-					if strings.Contains(sink.String(), "upterm: d ") {
+					if strings.Contains(sink.String(), approvalTestReviewShown) {
 						code = approvalTestCode(t, sink.String())
 					}
-					continuation := "g " + code + "\r"
+					continuation := "a " + code + "\r"
 					_, _ = pw.Write([]byte(continuation[:3]))
 					synctest.Wait()
 					_, _ = pw.Write([]byte(continuation[3:]))
 					synctest.Wait()
 					require.Empty(t, review.answers, "a known normal-mode frame must not approve")
-					require.NotContains(t, sink.String(), "upterm: d ", "a shortcut inside a frame must not capture the keyboard")
+					require.NotContains(t, sink.String(), approvalTestReviewShown, "a shortcut inside a frame must not capture the keyboard")
 					for _, b := range []byte(frame.end) {
 						_, _ = pw.Write([]byte{b})
 						synctest.Wait()
@@ -892,7 +968,7 @@ func TestApprovalNormalFramesKeepProgramOwnership(t *testing.T) {
 					_, _ = pw.Write([]byte("~a"))
 					synctest.Wait()
 					fresh := approvalTestCode(t, sink.String())
-					_, _ = pw.Write([]byte("c " + fresh + "\r"))
+					_, _ = pw.Write([]byte("y " + fresh + "\r"))
 					synctest.Wait()
 					require.Len(t, review.answers, 1)
 					require.Equal(t, upterm.ApprovalAnswer{ID: "first", Decision: "connection"}, <-review.answers)
@@ -923,12 +999,12 @@ func TestApprovalPendingEscapeBeforeFrame(t *testing.T) {
 					synctest.Wait()
 				}
 				require.Equal(t, input, program.String(), "the held escape and framed body must stay byte-exact")
-				require.NotContains(t, sink.String(), "upterm: d ")
+				require.NotContains(t, sink.String(), approvalTestReviewShown)
 				require.Empty(t, review.answers)
 				_, _ = pw.Write([]byte("~a"))
 				synctest.Wait()
 				code := approvalTestCode(t, sink.String())
-				_, _ = pw.Write([]byte("c " + code + "\r"))
+				_, _ = pw.Write([]byte("y " + code + "\r"))
 				synctest.Wait()
 				require.Len(t, review.answers, 1)
 			})
@@ -951,12 +1027,12 @@ func TestApprovalOrdinarySplitInput(t *testing.T) {
 			synctest.Wait()
 		}
 		require.Equal(t, input, program.String())
-		require.NotContains(t, sink.String(), "upterm: d ")
+		require.NotContains(t, sink.String(), approvalTestReviewShown)
 		_, _ = pw.Write([]byte("~a"))
 		synctest.Wait()
-		require.Contains(t, sink.String(), "upterm: d ", "ordinary split UTF-8 must not leave a false control frame open")
+		require.Contains(t, sink.String(), approvalTestReviewShown, "ordinary split UTF-8 must not leave a false control frame open")
 		code := approvalTestCode(t, sink.String())
-		_, _ = pw.Write([]byte("c " + code + "\r"))
+		_, _ = pw.Write([]byte("y " + code + "\r"))
 		synctest.Wait()
 		require.Len(t, review.answers, 1)
 		require.Equal(t, input, program.String())
@@ -1000,14 +1076,14 @@ func TestApprovalUTF8InsideNormalFrames(t *testing.T) {
 						synctest.Wait()
 					}
 					code := "ABCD"
-					if strings.Contains(sink.String(), "upterm: d ") {
+					if strings.Contains(sink.String(), approvalTestReviewShown) {
 						code = approvalTestCode(t, sink.String())
 					}
-					continuation := "g " + code + "\r"
+					continuation := "a " + code + "\r"
 					_, _ = pw.Write([]byte(continuation))
 					synctest.Wait()
 					require.Empty(t, review.answers, "a UTF-8 continuation cannot terminate the known frame")
-					require.NotContains(t, sink.String(), "upterm: d ", "the true terminator has not arrived")
+					require.NotContains(t, sink.String(), approvalTestReviewShown, "the true terminator has not arrived")
 					require.Equal(t, prefix+continuation, program.String())
 					for _, b := range []byte(frame.end) {
 						_, _ = pw.Write([]byte{b})
@@ -1016,7 +1092,7 @@ func TestApprovalUTF8InsideNormalFrames(t *testing.T) {
 					_, _ = pw.Write([]byte("\r~a"))
 					synctest.Wait()
 					fresh := approvalTestCode(t, sink.String())
-					_, _ = pw.Write([]byte("c " + fresh + "\r"))
+					_, _ = pw.Write([]byte("y " + fresh + "\r"))
 					synctest.Wait()
 					require.Len(t, review.answers, 1)
 					require.Equal(t, upterm.ApprovalAnswer{ID: "first", Decision: "connection"}, <-review.answers)
@@ -1050,7 +1126,7 @@ func TestApprovalUTF8InsideReviewFrames(t *testing.T) {
 						_, _ = pw.Write([]byte(prefix))
 						synctest.Wait()
 					}
-					continuation := "\rg " + code + "\r"
+					continuation := "\ra " + code + "\r"
 					_, _ = pw.Write([]byte(continuation))
 					synctest.Wait()
 					require.Empty(t, review.answers, "review uses the same UTF-8 body classifier")
@@ -1064,7 +1140,7 @@ func TestApprovalUTF8InsideReviewFrames(t *testing.T) {
 					} else {
 						require.Equal(t, prefix+continuation+frame.end, program.String())
 					}
-					_, _ = pw.Write([]byte("c " + code + "\r"))
+					_, _ = pw.Write([]byte("y " + code + "\r"))
 					synctest.Wait()
 					require.Len(t, review.answers, 1)
 				})

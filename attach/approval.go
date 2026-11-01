@@ -9,10 +9,13 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/owenthereal/upterm/upterm"
 )
@@ -375,13 +378,13 @@ func (r *terminalReview) input(chunk approvalRead, filter *EscapeFilter) ([]byte
 			typed := r.typed
 			r.typed = ""
 			decision := ""
-			if typed == "d "+r.code {
+			if typed == "n "+r.code {
 				decision = "deny"
 			}
-			if typed == "c "+r.code {
+			if typed == "y "+r.code {
 				decision = "connection"
 			}
-			if typed == "g "+r.code && r.state.Current.Fingerprint != "" {
+			if typed == "a "+r.code && r.state.Current.Fingerprint != "" {
 				decision = "guest"
 			}
 			if decision != "" && !r.answering {
@@ -463,45 +466,108 @@ func (r *terminalReview) programInput(chunk approvalRead, filter *EscapeFilter) 
 	return
 }
 
+// approvalLines is the review of state's current request: who asks, what it
+// wants, how long is left, and what each answer allows. Every subject is
+// shown whole and quoted, so a command or path hides nothing in it.
 func approvalLines(state upterm.ApprovalState, code string) []string {
 	request := state.Current
-	identity := strconv.QuoteToASCII(request.Fingerprint)
-	if request.Fingerprint == "" {
-		identity = "unidentified (no authenticated guest key)"
-	}
-	remaining := max(0, (request.DeadlineUnixMilli-time.Now().UnixMilli()+999)/1000)
-	lines := []string{fmt.Sprintf("upterm: guest %s; operation %s; capability %s", identity, strconv.QuoteToASCII(request.Operation), strconv.QuoteToASCII(request.Capability)), fmt.Sprintf("upterm: %ds remaining; %d pending", remaining, state.Pending)}
-	for i, subject := range request.Subjects {
-		lines = append(lines, fmt.Sprintf("upterm: subject[%d] = %s", i, strconv.QuoteToASCII(string(subject))))
-	}
-	if request.Capability == "exec" {
-		lines = append(lines, "upterm: execution trust: the guest can supply further input and code.")
-	}
-	connectionGrant := "allow this connection, capability, and complete subject tuple."
-	guestGrant := "allow this authenticated guest and capability until this host session ends."
-	if request.Capability == "sftp" {
+	who := approvalAsker(*request)
+	var lines []string
+	var allowOne, allowGuest string
+	switch request.Capability {
+	case "exec":
+		lines = append(lines, "upterm: "+who+" wants to run a command on this machine: "+strconv.QuoteToASCII(string(request.Subjects[0])),
+			"upterm: Allowing it lets this guest send more commands through it, so treat it as giving a shell.")
+		allowOne = "allow this command, on this connection only"
+		allowGuest = "allow this guest to run any command until this session ends"
+	case "forward":
+		lines = append(lines, "upterm: "+who+" wants to reach "+reviewText(net.JoinHostPort(string(request.Subjects[0]), string(request.Subjects[1])))+" on this machine")
+		allowOne = "allow this destination, on this connection only"
+		allowGuest = "allow this guest to reach any loopback port on this machine until this session ends"
+	default:
+		lines = append(lines, "upterm: "+who+" wants to "+fileRequest(request.Operation, request.Subjects))
 		// A file grant is for the paths shown, not the operation that asked:
 		// a download's approval also lets this connection overwrite or delete.
-		connectionGrant = "allow every file operation on this path, including writes and deletes, for this connection."
+		allowOne = "allow every file operation on this path, including writes and deletes, on this connection only"
 		if len(request.Subjects) == 2 {
-			connectionGrant = "allow renaming, linking or symlinking subject[0] to subject[1] for this connection."
+			allowOne = "allow renaming, linking or symlinking the first path to the second, on this connection only"
 		}
-		guestGrant = "allow every file operation on any path, including writes and deletes, for this authenticated guest until this host session ends."
+		allowGuest = "allow this guest every file operation on any path, including writes and deletes, until this session ends"
 	}
-	lines = append(lines, "upterm: d "+code+" then Enter: deny this request.", "upterm: c "+code+" then Enter: "+connectionGrant)
+	remaining := max(0, (request.DeadlineUnixMilli-time.Now().UnixMilli()+999)/1000)
+	lines = append(lines, fmt.Sprintf("upterm: %ds left; %d more waiting.", remaining, max(state.Pending, 1)-1),
+		"upterm:   y "+code+" Enter   "+allowOne)
 	if request.Fingerprint != "" {
-		lines = append(lines, "upterm: g "+code+" then Enter: "+guestGrant)
-	} else {
-		lines = append(lines, "upterm: guest-wide permission is unavailable for an unidentified guest.")
+		lines = append(lines, "upterm:   a "+code+" Enter   "+allowGuest)
+	}
+	lines = append(lines, "upterm:   n "+code+" Enter   deny", "upterm:   Esc            decide later (it still expires)")
+	if request.Fingerprint == "" {
+		lines = append(lines, "upterm: an unidentified guest can't be allowed beyond this connection.")
 	}
 	if request.Capability == "sftp" {
 		lines = append(lines, "upterm: a read-only session still allows downloads only.")
 	}
-	lines = append(lines, "upterm: Escape leaves review without answering.")
 	// Protocol subject bounds expand to at most 32 KiB when quoted. Keep the
 	// entire tuple; never truncate a command while offering to approve it.
 	if len(strings.Join(lines, "\n")) > 64*1024 {
 		return nil
 	}
 	return lines
+}
+
+// approvalAsker names who is asking: by the host's own label for its key when
+// the key is on the allowlist, else by the key, saying so when the session has
+// no allowlist and anyone with its ID can join.
+func approvalAsker(request upterm.ApprovalRequest) string {
+	switch {
+	case request.Fingerprint == "":
+		return "an unidentified guest (no authenticated key)"
+	case request.Guest != "":
+		return reviewText(request.Guest)
+	case request.Unlisted:
+		return "a guest with key " + reviewText(request.Fingerprint) + " (anyone with the session ID can join)"
+	}
+	return "a guest with key " + reviewText(request.Fingerprint)
+}
+
+// fileRequest is what a file operation wants, in the words of what it does to
+// the paths shown. A link is made at the first path, to the second.
+func fileRequest(operation string, subjects [][]byte) string {
+	path := strconv.QuoteToASCII(string(subjects[0]))
+	switch operation {
+	case "download":
+		return "read " + path
+	case "upload":
+		return "write " + path
+	case "delete":
+		return "delete " + path
+	case "mkdir":
+		return "create the directory " + path
+	case "rmdir":
+		return "remove the directory " + path
+	case "setstat":
+		return "change the attributes of " + path
+	case "rename":
+		return "rename " + path + " to " + strconv.QuoteToASCII(string(subjects[1]))
+	case "symlink":
+		return "make " + path + " a symlink to " + strconv.QuoteToASCII(string(subjects[1]))
+	case "link":
+		return "make " + path + " a hard link to " + strconv.QuoteToASCII(string(subjects[1]))
+	}
+	return "change " + path
+}
+
+// reviewText is text the review shows that isn't a subject: as it is when it
+// is all printable, quoted otherwise, so that nothing in it acts on the
+// terminal or reorders what follows.
+func reviewText(s string) string {
+	if !utf8.ValidString(s) {
+		return strconv.QuoteToASCII(s)
+	}
+	for _, r := range s {
+		if !unicode.IsGraphic(r) {
+			return strconv.QuoteToASCII(s)
+		}
+	}
+	return s
 }

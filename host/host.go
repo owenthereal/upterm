@@ -1204,6 +1204,7 @@ func (c *Host) Run(ctx context.Context) (runErr error) {
 			LogPath:                    c.LogPath,
 			HostKey:                    hostKey,
 			AuthorizedKeys:             aks,
+			GuestLabels:                guestLabels(c.AuthorizedKeys),
 			GuestCertAuthority:         relayAuthority.IsUserAuthority,
 			EventEmitter:               eventEmitter,
 			KeepAliveDuration:          c.KeepAliveDuration,

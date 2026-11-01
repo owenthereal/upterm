@@ -2421,7 +2421,7 @@ func TestApprovalRegistrationAndSessionEnd(t *testing.T) {
 				waitFor(t, func() bool { return strings.Contains(sink.String(), "pending") }, "notification missing")
 				_, err := pw.Write([]byte("~a"))
 				require.NoError(t, err)
-				waitFor(t, func() bool { return strings.Contains(sink.String(), "upterm: d ") }, "review missing")
+				waitFor(t, func() bool { return strings.Contains(sink.String(), approvalTestReviewShown) }, "review missing")
 			}
 			close(finish)
 			res := awaitResult(t, done)

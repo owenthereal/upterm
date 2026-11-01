@@ -648,9 +648,9 @@ func TestHostKeyHintOnlyWhereTheKeysWork(t *testing.T) {
 }
 
 func TestKeyHint(t *testing.T) {
-	require.Equal(t, "upterm: ~. detaches, ~? shows the session's status and keys, ~a reviews guest permissions", keyHint('~', false))
-	require.Equal(t, "upterm: ~. detaches, ~? shows the session's status and keys, ~a reviews guest permissions; with ssh's default ~ escape, type ~~., ~~? and ~~a", keyHint('~', true))
-	require.Equal(t, "upterm: ^. detaches, ^? shows the session's status and keys, ^a reviews guest permissions", keyHint('^', true))
+	require.Equal(t, "upterm: ~. detaches, ~? shows the session's status and keys, ~a reviews requests", keyHint('~', false))
+	require.Equal(t, "upterm: ~. detaches, ~? shows the session's status and keys, ~a reviews requests; with ssh's default ~ escape, type ~~., ~~? and ~~a", keyHint('~', true))
+	require.Equal(t, "upterm: ^. detaches, ^? shows the session's status and keys, ^a reviews requests", keyHint('^', true))
 	require.Empty(t, keyHint(0, true))
 }
 
