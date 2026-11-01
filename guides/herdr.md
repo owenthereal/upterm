@@ -40,7 +40,7 @@ cat >> ~/.ssh/known_hosts <<'EOF'
 EOF
 ```
 
-Each laptop gets the same line from the door later, from
+Each laptop gets the same key from the door later, from
 `upterm session ssh-config home`.
 
 ## Open the door
@@ -193,7 +193,9 @@ a remote session you didn't mean.
 If a tool fails, check `ssh -v home`, the key allowlist and the door's PATH.
 After restarting the door, print its ssh config again, and replace the
 `Host home` block on each laptop and the Username on the phone; on a Mac,
-start `caffeinate` again. Flags are fixed for one run.
+start `caffeinate` again. On a relay that routes by node, the `User` also
+changes when the door comes back on another node: print the ssh config and
+replace both then too. Flags are fixed for one run.
 
 ## Optional jump to the machine's sshd
 
@@ -252,5 +254,6 @@ Traffic through the public relay is decrypted there, apart from the jump to
 your own sshd. For sensitive work, [run your own
 relay](../README.md#hammer_and_wrench-deployment): it's one binary. Give the
 door `--server` with your relay's address, and `upterm session ssh-config
-home` prints the `User` your relay routes by, which on a relay without Consul
-is longer than the session ID.
+home` prints the `User` your relay routes by. On a relay without Consul, which
+routes by node, it is longer than the session ID, and it also changes when the
+door comes back on another node.

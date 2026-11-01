@@ -369,8 +369,9 @@ a port. Only your own keys get in:
 
    Put both parts on each laptop: the `Host home` block in its
    `~/.ssh/config`, and the relay's line in its `~/.ssh/known_hosts`, once.
-   The block's `User` changes whenever the door restarts, so print it again
-   then.
+   The block's `User` changes whenever the door restarts, and on a relay that
+   routes by node, also when the door comes back on another node, so print
+   it again then.
 4. From the laptop: `ssh home`, `scp notes.txt home:`, `sftp home`, or
    VS Code's **Remote-SSH: Connect to Host…** → `home`.
 
@@ -451,10 +452,14 @@ change them.
 
 When a guest asks for something, upterm says so in your terminal. Type `~a` at
 the start of a line to review the oldest request. The review says who is
-asking, by the `--authorized-user` or `--authorized-keys` entry their key is
-on, or else by their key, and what they want. Answer with the code it shows:
+asking and what they want. A guest an `--authorized-user` entry names, such
+as `github:alice`, is shown as `alice (github:alice)`; any other guest by
+their key, with the entry that lists it, if one does. Answer with the code it
+shows:
 
-- `y CODE` then Enter allows this request, on this connection only;
+- `y CODE` then Enter allows what the review names, on this connection only:
+  that command, that destination, or every file operation on that path (for
+  two paths, renaming or linking the first to the second);
 - `a CODE` then Enter allows this guest the same kind of request until the
   session ends, across reconnects;
 - `n CODE` then Enter denies it;

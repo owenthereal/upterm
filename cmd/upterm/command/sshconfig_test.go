@@ -520,6 +520,7 @@ func TestSSHConfigHelp(t *testing.T) {
 	long := oneSpaced(c.Long)
 	for _, want := range []string{
 		"Put the Host block in ~/.ssh/config on each device you connect from.",
+		"Its User is the session's SSH user, which changes whenever the session restarts, and on a relay that routes by node, also when the session comes back on another node: run this again then, and replace the block.",
 		"Add the known_hosts lines to ~/.ssh/known_hosts on each device, once.",
 		"'upterm session info NAME -o json' has the same block as sshConfig, and the known_hosts lines as knownHosts, beside how the host came to trust the key (relayKeyTrust).",
 	} {
