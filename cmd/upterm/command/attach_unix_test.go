@@ -3,6 +3,7 @@
 package command
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
@@ -10,6 +11,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"slices"
@@ -21,7 +23,9 @@ import (
 
 	gssh "charm.land/ssh"
 	ptylib "github.com/creack/pty"
+	"github.com/google/shlex"
 	"github.com/owenthereal/upterm/attach"
+	"github.com/owenthereal/upterm/host/sessiondir"
 	"github.com/owenthereal/upterm/internal/termsize"
 	uio "github.com/owenthereal/upterm/io"
 	"github.com/owenthereal/upterm/upterm"
@@ -60,6 +64,100 @@ func TestAttachAsksForTheDoorNoticeOnlyInRawMode(t *testing.T) {
 	}
 }
 
+// upterm attach on a door asks the door to show its notice, with this
+// terminal's keys: the session's record says it is a door, and attach holds
+// the terminal it runs on in raw mode. Run as the command itself, in a
+// process of its own, on a terminal it is in the foreground of, as a shell
+// runs it: raw mode is only for such a terminal, and job control can't be
+// staged in-process.
+func TestAttachAsksADoorToShowItsNotice(t *testing.T) {
+	if os.Getenv("UPTERM_ATTACH_DOOR_CHILD") == "1" {
+		os.Args = []string{"upterm", "attach", "home"}
+		os.Exit(Main())
+	}
+	setupSessionRoots(t)
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	shell, err := shlex.Split(getDefaultShell())
+	require.NoError(t, err)
+	d := claimSession(t, "home")
+	releaseAtEnd(t, d)
+	envs := make(chan []string, 1)
+	door := serveTestDoorAt(t, d.AttachSocket(), func(s gssh.Session) {
+		envs <- s.Environ()
+		_ = s.Exit(0)
+	})
+	require.NoError(t, d.Update(func(r *sessiondir.Record) {
+		r.Status = sessiondir.StatusReady
+		r.Command, r.LoginCommand = shell, []string{"herdr"}
+		r.HostKeys = []string{strings.TrimSuffix(string(ssh.MarshalAuthorizedKey(door.key)), "\n")}
+	}))
+
+	child := exec.Command(os.Args[0], "-test.run=^TestAttachAsksADoorToShowItsNotice$")
+	// A dumb terminal, which bubbletea doesn't ask, as the process starts,
+	// for its background colour: nothing here would answer, and it waits
+	// five seconds for one. Nothing about the notice depends on TERM.
+	child.Env = append(os.Environ(), "UPTERM_ATTACH_DOOR_CHILD=1", "TERM=dumb")
+	// A session and controlling terminal of its own, whose foreground it is.
+	terminal, err := ptylib.Start(child)
+	require.NoError(t, err)
+	// Read for as long as the child has the terminal: macOS doesn't let a
+	// process finish exiting while what it wrote there is unread. The read
+	// ends once nothing has the terminal open, which here is once the child
+	// has gone.
+	var shown bytes.Buffer
+	read := make(chan struct{})
+	go func() {
+		_, _ = io.Copy(&shown, terminal)
+		close(read)
+	}()
+	var waitErr error
+	exited := make(chan struct{})
+	go func() {
+		waitErr = child.Wait()
+		close(exited)
+	}()
+	// What attach wrote, once it has gone and the read has ended.
+	wrote := func() string {
+		select {
+		case <-read:
+			return shown.String()
+		case <-time.After(5 * time.Second):
+			t.Error("the terminal's read outlived the child")
+			return ""
+		}
+	}
+	t.Cleanup(func() {
+		select {
+		case <-exited:
+		case <-time.After(10 * time.Second):
+			_ = child.Process.Kill()
+			select {
+			case <-exited:
+			case <-time.After(5 * time.Second):
+				t.Error("the child outlived its kill")
+				return
+			}
+		}
+		wrote()
+		_ = terminal.Close()
+	})
+
+	select {
+	case env := <-envs:
+		require.Contains(t, env, upterm.AttachNoticeEnvVar+"=upterm: this is home's door; 'exit' closes it for every guest. ~. detaches; ~a reviews requests.")
+	case <-exited:
+		t.Fatalf("attach ended without reaching the door (%v); it wrote %q", waitErr, wrote())
+	case <-time.After(20 * time.Second):
+		t.Fatal("attach never reached the door")
+	}
+	select {
+	case <-exited:
+		require.NoError(t, waitErr, "attach exits as the session did; it wrote %q", wrote())
+	case <-time.After(10 * time.Second):
+		t.Fatal("attach did not exit once the session had")
+	}
+}
+
 // testDoor is a charm ssh server on a unix socket whose handler is the
 // test's. It accepts any public key, as the host door does. key is its own
 // host key, in the form a Client pins.
@@ -74,18 +172,23 @@ type testDoor struct {
 
 func serveTestDoor(t *testing.T, handler func(gssh.Session)) *testDoor {
 	t.Helper()
-	_, key, err := ed25519.GenerateKey(rand.Reader)
-	require.NoError(t, err)
-	signer, err := ssh.NewSignerFromKey(key)
-	require.NoError(t, err)
-
 	// A short root, for the reason setupSessionRoots uses one: a socket path
 	// is bounded at 103 bytes and macOS hands out long temp directories.
 	dir, err := os.MkdirTemp("/tmp", "up")
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	return serveTestDoorAt(t, filepath.Join(dir, "a.sock"), handler)
+}
 
-	socket := filepath.Join(dir, "a.sock")
+// serveTestDoorAt is serveTestDoor on socket, such as the one a session's
+// record names.
+func serveTestDoorAt(t *testing.T, socket string, handler func(gssh.Session)) *testDoor {
+	t.Helper()
+	_, key, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+	signer, err := ssh.NewSignerFromKey(key)
+	require.NoError(t, err)
+
 	ln, err := net.Listen("unix", socket)
 	require.NoError(t, err)
 
