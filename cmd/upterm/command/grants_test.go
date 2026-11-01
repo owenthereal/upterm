@@ -720,3 +720,188 @@ func TestAllowLocalTCPForwardingIsDeprecatedOnTheCommandLine(t *testing.T) {
 	require.Contains(t, stderr, "a/b", "the checks ran")
 	require.NotContains(t, stderr, "deprecated")
 }
+
+// allow-local-tcp-forwarding from the environment or the config file lets
+// guests forward to any destination, and a command line that asks for
+// forwards to loopback addresses alone doesn't narrow it. upterm says so,
+// once, from the process the command line was given to, naming where the
+// value came from.
+func TestAllowLocalTCPForwardingFromEnvOrConfigSaysItWidensLoopbackForwarding(t *testing.T) {
+	keys := guestKeysFile(t)
+	const (
+		loopback = "upterm: --allow-forwarding=loopback has no effect: allow-local-tcp-forwarding (from %s) lets guests forward to any destination\n"
+		full     = "upterm: --full-access doesn't keep forwarding to loopback addresses: allow-local-tcp-forwarding (from %s) lets guests forward to any destination\n"
+		inConfig = "allow-local-tcp-forwarding: true\n"
+		variable = "UPTERM_ALLOW_LOCAL_TCP_FORWARDING"
+	)
+	for _, tc := range []struct {
+		name, config, env string // env is the variable's value
+		args              []string
+		want              string // with %s for where the value came from
+	}{
+		{name: "--allow-forwarding=loopback, the config key", config: inConfig, args: []string{"--allow-forwarding=loopback"}, want: loopback},
+		{name: "--allow-forwarding=loopback, the variable", env: "true", args: []string{"--allow-forwarding=loopback"}, want: loopback},
+		{name: "--full-access, the config key", config: inConfig, args: []string{"--full-access", "--authorized-keys", keys}, want: full},
+		{name: "--full-access, the variable", env: "true", args: []string{"--full-access", "--authorized-keys", keys}, want: full},
+		{name: "--full-access and --allow-forwarding=loopback", config: inConfig,
+			args: []string{"--full-access", "--allow-forwarding=loopback", "--authorized-keys", keys}, want: loopback},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			setupSessionRoots(t)
+			withConfig(t, tc.config)
+			from := utils.UptermConfigFilePath()
+			if tc.env != "" {
+				t.Setenv(variable, tc.env)
+				from = variable
+			}
+			// A proxy that can't be parsed stops the run once the checks have
+			// passed: the warning didn't stop it.
+			_, stderr, code := runCLI(t, append(append([]string{"host", "--accept", "--proxy", "://not-a-url"}, tc.args...), "--", "true")...)
+			require.Equal(t, 1, code)
+			lines := strings.SplitAfter(strings.TrimSuffix(stderr, "\n"), "\n")
+			require.Len(t, lines, 2, stderr)
+			require.Equal(t, fmt.Sprintf(tc.want, from), lines[0])
+			require.True(t, strings.HasPrefix(lines[1], "upterm: invalid --proxy"), stderr)
+		})
+	}
+
+	// --detach's parent says it, once, before anything else it says.
+	setupSessionRoots(t)
+	withConfig(t, inConfig)
+	_, stderr, code := runCLI(t, "host", "--detach", "--allow-forwarding=loopback", "--", "true")
+	require.Equal(t, 1, code)
+	require.Equal(t, fmt.Sprintf(loopback, utils.UptermConfigFilePath())+
+		"upterm: --detach needs --accept when there is no terminal to ask in (it also lets guests transfer files without asking)\n", stderr)
+
+	// Its daemon, which runs the same checks on the same argv, env and
+	// config, says nothing of it: its stderr is the log. Refused by a check
+	// of its own, so the run ends before it would read the daemon's channel.
+	setupSessionRoots(t)
+	withConfig(t, inConfig)
+	t.Setenv(daemonHandoffEnv, "x")
+	_, stderr, code = runCLI(t, "host", "--detach", "--accept", "--allow-forwarding=loopback", "--name", "a/b", "--", "true")
+	require.Equal(t, 1, code)
+	require.Contains(t, stderr, "a/b", "the checks ran")
+	require.NotContains(t, stderr, "any destination")
+}
+
+// Where allow-local-tcp-forwarding from the environment or the config file
+// widens nothing the command line asked for, upterm says nothing of it: the
+// command line asks for no forwards, or for forwards anywhere itself, or
+// gives the flag a value of its own; or forwarding is off anyway.
+func TestAllowLocalTCPForwardingFromEnvOrConfigIsQuietWhenItWidensNothing(t *testing.T) {
+	keys := guestKeysFile(t)
+	const (
+		inConfig   = "allow-local-tcp-forwarding: true\n"
+		deprecated = "upterm: --allow-local-tcp-forwarding is deprecated; use --allow-forwarding=any\n"
+	)
+	for _, tc := range []struct {
+		name   string
+		env    map[string]string
+		args   []string
+		before string // what stderr says before the proxy's error
+	}{
+		{name: "no forwards asked for"},
+		{name: "--allow-forwarding=any", args: []string{"--allow-forwarding=any"}},
+		{name: "--full-access --allow-forwarding=any", args: []string{"--full-access", "--allow-forwarding=any", "--authorized-keys", keys}},
+		{name: "the flag on the command line", args: []string{"--allow-forwarding=loopback", "--allow-local-tcp-forwarding"}, before: deprecated},
+		{name: "--full-access and the flag on the command line", args: []string{"--full-access", "--allow-local-tcp-forwarding", "--authorized-keys", keys}, before: deprecated},
+		{name: "turned off on the command line", args: []string{"--allow-forwarding=loopback", "--allow-local-tcp-forwarding=false"}},
+		{name: "turned off in the environment", env: map[string]string{"UPTERM_ALLOW_LOCAL_TCP_FORWARDING": "false"}, args: []string{"--allow-forwarding=loopback"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			setupSessionRoots(t)
+			withConfig(t, inConfig)
+			for k, v := range tc.env {
+				t.Setenv(k, v)
+			}
+			// A proxy that can't be parsed stops the run once the checks have
+			// passed.
+			_, stderr, code := runCLI(t, append(append([]string{"host", "--accept", "--proxy", "://not-a-url"}, tc.args...), "--", "true")...)
+			require.Equal(t, 1, code)
+			rest, ok := strings.CutPrefix(stderr, tc.before)
+			require.True(t, ok, stderr)
+			require.True(t, strings.HasPrefix(rest, "upterm: invalid --proxy"), stderr)
+			require.Equal(t, 1, strings.Count(rest, "\n"), stderr)
+		})
+	}
+
+	// Forwarding is off, by --no-forwarding or read-only from any origin, and
+	// the run is refused for it.
+	for _, tc := range []struct {
+		name   string
+		config string
+		env    map[string]string
+		args   []string
+		want   string // with %s for the config file
+	}{
+		{name: "--allow-forwarding=loopback --no-forwarding", config: inConfig, args: []string{"--allow-forwarding=loopback", "--no-forwarding"},
+			want: "upterm: allow-local-tcp-forwarding (from %s) has no effect: --no-forwarding denies port forwarding\n" +
+				"upterm: --allow-forwarding and --no-forwarding contradict each other; pick one\n"},
+		{name: "--full-access --no-forwarding", config: inConfig, args: []string{"--full-access", "--no-forwarding", "--authorized-keys", keys},
+			want: "upterm: allow-local-tcp-forwarding (from %s) has no effect: --no-forwarding denies port forwarding\n" +
+				"upterm: --full-access and --no-forwarding contradict each other; pick one\n"},
+		{name: "--allow-forwarding=loopback --read-only", config: inConfig, args: []string{"--allow-forwarding=loopback", "--read-only"},
+			want: "upterm: allow-local-tcp-forwarding (from %s) has no effect: --read-only denies port forwarding\n" +
+				"upterm: --allow-forwarding and --read-only contradict each other; pick one\n"},
+		{name: "--allow-forwarding=loopback, read-only in config", config: "read-only: true\n" + inConfig, args: []string{"--allow-forwarding=loopback"},
+			want: "upterm: --allow-forwarding has no effect: read-only (from %s) denies port forwarding\n" +
+				"upterm: --read-only and --allow-local-tcp-forwarding cannot be used together: a read-only session must not permit network pivoting through the host\n"},
+		{name: "--full-access, read-only in the environment", config: inConfig, env: map[string]string{"UPTERM_READ_ONLY": "true"},
+			args: []string{"--full-access", "--authorized-keys", keys},
+			want: "upterm: --full-access and read-only (from UPTERM_READ_ONLY) contradict each other; pick one\n" +
+				"upterm: --read-only and --allow-local-tcp-forwarding cannot be used together: a read-only session must not permit network pivoting through the host\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			setupSessionRoots(t)
+			withConfig(t, tc.config)
+			for k, v := range tc.env {
+				t.Setenv(k, v)
+			}
+			want := tc.want
+			if strings.Contains(want, "%s") {
+				want = fmt.Sprintf(want, utils.UptermConfigFilePath())
+			}
+			stdout, stderr, code := runCLI(t, append(append([]string{"host", "--accept"}, tc.args...), "--", "true")...)
+			require.Equal(t, 1, code)
+			require.Equal(t, want, stderr)
+			require.Empty(t, stdout)
+		})
+	}
+}
+
+// What upterm says of allow-local-tcp-forwarding from the environment or the
+// config file changes nothing: guests still forward to any destination.
+func TestAllowLocalTCPForwardingFromEnvOrConfigStillForwardsAnywhere(t *testing.T) {
+	keys := guestKeysFile(t)
+	const inConfig = "allow-local-tcp-forwarding: true\n"
+	inEnv := map[string]string{"UPTERM_ALLOW_LOCAL_TCP_FORWARDING": "true"}
+	loopback := func(s *serverGrants, r *reportedGrants) {
+		s.AllowLoopbackTCPForwarding, s.AllowLocalTCPForwarding, r.TCPForwarding, r.LocalForwarding = true, true, "all", true
+	}
+	full := func(s *serverGrants, r *reportedGrants) {
+		loopback(s, r)
+		s.AcceptExec, s.SFTPWithoutApproval, s.FileTransferApprovalRequired = true, true, false
+		r.Access, r.Execution, r.FileTransferApprovalRequired = "allowlist", "granted", false
+	}
+	for _, tc := range []struct {
+		name   string
+		config string
+		env    map[string]string
+		args   []string
+		edit   func(*serverGrants, *reportedGrants)
+	}{
+		{name: "--allow-forwarding=loopback, the config key", config: inConfig, args: []string{"--allow-forwarding=loopback"}, edit: loopback},
+		{name: "--allow-forwarding=loopback, the variable", env: inEnv, args: []string{"--allow-forwarding=loopback"}, edit: loopback},
+		{name: "--full-access, the config key", config: inConfig, args: []string{"--full-access", "--authorized-keys", keys}, edit: full},
+		{name: "--full-access, the variable", env: inEnv, args: []string{"--full-access", "--authorized-keys", keys}, edit: full},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			wantServer, wantReported := asked()
+			tc.edit(&wantServer, &wantReported)
+			server, reported := grantsWith(t, tc.config, tc.env, tc.args...)
+			require.Equal(t, wantServer, server, "the Host")
+			require.Equal(t, wantReported, reported, "what session info reports")
+		})
+	}
+}

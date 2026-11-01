@@ -525,6 +525,10 @@ func grantConflicts() []grantConflict {
 // for it: only read-only and allow-local-tcp-forwarding are both keys.
 //
 // --full-access is a shell as you, so it also needs an allowlist.
+//
+// allow-local-tcp-forwarding from the environment or the config file lets
+// guests forward anywhere, which a command line asking for loopback forwards
+// alone doesn't narrow; that is a warning too.
 func validateGrants(origin func(name string) string) (errs []error, warnings []string) {
 	if flagFullAccess && !authorizationRequested() {
 		errs = append(errs, errors.New("--full-access needs --authorized-user or --authorized-keys: without one, anyone with the session ID would get a shell as you"))
@@ -545,6 +549,18 @@ func validateGrants(origin func(name string) string) (errs []error, warnings []s
 	if origin("read-only") != "" && origin("allow-local-tcp-forwarding") != "" {
 		if err := validateReadOnlyForwarding(flagReadOnly, flagAllowLocalTCPForwarding); err != nil {
 			errs = append(errs, err)
+		}
+	}
+	// Nothing to say where forwarding is off anyway, where the command line
+	// asks for forwards anywhere itself, or where it gives
+	// allow-local-tcp-forwarding a value of its own.
+	if from := origin("allow-local-tcp-forwarding"); from != "" && flagAllowLocalTCPForwarding && !flagNoForwarding && !flagReadOnly {
+		widens := grantSide("allow-local-tcp-forwarding", from) + " lets guests forward to any destination"
+		switch {
+		case flagAllowForwarding == forwardLoopback:
+			warnings = append(warnings, "upterm: --allow-forwarding=loopback has no effect: "+widens)
+		case flagFullAccess && flagAllowForwarding == "":
+			warnings = append(warnings, "upterm: --full-access doesn't keep forwarding to loopback addresses: "+widens)
 		}
 	}
 	return errs, warnings

@@ -509,9 +509,10 @@ func exampleConfig() string {
 # When enabled, clients can view but not interact with the session.
 # read-only: false
 
-# Let guests forward ports (ssh -L) to anything this machine can reach, without
-# approval, as --allow-forwarding=any does (default: false). This key still
-# works; the flag of the same name is deprecated in favor of
+# Let guests forward ports (ssh -L) to anything this machine can reach,
+# without approval (default: false). A run's --allow-forwarding=loopback or
+# --full-access doesn't narrow it; --no-forwarding turns it off. This key
+# still works; the flag of the same name is deprecated in favor of
 # --allow-forwarding=any.
 # Cannot be combined with read-only.
 # allow-local-tcp-forwarding: false

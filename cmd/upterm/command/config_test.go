@@ -417,12 +417,15 @@ func TestTheExampleConfigSaysWhatAcceptDoes(t *testing.T) {
 	require.NotContains(t, exampleConfig(), "Auto-accept")
 }
 
-// The example config's allow-local-tcp-forwarding entry says the key still
-// works, and that the flag of the same name is deprecated.
+// The example config's allow-local-tcp-forwarding entry says what the key
+// grants, that a run asking for loopback forwards alone doesn't narrow it,
+// that the key still works, and that the flag of the same name is
+// deprecated.
 func TestTheExampleConfigSaysTheOldForwardingFlagIsDeprecated(t *testing.T) {
-	require.Contains(t, exampleConfig(), "# Let guests forward ports (ssh -L) to anything this machine can reach, without\n"+
-		"# approval, as --allow-forwarding=any does (default: false). This key still\n"+
-		"# works; the flag of the same name is deprecated in favor of\n"+
+	require.Contains(t, exampleConfig(), "# Let guests forward ports (ssh -L) to anything this machine can reach,\n"+
+		"# without approval (default: false). A run's --allow-forwarding=loopback or\n"+
+		"# --full-access doesn't narrow it; --no-forwarding turns it off. This key\n"+
+		"# still works; the flag of the same name is deprecated in favor of\n"+
 		"# --allow-forwarding=any.\n"+
 		"# Cannot be combined with read-only.\n"+
 		"# allow-local-tcp-forwarding: false\n")
