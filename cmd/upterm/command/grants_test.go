@@ -66,25 +66,41 @@ func guestKeysFile(t *testing.T) string {
 	return path
 }
 
-// grantsOf hosts a session with the host flags args, as the daemon does, up
-// to the moment the relay has created it, and returns the policy the Host
-// enforces and the policy the session reports. The report is read as
-// `session info` reads it: the JSON's keys, and the view's Guests row, which
-// must say the same.
+// grantsOf is grantsWith an empty config file and no variables of its own.
 func grantsOf(t *testing.T, args ...string) (serverGrants, reportedGrants) {
+	t.Helper()
+	return grantsWith(t, "", nil, args...)
+}
+
+// grantsWith hosts a session with the host flags args, the config file
+// config and the variables env, as the daemon does, up to the moment the
+// relay has created it, and returns the policy the Host enforces and the
+// policy the session reports. The config file and the variables set the
+// flags as the root's pre-run has them do. The report is read as `session
+// info` reads it: the JSON's keys, and the view's Guests row, which must say
+// the same.
+func grantsWith(t *testing.T, config string, env map[string]string, args ...string) (serverGrants, reportedGrants) {
 	t.Helper()
 	cmd := hostCmd()
 	t.Cleanup(func() { hostCmd() })
 	cmd.SetErr(io.Discard)
 	daemonTestRoots(t)
+	withConfig(t, config)
+	for k, v := range env {
+		t.Setenv(k, v)
+	}
 
 	key, err := host.NewHostKey()
 	require.NoError(t, err)
 	relay := fakerelay.Start(t, key, fakerelay.RandomID)
 	require.NoError(t, cmd.ParseFlags(append([]string{"--server", "ssh://" + relay.Addr, "--skip-host-key-check"}, args...)))
-	// Every flag is the command line's, as the root's pre-run records them;
-	// these parse without it.
-	cmd.Flags().Visit(func(f *pflag.Flag) { suppliedFlags[f.Name], commandLineFlags[f.Name] = true, true })
+	// As the root's pre-run: what the command line set, and then the config
+	// file and the environment, which set the rest.
+	commandLine := make(map[string]bool)
+	cmd.Flags().Visit(func(f *pflag.Flag) { commandLine[f.Name] = true })
+	supplied, _, err := bindFlagsToEnv(cmd)
+	require.NoError(t, err)
+	suppliedFlags, commandLineFlags = supplied, commandLine
 	require.NoError(t, validateShareRequiredFlags(cmd, nil))
 	opts, err := parseHostOptions([]string{"sh"})
 	require.NoError(t, err)
@@ -365,6 +381,61 @@ func TestGuestGrantContradictionsFromEnvOrConfigAreWarnings(t *testing.T) {
 			require.Len(t, lines, 2, stderr)
 			require.Equal(t, want, lines[0])
 			require.Contains(t, lines[1], "proxy", "and the run went on to the proxy")
+		})
+	}
+}
+
+// A grant on the command line that a denial from the environment or the
+// config file contradicts has the effect its warning says: none. The Host is
+// given both, and enforces the denial first, so what session info reports is
+// the denial's.
+func TestADenialFromEnvOrConfigWinsOverAGrant(t *testing.T) {
+	readOnly := func(s *serverGrants, r *reportedGrants) {
+		s.ReadOnly, r.ReadOnly, r.FileTransfer, r.Execution, r.TCPForwarding = true, true, "downloads", "off", "off"
+	}
+	for _, tc := range []struct {
+		name   string
+		config string
+		env    map[string]string
+		args   []string
+		edit   func(*serverGrants, *reportedGrants)
+	}{
+		{name: "read-only in config, --allow-exec", config: "read-only: true\n", args: []string{"--allow-exec"},
+			edit: func(s *serverGrants, r *reportedGrants) {
+				s.AcceptExec = true
+				readOnly(s, r)
+			}},
+		{name: "read-only in config, --allow-forwarding=any", config: "read-only: true\n", args: []string{"--allow-forwarding=any"},
+			edit: func(s *serverGrants, r *reportedGrants) {
+				s.AllowLocalTCPForwarding = true
+				readOnly(s, r)
+			}},
+		{name: "read-only in the environment, --allow-exec", env: map[string]string{"UPTERM_READ_ONLY": "true"}, args: []string{"--allow-exec"},
+			edit: func(s *serverGrants, r *reportedGrants) {
+				s.AcceptExec = true
+				readOnly(s, r)
+			}},
+		{name: "no-sftp in config, --allow-sftp", config: "no-sftp: true\n", args: []string{"--allow-sftp"},
+			edit: func(s *serverGrants, r *reportedGrants) {
+				s.SFTPDisabled, s.SFTPWithoutApproval, s.FileTransferApprovalRequired = true, true, false
+				r.FileTransfer, r.FileTransferApprovalRequired = "off", false
+			}},
+		{name: "allow-local-tcp-forwarding in config, --read-only", config: "allow-local-tcp-forwarding: true\n", args: []string{"--read-only"},
+			edit: func(s *serverGrants, r *reportedGrants) {
+				s.AllowLocalTCPForwarding = true
+				readOnly(s, r)
+			}},
+		{name: "allow-local-tcp-forwarding in config, --no-forwarding", config: "allow-local-tcp-forwarding: true\n", args: []string{"--no-forwarding"},
+			edit: func(s *serverGrants, r *reportedGrants) {
+				s.AllowLocalTCPForwarding, s.ForwardingDisabled, r.TCPForwarding = true, true, "off"
+			}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			wantServer, wantReported := asked()
+			tc.edit(&wantServer, &wantReported)
+			server, reported := grantsWith(t, tc.config, tc.env, tc.args...)
+			require.Equal(t, wantServer, server, "the Host")
+			require.Equal(t, wantReported, reported, "what session info reports")
 		})
 	}
 }
