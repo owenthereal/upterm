@@ -992,6 +992,37 @@ func TestSpawnedSessionDeclineIsNotAnError(t *testing.T) {
 	require.ErrorAs(t, err, &discarded, "shareRunE maps this to exit 0")
 }
 
+// A detached session asks its start question too, and one declined there
+// never starts: nothing says it is running, and the answer reaches the
+// daemon. One accepted there goes to the background as with --accept.
+func TestADetachedSessionStartsOnlyWhenItsQuestionIsAnsweredYes(t *testing.T) {
+	t.Run("declined", func(t *testing.T) {
+		spawn, d := newScriptedDaemon(t)
+		var stdout, stderr bytes.Buffer
+		s := newSession(t, spawn, nil, &stdout, &stderr)
+		s.detach = true
+		s.display = func(context.Context, *api.GetSessionResponse, string) error { return UserDiscardedError{} }
+		dec := d.startup(t, "s")
+		err := s.run(context.Background())
+		require.Equal(t, api.Accept_DECLINED, <-dec)
+		require.ErrorAs(t, err, new(UserDiscardedError), "shareRunE maps this to exit 0")
+		require.Empty(t, stdout.String())
+	})
+	t.Run("accepted", func(t *testing.T) {
+		spawn, d := newScriptedDaemon(t)
+		var stdout, stderr bytes.Buffer
+		s := newSession(t, spawn, nil, &stdout, &stderr)
+		s.detach = true
+		asked := false
+		s.display = func(context.Context, *api.GetSessionResponse, string) error { asked = true; return nil }
+		dec := d.startup(t, "s")
+		go func() { <-dec; d.start() }()
+		require.NoError(t, s.run(context.Background()))
+		require.True(t, asked)
+		require.Equal(t, "Session s is running in the background. Attach with upterm attach s; stop it with upterm session stop s.\n", stdout.String())
+	})
+}
+
 // Ctrl-C at the accept prompt, as the foreground host meets it: answered
 // INTERRUPTED, and what run returns exits 130 with nothing said.
 func TestSpawnedSessionInterruptedIsSilent130(t *testing.T) {

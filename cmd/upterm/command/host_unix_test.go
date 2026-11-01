@@ -24,27 +24,35 @@ func Test_confirmationTerminalError(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = pr.Close(); _ = pw.Close() })
 
+	const (
+		refused         = "upterm host needs a terminal to ask before starting; pass --accept to start without asking"
+		refusedDetached = "--detach needs --accept when there is no terminal to ask in (it also lets guests transfer files without asking)"
+	)
 	cases := []struct {
-		name    string
-		accept  bool
-		stdin   *os.File
-		stdout  *os.File
-		refused bool
+		name           string
+		accept, detach bool
+		stdin          *os.File
+		stdout         *os.File
+		want           string
 	}{
-		{name: "pipe stdin with pty stdout", stdin: pr, stdout: tty, refused: true},
-		{name: "pty stdin with pipe stdout", stdin: tty, stdout: pw, refused: true},
+		{name: "pipe stdin with pty stdout", stdin: pr, stdout: tty, want: refused},
+		{name: "pty stdin with pipe stdout", stdin: tty, stdout: pw, want: refused},
 		{name: "pty on both", stdin: tty, stdout: tty},
 		{name: "accept with pipes on both", accept: true, stdin: pr, stdout: pw},
+		{name: "detach with pty on both", detach: true, stdin: tty, stdout: tty},
+		{name: "detach with pipe stdin", detach: true, stdin: pr, stdout: tty, want: refusedDetached},
+		{name: "detach with pipe stdout", detach: true, stdin: tty, stdout: pw, want: refusedDetached},
+		{name: "detach and accept with pipes on both", accept: true, detach: true, stdin: pr, stdout: pw},
 	}
 
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			err := confirmationTerminalError(c.accept, c.stdin, c.stdout)
-			if !c.refused {
+			err := confirmationTerminalError(c.accept, c.detach, c.stdin, c.stdout)
+			if c.want == "" {
 				require.NoError(t, err)
 				return
 			}
-			require.EqualError(t, err, "upterm host needs a terminal to ask before starting; pass --accept to start without asking")
+			require.EqualError(t, err, c.want)
 		})
 	}
 }

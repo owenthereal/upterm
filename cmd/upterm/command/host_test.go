@@ -41,11 +41,6 @@ func Test_hostValueChecks(t *testing.T) {
 	require.NoError(t, validateReadOnlyForwarding(false, true))
 	require.ErrorContains(t, validateReadOnlyForwarding(true, true), "--read-only and --allow-local-tcp-forwarding cannot be used together")
 
-	require.NoError(t, validateDetachAccept(false, false))
-	require.NoError(t, validateDetachAccept(false, true))
-	require.NoError(t, validateDetachAccept(true, true))
-	require.EqualError(t, validateDetachAccept(true, false), "--detach requires --accept: a session nobody is watching cannot be confirmed interactively")
-
 	command, err := parseForceCommand("tmux attach -t 'pair programming'")
 	require.NoError(t, err)
 	require.Equal(t, []string{"tmux", "attach", "-t", "pair programming"}, command)
@@ -132,11 +127,12 @@ func TestSSHServerWithoutAPortIs22(t *testing.T) {
 	require.Equal(t, "ssh://", flagServer, "a refused address is left as given")
 }
 
-// Test_validateShareRequiredFlags_detachNeedsAcceptAndOutputNeedsDetach pins
-// the three combinations that cannot work: a background session nobody can
-// confirm, an output format for a foreground run that has none, and a format
-// this does not speak.
-func Test_validateShareRequiredFlags_detachNeedsAcceptAndOutputNeedsDetach(t *testing.T) {
+// Test_validateShareRequiredFlags_outputNeedsDetach pins the two
+// combinations that cannot work: an output format for a foreground run that
+// has none, and a format this does not speak. A background session nobody
+// confirmed is the terminal check's to refuse, in the parent, since the
+// daemon makes these checks too and has no terminal.
+func Test_validateShareRequiredFlags_outputNeedsDetach(t *testing.T) {
 	origServer, origDetach, origAccept, origOutput := flagServer, flagDetach, flagAccept, flagHostOutput
 	t.Cleanup(func() {
 		flagServer, flagDetach, flagAccept, flagHostOutput = origServer, origDetach, origAccept, origOutput
@@ -151,7 +147,7 @@ func Test_validateShareRequiredFlags_detachNeedsAcceptAndOutputNeedsDetach(t *te
 
 	reset()
 	flagDetach = true
-	require.ErrorContains(t, validateShareRequiredFlags(cmd, nil), "--detach requires --accept")
+	require.NoError(t, validateShareRequiredFlags(cmd, nil))
 
 	reset()
 	flagHostOutput = "json"

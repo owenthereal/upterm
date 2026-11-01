@@ -196,6 +196,11 @@ func TestGuestGrantsReachTheSessionAsSpelled(t *testing.T) {
 			unasked(s, r)
 			r.Open = true
 		}},
+		{"in the background, asked", []string{"--detach"}, func(*serverGrants, *reportedGrants) {}},
+		{"in the background, unasked", []string{"--detach", "--accept"}, func(s *serverGrants, r *reportedGrants) {
+			unasked(s, r)
+			r.Open = true
+		}},
 		{"started unasked, no file transfer", []string{"--accept", "--no-sftp"}, func(s *serverGrants, r *reportedGrants) {
 			unasked(s, r)
 			s.SFTPDisabled, r.Open, r.FileTransfer = true, true, "off"
@@ -531,4 +536,44 @@ func TestFullAccessHelp(t *testing.T) {
 		"and forward ports to this machine's loopback addresses (ssh -L 8080:127.0.0.1:8080). "+
 		"Requires --authorized-user or --authorized-keys.", f.Usage)
 	require.Contains(t, oneSpaced(host.Long), "--full-access allows all three, for the keys --authorized-user or --authorized-keys names.")
+}
+
+// --detach asks its start question as upterm host does, on the terminal it
+// was started from; with no terminal to ask in it needs --accept, and says
+// that --accept grants file transfers too. It never implies consent.
+func TestDetachAsksOnATerminalAndNeedsAcceptWithoutOne(t *testing.T) {
+	const want = "upterm: --detach needs --accept when there is no terminal to ask in (it also lets guests transfer files without asking)\n"
+	for _, args := range [][]string{
+		{"host", "--detach", "--", "true"},
+		{"host", "--detach", "-o", "json", "--", "true"},
+	} {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			setupSessionRoots(t)
+			withConfig(t, "")
+			// runCLI's stdin and stdout are pipes.
+			stdout, stderr, code := runCLI(t, args...)
+			require.Equal(t, 1, code)
+			require.Equal(t, want, stderr)
+			require.Empty(t, stdout)
+		})
+	}
+
+	// The question is the terminal's to ask, so the checks every run makes,
+	// the daemon's included, have nothing against --detach without --accept.
+	cmd := hostCmd()
+	defer hostCmd()
+	require.NoError(t, cmd.ParseFlags([]string{"--detach"}))
+	require.NoError(t, validateShareRequiredFlags(cmd, nil))
+	require.NoError(t, cmd.ParseFlags([]string{"-o", "json"}))
+	require.NoError(t, validateShareRequiredFlags(cmd, nil))
+}
+
+// --detach's help says when it asks, and what it needs when it can't.
+func TestDetachHelpSaysWhenItAsks(t *testing.T) {
+	host := findCommand(t, "upterm host")
+	require.Equal(t, "Start the session in the background and exit once it is running. "+
+		"On a terminal, upterm asks before starting it, as it does without --detach; with no terminal to ask in, pass --accept. "+
+		"Attach a terminal later with 'upterm attach NAME'; stop it with 'upterm session stop NAME'.", host.Flag("detach").Usage)
+	require.Contains(t, oneSpaced(host.Long), "With --detach nothing is attached: the session starts in the background, and upterm prints how to reach it. "+
+		"It still asks before starting it, on this terminal; with no terminal to ask in, --detach needs --accept.")
 }

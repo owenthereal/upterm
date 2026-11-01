@@ -65,7 +65,8 @@ is suspended may disconnect it (254 below); 'upterm attach NAME' brings it
 back.
 
 With --detach nothing is attached: the session starts in the background, and
-upterm prints how to reach it.
+upterm prints how to reach it. It still asks before starting it, on this
+terminal; with no terminal to ask in, --detach needs --accept.
 
 Exit status: the command's own status when it exits; 1 when upterm fails, or
 the session is stopped or ends by a signal (whatever the command returns
@@ -123,7 +124,7 @@ upterm host [flags] [-- COMMAND [ARGS...]]
       --allow-sftp                      Let guests transfer files (scp, sftp) without approval, with your access; downloads only with --read-only.
       --authorized-keys string          An authorized_keys file: only guests with a key it lists, or that --authorized-user names, can join.
       --authorized-user strings         Let a user join with the public keys a code-hosting service lists for them, fetched through --proxy when it is set. Repeatable. Providers: github, gitlab, codeberg, srht (host optional), gitea, forgejo (host required). Examples: github:alice, github:bob@ghe.example.com, gitea:carol@git.example.com, https://git.example.com/dave
-      --detach                          Start the session in the background and exit once it is running. Requires --accept. Attach a terminal later with 'upterm attach NAME'; stop it with 'upterm session stop NAME'.
+      --detach                          Start the session in the background and exit once it is running. On a terminal, upterm asks before starting it, as it does without --detach; with no terminal to ask in, pass --accept. Attach a terminal later with 'upterm attach NAME'; stop it with 'upterm session stop NAME'.
       --escape-char string              The character that starts upterm's keys at the start of a line, or 'none' to turn them off. (default "~")
   -f, --force-command string            Run this host-chosen command for guest shell and exec requests, with a private PTY when requested and pipes otherwise. --no-exec and --read-only still deny explicit exec. Mutually exclusive with --login-command.
       --full-access                     Let authorized guests do what an SSH login to your account can, without asking: run commands (ssh SESSION CMD, VS Code, herdr --remote), transfer files (scp, sftp), and forward ports to this machine's loopback addresses (ssh -L 8080:127.0.0.1:8080). Requires --authorized-user or --authorized-keys.

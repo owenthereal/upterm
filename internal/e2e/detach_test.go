@@ -115,6 +115,43 @@ func TestDetachedHostPrintsJSONAndCanBeAttachedAndStopped(t *testing.T) {
 	require.NoError(t, h.waitForText(client, "Connection to", 20*time.Second), "the guest's ssh ends with the session")
 }
 
+// Without --accept, --detach asks its start question on the terminal it was
+// started from, as upterm host does, and goes to the background only on a
+// yes; a no starts nothing, and exits 0 as declining does. With -o json the
+// question comes first, then the JSON.
+func TestDetachedHostAsksItsStartQuestionOnATerminal(t *testing.T) {
+	h := newTestHarness(t, 200)
+	for _, tc := range []struct {
+		answer, output string
+		started        bool
+	}{
+		{answer: "n"},
+		{answer: "y", started: true},
+		{answer: "y", output: " -o json", started: true},
+	} {
+		name := fmt.Sprintf("e2e-ask-%s%d", tc.answer, time.Now().UnixNano()%1_000_000)
+		h.stopOnCleanup(name)
+		// The marker names the run, so a wait can't match an earlier one.
+		marker := "ASK_STATUS_" + name
+		hostCmd := fmt.Sprintf("clear; upterm host --detach%s --skip-host-key-check --server %s --private-key %s --name %s -- bash --rcfile %s --noprofile; echo %s=$?",
+			tc.output, h.serverURL, h.keyFile, name, h.rcFile, marker)
+		require.NoError(t, h.host.SendLine(h.ctx, hostCmd))
+		require.NoError(t, h.waitForText(h.host, "Start the session? [y/n]", 30*time.Second), "%s asks first", name)
+		require.NoError(t, h.host.SendKeys(h.ctx, tc.answer))
+		require.NoError(t, h.waitForText(h.host, marker+"=0", 30*time.Second), "%s exits 0", name)
+
+		out, err := h.runCLI(20*time.Second, "session", "info", name, "-o", "json")
+		require.NoError(t, err, "%s", out)
+		if tc.started {
+			require.Contains(t, string(out), `"status": "ready"`, name)
+			require.Contains(t, string(out), `"startConfirmed": true`, "%s was asked, not --accept", name)
+		} else {
+			require.Contains(t, string(out), `"status": "ended"`, name)
+			require.Contains(t, string(out), `"reason": "startup_abandoned"`, name)
+		}
+	}
+}
+
 // A stop reaches every terminal attached to the session, not only the one
 // that started it. Both the host's own terminal and an `upterm attach` see
 // the stop: the daemon tells each attached terminal the session was stopped

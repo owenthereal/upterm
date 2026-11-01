@@ -197,7 +197,8 @@ it. NAME is the session's name, which upterm prints (--name chooses it).
 ` + attachedKeysHelp + `
 
 With --detach nothing is attached: the session starts in the background, and
-upterm prints how to reach it.
+upterm prints how to reach it. It still asks before starting it, on this
+terminal; with no terminal to ask in, --detach needs --accept.
 
 Exit status: the command's own status when it exits; 1 when upterm fails, or
 the session is stopped or ends by a signal (whatever the command returns
@@ -276,7 +277,7 @@ reports the command's status.`,
 	cmd.PersistentFlags().StringVar(&flagTerm, "term", "", "Set TERM for the hosted command. Defaults to the inherited TERM, or "+defaultTerm+" when TERM is unset or "+dumbTerm+".")
 	cmd.PersistentFlags().StringVar(&flagName, "name", "", "Name the session, for upterm attach and the session commands to find it by. Defaults to the command's name and four hex digits, e.g. bash-1f3a.")
 	cmd.PersistentFlags().DurationVar(&flagJoinTimeout, "join-timeout", 0, "End the session if no guest has joined within this long (e.g. 10m). 0 waits forever. A guest who joins disarms it permanently, so a guest who joins and then leaves does not re-arm it. Change it later with 'upterm session set NAME --join-timeout'.")
-	cmd.PersistentFlags().BoolVar(&flagDetach, "detach", false, "Start the session in the background and exit once it is running. Requires --accept. Attach a terminal later with 'upterm attach NAME'; stop it with 'upterm session stop NAME'.")
+	cmd.PersistentFlags().BoolVar(&flagDetach, "detach", false, "Start the session in the background and exit once it is running. On a terminal, upterm asks before starting it, as it does without --detach; with no terminal to ask in, pass --accept. Attach a terminal later with 'upterm attach NAME'; stop it with 'upterm session stop NAME'.")
 	cmd.PersistentFlags().StringVarP(&flagHostOutput, "output", "o", "", "With --detach, print the started session as JSON: a superset of the fields 'upterm session info NAME -o json' reports at launch, with sshCommand and joinCommand present even when its status says guests can't join.")
 	_ = cmd.RegisterFlagCompletionFunc("output", completeValues("json"))
 	cmd.PersistentFlags().StringVar(&flagHostEscapeChar, "escape-char", "~", escapeCharHelp)
@@ -444,10 +445,10 @@ func validateSessionNameFlag(name string) error {
 	return sessiondir.CheckSocketPath(utils.UptermRuntimeDir(), name)
 }
 
-// validateJoinTimeout, validateReadOnlyForwarding, validateDetachAccept and
-// validateServer are the checks host makes on its flags' values before it
-// runs. config edit calls them on the values the config file sets, so a file
-// it accepts is one host accepts.
+// validateJoinTimeout, validateReadOnlyForwarding and validateServer are the
+// checks host makes on its flags' values before it runs. config edit calls
+// them on the values the config file sets, so a file it accepts is one host
+// accepts.
 func validateJoinTimeout(d time.Duration) error {
 	if d < 0 {
 		return errors.New("--join-timeout cannot be negative; use 0 to wait forever")
@@ -544,13 +545,6 @@ func flagOrigin(name string) string {
 	return utils.UptermConfigFilePath()
 }
 
-func validateDetachAccept(detach, accept bool) error {
-	if detach && !accept {
-		return errors.New("--detach requires --accept: a session nobody is watching cannot be confirmed interactively")
-	}
-	return nil
-}
-
 // validateServer checks a server address: ssh, ws or wss, and a host for ssh.
 func validateServer(raw string) error {
 	if raw == "" {
@@ -626,9 +620,6 @@ func validateShareRequiredFlags(c *cobra.Command, args []string) error {
 		result = multierror.Append(result, err)
 	}
 
-	if err := validateDetachAccept(flagDetach, flagAccept); err != nil {
-		result = multierror.Append(result, err)
-	}
 	if flagHostOutput != "" && !flagDetach {
 		result = multierror.Append(result, fmt.Errorf("--output requires --detach"))
 	}
@@ -662,12 +653,19 @@ func validateShareRequiredFlags(c *cobra.Command, args []string) error {
 // `upterm host </dev/null` through to claim its name, establish the reverse
 // tunnel and start the prompt before finding there was nothing to read the
 // answer from. With --accept there is no prompt and nothing to check.
-func confirmationTerminalError(accept bool, stdin, stdout *os.File) error {
+//
+// --detach asks too, here, before it goes to the background: going there
+// is no answer to the question. Without a terminal it needs --accept, which
+// grants file transfers as well, and the refusal says so.
+func confirmationTerminalError(accept, detach bool, stdin, stdout *os.File) error {
 	if accept {
 		return nil
 	}
 	if term.IsTerminal(int(stdin.Fd())) && term.IsTerminal(int(stdout.Fd())) {
 		return nil
+	}
+	if detach {
+		return errors.New("--detach needs --accept when there is no terminal to ask in (it also lets guests transfer files without asking)")
 	}
 	return errors.New("upterm host needs a terminal to ask before starting; pass --accept to start without asking")
 }
@@ -815,7 +813,7 @@ func shareRunE(c *cobra.Command, args []string) error {
 
 	// Refuse before anything is claimed or connected: a session that reaches
 	// the prompt and cannot be answered is an orphan holding a name.
-	if err := confirmationTerminalError(flagAccept, os.Stdin, os.Stdout); err != nil {
+	if err := confirmationTerminalError(flagAccept, flagDetach, os.Stdin, os.Stdout); err != nil {
 		_, _ = fmt.Fprintln(os.Stderr, "upterm: "+err.Error())
 		return SilentError{Err: err}
 	}
@@ -864,8 +862,10 @@ func guardedSpawn(so spawnOptions) (net.Conn, *os.Process, error) {
 // child, this process is its operator's terminal.
 func runHostParent(c *cobra.Command, logger *slog.Logger, opts hostOptions) error {
 	display := displaySession
-	if flagDetach && flagHostOutput == "json" {
-		// stdout is the JSON; the banner would be noise in it.
+	if flagDetach && flagHostOutput == "json" && flagAccept {
+		// stdout is the JSON, and nobody is asked: the banner would be noise
+		// in it. Without --accept the banner is what the question is about,
+		// and the JSON follows the answer.
 		display = func(context.Context, *api.GetSessionResponse, string) error { return nil }
 	}
 	var (

@@ -81,7 +81,8 @@ back.
 
 .PP
 With --detach nothing is attached: the session starts in the background, and
-upterm prints how to reach it.
+upterm prints how to reach it. It still asks before starting it, on this
+terminal; with no terminal to ask in, --detach needs --accept.
 
 .PP
 Exit status: the command's own status when it exits; 1 when upterm fails, or
@@ -119,7 +120,7 @@ reports the command's status.
 
 .PP
 \fB--detach\fP[=false]
-	Start the session in the background and exit once it is running. Requires --accept. Attach a terminal later with 'upterm attach NAME'; stop it with 'upterm session stop NAME'.
+	Start the session in the background and exit once it is running. On a terminal, upterm asks before starting it, as it does without --detach; with no terminal to ask in, pass --accept. Attach a terminal later with 'upterm attach NAME'; stop it with 'upterm session stop NAME'.
 
 .PP
 \fB--escape-char\fP="~"
