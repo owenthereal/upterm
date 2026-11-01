@@ -9,6 +9,7 @@ import (
 	"io/fs"
 	"net"
 	"os"
+	"slices"
 	"strings"
 
 	"github.com/owenthereal/upterm/utils"
@@ -149,20 +150,38 @@ func knownHostsLine(hostname string, key ssh.PublicKey, authority bool) string {
 
 // pinLine is the known_hosts line a guest pins a relay with, for key at
 // hostname, once a check has trusted it: the key itself, and for a
-// certificate, the key it certifies when its signer is that key, as every
-// uptermd's is, else an @cert-authority line for its signer. The key itself
-// is what the relay proved it holds, and ssh accepts a line for it whatever
-// the certificate says: OpenSSH refuses a host certificate that lists no
-// principals, which an uptermd started without --hostname presents, and then
-// checks its key as a plain one.
+// certificate, an @cert-authority line for its signer where ssh accepts one,
+// else the key it certifies. The key is what the relay proved it holds, and
+// ssh accepts a line for it whatever the certificate says: OpenSSH refuses a
+// host certificate that lists no principals (as an uptermd started without
+// --hostname presents) or doesn't list the host it dialled, and then checks
+// the certificate's key as a plain one.
+//
+// So the signer gets the line only when the certificate lists the host and
+// the signer is another key: every uptermd signs its certificate with the
+// key it certifies, which its own line pins.
 func pinLine(hostname string, key ssh.PublicKey) string {
 	if cert, ok := key.(*ssh.Certificate); ok {
-		if !bytes.Equal(cert.SignatureKey.Marshal(), cert.Key.Marshal()) {
+		if !bytes.Equal(cert.SignatureKey.Marshal(), cert.Key.Marshal()) && listsHost(cert, hostname) {
 			return knownHostsLine(hostname, cert.SignatureKey, true)
 		}
 		key = cert.Key
 	}
 	return knownHostsLine(hostname, key, false)
+}
+
+// listsHost reports whether cert lists, among its principals, the host of
+// address, the host:port a check was asked about, as OpenSSH matches a host
+// certificate: the host without its port or brackets, lowercased, since ssh
+// lowercases the name it dials, against each principal letter for letter. A
+// principal that is a pattern matches nothing here, which costs only the
+// @cert-authority line: ssh accepts the plain one all the same.
+func listsHost(cert *ssh.Certificate, address string) bool {
+	host, _, err := net.SplitHostPort(address)
+	if err != nil {
+		host = strings.TrimSuffix(strings.TrimPrefix(address, "["), "]")
+	}
+	return slices.Contains(cert.ValidPrincipals, strings.ToLower(host))
 }
 
 // Confirm prints the prompt and reads the answer from in, which is "yes", the

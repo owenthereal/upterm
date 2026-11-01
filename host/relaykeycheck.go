@@ -30,9 +30,10 @@ type TrustedRelayKey struct {
 	// KnownHostsLine trusts the key for the host and port it was checked
 	// for. It is a plain key line for the key the relay proved it holds,
 	// which for a certificate signed by its own key, as every uptermd's is,
-	// is the key its authority line names. A certificate trusted by an
-	// authority other than its own key gets an @cert-authority line for that
-	// authority.
+	// is the key its authority line names. A certificate an authority other
+	// than its own key signs gets an @cert-authority line for that authority
+	// only when it lists the host among its principals, as ssh requires of
+	// one it accepts by its authority; otherwise its own key's plain line.
 	KnownHostsLine string
 	// Trust is RelayKeyKnown, RelayKeyPrompted or RelayKeyAutoAccepted.
 	Trust string

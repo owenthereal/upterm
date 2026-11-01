@@ -676,7 +676,7 @@ func TestEveryCommandAndClientPrintsWhole(t *testing.T) {
 func TestSSHConfigPrintsWholeUnderTheCommands(t *testing.T) {
 	pinTerminal(t)
 	block := "# ~/.ssh/config\nHost home\n  HostName uptermd.upterm.dev\n  User " + strings.Repeat("x", 120) + "\n" +
-		"# ~/.ssh/known_hosts, once per device\n@cert-authority uptermd.upterm.dev ssh-ed25519 AAAA\n"
+		"# ~/.ssh/known_hosts, once per device\nuptermd.upterm.dev ssh-ed25519 AAAA\n"
 	detail := SessionDetail{SessionID: "id", SSHCommand: "ssh id@h", SSHConfig: block}
 	assert.Equal(t, "Session: id\n\n"+
 		"\n➤ SSH:\n    ssh id@h\n"+
@@ -686,7 +686,7 @@ func TestSSHConfigPrintsWholeUnderTheCommands(t *testing.T) {
 		"      HostName uptermd.upterm.dev\n"+
 		"      User "+strings.Repeat("x", 120)+"\n"+
 		"    # ~/.ssh/known_hosts, once per device\n"+
-		"    @cert-authority uptermd.upterm.dev ssh-ed25519 AAAA\n",
+		"    uptermd.upterm.dev ssh-ed25519 AAAA\n",
 		renderSessionDetail(detail, 80))
 
 	// It is a way in of its own, so the commands' section opens for it.

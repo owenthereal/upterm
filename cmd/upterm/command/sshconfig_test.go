@@ -129,8 +129,9 @@ func TestSSHConfigGolden(t *testing.T) {
 		{"ipv6", relayAnswer("ssh://[::1]:2222", exampleSessionID, "[::1]:2222 "+publicRelayKey, "known"), nil},
 		{"wss", relayAnswer("wss://uptermd.upterm.dev", exampleSessionID, "[uptermd.upterm.dev]:443 "+publicRelayKey, "known"), nil},
 		{"ws-embedded-relay", relayAnswer("ws://relay.example.com:8080", embeddedSSHUser, "[relay.example.com]:8080 "+publicRelayKey, "known"), nil},
-		// A relay whose host certificate another key signs, which the host
-		// trusted as that certificate's authority.
+		// A relay whose host certificate another key signs, for the host the
+		// session dialled, which the host trusted as that certificate's
+		// authority.
 		{"authority", relayAnswer("ssh://relay.example.com", exampleSessionID, "@cert-authority relay.example.com "+otherAuthorityKey, "known"), nil},
 		{"prompted", relayAnswer("ssh://uptermd.upterm.dev:22", exampleSessionID, "uptermd.upterm.dev "+publicRelayKey, "prompted"), nil},
 		{"auto-accepted", relayAnswer("ssh://uptermd.upterm.dev:22", exampleSessionID, "uptermd.upterm.dev "+publicRelayKey, "auto-accepted"), nil},

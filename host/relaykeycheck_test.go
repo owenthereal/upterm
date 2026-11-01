@@ -44,6 +44,14 @@ func TestRelayKeyCheckSaysWhatItTrustedAndHow(t *testing.T) {
 	cert := signHostCert(t, ca, hostKey.PublicKey(), "relay.test")
 	// Signed by its own key, as every uptermd's certificate is.
 	selfSigned := signHostCert(t, hostKey, hostKey.PublicKey(), "relay.test")
+	// Certificates another authority signs, which ssh accepts by it only for
+	// a host they list: none, other hosts, the host in capitals, the host
+	// among others, and an address.
+	noPrincipals := signHostCert(t, ca, hostKey.PublicKey())
+	otherHosts := signHostCert(t, ca, hostKey.PublicKey(), "other.test", "relay.test.example")
+	inCapitals := signHostCert(t, ca, hostKey.PublicKey(), "Relay.Test")
+	amongOthers := signHostCert(t, ca, hostKey.PublicKey(), "other.test", "relay.test")
+	ipv6 := signHostCert(t, ca, hostKey.PublicKey(), "::1")
 	plain := knownhosts.Line([]string{"relay.test"}, hostKey.PublicKey())
 	authority := authorityLine("relay.test", ca.PublicKey())
 	ownAuthority := authorityLine("relay.test", hostKey.PublicKey())
@@ -71,6 +79,22 @@ func TestRelayKeyCheckSaysWhatItTrustedAndHow(t *testing.T) {
 		{"a self-signed certificate no line names", "", "relay.test:22", selfSigned, plain, false, ownAuthority},
 		{"a key on another port", "", "relay.test:2222", hostKey.PublicKey(),
 			knownhosts.Line([]string{"[relay.test]:2222"}, hostKey.PublicKey()), false, ""},
+		// ssh refuses a certificate that lists no names, or not the host it
+		// dialled, and then checks its key as a plain one: a guest pins that
+		// key, as for a self-signed certificate, while the host's own file
+		// keeps the authority. ssh lowercases the host it dials and compares
+		// the names letter for letter, so a name in capitals isn't the host.
+		{"a certificate that lists no names, its authority's line trusts", authority + "\n", "relay.test:22", noPrincipals, plain, true, ""},
+		{"a certificate that lists no names, no line names", "", "relay.test:22", noPrincipals, plain, false, authority},
+		{"a certificate for other hosts no line names", "", "relay.test:22", otherHosts, plain, false, authority},
+		{"a certificate for its host in capitals no line names", "", "relay.test:22", inCapitals, plain, false, authority},
+		// One that lists the host is pinned by its authority, for the host and
+		// port the check was asked about.
+		{"a certificate for its host among others no line names", "", "relay.test:22", amongOthers, authority, false, ""},
+		{"a certificate for a host dialled in capitals", "", "Relay.Test:22", cert,
+			authorityLine("Relay.Test", ca.PublicKey()), false, ""},
+		{"a certificate for an address on another port", "", "[::1]:2222", ipv6,
+			authorityLine("[::1]:2222", ca.PublicKey()), false, ""},
 	} {
 		for _, c := range relayKeyChecks {
 			t.Run(c.name+"/"+tc.name, func(t *testing.T) {

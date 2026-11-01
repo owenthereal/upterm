@@ -468,7 +468,7 @@ func TestGetSessionReportsTheRelayKeyTheHostTrusted(t *testing.T) {
 	require.Nil(t, resp.RelayKnownHosts)
 	require.Nil(t, resp.RelayKeyTrust)
 
-	const line = "@cert-authority uptermd.upterm.dev ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICiecex8Dq718eSe1CCLgLvDmI7AagvCtax7brPFWkh4"
+	const line = "uptermd.upterm.dev ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICiecex8Dq718eSe1CCLgLvDmI7AagvCtax7brPFWkh4"
 	srv.Session.RelayKnownHosts = proto.String(line)
 	srv.Session.RelayKeyTrust = proto.String("prompted")
 	resp = getSession(t, srv)
