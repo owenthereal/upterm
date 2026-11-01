@@ -74,18 +74,25 @@ go install ./cmd/upterm/...
 1. Client joins using the shared string, and rejoins on its own if the connection drops:
 
    ```console
-   upterm join ssh://TOKEN@uptermd.upterm.dev
+   upterm join ssh://SESSION_USER@uptermd.upterm.dev
    ```
 
    Or with plain `ssh` (no install needed):
 
    ```console
-   ssh TOKEN@uptermd.upterm.dev
+   ssh SESSION_USER@uptermd.upterm.dev
    ```
+
+   `SESSION_USER` stands for the session's SSH user, the part before `@` on
+   the host's `➤ SSH:` line. On uptermd.upterm.dev it is the session ID; a
+   self-hosted relay that routes without Consul adds the node the session is
+   on, after a colon. To reach a session by a name of your own instead, see
+   [Reach your own machine](#reach-your-own-machine).
 
 ## :blue_book: Quick Reference
 
 Dive into more commands and advanced usage in the [documentation](docs/upterm.md).
+To reach your own machine from a laptop or a phone with plain `ssh`, VS Code or `scp`, see [Reach your own machine](#reach-your-own-machine).
 To reach agents running in [Herdr](https://github.com/herdrdev/herdr) at home from a phone or another laptop, see [Reach your Herdr agents from anywhere](guides/herdr.md).
 Below are some notable highlights:
 
@@ -326,60 +333,151 @@ uptermd.upterm.dev runs. With an older one, `upterm session info` says
 `Reconnect: unsupported by this relay`, and a lost connection leaves the
 session `disconnected`, as before.
 
-### Private guest commands and terminal approval
+### Reach your own machine
 
-Ordinary `upterm host` shares one terminal. A guest's explicit SSH command
-runs privately after execution approval; use `--accept-exec` to grant that
-trust for the run. This permits further code and input on stdin, not just the
-command text shown for approval. On Unix the raw command runs through
-`$SHELL -c` (or `/bin/sh`); Windows uses pwsh, Windows PowerShell or cmd.exe.
-Guest commands use the host's launch directory and inherited environment;
-guest environment requests are ignored.
+Leave a door open on a machine, at home say, and reach it from a laptop or a
+phone with plain `ssh`, `scp` and VS Code, through the relay, without opening
+a port. Only your own keys get in:
 
-`--login-command herdr` opens that host-selected command
-for shell requests, without exec approval. Explicit guest commands still use
-the exec policy. `--force-command COMMAND` instead replaces shell and exec
-commands; it runs with a private PTY when requested and pipes otherwise.
-With pipes, stdin EOF closes child input without cancelling the command;
-output drains before the child's real exit status is returned.
-Only forced exec receives `SSH_ORIGINAL_COMMAND`. Both flags parse argv with
-shell-style quoting and are mutually exclusive. `--no-exec` and `--read-only`
-deny explicit exec before forced substitution or grants; host-selected shell
-commands remain available, with read-only input suppressed.
+1. On the machine, pin the relay's key first, so the door checks the relay
+   rather than trusting whatever answers: the lines are under
+   [Running Without a Terminal](#running-without-a-terminal).
+2. Open the door:
 
-Ungranted exec, literal loopback forwarding and file operations without
-`--accept` request approval at the **primary local host terminal**. Type `~a`
-at the start of a line to review the oldest pending request. The review names
-the guest by the `--authorized-user` or `--authorized-keys` entry its key is
-on, or else by the key. Answer with its fresh confirmation code: `y CODE` then
-Enter allows this request on its connection; `a CODE` then Enter allows that
-guest key the same kind of request until the host session ends, across
-reconnects; `n CODE` then Enter denies it. An exec grant never grants SFTP or
-forwarding. Esc leaves a request pending. Requests expire 60 seconds
-after arrival at the host permission boundary, including queueing and review;
-earlier protocol buffering is outside that deadline.
+   ```console
+   upterm host --detach --name home --full-access \
+     --authorized-user github:YOUR_GITHUB_USER \
+     --login-command herdr
+   ```
 
-No capable primary terminal means immediate denial without an applicable
-grant. A detached door needs `upterm attach NAME` for new approvals; approval
-never moves silently to a secondary attachment or guest. `--escape-char none`
-disables review and passes all input through. A custom escape character
-replaces `~`; type it twice at line start to send a literal one (`~~a` sends
-`~a`). These escapes are local to the host attachment.
+   - `--authorized-user github:YOUR_GITHUB_USER` lets in only the keys on
+     your GitHub account, as they are when the door starts.
+   - `--full-access` lets those keys do what an SSH login to your account
+     can, without asking you: run commands, transfer files, and forward
+     ports to this machine's loopback addresses.
+   - `--login-command herdr` is what plain `ssh home` opens: a
+     [Herdr](guides/herdr.md) client of its own for each guest. Without it,
+     plain `ssh home` shares the door's own terminal.
+   - `--detach` asks before it starts the door, on this terminal, then
+     leaves it running in the background.
+3. The door prints its ssh config as it starts. Print it again whenever you
+   need it:
 
-`--login-command`, `--accept-exec`, `--allow-loopback-tcp-forwarding`,
-`--no-exec` and `--no-forwarding` are per-run CLI options, not environment or
-config settings. Restart the session to change them.
+   ```console
+   upterm session ssh-config home
+   ```
 
-`session info`, `session current` and detached JSON report `loginCommand`,
-`guestShell` (`shared`, `login`, `forced`), `execution` (`off`, `approval`,
-`granted`, `forced`), `tcpForwarding` (`off`, `loopback-approval`, `loopback`,
-`all`) and `approvalMethod` (`terminal`, `custom`, `unavailable`). These report
-configured policy, never cached grants or current prompts. `approval` with
-`unavailable` means ungranted requests are denied immediately. Missing optional
-policy fields from old daemons or ended sessions mean unknown. Ended records
-retain command metadata, including the login command, without retaining grants.
-The legacy `localForwarding` boolean is true only for effective unrestricted
-forwarding.
+   Put both parts on each laptop: the `Host home` block in its
+   `~/.ssh/config`, and the relay's line in its `~/.ssh/known_hosts`, once.
+   The block's `User` changes whenever the door restarts, so print it again
+   then.
+4. From the laptop: `ssh home`, `scp notes.txt home:`, `sftp home`, or
+   VS Code's **Remote-SSH: Connect to Host…** → `home`.
+
+The key `ssh home` offers has to be on your GitHub account, as it was when
+the door started: after you add, change or revoke one there, restart the
+door. [Reach your Herdr agents from anywhere](guides/herdr.md) covers the
+rest: a phone, keeping the machine awake, and a jump to its own sshd.
+
+#### VS Code
+
+VS Code's Remote-SSH starts its server on the session's machine with a
+command, and talks to it through a forward to a loopback port there, so it
+needs a session that allows both: `--full-access`, or `--allow-exec
+--allow-forwarding=loopback`. Put the block `upterm session ssh-config NAME`
+prints in `~/.ssh/config`, add the relay's line to `~/.ssh/known_hosts`, and
+choose **Remote-SSH: Connect to Host…** → `NAME`.
+
+To reach a server on that machine from the laptop, a dev server on port 3000
+say, add a `LocalForward` with literal loopback addresses to the block, and
+open `http://127.0.0.1:3000`:
+
+```text
+  LocalForward 127.0.0.1:3000 127.0.0.1:3000
+```
+
+In testing, VS Code's own `remote.SSH.defaultForwardedPorts` setting didn't
+forward through upterm: its log said "Created tunnel does not match
+requirements of requested tunnel. Host or port mismatch."
+
+### What guests can do
+
+A guest who joins with `upterm join`, or with plain `ssh` and no command,
+shares your terminal: they see it, and type into it unless the session is
+`--read-only`. A guest can ask for more, and each of these asks you first, in
+your terminal:
+
+| A guest runs | What it does | Allow it without asking | Never allow it |
+| --- | --- | --- | --- |
+| `ssh SESSION CMD`, VS Code, `herdr --remote` | runs `CMD` as you, apart from your terminal | `--allow-exec` | `--no-exec` |
+| `scp`, `sftp` | reads and writes your files | `--allow-sftp` | `--no-sftp` |
+| `ssh -L 8080:127.0.0.1:8080` | reaches a port on this machine's loopback addresses | `--allow-forwarding=loopback` | `--no-forwarding` |
+
+- `--full-access` allows all three for the keys `--authorized-user` or
+  `--authorized-keys` names, and refuses to start without one of them:
+  without an allowlist, anyone with the session ID would get a shell as you.
+- `--accept` starts the session without asking you first, and allows file
+  transfers too.
+- `--read-only` lets guests only watch and download: no typing, commands,
+  uploads or forwarding.
+- `--allow-forwarding=any` lets guests reach anything this machine can, not
+  only its loopback addresses: see [Local TCP Forwarding](#local-tcp-forwarding).
+
+A command a guest runs can read more input, and so more code, after the one
+you saw: allowing one is like giving a shell. It runs through `$SHELL -c`
+(or `/bin/sh`) on Unix, and pwsh, Windows PowerShell or cmd.exe on Windows.
+
+`--login-command PROGRAM` gives each guest's plain `ssh` a `PROGRAM` of its
+own, Herdr say, instead of your terminal; a command a guest names still
+follows the table. `--force-command COMMAND` runs `COMMAND` for every guest
+instead of both, and tells it what a guest asked for in
+`SSH_ORIGINAL_COMMAND`. The two can't be used together. `--no-exec` and
+`--read-only` refuse a command a guest names even where the forced command
+would have taken its place, and under `--read-only` the login or forced
+command still opens, but nothing a guest types reaches it.
+
+Whatever a guest runs, its own command or your login or forced command, starts
+in the directory the session started in, with the session's environment minus
+the variables that describe your own SSH connection or terminal pane
+(`SSH_CONNECTION`, `TMUX` and `HERDR_ENV`, for example). A guest's own
+environment requests are ignored.
+
+`--login-command`, `--allow-exec`, `--allow-sftp`, `--allow-forwarding`,
+`--full-access`, `--no-exec` and `--no-forwarding` are set on the command line
+only, not in the environment or the config file: restart the session to
+change them.
+
+#### Approving requests
+
+When a guest asks for something, upterm says so in your terminal. Type `~a` at
+the start of a line to review the oldest request. The review says who is
+asking, by the `--authorized-user` or `--authorized-keys` entry their key is
+on, or else by their key, and what they want. Answer with the code it shows:
+
+- `y CODE` then Enter allows this request, on this connection only;
+- `a CODE` then Enter allows this guest the same kind of request until the
+  session ends, across reconnects;
+- `n CODE` then Enter denies it;
+- Esc decides later. A request expires 60 seconds after it arrives.
+
+Allowing a guest's commands never allows it file transfers or forwarding.
+
+Only the session's primary terminal can answer: the one attached to it
+first. A session in the background (`--detach`) has none until you
+`upterm attach NAME`, and until then a request is denied at once. On a door,
+the shell `upterm attach` puts you in is the door's own: `exit` there closes
+it for every guest, so leave with `~.` instead. `--escape-char none` turns
+review off; another `--escape-char` takes the place of `~`, typed twice to
+send it (`~~a` sends `~a`).
+
+`session info`, `session current` and `upterm host --detach -o json` report
+what the session allows: `guestShell` (`shared`, `login`, `forced`),
+`execution` (`off`, `approval`, `granted`, `forced`), `tcpForwarding` (`off`,
+`loopback-approval`, `loopback`, `all`) and `approvalMethod` (`terminal`,
+`custom`, `unavailable`). They say how the session was started, never what
+has been allowed since. An older upterm doesn't report them, and neither
+does a session that has ended. The older `localForwarding` boolean is true
+only when forwards to anything are allowed.
 
 ### File Transfer (SFTP/SCP)
 
@@ -387,34 +485,37 @@ Clients can transfer files using standard `scp` or `sftp` commands. The connecti
 
 ```console
 # Download a file from host
-scp -P PORT USER@HOST:/path/to/file.txt ./local/
+scp SESSION_USER@uptermd.upterm.dev:/path/to/file.txt ./local/
 
 # Upload a file to host
-scp -P PORT ./local/file.txt USER@HOST:/path/to/destination/
+scp ./local/file.txt SESSION_USER@uptermd.upterm.dev:/path/to/destination/
 ```
+
+With the block `upterm session ssh-config NAME` prints in `~/.ssh/config`, `scp NAME:/path/to/file.txt ./local/` works the same.
 
 **Security model:**
 
 - File transfers have the same access as the terminal session (clients can already access any file via the shell)
-- Without `--accept`, protected file operations need approval through `~a` at the primary host terminal, with the connection/subject or guest/capability scope described above. No capable primary means denial without an applicable grant
+- Each file operation asks you first, as [Approving requests](#approving-requests) describes, unless `--allow-sftp`, `--accept` or `--full-access` allows transfers. One that isn't approved, because you denied it, it expired, or nothing could answer it, fails with scp's or sftp's own `Permission denied`
 - Use `--read-only` to restrict SFTP to downloads only (no uploads, deletes, or modifications)
 - Use `--no-sftp` to disable file transfers entirely
 
 ### Local TCP Forwarding
 
-Clients can use standard SSH local forwarding through a hosted session.
-Without a grant, only literal 127.0.0.0/8 and ::1 destinations can request
-terminal approval. `--allow-loopback-tcp-forwarding` grants that tier for the
-run; hostnames (including `localhost`), mapped IPv6 and zoned addresses do not
-qualify. The existing `--allow-local-tcp-forwarding` grants any destination the
-host can reach. `--no-forwarding` and `--read-only` deny all forwarding before
-grants or approval. `--accept` grants no forwarding.
+Guests can use standard SSH local forwarding (`ssh -L`, or `LocalForward` in
+`~/.ssh/config`) through a session to this machine's loopback addresses:
+literal `127.0.0.0/8` and `::1`. Each forward asks you first, unless
+`--allow-forwarding=loopback` or `--full-access` allows them. Hostnames,
+`localhost` included, mapped IPv6 and addresses with a zone are refused, as is
+anywhere else this machine can reach, unless `--allow-forwarding=any` allows
+forwards to anything, without asking. `--no-forwarding` and `--read-only`
+refuse all forwarding, and `--accept` allows none.
 
 For example:
 
 ```console
-upterm host --allow-loopback-tcp-forwarding
-ssh -L 5555:127.0.0.1:8080 SESSION_SSH_USER@uptermd.upterm.dev
+upterm host --allow-forwarding=loopback
+ssh -L 5555:127.0.0.1:8080 SESSION_USER@uptermd.upterm.dev
 ```
 
 A refused forward shows up only once something connects to the local port,
@@ -425,32 +526,6 @@ channel 3: open failed: administratively prohibited: upterm: forwarding to local
 ```
 
 After the first successful forward, the guest appears in session info and join/leave notifications until its SSH connection closes, even between forwarding channels. It is listed as `jump`, followed by where its forwards go, such as `→ 127.0.0.1:8080`: each distinct destination once, up to 16, then how many more forwards it opened, to anywhere else (`(+N more forwards)`). `--hide-client-ip`, and CI, hide the destinations along with the address. Multiple forwards on that connection share one entry; terminal and SFTP sessions retain their own entries. Forwarding alone does not set `firstGuestJoinedAt` or satisfy `--join-timeout`: an accepted terminal or SFTP session must join before that deadline. An idle `ssh -N` connection or a failed forward does not appear.
-
-### Upgrading guest permissions and embeddings
-
-An explicit SSH command (`ssh -t … CMD`) no longer joins the shared terminal
-with `CMD` ignored: it runs `CMD` privately, after approval or with
-`--accept-exec`, and `--accept` doesn't grant it, so a detached `--accept`
-session denies it. Use plain `ssh` or `upterm join` to join the shared
-terminal.
-
-Forced commands now support pipes when the guest requests no PTY. File-transfer
-approval uses the primary host terminal instead of desktop dialogs; `--accept`
-remains the unattended file-transfer option. Guest-wide approvals survive
-connections for the host session but remain capability-scoped. Unanswered
-requests expire, and nil or unavailable checkers deny ungranted requests. The
-new local `~a` escape is consumed where approval is supported; use `~~a` for
-literal input or change/disable the escape as described above.
-
-**Embedding API migration:** import permission types from `host/consent`
-instead of `host/sftp`; there are no old-package aliases. Replace
-`Host.SFTPPermissionChecker` with `Host.PermissionChecker`. Implement
-`CheckPermission(context.Context, consent.Operation, consent.ClientInfo,
-...string) (consent.Decision, error)` and `ClearConnection(string)`, honor the
-context deadline/cancellation, and handle SFTP, exec and forwarding capabilities.
-For built-in primary-terminal approval, set `Host.TerminalConsent = true`
-instead of supplying a custom checker; the two options are mutually exclusive.
-A nil checker with terminal consent disabled denies ungranted operations.
 
 ### WebSocket Connection
 
@@ -463,14 +538,10 @@ upterm host --server wss://uptermd.upterm.dev -- bash
 Clients can connect to the host session via WebSocket as well:
 
 ```console
-upterm join wss://TOKEN@uptermd.upterm.dev
+upterm join wss://SESSION_USER@uptermd.upterm.dev
 ```
 
-Or with `ssh`, through `upterm proxy`:
-
-```console
-ssh -o ProxyCommand='upterm proxy wss://TOKEN@uptermd.upterm.dev' TOKEN@uptermd.upterm.dev:443
-```
+Or with plain `ssh`, through `upterm proxy`, which the guest needs installed too: `upterm session ssh-config NAME` prints a `Host` block whose `ProxyCommand` runs it.
 
 ### HTTP Proxy
 
@@ -497,12 +568,14 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v2
+    - uses: actions/checkout@v7
     - name: Setup upterm session
       uses: owenthereal/action-upterm@v2
 ```
 
 This setup allows you to SSH into the workflow runner whenever you need to troubleshoot or inspect the execution environment. Find the SSH connection string in the `Checks` tab of your Pull Request or in the workflow logs.
+
+VS Code can open the runner too, when the session allows what it needs: see [VS Code](#vs-code).
 
 action-upterm v2 runs the session on upterm's own background daemon (`upterm host --detach`) instead of tmux, and requires upterm v0.32.0 or newer, which it installs by default. upterm itself enforces `wait-timeout-minutes`: attached mode passes it as `--join-timeout`, and detached mode hands it over with `upterm session set` once the job's other steps are done. The first guest to join claims the session for good, even one who left again before the window opened.
 
@@ -715,8 +788,10 @@ upterm host --server wss://YOUR_HEROKU_APP_URL -- YOUR_COMMAND
 A client connects to the host session via WebSocket
 
 ```console
-ssh -o ProxyCommand='upterm proxy wss://TOKEN@YOUR_HEROKU_APP_URL' TOKEN@YOUR_HEROKU_APP_URL:443
+upterm join wss://SESSION_USER@YOUR_HEROKU_APP_URL
 ```
+
+Or with plain `ssh`, through the block `upterm session ssh-config NAME` prints on the host.
 
 ### Digital Ocean
 
