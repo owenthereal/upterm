@@ -296,9 +296,11 @@ reports the command's status.`,
 	perRun(cmd.PersistentFlags(), "name", "detach", "output", "login-command", "allow-exec", "allow-sftp", "no-exec", "allow-forwarding", "no-forwarding", "full-access")
 
 	// --allow-forwarding=any's released name, kept working, and as the config
-	// key it was, for the scripts and files that say it. Hidden, and not
-	// marked deprecated: pflag would say so for the config key too, which has
-	// no other spelling, since --allow-forwarding is the command line's only.
+	// key it was, for the scripts and files that say it. Hidden, and said to
+	// be deprecated by validateShareRequiredFlags, only where the command line
+	// gives it: pflag's MarkDeprecated would say so for the config key too,
+	// which has no other spelling, since --allow-forwarding is the command
+	// line's only.
 	_ = cmd.PersistentFlags().MarkHidden("allow-local-tcp-forwarding")
 
 	// The provider list comes from host.ProviderList so --help, the generated
@@ -629,6 +631,11 @@ func validateShareRequiredFlags(c *cobra.Command, args []string) error {
 	grantErrs, warnings := validateGrants(flagOrigin)
 	for _, err := range grantErrs {
 		result = multierror.Append(result, err)
+	}
+	// Only where it was typed, and only as the grant: its key and variable,
+	// and =false, which turns their grant off, have no other spelling.
+	if commandLineFlags["allow-local-tcp-forwarding"] && flagAllowLocalTCPForwarding {
+		warnings = append([]string{"upterm: --allow-local-tcp-forwarding is deprecated; use --allow-forwarding=any"}, warnings...)
 	}
 	// The parent's only: the daemon makes the same checks on the same argv,
 	// env and config, and its stderr is the log.

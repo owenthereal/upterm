@@ -417,6 +417,17 @@ func TestTheExampleConfigSaysWhatAcceptDoes(t *testing.T) {
 	require.NotContains(t, exampleConfig(), "Auto-accept")
 }
 
+// The example config's allow-local-tcp-forwarding entry says the key still
+// works, and that the flag of the same name is deprecated.
+func TestTheExampleConfigSaysTheOldForwardingFlagIsDeprecated(t *testing.T) {
+	require.Contains(t, exampleConfig(), "# Let guests forward ports (ssh -L) to anything this machine can reach, without\n"+
+		"# approval, as --allow-forwarding=any does (default: false). This key still\n"+
+		"# works; the flag of the same name is deprecated in favor of\n"+
+		"# --allow-forwarding=any.\n"+
+		"# Cannot be combined with read-only.\n"+
+		"# allow-local-tcp-forwarding: false\n")
+}
+
 // The guest settings the file can't hold are in the example all the same,
 // each saying where it is set, so whoever looks for one here learns why it
 // isn't a key.

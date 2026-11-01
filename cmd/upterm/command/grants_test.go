@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -74,6 +75,7 @@ func grantsOf(t *testing.T, args ...string) (serverGrants, reportedGrants) {
 	t.Helper()
 	cmd := hostCmd()
 	t.Cleanup(func() { hostCmd() })
+	cmd.SetErr(io.Discard)
 	daemonTestRoots(t)
 
 	key, err := host.NewHostKey()
@@ -300,7 +302,7 @@ func TestGuestGrantContradictionsOnTheCommandLineAreErrors(t *testing.T) {
 			withConfig(t, "")
 			stdout, stderr, code := runCLI(t, append(append([]string{"host"}, tc.args...), "--", "true")...)
 			require.Equal(t, 1, code)
-			require.Equal(t, "upterm: "+tc.want+"\n", stderr)
+			require.Equal(t, oldNameNotice(tc.args)+"upterm: "+tc.want+"\n", stderr)
 			require.Empty(t, stdout)
 		})
 	}
@@ -357,6 +359,8 @@ func TestGuestGrantContradictionsFromEnvOrConfigAreWarnings(t *testing.T) {
 			// passed: the warning didn't stop it.
 			_, stderr, code := runCLI(t, append(append([]string{"host", "--accept", "--proxy", "://not-a-url"}, tc.args...), "--", "true")...)
 			require.Equal(t, 1, code)
+			stderr, ok := strings.CutPrefix(stderr, oldNameNotice(tc.args))
+			require.True(t, ok, stderr)
 			lines := strings.Split(strings.TrimSuffix(stderr, "\n"), "\n")
 			require.Len(t, lines, 2, stderr)
 			require.Equal(t, want, lines[0])
@@ -404,6 +408,8 @@ func TestGuestGrantsThatAgreePass(t *testing.T) {
 			withConfig(t, "")
 			_, stderr, code := runCLI(t, append(append([]string{"host", "--accept", "--proxy", "://not-a-url"}, args...), "--", "true")...)
 			require.Equal(t, 1, code)
+			stderr, ok := strings.CutPrefix(stderr, oldNameNotice(args))
+			require.True(t, ok, stderr)
 			require.Equal(t, 1, strings.Count(stderr, "\n"), stderr)
 			require.Contains(t, stderr, "proxy", "the run went on to the proxy")
 		})
@@ -576,4 +582,70 @@ func TestDetachHelpSaysWhenItAsks(t *testing.T) {
 		"Attach a terminal later with 'upterm attach NAME'; stop it with 'upterm session stop NAME'.", host.Flag("detach").Usage)
 	require.Contains(t, oneSpaced(host.Long), "With --detach nothing is attached: the session starts in the background, and upterm prints how to reach it. "+
 		"It still asks before starting it, on this terminal; with no terminal to ask in, --detach needs --accept.")
+}
+
+// oldNameNotice is what host says first when its command line gives
+// --allow-forwarding=any's released name, and "" when it doesn't.
+func oldNameNotice(args []string) string {
+	if slices.Contains(args, "--allow-local-tcp-forwarding") {
+		return "upterm: --allow-local-tcp-forwarding is deprecated; use --allow-forwarding=any\n"
+	}
+	return ""
+}
+
+// --allow-local-tcp-forwarding on the command line is said to be deprecated,
+// once, by the process that was given it. The config key and the variable
+// aren't: they have no other spelling, since --allow-forwarding is the
+// command line's only. Nor is --allow-local-tcp-forwarding=false, which only
+// turns their grant off and has no other spelling either.
+func TestAllowLocalTCPForwardingIsDeprecatedOnTheCommandLine(t *testing.T) {
+	const notice = "upterm: --allow-local-tcp-forwarding is deprecated; use --allow-forwarding=any\n"
+	for _, tc := range []struct {
+		name, config, env string // env is UPTERM_ALLOW_LOCAL_TCP_FORWARDING's value
+		args              []string
+		notice            bool
+	}{
+		{name: "the command line", args: []string{"--allow-local-tcp-forwarding"}, notice: true},
+		{name: "the config key", config: "allow-local-tcp-forwarding: true\n"},
+		{name: "the variable", env: "true"},
+		{name: "turned off on the command line", config: "allow-local-tcp-forwarding: true\n", args: []string{"--allow-local-tcp-forwarding=false"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			setupSessionRoots(t)
+			withConfig(t, tc.config)
+			if tc.env != "" {
+				t.Setenv("UPTERM_ALLOW_LOCAL_TCP_FORWARDING", tc.env)
+			}
+			// A proxy that can't be parsed stops the run once the checks have
+			// passed.
+			_, stderr, code := runCLI(t, append(append([]string{"host", "--accept", "--proxy", "://not-a-url"}, tc.args...), "--", "true")...)
+			require.Equal(t, 1, code)
+			lines := strings.SplitAfter(strings.TrimSuffix(stderr, "\n"), "\n")
+			if tc.notice {
+				require.Len(t, lines, 2, stderr)
+				require.Equal(t, notice, lines[0])
+			} else {
+				require.Len(t, lines, 1, stderr)
+			}
+			require.True(t, strings.HasPrefix(lines[len(lines)-1], "upterm: invalid --proxy"), stderr)
+		})
+	}
+
+	// --detach's parent says it, once, before anything else it says.
+	setupSessionRoots(t)
+	withConfig(t, "")
+	_, stderr, code := runCLI(t, "host", "--detach", "--allow-local-tcp-forwarding", "--", "true")
+	require.Equal(t, 1, code)
+	require.Equal(t, notice+"upterm: --detach needs --accept when there is no terminal to ask in (it also lets guests transfer files without asking)\n", stderr)
+
+	// Its daemon, which runs the same checks on the same argv, says nothing
+	// of it: its stderr is the log. Refused by a check of its own, so the run
+	// ends before it would read the daemon's channel.
+	setupSessionRoots(t)
+	withConfig(t, "")
+	t.Setenv(daemonHandoffEnv, "x")
+	_, stderr, code = runCLI(t, "host", "--detach", "--accept", "--allow-local-tcp-forwarding", "--name", "a/b", "--", "true")
+	require.Equal(t, 1, code)
+	require.Contains(t, stderr, "a/b", "the checks ran")
+	require.NotContains(t, stderr, "deprecated")
 }

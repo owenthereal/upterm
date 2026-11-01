@@ -510,7 +510,9 @@ func exampleConfig() string {
 # read-only: false
 
 # Let guests forward ports (ssh -L) to anything this machine can reach, without
-# approval, as --allow-forwarding=any does (default: false)
+# approval, as --allow-forwarding=any does (default: false). This key still
+# works; the flag of the same name is deprecated in favor of
+# --allow-forwarding=any.
 # Cannot be combined with read-only.
 # allow-local-tcp-forwarding: false
 
