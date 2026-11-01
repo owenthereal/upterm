@@ -336,7 +336,7 @@ command text shown for approval. On Unix the raw command runs through
 Guest commands use the host's launch directory and inherited environment;
 guest environment requests are ignored.
 
-`--login-command 'env -u HERDR_ENV herdr'` opens that host-selected command
+`--login-command herdr` opens that host-selected command
 for shell requests, without exec approval. Explicit guest commands still use
 the exec policy. `--force-command COMMAND` instead replaces shell and exec
 commands; it runs with a private PTY when requested and pipes otherwise.

@@ -1461,12 +1461,12 @@ func TestDocumentedGuestToolOptionsParseOffline(t *testing.T) {
 	defer hostCmd()
 	for _, args := range [][]string{
 		{},
-		{"--detach", "--name", "home", "--accept", "--authorized-user", "github:YOUR_GITHUB_USER", "--login-command", "env -u HERDR_ENV herdr", "--allow-exec", "--allow-forwarding=loopback"},
+		{"--detach", "--name", "home", "--accept", "--authorized-user", "github:YOUR_GITHUB_USER", "--login-command", "herdr", "--allow-exec", "--allow-forwarding=loopback"},
 		{"--force-command", "tmux attach -t pair-programming", "--", "tmux", "new", "-t", "pair-programming"},
 		{"--allow-forwarding=loopback"},
 		{"--allow-forwarding=any"},
 		{"--allow-local-tcp-forwarding"},
-		{"--login-command", "env -u HERDR_ENV herdr", "--no-exec", "--no-forwarding"},
+		{"--login-command", "herdr", "--no-exec", "--no-forwarding"},
 	} {
 		cmd := hostCmd()
 		require.NoError(t, cmd.ParseFlags(args))
@@ -1474,7 +1474,7 @@ func TestDocumentedGuestToolOptionsParseOffline(t *testing.T) {
 		opts, err := parseHostOptions(cmd.Flags().Args())
 		require.NoError(t, err)
 		if cmd.Flags().Changed("login-command") {
-			require.Equal(t, []string{"env", "-u", "HERDR_ENV", "herdr"}, opts.loginCommand)
+			require.Equal(t, []string{"herdr"}, opts.loginCommand)
 		}
 	}
 }
