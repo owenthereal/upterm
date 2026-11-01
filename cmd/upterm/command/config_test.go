@@ -443,3 +443,13 @@ func TestConfigEditMappingsDoNotBypassBoundKeyValidation(t *testing.T) {
 		})
 	}
 }
+
+func TestGuestCommandConfigIsPerRun(t *testing.T) {
+	for _, key := range []string{"login-command", "accept-exec", "no-exec"} {
+		t.Run(key, func(t *testing.T) {
+			restoreFlags(t)
+			path := writeConfig(t, key+": [invalid]\n")
+			require.Empty(t, validateConfigFile(Root(), path))
+		})
+	}
+}

@@ -561,6 +561,7 @@ func TestPerRunFlagsAreExactlyTheRunsOwnChoices(t *testing.T) {
 	walk(Root())
 	require.ElementsMatch(t, []string{
 		"upterm host --detach", "upterm host --name", "upterm host --output",
+		"upterm host --login-command", "upterm host --accept-exec", "upterm host --no-exec",
 		"upterm join --wait",
 		"upterm session current --output", "upterm session info --output",
 		"upterm session set --join-timeout",
@@ -590,6 +591,9 @@ func TestPerRunValuesAreIgnored(t *testing.T) {
 		{[]string{"host"}, "detach", "true"},
 		{[]string{"host"}, "name", "build"},
 		{[]string{"host"}, "output", "json"},
+		{[]string{"host"}, "login-command", "host-tool"},
+		{[]string{"host"}, "accept-exec", "true"},
+		{[]string{"host"}, "no-exec", "true"},
 		{[]string{"join"}, "wait", "true"},
 		{[]string{"session", "info"}, "output", "json"},
 		{[]string{"session", "current"}, "output", "json"},

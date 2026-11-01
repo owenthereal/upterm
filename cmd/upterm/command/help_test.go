@@ -211,3 +211,11 @@ func TestApprovalHelp(t *testing.T) {
 	require.Contains(t, keysLine('!', true), "!a review permissions")
 	require.Contains(t, keyHint('~', true), "~~a")
 }
+
+func TestGuestExecHostHelp(t *testing.T) {
+	cmd := hostCmd()
+	require.Contains(t, cmd.Long, "stdin")
+	require.Contains(t, cmd.PersistentFlags().Lookup("login-command").Usage, "host-chosen")
+	require.Contains(t, cmd.PersistentFlags().Lookup("accept-exec").Usage, "further code")
+	require.Contains(t, cmd.PersistentFlags().Lookup("no-exec").Usage, "forced exec")
+}

@@ -84,7 +84,7 @@ func TestRawSessionAdmissionKeepsSelectedTracker(t *testing.T) {
 	for _, kind := range []clientKind{kindGuest, kindHost} {
 		t.Run(map[clientKind]string{kindGuest: "guest", kindHost: "host"}[kind], func(t *testing.T) {
 			original, replacement := &guestHandlers{}, &guestHandlers{}
-			h := &sessionHandler{kind: kind, sharedGuests: original, hostHandlers: original, forceCommands: replacement}
+			h := &sessionHandler{kind: kind, sharedGuests: original, hostHandlers: original, privateCommands: replacement}
 			underlying := &fakeGuestSession{}
 			raw := &rawSession{Session: underlying}
 			require.True(t, h.admitGuest(raw, "shell"))

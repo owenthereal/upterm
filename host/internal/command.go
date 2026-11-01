@@ -215,14 +215,6 @@ func (c *command) Result() CommandResult {
 	return c.result
 }
 
-// setupCommand builds the *forced* command — the one a guest gets on its own
-// pty, started by startForceCommand. exec.Command, not CommandContext, for the
-// reason Start gives: Go's cancellation kills the process outright, ahead of
-// the hangup HandleSession's teardown sends first.
-func setupCommand(name string, args []string) *exec.Cmd {
-	return exec.Command(name, args...)
-}
-
 // environ is the environment the command runs with: the host's own, then the
 // session's variables, then TERM, when the host names one.
 //

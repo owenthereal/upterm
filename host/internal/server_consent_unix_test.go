@@ -52,7 +52,7 @@ func TestSessionPermissionWindowFlood(t *testing.T) {
 
 func testPermissionCancellation(t *testing.T, kind string, flood bool) {
 	t.Helper()
-	h := &sessionHandler{kind: kindGuest, sharedGuests: &guestHandlers{}, forceCommands: &guestHandlers{}}
+	h := &sessionHandler{kind: kindGuest, sharedGuests: &guestHandlers{}, privateCommands: &guestHandlers{}}
 	var callbackSession gssh.Session
 	var callbackClosed bool
 	var effects atomic.Int32
@@ -190,14 +190,18 @@ func testPermissionCancellation(t *testing.T, kind string, flood bool) {
 func TestSessionAdmissionShutdownRace(t *testing.T) {
 	for _, kind := range []string{"shell", "empty exec", "exec", "sftp"} {
 		t.Run(kind, func(t *testing.T) {
-			h := &sessionHandler{kind: kindGuest, sharedGuests: &guestHandlers{}, forceCommands: &guestHandlers{}}
+			h := &sessionHandler{kind: kindGuest, sharedGuests: &guestHandlers{}, privateCommands: &guestHandlers{}}
 			var admitted, completed atomic.Int32
 			registered := make(chan struct{}, 32)
 			release := make(chan struct{})
 			var releaseOnce, waitOnce sync.Once
 			t.Cleanup(func() { releaseOnce.Do(func() { close(release) }) })
 			waiting := make(chan struct{})
-			h.sharedGuests.onWait = func() { waitOnce.Do(func() { close(waiting) }) }
+			tracker := h.sharedGuests
+			if kind == "exec" || kind == "empty exec" {
+				tracker = h.privateCommands
+			}
+			tracker.onWait = func() { waitOnce.Do(func() { close(waiting) }) }
 			handle := func(sess gssh.Session) {
 				if finish := h.takeAdmission(sess); finish != nil {
 					defer finish()
@@ -244,7 +248,7 @@ func TestSessionAdmissionShutdownRace(t *testing.T) {
 				}
 			}
 			waited := make(chan bool, 1)
-			go func() { waited <- h.sharedGuests.wait(harnessTimeout) }()
+			go func() { waited <- tracker.wait(harnessTimeout) }()
 			select {
 			case <-waiting:
 			case <-time.After(harnessTimeout):

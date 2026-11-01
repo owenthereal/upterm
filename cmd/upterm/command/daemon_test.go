@@ -837,3 +837,24 @@ func runDaemonAgainstUnsupportedRelay(t *testing.T) string {
 	require.ErrorIs(t, <-parentDone, bootstrap.ErrDaemonGone)
 	return printed.String()
 }
+
+func TestDaemonGuestCommandConfiguration(t *testing.T) {
+	cmd := hostCmd()
+	daemonTestRoots(t)
+	require.NoError(t, cmd.ParseFlags([]string{"--login-command=tool 'a b'", "--accept-exec", "--no-exec"}))
+	opts, err := parseHostOptions([]string{"sh"})
+	require.NoError(t, err)
+	a, b := net.Pipe()
+	t.Cleanup(func() { _ = a.Close(); _ = b.Close() })
+	child := bootstrap.NewChild(a, nil)
+	t.Cleanup(func() { _ = child.Close() })
+	h, err := buildDaemonHost(context.Background(), "guest-options", opts, child, discardLogger())
+	require.NoError(t, err)
+	require.Equal(t, []string{"tool", "a b"}, h.LoginCommand)
+	require.True(t, h.AcceptExec)
+	require.True(t, h.ExecDisabled)
+	cwd, err := os.Getwd()
+	require.NoError(t, err)
+	require.Equal(t, cwd, h.CommandDir)
+	hostCmd()
+}
