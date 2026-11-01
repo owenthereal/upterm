@@ -66,7 +66,7 @@ func guestKeysFile(t *testing.T) string {
 	return path
 }
 
-// grantsOf is grantsWith an empty config file and no variables of its own.
+// grantsOf is grantsWith, with an empty config file and no variables.
 func grantsOf(t *testing.T, args ...string) (serverGrants, reportedGrants) {
 	t.Helper()
 	return grantsWith(t, "", nil, args...)
@@ -76,9 +76,9 @@ func grantsOf(t *testing.T, args ...string) (serverGrants, reportedGrants) {
 // config and the variables env, as the daemon does, up to the moment the
 // relay has created it, and returns the policy the Host enforces and the
 // policy the session reports. The config file and the variables set the
-// flags as the root's pre-run has them do. The report is read as `session
-// info` reads it: the JSON's keys, and the view's Guests row, which must say
-// the same.
+// flags as the root's pre-run has them do; the environment the test runs in
+// sets none. The report is read as `session info` reads it: the JSON's keys,
+// and the view's Guests row, which must say the same.
 func grantsWith(t *testing.T, config string, env map[string]string, args ...string) (serverGrants, reportedGrants) {
 	t.Helper()
 	cmd := hostCmd()
@@ -86,14 +86,25 @@ func grantsWith(t *testing.T, config string, env map[string]string, args ...stri
 	cmd.SetErr(io.Discard)
 	daemonTestRoots(t)
 	withConfig(t, config)
-	for k, v := range env {
-		t.Setenv(k, v)
-	}
 
 	key, err := host.NewHostKey()
 	require.NoError(t, err)
 	relay := fakerelay.Start(t, key, fakerelay.RandomID)
 	require.NoError(t, cmd.ParseFlags(append([]string{"--server", "ssh://" + relay.Addr, "--skip-host-key-check"}, args...)))
+	// The variables are env's alone. Every other one the binding reads is
+	// unset, not emptied, since an empty variable is a value too: the
+	// developer's own UPTERM_KNOWN_HOSTS, UPTERM_PRIVATE_KEY or
+	// UPTERM_AUTHORIZED_USER would undo what daemonTestRoots keeps out.
+	// After the parse, which merges host's flags into the set the binding
+	// visits.
+	cmd.Flags().VisitAll(func(f *pflag.Flag) {
+		k := envVarName(f.Name)
+		t.Setenv(k, "")
+		require.NoError(t, os.Unsetenv(k))
+	})
+	for k, v := range env {
+		t.Setenv(k, v)
+	}
 	// As the root's pre-run: what the command line set, and then the config
 	// file and the environment, which set the rest.
 	commandLine := make(map[string]bool)
