@@ -827,6 +827,12 @@ func (f *joinTimeoutHost) guestClient(t *testing.T) *ssh.Client {
 	t.Helper()
 	key, err := NewHostKey()
 	require.NoError(t, err)
+	return f.guestClientWith(t, key)
+}
+
+// guestClientWith is guestClient for a guest holding key.
+func (f *joinTimeoutHost) guestClientWith(t *testing.T, key ssh.Signer) *ssh.Client {
+	t.Helper()
 	conn, err := net.DialTimeout("tcp", f.relayAddr, 3*time.Second)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = conn.Close() })
@@ -1125,6 +1131,108 @@ func (f *joinTimeoutHost) attachAfter(t *testing.T, hold <-chan struct{}) (<-cha
 		clientDone <- joinAttachmentResult{result, err}
 	}()
 	return clientDone, cancel
+}
+
+// attachForReview starts the session with upterm attach's own client as its
+// terminal, as attachAfter does, but one a host types into: it answers
+// guests' requests, so the review it draws is what the host is shown. It
+// returns what the client draws and where to type.
+func (f *joinTimeoutHost) attachForReview(t *testing.T) (*lockedBuffer, io.Writer) {
+	t.Helper()
+	f.h.AwaitInitialClient = true
+	listening := make(chan string, 1)
+	f.h.AttachListeningCallback = func(socket string) { listening <- socket }
+	f.start(t)
+	var socket string
+	select {
+	case socket = <-listening:
+	case <-time.After(5 * time.Second):
+		t.Fatal("attach socket never bound")
+	}
+	rec := f.record(t)
+	require.NotEmpty(t, rec.HostKeys)
+	key, _, _, _, err := ssh.ParseAuthorizedKey([]byte(rec.HostKeys[0]))
+	require.NoError(t, err)
+	typed, keys := io.Pipe()
+	screen := &lockedBuffer{}
+	client := &attach.Client{Socket: socket, HostKeys: []ssh.PublicKey{key}, Stdin: typed, Stdout: screen,
+		Pty: &attach.Pty{Term: "xterm"}, Escape: '~', Approvals: true}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ended := make(chan struct{})
+	go func() {
+		defer close(ended)
+		_, _ = client.Run(ctx)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		_ = keys.Close()
+		select {
+		case <-ended:
+		case <-time.After(5 * time.Second):
+			t.Error("the attach client did not end")
+		}
+	})
+	return screen, keys
+}
+
+// A guest the allowlist lets in is named in the primary terminal's review by
+// the entry its key is on, as the host configured it: the user an
+// --authorized-user names, or, for an entry that names no one, such as an
+// authorized_keys file, the key and the file it came from.
+func TestReviewNamesAGuestByItsAllowlistEntry(t *testing.T) {
+	alice, err := NewHostKey()
+	require.NoError(t, err)
+	bob, err := NewHostKey()
+	require.NoError(t, err)
+	file := filepath.Join(t.TempDir(), "authorized_keys")
+	require.NoError(t, os.WriteFile(file, ssh.MarshalAuthorizedKey(bob.PublicKey()), 0o600))
+	fromFile, err := AuthorizedKeysFromFile(file)
+	require.NoError(t, err)
+	named := &AuthorizedKey{PublicKeys: []ssh.PublicKey{alice.PublicKey()}, Comment: "github:alice@github.com", guest: "alice (github:alice)"}
+	for _, tc := range []struct {
+		name  string
+		guest ssh.Signer
+		who   string
+	}{
+		{"a user the host named", alice, "alice (github:alice)"},
+		{"an entry that names no one", bob, "a guest with key " + utils.FingerprintSHA256(bob.PublicKey()) + " from " + file},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newJoinTimeoutHost(t)
+			f.h.TerminalConsent = true
+			f.h.AuthorizedKeys = []*AuthorizedKey{named, fromFile}
+			screen, keys := f.attachForReview(t)
+			awaitJoinTimeoutSignal(t, f.ready, "readiness")
+			shows := func(text string) {
+				t.Helper()
+				require.Eventually(t, func() bool { return strings.Contains(screen.String(), text) }, 5*time.Second, 5*time.Millisecond,
+					"the terminal never showed %q; it showed %q", text, screen)
+			}
+
+			guest := f.guestClientWith(t, tc.guest)
+			sess, err := guest.NewSession()
+			require.NoError(t, err)
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				_ = sess.Run("true")
+			}()
+			shows("upterm: 1 permission request(s) pending; ~a reviews the oldest.")
+			_, err = io.WriteString(keys, "~a")
+			require.NoError(t, err)
+			shows("\r\nupterm: " + tc.who + " wants to run a command on this machine: \"true\"\x1b[K\r\n")
+			// Leaving ends the request; nothing is left to answer.
+			require.NoError(t, guest.Close())
+			select {
+			case <-done:
+			case <-time.After(5 * time.Second):
+				t.Fatal("the guest's request outlived its connection")
+			}
+
+			f.finish(t, "0")
+			require.NoError(t, f.result(t))
+		})
+	}
 }
 
 func TestJoinTimeoutCancellationBeforeReadiness(t *testing.T) {

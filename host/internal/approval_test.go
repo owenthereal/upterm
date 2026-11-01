@@ -18,6 +18,7 @@ import (
 	"time"
 
 	gssh "charm.land/ssh"
+	"github.com/owenthereal/upterm/attach"
 	"github.com/owenthereal/upterm/host/consent"
 	"github.com/owenthereal/upterm/server"
 	"github.com/owenthereal/upterm/upterm"
@@ -425,6 +426,96 @@ func TestApprovalReviewNamesAnAllowlistedGuest(t *testing.T) {
 		t.Fatal("the denied command never ended")
 	}
 	require.Equal(t, execDeniedNotice, stderr.String())
+}
+
+// A guest of a session with no allowlist is named in the primary terminal's
+// review by its key alone, and the review is told the session has none, so
+// it says anyone with the session ID can join. The host's answer decides as
+// before.
+func TestApprovalReviewSaysAnyoneCanJoinASessionWithNoAllowlist(t *testing.T) {
+	t.Run("the request", func(t *testing.T) {
+		h := approvalHost(t)
+		a := approvalConnect(t, h, true, true, true, true)
+		approvalPrimary(t, h, a.id)
+		sess := execSession(t, h.guestClient(t), false)
+		var stderr bytes.Buffer
+		sess.Stderr = &stderr
+		done := make(chan error, 1)
+		go func() { done <- sess.Run("true") }()
+
+		var state upterm.ApprovalState
+		for state.Current == nil {
+			select {
+			case state = <-a.states:
+			case <-time.After(harnessTimeout):
+				t.Fatal("no review reached the primary terminal")
+			}
+		}
+		require.True(t, state.Current.Unlisted)
+		require.Empty(t, state.Current.Guest)
+		// The harness's guest holds the key its relay signs with.
+		require.Equal(t, utils.FingerprintSHA256(h.relaySigner.PublicKey()), state.Current.Fingerprint)
+		require.True(t, approvalAnswer(t, a, state.Current.ID, "deny"))
+		select {
+		case err := <-done:
+			requireExitStatus(t, err, 1)
+		case <-time.After(harnessTimeout):
+			t.Fatal("the denied command never ended")
+		}
+		require.Equal(t, execDeniedNotice, stderr.String())
+	})
+	t.Run("the review", func(t *testing.T) {
+		h := approvalHost(t)
+		screen, keys := attachReviewTerminal(t, h)
+		guest := h.guestClient(t)
+		sess := execSession(t, guest, false)
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			_ = sess.Run("true")
+		}()
+
+		screen.await(t, "upterm: 1 permission request(s) pending; ~a reviews the oldest.")
+		_, err := io.WriteString(keys, "~a")
+		require.NoError(t, err)
+		screen.await(t, "\r\nupterm: a guest with key "+utils.FingerprintSHA256(h.relaySigner.PublicKey())+
+			" (anyone with the session ID can join) wants to run a command on this machine: \"true\"\x1b[K\r\n")
+		// Leaving ends the request; nothing is left to answer.
+		require.NoError(t, guest.Close())
+		select {
+		case <-done:
+		case <-time.After(harnessTimeout):
+			t.Fatal("the guest's request outlived its connection")
+		}
+	})
+}
+
+// attachReviewTerminal attaches upterm attach's own client to h's host door,
+// as the session's primary terminal, and returns what it draws and where to
+// type: the review a host is shown, drawn by the client that draws it.
+func attachReviewTerminal(t *testing.T, h *hostHarness) (*sessionLog, io.Writer) {
+	t.Helper()
+	typed, keys := io.Pipe()
+	screen := newSessionLog()
+	client := &attach.Client{Socket: h.attachSocket, HostKeys: []ssh.PublicKey{h.hostKey}, Stdin: typed, Stdout: screen,
+		Pty: &attach.Pty{Term: "xterm"}, Escape: '~', Approvals: true, Logger: discardLogger()}
+	ctx, cancel := context.WithCancel(context.Background())
+	ended := make(chan struct{})
+	go func() {
+		defer close(ended)
+		_, _ = client.Run(ctx)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		_ = keys.Close()
+		select {
+		case <-ended:
+		case <-time.After(harnessTimeout):
+			t.Error("the attach client did not end")
+		}
+	})
+	require.Eventually(t, func() bool { return h.srv.hostClients.primaryID() != "" }, harnessTimeout, time.Millisecond, "the attach client never became the primary terminal")
+	return screen, keys
 }
 
 func TestApprovalLoss(t *testing.T) {
