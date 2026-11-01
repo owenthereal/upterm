@@ -323,18 +323,27 @@ func TestAForwardThatCantConnectKeepsTheLibrarysText(t *testing.T) {
 // A guest whose command can't start is told so on its stderr: which command
 // it was, the host's login or forced command or the one it asked for, what
 // its status stands for, and the host's log, which has the error itself. None
-// of the error is passed on. The guest has a pty, and its terminal is raw, so
-// the line ends with a carriage return as well.
+// of the error is passed on. A start that found no such file is told which
+// file the host finds missing: the directory the command starts in, gone since
+// the session started, a file the program needs, such as the interpreter a
+// script names, or else the program. The guest has a pty, and its terminal is
+// raw, so the line ends with a carriage return as well.
 func TestAGuestWhoseCommandCantStartIsToldWhichAndWhy(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	notExecutable := filepath.Join(t.TempDir(), "not-executable")
 	require.NoError(t, os.WriteFile(notExecutable, []byte("#!/bin/sh\n"), 0o644))
+	// Unix only, as this file is: the kernel runs the interpreter a script
+	// names, and finds none.
+	scripts := t.TempDir()
+	noInterpreter := filepath.Join(scripts, "door.sh")
+	require.NoError(t, os.WriteFile(noInterpreter, []byte("#!/nonexistent/upterm-interpreter\necho ran\n"), 0o755))
 	for _, tc := range []struct {
 		name    string
 		srv     *Server
 		exec    bool
 		shell   string
+		dirGone bool // the directory guest commands start in is removed once the session is up
 		status  int
 		message string
 	}{
@@ -383,14 +392,52 @@ func TestAGuestWhoseCommandCantStartIsToldWhichAndWhy(t *testing.T) {
 			status:  127,
 			message: "upterm: the host's forced command couldn't start: /nonexistent?]0;owned? was not found.\r\n",
 		},
+		{
+			name:    "login command whose directory is gone",
+			srv:     &Server{LoginCommand: []string{"sh", "-c", "echo ran"}, LogPath: "/var/log/upterm.log"},
+			dirGone: true,
+			status:  127,
+			message: "upterm: the host's login command couldn't start: the directory it starts in no longer exists. The host's log is /var/log/upterm.log.\r\n",
+		},
+		{
+			name:    "requested command whose directory is gone",
+			srv:     &Server{AcceptExec: true, LogPath: "/var/log/upterm.log"},
+			exec:    true,
+			shell:   "/bin/sh",
+			dirGone: true,
+			status:  127,
+			message: "upterm: your command couldn't start: the directory it starts in no longer exists. The host's log is /var/log/upterm.log.\r\n",
+		},
+		{
+			name:    "forced command whose interpreter is missing",
+			srv:     &Server{ForceCommand: []string{noInterpreter}, LogPath: "/var/log/upterm.log"},
+			status:  127,
+			message: "upterm: the host's forced command couldn't start: " + noInterpreter + " needs a file that is missing, such as its interpreter. The host's log is /var/log/upterm.log.\r\n",
+		},
+		{
+			// A relative program is looked for where the command starts,
+			// not where the host runs.
+			name:    "relative forced command whose interpreter is missing",
+			srv:     &Server{ForceCommand: []string{"./door.sh"}, CommandDir: scripts, LogPath: "/var/log/upterm.log"},
+			status:  127,
+			message: "upterm: the host's forced command couldn't start: ./door.sh needs a file that is missing, such as its interpreter. The host's log is /var/log/upterm.log.\r\n",
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if tc.shell != "" {
 				t.Setenv("SHELL", tc.shell)
 			}
+			if tc.dirGone {
+				tc.srv.CommandDir = filepath.Join(t.TempDir(), "launch")
+				require.NoError(t, os.Mkdir(tc.srv.CommandDir, 0o700))
+			}
 			tc.srv.Command = readsALine("READY", 0)
 			h := startHost(t, tc.srv)
-			sess, err := h.guestClient(t).NewSession()
+			client := h.guestClient(t)
+			if tc.dirGone {
+				require.NoError(t, os.Remove(tc.srv.CommandDir))
+			}
+			sess, err := client.NewSession()
 			require.NoError(t, err)
 			var stdout, stderr bytes.Buffer
 			sess.Stdout, sess.Stderr = &stdout, &stderr

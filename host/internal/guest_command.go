@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -176,9 +177,9 @@ func execDenialNotice(err error) string {
 
 // startFailureNotice is what a guest is told when the command selection chose
 // couldn't start, with code, 127 or 126, the status that says why: which
-// command it was, what the status stands for, and the host's log, which has
-// the error itself. None of the error is passed on.
-func (h *sessionHandler) startFailureNotice(selection guestCommandSelection, code int, err error) string {
+// command it was, why it couldn't start, and the host's log, which has the
+// error itself. None of the error is passed on.
+func (h *sessionHandler) startFailureNotice(selection guestCommandSelection, code int, err *guestProcessStartError) string {
 	what, program := "the host's login command", guestText(selection.Argv[0])
 	switch {
 	case selection.NeedsExecConsent:
@@ -188,18 +189,37 @@ func (h *sessionHandler) startFailureNotice(selection guestCommandSelection, cod
 	case len(h.forceCommand) > 0:
 		what = "the host's forced command"
 	}
-	why := " couldn't be executed"
-	if code == 127 {
-		why = " was not found"
-		if errors.Is(err, exec.ErrNotFound) {
-			why += " on the session's PATH"
-		}
-	}
-	notice := "upterm: " + what + " couldn't start: " + program + why + "."
+	notice := "upterm: " + what + " couldn't start: " + startFailureReason(program, code, err) + "."
 	if h.logPath != "" {
 		notice += " The host's log is " + uio.PlainText(utils.ShortenHomePath(h.logPath)) + "."
 	}
 	return notice + "\r\n"
+}
+
+// startFailureReason is why program couldn't start, for a start that failed
+// with err and code: one of a few fixed reasons. A start that found no such
+// file says only that, and the missing file can be the directory the command
+// starts in, a file the program needs, such as the interpreter a script
+// names, or the program itself. So the host looks, as it reports the failure:
+// at the directory first, since a command whose directory is gone never
+// reaches its program, then at the program. A reason is given only when the
+// look bears it out; otherwise the program was not found.
+func startFailureReason(program string, code int, err *guestProcessStartError) string {
+	switch {
+	case code != 127:
+		return program + " couldn't be executed"
+	case errors.Is(err, exec.ErrNotFound):
+		return program + " was not found on the session's PATH"
+	}
+	if err.dir != "" {
+		if _, statErr := os.Stat(err.dir); errors.Is(statErr, fs.ErrNotExist) {
+			return "the directory it starts in no longer exists"
+		}
+	}
+	if _, statErr := os.Stat(err.program()); statErr == nil {
+		return program + " needs a file that is missing, such as its interpreter"
+	}
+	return program + " was not found"
 }
 
 // maxGuestText bounds a name echoed to a guest: a hostname is at most 253
@@ -409,7 +429,7 @@ func (h *sessionHandler) handlePrivateCommand(sess gssh.Session, selection guest
 			if errors.Is(err, exec.ErrNotFound) || errors.Is(err, os.ErrNotExist) {
 				code = 127
 			}
-			guestCommandDiagnostic(sess, h.startFailureNotice(selection, code, err))
+			guestCommandDiagnostic(sess, h.startFailureNotice(selection, code, startErr))
 		}
 	}
 	kind, _, _, _ := h.endingCause()
