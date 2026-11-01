@@ -320,20 +320,104 @@ func TestAForwardThatCantConnectKeepsTheLibrarysText(t *testing.T) {
 	require.NotContains(t, open.Message, "port forwarding")
 }
 
-// A guest whose forced command can't start is told so on its stderr, and where
-// to find why: the host's log. The guest has a pty, and its terminal is raw,
-// so the line ends with a carriage return as well.
-func TestAGuestWhoseForcedCommandCantStartIsTold(t *testing.T) {
-	h := startHost(t, &Server{Command: readsALine("READY", 0), ForceCommand: []string{"/nonexistent-upterm-force-command"}})
+// A guest whose command can't start is told so on its stderr: which command
+// it was, the host's login or forced command or the one it asked for, what
+// its status stands for, and the host's log, which has the error itself. None
+// of the error is passed on. The guest has a pty, and its terminal is raw, so
+// the line ends with a carriage return as well.
+func TestAGuestWhoseCommandCantStartIsToldWhichAndWhy(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	notExecutable := filepath.Join(t.TempDir(), "not-executable")
+	require.NoError(t, os.WriteFile(notExecutable, []byte("#!/bin/sh\n"), 0o644))
+	for _, tc := range []struct {
+		name    string
+		srv     *Server
+		exec    bool
+		shell   string
+		status  int
+		message string
+	}{
+		{
+			name:    "forced command not found",
+			srv:     &Server{ForceCommand: []string{"/nonexistent-upterm-force-command"}, LogPath: "/var/log/upterm.log"},
+			status:  127,
+			message: "upterm: the host's forced command couldn't start: /nonexistent-upterm-force-command was not found. The host's log is /var/log/upterm.log.\r\n",
+		},
+		{
+			name:    "login command not on PATH",
+			srv:     &Server{LoginCommand: []string{"upterm-nonexistent-login-command", "--flag"}, LogPath: filepath.Join(home, ".local", "state", "upterm", "upterm.log")},
+			status:  127,
+			message: "upterm: the host's login command couldn't start: upterm-nonexistent-login-command was not found on the session's PATH. The host's log is ~/.local/state/upterm/upterm.log.\r\n",
+		},
+		{
+			name:    "forced command not executable",
+			srv:     &Server{ForceCommand: []string{notExecutable}, LogPath: "/var/log/upterm.log"},
+			status:  126,
+			message: "upterm: the host's forced command couldn't start: " + notExecutable + " couldn't be executed. The host's log is /var/log/upterm.log.\r\n",
+		},
+		{
+			name:    "forced exec not found",
+			srv:     &Server{ForceCommand: []string{"/nonexistent-upterm-force-command"}, LogPath: "/var/log/upterm.log"},
+			exec:    true,
+			status:  127,
+			message: "upterm: the host's forced command couldn't start: /nonexistent-upterm-force-command was not found. The host's log is /var/log/upterm.log.\r\n",
+		},
+		{
+			name:    "requested command's shell not found",
+			srv:     &Server{AcceptExec: true, LogPath: "/var/log/upterm.log"},
+			exec:    true,
+			shell:   "/nonexistent/upterm-shell",
+			status:  127,
+			message: "upterm: your command couldn't start: the host's shell, /nonexistent/upterm-shell, was not found. The host's log is /var/log/upterm.log.\r\n",
+		},
+		{
+			name:    "no log to name",
+			srv:     &Server{ForceCommand: []string{"/nonexistent-upterm-force-command"}},
+			status:  127,
+			message: "upterm: the host's forced command couldn't start: /nonexistent-upterm-force-command was not found.\r\n",
+		},
+		{
+			name:    "a program's name is told plain",
+			srv:     &Server{ForceCommand: []string{"/nonexistent\x1b]0;owned\a"}},
+			status:  127,
+			message: "upterm: the host's forced command couldn't start: /nonexistent?]0;owned? was not found.\r\n",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.shell != "" {
+				t.Setenv("SHELL", tc.shell)
+			}
+			tc.srv.Command = readsALine("READY", 0)
+			h := startHost(t, tc.srv)
+			sess, err := h.guestClient(t).NewSession()
+			require.NoError(t, err)
+			var stdout, stderr bytes.Buffer
+			sess.Stdout, sess.Stderr = &stdout, &stderr
+			if tc.exec {
+				err = sess.Run("true")
+			} else {
+				require.NoError(t, sess.RequestPty("xterm", 24, 80, ssh.TerminalModes{}))
+				require.NoError(t, sess.Shell())
+				err = sess.Wait()
+			}
+			requireExitStatus(t, err, tc.status)
+			require.Equal(t, tc.message, stderr.String())
+			require.Empty(t, stdout.String())
+		})
+	}
+}
+
+// A command that ran and exited with a status of its own is not one that
+// couldn't start, whatever that status is.
+func TestAGuestCommandThatExitsWith127IsNotToldItCouldntStart(t *testing.T) {
+	h := startHost(t, &Server{Command: readsALine("READY", 0), ForceCommand: []string{"sh", "-c", "exit 127"}, LogPath: "/var/log/upterm.log"})
 	sess, err := h.guestClient(t).NewSession()
 	require.NoError(t, err)
-	require.NoError(t, sess.RequestPty("xterm", 24, 80, ssh.TerminalModes{}))
-	var stdout, stderr bytes.Buffer
-	sess.Stdout, sess.Stderr = &stdout, &stderr
-	require.NoError(t, sess.Shell())
-	requireExitStatus(t, sess.Wait(), 127)
-	require.Equal(t, "upterm: this session's command couldn't start; the host's log has why.\r\n", stderr.String())
-	require.Empty(t, stdout.String())
+	var stderr bytes.Buffer
+	sess.Stderr = &stderr
+	requireExitStatus(t, sess.Run("ignored"), 127)
+	require.Empty(t, stderr.String())
 }
 
 func TestFailedForceCommandDoesNotJoin(t *testing.T) {

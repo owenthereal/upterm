@@ -142,7 +142,7 @@ func TestSFTPConsentSSH(t *testing.T) {
 				code, message := sftpMkdirStatus(t, guest, path)
 				require.Equal(t, uint32(sftp.ErrSSHFxPermissionDenied), code)
 				require.Contains(t, message, "primary host terminal")
-				require.Contains(t, message, "--accept")
+				require.Contains(t, message, "--allow-sftp")
 				_, err = os.Stat(path)
 				require.True(t, os.IsNotExist(err))
 			})

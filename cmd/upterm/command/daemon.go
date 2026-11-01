@@ -174,6 +174,7 @@ func buildDaemonHost(ctx context.Context, name string, opts hostOptions, child *
 		AcceptExec:        allowExec,
 		ExecDisabled:      flagNoExec,
 		HideClientIP:      shouldHideClientIP(),
+		LogPath:           utils.UptermLogFilePath(),
 		Signers:           signers,
 		IdentitiesOnly:    identitiesOnlyRequested(),
 		HostKey:           hostKey,

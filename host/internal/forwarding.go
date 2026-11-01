@@ -13,13 +13,11 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-	"unicode/utf8"
 
 	gssh "charm.land/ssh"
 	"github.com/olebedev/emitter"
 	"github.com/owenthereal/upterm/host/api"
 	"github.com/owenthereal/upterm/host/consent"
-	uio "github.com/owenthereal/upterm/io"
 	"github.com/owenthereal/upterm/upterm"
 	"github.com/owenthereal/upterm/utils"
 	"golang.org/x/crypto/ssh"
@@ -128,10 +126,6 @@ var (
 	errForwardDestination = errors.New("invalid forwarding destination")
 	errForwardNotLoopback = errors.New("upterm forwards only to literal loopback addresses")
 )
-
-// maxEchoedDestination bounds how much of a refused destination the refusal
-// echoes: a name is at most 253 bytes, and a guest can send far more.
-const maxEchoedDestination = 255
 
 // The address and decimal port form the complete consent subject, and the same
 // tuple is used by the dial. Never resolve names to qualify for loopback trust.
@@ -254,14 +248,7 @@ func forwardRefusal(err error, address string, port uint32) string {
 // somewhere else, where loopback is not what the guest asked for.
 func notLoopbackRefusal(address string, port uint32) string {
 	p := strconv.FormatUint(uint64(port), 10)
-	if len(address) > maxEchoedDestination {
-		cut := maxEchoedDestination
-		for cut > 0 && !utf8.RuneStart(address[cut]) {
-			cut--
-		}
-		address = address[:cut] + "…"
-	}
-	refusal := "upterm: forwarding to " + net.JoinHostPort(uio.PlainText(address), p) + " refused: " + errForwardNotLoopback.Error()
+	refusal := "upterm: forwarding to " + net.JoinHostPort(guestText(address), p) + " refused: " + errForwardNotLoopback.Error()
 	if ip, err := netip.ParseAddr(address); err == nil && !ip.WithZone("").Unmap().IsLoopback() {
 		return refusal
 	}

@@ -64,6 +64,9 @@ type Server struct {
 	// SSH_CONNECTION and SSH_CLIENT, as --hide-client-ip keeps it out of
 	// what upterm prints.
 	HideClientIP bool
+	// LogPath is where the host's log is, which a guest whose command
+	// couldn't start is told to have the host look in. Empty names none.
+	LogPath string
 	// HostKey is the key both doors present. A session's key, not the
 	// operator's identity: a key exchange signs with whatever is here, on
 	// every join, attach and rekey, and an identity held by a confirming
@@ -349,6 +352,7 @@ func (s *Server) ServeWithContext(ctx context.Context, guest, host net.Listener)
 		replayBudget:      replayBudget,
 		commandEnv:        s.CommandEnv,
 		hideClientIP:      s.HideClientIP,
+		logPath:           s.LogPath,
 		ptmx:              shared,
 		eventEmmiter:      s.EventEmitter,
 		terminals:         newTerminalWindows(s.Logger),
@@ -1008,6 +1012,7 @@ type sessionHandler struct {
 	acceptExec, execDisabled bool
 	commandEnv               []string
 	hideClientIP             bool
+	logPath                  string
 	ptmx                     PTY
 	eventEmmiter             *emitter.Emitter
 	// terminals is the geometry of every terminal attached to the session,

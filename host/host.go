@@ -165,6 +165,10 @@ type Host struct {
 	// HideClientIP keeps a guest's address out of its forced command's
 	// SSH_CONNECTION and SSH_CLIENT.
 	HideClientIP bool
+	// LogPath is where Logger's records are written, which a guest whose
+	// command couldn't start is told to have the host look in. Empty names
+	// none.
+	LogPath string
 	// AutoAccept says the session was started without anyone confirming it
 	// (--accept). With no AuthorizedKeys as well, it is open: anyone with
 	// the session ID can join, and nobody was asked. GetSessionResponse.open
@@ -176,9 +180,10 @@ type Host struct {
 	// still turns them off, and ReadOnly still refuses all but downloads.
 	SFTPAutoAccept bool
 	// FileTransferApprovalRequired says each guest file transfer waits for
-	// the primary host terminal (no --accept). The daemon sets it alongside
-	// TerminalConsent. It is reported to readers
-	// of the session and changes nothing about what is allowed.
+	// the primary host terminal (no --allow-sftp, which --accept and
+	// --full-access include). The daemon sets it alongside TerminalConsent.
+	// It is reported to readers of the session and changes nothing about
+	// what is allowed.
 	FileTransferApprovalRequired bool
 	// ProxyURL, when non-nil, routes the connection to the upterm server
 	// through an HTTP proxy.
@@ -1196,6 +1201,7 @@ func (c *Host) Run(ctx context.Context) (runErr error) {
 			AcceptExec:                 c.AcceptExec,
 			ExecDisabled:               c.ExecDisabled,
 			HideClientIP:               c.HideClientIP,
+			LogPath:                    c.LogPath,
 			HostKey:                    hostKey,
 			AuthorizedKeys:             aks,
 			GuestCertAuthority:         relayAuthority.IsUserAuthority,

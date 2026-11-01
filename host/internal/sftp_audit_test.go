@@ -102,6 +102,9 @@ func TestSFTPAudit(t *testing.T) {
 			records := sftpAuditRecords(t, output)
 			require.Len(t, records, 1)
 			requireSFTPAudit(t, records[0], "mkdir", tc.outcome, []string{path})
+			if tc.outcome == "unavailable" {
+				require.Contains(t, records[0]["reason"], "the host can attach with approval escapes enabled or use --allow-sftp")
+			}
 			require.Equal(t, strconv.QuoteToASCII("guest"), records[0]["fingerprint"])
 			require.Equal(t, strconv.QuoteToASCII("connection"), records[0]["connection_id"])
 		})

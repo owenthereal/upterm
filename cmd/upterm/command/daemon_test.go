@@ -451,6 +451,20 @@ func TestBuildDaemonHostNotifiesByName(t *testing.T) {
 	}, titles)
 }
 
+// A guest whose command can't start is told where the host's log is: the one
+// this daemon writes to, which its record names as well.
+func TestBuildDaemonHostTellsGuestsWhereItsLogIs(t *testing.T) {
+	hostCmd()
+	daemonTestRoots(t)
+	a, b := net.Pipe()
+	t.Cleanup(func() { _ = a.Close(); _ = b.Close() })
+	child := bootstrap.NewChild(a, nil)
+	t.Cleanup(func() { _ = child.Close() })
+	h, err := buildDaemonHost(context.Background(), "log", testHostOptions(), child, discardLogger())
+	require.NoError(t, err)
+	require.Equal(t, utils.UptermLogFilePath(), h.LogPath)
+}
+
 // TestBuildDaemonHostHidesClientIPs pins that --hide-client-ip reaches the
 // session, which keeps a guest's address out of its forced command's
 // environment as well as out of what upterm prints. The daemon runs the
