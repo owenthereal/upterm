@@ -243,16 +243,29 @@ func forwardRefusal(err error, address string, port uint32) string {
 }
 
 // notLoopbackRefusal is the loopback rule's refusal of address and port. It
-// names the destination, the guest's own input and so bounded and plain, and
-// how to write it as one the session forwards to: unless it is an address
-// somewhere else, where loopback is not what the guest asked for.
+// names the destination, the guest's own input and so bounded and plain, and,
+// where loopback is what the guest asked for, how to write it as a
+// destination the session forwards to.
 func notLoopbackRefusal(address string, port uint32) string {
 	p := strconv.FormatUint(uint64(port), 10)
 	refusal := "upterm: forwarding to " + net.JoinHostPort(guestText(address), p) + " refused: " + errForwardNotLoopback.Error()
-	if ip, err := netip.ParseAddr(address); err == nil && !ip.WithZone("").Unmap().IsLoopback() {
+	if !meansLoopback(address) {
 		return refusal
 	}
 	return refusal + "; use 127.0.0.1:" + p + " or [::1]:" + p
+}
+
+// meansLoopback reports whether address names this machine's loopback in a
+// form upterm doesn't forward to: localhost, in any case and with or without
+// its final dot, or a name under it, the names set aside for loopback, which
+// upterm never resolves; or a loopback address mapped into IPv6 or given a
+// zone. Any other name may be somewhere else entirely.
+func meansLoopback(address string) bool {
+	if ip, err := netip.ParseAddr(address); err == nil {
+		return ip.WithZone("").Unmap().IsLoopback()
+	}
+	name := strings.ToLower(strings.TrimSuffix(address, "."))
+	return name == "localhost" || strings.HasSuffix(name, ".localhost")
 }
 
 // Pending opens have no per-channel CLOSE notification until acceptance. The
