@@ -6,7 +6,6 @@ import (
 	"bytes"
 	gssh "charm.land/ssh"
 	"context"
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -424,22 +423,30 @@ func TestGuestExecStatusSurvivesTheCommandsOwnExit(t *testing.T) {
 	end := filepath.Join(dir, "end")
 	require.NoError(t, syscall.Mkfifo(end, 0o600))
 	// The hosted command exits 0 once the test opens and closes the FIFO.
-	h := startHost(t, &Server{Command: []string{"sh", "-c", `read -r line < "$0"; exit 0`, end}, AcceptExec: true})
+	srv := &Server{Command: []string{"sh", "-c", `read -r line < "$0"; exit 0`, end}, AcceptExec: true}
+	recorded := make(chan struct{})
+	srv.onPrivateCommandExit = func() { close(recorded) }
+	h := startHost(t, srv)
 	s := execSession(t, h.guestClient(t), false)
 	out, err := s.StdoutPipe()
 	require.NoError(t, err)
-	leaderFile, childFile := filepath.Join(dir, "leader"), filepath.Join(dir, "child")
-	require.NoError(t, s.Start(fmt.Sprintf(`echo $$ > %q; sleep 30 & echo $! > %q; printf done; exit 0`, leaderFile, childFile)))
+	childFile := filepath.Join(dir, "child")
+	require.NoError(t, s.Start(fmt.Sprintf(`sleep 30 & echo $! > %q; printf done; exit 0`, childFile)))
 	readUntil(t, out, "done")
 	t.Cleanup(func() {
 		if pid, err := readPIDFile(childFile); err == nil {
 			_ = syscall.Kill(pid, syscall.SIGKILL)
 		}
 	})
-	leader, err := readPIDFile(leaderFile)
-	require.NoError(t, err)
-	// Reaped, so its exit was observed before the session's end begins.
-	require.Eventually(t, func() bool { return errors.Is(syscall.Kill(leader, 0), syscall.ESRCH) }, harnessTimeout, 5*time.Millisecond)
+	// The handler has recorded the leader's exit before the session's end
+	// begins. The leader being reaped doesn't show that: the runner's waiter
+	// records the exit only after the reap, and an end that came between
+	// would make it an exit after the end.
+	select {
+	case <-recorded:
+	case <-time.After(harnessTimeout):
+		t.Fatal("the handler never recorded the leader's exit")
+	}
 	w, err := os.OpenFile(end, os.O_WRONLY, 0)
 	require.NoError(t, err)
 	require.NoError(t, w.Close())
