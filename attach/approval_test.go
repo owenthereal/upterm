@@ -218,11 +218,12 @@ func TestApprovalVisibleSubjects(t *testing.T) {
 	require.Equal(t, 4096, strings.Count(lines, `\xfe`))
 }
 
-// The review says who is asking, by the host's own label for its key or by
-// the key, saying when anyone with the session ID can join; what it wants, in
-// the words of what it does; and what each answer allows. A file answer is
-// for the paths shown, not for the one operation that asked, so it says what
-// else it allows.
+// The review says who is asking, by the host's own label for its key -- a
+// named user, or the key and the file or URL it came from -- or by the key,
+// saying when anyone with the session ID can join; what it wants, in the
+// words of what it does; and what each answer allows. A file answer is for
+// the paths shown, not for the one operation that asked, so it says what else
+// it allows.
 func TestApprovalReviewSaysWhatItDecides(t *testing.T) {
 	keys := func(allowOne, allowGuest string) []string {
 		return []string{
@@ -248,6 +249,12 @@ func TestApprovalReviewSaysWhatItDecides(t *testing.T) {
 	}{
 		{"exec by a listed guest", alice, "exec", []string{"bash"}, 2, append([]string{
 			`upterm: alice (github:alice) wants to run a command on this machine: "bash"`, shell, "upterm: 57s left; 1 more waiting.",
+		}, execKeys...)},
+		{"exec by a guest an entry names no one for", upterm.ApprovalRequest{
+			Fingerprint: "SHA256:NjkIYAtFt4JkGVLZL0P8B0AXyCnb5oKDHh5H9yOF6/o",
+			Guest:       "a guest with key SHA256:NjkIYAtFt4JkGVLZL0P8B0AXyCnb5oKDHh5H9yOF6/o from /home/owen/.ssh/authorized_keys",
+		}, "exec", []string{"bash"}, 1, append([]string{
+			`upterm: a guest with key SHA256:NjkIYAtFt4JkGVLZL0P8B0AXyCnb5oKDHh5H9yOF6/o from /home/owen/.ssh/authorized_keys wants to run a command on this machine: "bash"`, shell, "upterm: 57s left; 0 more waiting.",
 		}, execKeys...)},
 		{"exec on an open session", upterm.ApprovalRequest{Fingerprint: "SHA256:3Jx9", Unlisted: true}, "exec", []string{"make test"}, 1, append([]string{
 			`upterm: a guest with key SHA256:3Jx9 (anyone with the session ID can join) wants to run a command on this machine: "make test"`, shell, "upterm: 57s left; 0 more waiting.",

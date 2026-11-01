@@ -20,8 +20,11 @@ type AuthorizedKey struct {
 
 // guestLabels names, by fingerprint, the guest each key in aks belongs to,
 // for the approval review to say who is asking: the user an --authorized-user
-// named, "alice (github:alice)", or else where the key came from. A key on
-// more than one entry is named by the first that names someone.
+// named, "alice (github:alice)", or else, for an entry that names no one,
+// such as an authorized_keys file, which can hold several guests' keys, the
+// key and where it came from, "a guest with key SHA256:… from
+// /home/alice/.ssh/authorized_keys". A key on more than one entry is named by
+// the first that names someone.
 func guestLabels(aks []*AuthorizedKey) map[string]string {
 	labels := make(map[string]string)
 	for _, named := range []bool{true, false} {
@@ -29,18 +32,19 @@ func guestLabels(aks []*AuthorizedKey) map[string]string {
 			if (ak.guest != "") != named {
 				continue
 			}
-			label := ak.guest
-			switch {
-			case label != "":
-			case ak.Comment != "":
-				label = "a guest with a key from " + ak.Comment
-			default:
-				label = "a guest with an authorized key"
-			}
 			for _, key := range ak.PublicKeys {
-				if fingerprint := utils.FingerprintSHA256(key); labels[fingerprint] == "" {
-					labels[fingerprint] = label
+				fingerprint := utils.FingerprintSHA256(key)
+				if labels[fingerprint] != "" {
+					continue
 				}
+				label := ak.guest
+				if label == "" {
+					label = "a guest with key " + fingerprint
+					if ak.Comment != "" {
+						label += " from " + ak.Comment
+					}
+				}
+				labels[fingerprint] = label
 			}
 		}
 	}

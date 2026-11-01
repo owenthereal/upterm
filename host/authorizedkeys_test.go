@@ -71,8 +71,9 @@ func Test_parseAuthorizedKeys_emptyInputIsAnError(t *testing.T) {
 }
 
 // The approval review names a guest by the allowlist entry its key is on, as
-// the host wrote it: an --authorized-user's user and reference, or else where
-// the key came from. A key on two entries is named by one that names someone.
+// the host wrote it: an --authorized-user's user and reference, or, for an
+// entry that names no one and may hold several guests' keys, the key and
+// where it came from. A key on two entries is named by one that names someone.
 func Test_guestLabels(t *testing.T) {
 	pinGitHubHost(t, "github.com")
 	newKey := func() ssh.PublicKey {
@@ -87,7 +88,9 @@ func Test_guestLabels(t *testing.T) {
 		require.NoError(t, err)
 		return ref.guest()
 	}
-	alice, bob, carol, dave, erin := newKey(), newKey(), newKey(), newKey(), newKey()
+	dave, _, _, _, err := ssh.ParseAuthorizedKey([]byte(testPublicKey))
+	require.NoError(t, err)
+	alice, bob, carol, erin := newKey(), newKey(), newKey(), newKey()
 	aks := []*AuthorizedKey{
 		{PublicKeys: []ssh.PublicKey{alice, dave}, Comment: "/home/owen/.ssh/authorized_keys"},
 		{PublicKeys: []ssh.PublicKey{alice}, Comment: "github:alice@github.com", guest: named("github:alice")},
@@ -97,10 +100,10 @@ func Test_guestLabels(t *testing.T) {
 	}
 	assert.Equal(t, map[string]string{
 		utils.FingerprintSHA256(alice): "alice (github:alice)",
-		utils.FingerprintSHA256(dave):  "a guest with a key from /home/owen/.ssh/authorized_keys",
+		utils.FingerprintSHA256(dave):  "a guest with key SHA256:NjkIYAtFt4JkGVLZL0P8B0AXyCnb5oKDHh5H9yOF6/o from /home/owen/.ssh/authorized_keys",
 		utils.FingerprintSHA256(bob):   "bob (gitea:bob@git.example.com)",
-		utils.FingerprintSHA256(carol): "a guest with a key from https://keys.example.com/carol.keys",
-		utils.FingerprintSHA256(erin):  "a guest with an authorized key",
+		utils.FingerprintSHA256(carol): "a guest with key " + utils.FingerprintSHA256(carol) + " from https://keys.example.com/carol.keys",
+		utils.FingerprintSHA256(erin):  "a guest with key " + utils.FingerprintSHA256(erin),
 	}, guestLabels(aks))
 	assert.Empty(t, guestLabels(nil))
 }
