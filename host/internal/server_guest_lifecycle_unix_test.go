@@ -6,7 +6,10 @@ import (
 	"bytes"
 	"context"
 	"io"
+	"log/slog"
 	"net"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -215,6 +218,76 @@ func TestARefusedForwardPreservesConsentReason(t *testing.T) {
 			require.Equal(t, tc.want, open.Message)
 		})
 	}
+}
+
+// A command that exits on its own ends the session with no stop: the
+// session's context ends and the stop's never does. A forward still waiting
+// for approval then ends with the session, as it would at a stop or with its
+// transport, rather than waiting on until the tunnel closes: it is refused
+// and audited as canceled, and nothing is dialed.
+func TestAPendingForwardEndsWhenTheCommandExits(t *testing.T) {
+	end := filepath.Join(t.TempDir(), "end")
+	asked, ended := make(chan struct{}), make(chan struct{})
+	output := &recordingWriter{}
+	h := startHost(t, &Server{
+		// Exits 0 once the test creates the file. Polled rather than a FIFO's
+		// EOF, which a hosted command here has been seen to miss.
+		Command: []string{"sh", "-c", `while [ ! -e "$0" ]; do sleep 0.01; done; exit 0`, end},
+		Logger:  slog.New(slog.NewJSONHandler(output, nil)),
+		PermissionChecker: forwardPermissionFunc(func(ctx context.Context, _ consent.Operation, _ consent.ClientInfo, _ ...string) (consent.Decision, error) {
+			close(asked)
+			<-ctx.Done()
+			close(ended)
+			return consent.Deny, consent.ErrCanceled
+		}),
+	})
+	target, err := net.ListenTCP("tcp", &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	require.NoError(t, err)
+	defer func() { _ = target.Close() }()
+	guest := h.guestClient(t)
+	dialed := make(chan error, 1)
+	go func() {
+		conn, err := guest.Dial("tcp", target.Addr().String())
+		if conn != nil {
+			_ = conn.Close()
+		}
+		dialed <- err
+	}()
+	select {
+	case <-asked:
+	case <-time.After(harnessTimeout):
+		t.Fatal("the forward was not put to the checker")
+	}
+	require.NoError(t, os.WriteFile(end, nil, 0o600))
+	select {
+	case <-h.stopped:
+	case <-time.After(harnessTimeout):
+		t.Fatal("the session did not end with its command")
+	}
+	// Well before the guest's own connection deadline could end the wait.
+	select {
+	case <-ended:
+	case <-time.After(2 * time.Second):
+		t.Fatal("forward still waiting for approval after the session ended")
+	}
+	var open *ssh.OpenChannelError
+	require.ErrorAs(t, <-dialed, &open)
+	require.Equal(t, ssh.Prohibited, open.Reason)
+	require.Equal(t, forwardCanceledRefusal, open.Message)
+	var policy []map[string]any
+	for _, record := range forwardingAuditRecords(t, string(output.bytes())) {
+		if record["msg"] == "forwarding permission policy" {
+			policy = append(policy, record)
+		}
+	}
+	require.Len(t, policy, 1)
+	require.Equal(t, "canceled", policy[0]["outcome"])
+	require.NoError(t, target.SetDeadline(time.Now().Add(20*time.Millisecond)))
+	conn, err := target.Accept()
+	if conn != nil {
+		_ = conn.Close()
+	}
+	require.Error(t, err, "a forward the session's end canceled was dialed")
 }
 
 // A read-only session can't allow forwarding: the host would have to drop

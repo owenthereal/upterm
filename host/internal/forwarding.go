@@ -237,9 +237,9 @@ func forwardRefusal(err error) string {
 }
 
 // Pending opens have no per-channel CLOSE notification until acceptance. The
-// arrival deadline bounds consent and dial; accepted traffic retains only the
-// original transport and host lifetime.
-func forwardingHandler(events *emitter.Emitter, forwards *Forwards, policy forwardingPolicy, hostCtx context.Context, logger *slog.Logger) gssh.ChannelHandler {
+// arrival deadline and the session bound consent and dial; accepted traffic
+// retains only the original transport and host lifetime.
+func forwardingHandler(events *emitter.Emitter, forwards *Forwards, policy forwardingPolicy, hostCtx, sessionCtx context.Context, logger *slog.Logger) gssh.ChannelHandler {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -275,10 +275,18 @@ func forwardingHandler(events *emitter.Emitter, forwards *Forwards, policy forwa
 		}
 		openCtx, cancelOpen := context.WithDeadline(transferCtx, arrived.Add(consent.PermissionTimeout))
 		defer cancelOpen()
+		// A host stop ends an open through the transfer it starts. A command
+		// that exits on its own ends only the session's context, so that ends
+		// the open too, and with it any wait for approval.
+		stopSession := context.AfterFunc(sessionCtx, cancelOpen)
+		defer stopSession()
+		if sessionCtx.Err() != nil {
+			cancelOpen()
+		}
 		// Cancellation propagation through an SSH context can be asynchronous.
 		// Recheck the original owners synchronously at every side-effect boundary.
 		openError := func() error {
-			for _, parent := range []context.Context{ctx, hostCtx, openCtx} {
+			for _, parent := range []context.Context{ctx, hostCtx, sessionCtx, openCtx} {
 				if err := parent.Err(); err != nil {
 					return err
 				}
