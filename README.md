@@ -452,9 +452,10 @@ change them.
 
 When a guest asks for something, upterm says so in your terminal. Type `~a` at
 the start of a line to review the oldest request. The review says who is
-asking and what they want. A guest an `--authorized-user` entry names, such
-as `github:alice`, is shown as `alice (github:alice)`; any other guest by
-their key, with the entry that lists it, if one does. Answer with the code it
+asking and what they want. A guest that a `provider:user` entry names, such
+as `--authorized-user github:alice`, is shown as `alice (github:alice)`. Any
+other guest is shown by their key, with the entry that let them in when there
+is one: a URL entry or an `--authorized-keys` file. Answer with the code it
 shows:
 
 - `y CODE` then Enter allows what the review names, on this connection only:
