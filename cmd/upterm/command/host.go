@@ -236,7 +236,16 @@ reports the command's status.`,
   upterm host --detach --accept --authorized-user github:alice
 
   # The same, as JSON for a script:
-  upterm host --detach --accept --authorized-user github:alice -o json`,
+  upterm host --detach --accept --authorized-user github:alice -o json
+
+  # A door to this machine for alice's keys alone, in the background: plain
+  # ssh opens Herdr, and alice can also run commands, transfer files and
+  # forward to this machine's loopback ports:
+  upterm host --detach --name home --full-access --authorized-user github:alice --login-command herdr
+
+  # On a CI runner, with nobody there to ask: a session alice can open in
+  # VS Code (Remote-SSH), which runs its server and forwards to its port:
+  upterm host --detach --accept --authorized-user github:alice --allow-exec --allow-forwarding=loopback`,
 		PreRunE: validateShareRequiredFlags,
 		RunE:    shareRunE,
 	}
@@ -299,6 +308,23 @@ reports the command's status.`,
 		"Let a user join with the public keys a code-hosting service lists for them, fetched through --proxy when it is set. Repeatable. "+
 			"Providers: "+host.ProviderList()+". "+
 			"Examples: github:alice, github:bob@ghe.example.com, gitea:carol@git.example.com, https://git.example.com/dave")
+
+	// The help lists the flags by what they decide; the rest are under the
+	// last heading.
+	const (
+		whoCanJoin = "Who can join"
+		guestsDo   = "What guests can do"
+		background = "Running in the background"
+		relay      = "Relay"
+		other      = "Other flags"
+	)
+	groupFlags(cmd, whoCanJoin, guestsDo, background, relay, other)
+	flags := cmd.PersistentFlags()
+	flagGroup(flags, whoCanJoin, "authorized-keys", "authorized-user")
+	flagGroup(flags, guestsDo, "allow-exec", "allow-sftp", "allow-forwarding", "full-access",
+		"no-exec", "no-sftp", "no-forwarding", "read-only", "login-command", "force-command")
+	flagGroup(flags, background, "detach", "accept", "name", "output", "join-timeout")
+	flagGroup(flags, relay, "server", "proxy", "private-key", "known-hosts", "skip-host-key-check")
 
 	// Superseded by --authorized-user. Kept working and hidden rather than
 	// deprecated: action-upterm wraps these flags and users pin it at @v1, so a

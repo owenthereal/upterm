@@ -7,7 +7,9 @@ import (
 	"testing"
 	"unicode"
 
+	"github.com/google/shlex"
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 	"github.com/stretchr/testify/require"
 )
 
@@ -224,4 +226,79 @@ func TestGuestExecHostHelp(t *testing.T) {
 	require.NotNil(t, allowExec)
 	require.Contains(t, allowExec.Usage, "stdin can carry further code")
 	require.Contains(t, cmd.PersistentFlags().Lookup("no-exec").Usage, "forced exec")
+}
+
+// host's help lists its flags under headings, each flag once, and in one set
+// of columns across the headings.
+func TestHostHelpGroupsItsFlags(t *testing.T) {
+	setupSessionRoots(t)
+	withConfig(t, "")
+	stdout, _, code := runCLI(t, "host", "--help")
+	require.Equal(t, 0, code)
+	require.NotContains(t, stdout, "\nFlags:\n")
+
+	type group struct {
+		heading string
+		flags   []string
+	}
+	want := []group{
+		{"Who can join", []string{"authorized-keys", "authorized-user"}},
+		{"What guests can do", []string{"allow-exec", "allow-forwarding", "allow-sftp", "force-command", "full-access",
+			"login-command", "no-exec", "no-forwarding", "no-sftp", "read-only"}},
+		{"Running in the background", []string{"accept", "detach", "join-timeout", "name", "output"}},
+		{"Relay", []string{"known-hosts", "private-key", "proxy", "server", "skip-host-key-check"}},
+		{"Other flags", []string{"escape-char", "help", "hide-client-ip", "pty-size", "term"}},
+		{"Global Flags", []string{"debug"}},
+	}
+	_, flags, ok := strings.Cut(stdout, "\n\n"+want[0].heading+":\n")
+	require.True(t, ok, stdout)
+	flagLine := regexp.MustCompile(`^  (?:-\S, |    )--([^\s=]+)(?: \S+)? {2,}`)
+	var got []group
+	columns := make(map[int]bool)
+	for _, line := range strings.Split(want[0].heading+":\n"+flags, "\n") {
+		if heading, ok := strings.CutSuffix(line, ":"); ok && !strings.HasPrefix(line, " ") {
+			got = append(got, group{heading: heading})
+			continue
+		}
+		if m := flagLine.FindStringSubmatch(line); m != nil {
+			last := &got[len(got)-1]
+			last.flags = append(last.flags, m[1])
+			if last.heading != "Global Flags" {
+				columns[len(m[0])] = true
+			}
+		}
+	}
+	require.Equal(t, want, got)
+	require.Len(t, columns, 1, "the usages start in one column:\n%s", stdout)
+}
+
+// host's examples include a door to your own machine and a CI session for
+// VS Code, and each of them is a command host accepts.
+func TestHostExamples(t *testing.T) {
+	host := findCommand(t, "upterm host")
+	for _, example := range []string{
+		"  upterm host --detach --name home --full-access --authorized-user github:alice --login-command herdr\n",
+		"  upterm host --detach --accept --authorized-user github:alice --allow-exec --allow-forwarding=loopback\n",
+	} {
+		require.Contains(t, host.Example+"\n", example)
+	}
+
+	origSupplied, origCommandLine := suppliedFlags, commandLineFlags
+	t.Cleanup(func() { suppliedFlags, commandLineFlags = origSupplied, origCommandLine; hostCmd() })
+	var n int
+	for _, line := range strings.Split(host.Example, "\n") {
+		rest, ok := strings.CutPrefix(line, "  upterm host")
+		if !ok {
+			continue
+		}
+		n++
+		args, err := shlex.Split(rest)
+		require.NoError(t, err, line)
+		cmd := hostCmd()
+		require.NoError(t, cmd.ParseFlags(args), line)
+		suppliedFlags, commandLineFlags = map[string]bool{}, map[string]bool{}
+		cmd.Flags().Visit(func(f *pflag.Flag) { suppliedFlags[f.Name], commandLineFlags[f.Name] = true, true })
+		require.NoError(t, validateShareRequiredFlags(cmd, cmd.Flags().Args()), line)
+	}
+	require.Greater(t, n, 10, "the examples were found")
 }

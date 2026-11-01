@@ -240,6 +240,15 @@ reports the command's status.
 
   # The same, as JSON for a script:
   upterm host --detach --accept --authorized-user github:alice -o json
+
+  # A door to this machine for alice's keys alone, in the background: plain
+  # ssh opens Herdr, and alice can also run commands, transfer files and
+  # forward to this machine's loopback ports:
+  upterm host --detach --name home --full-access --authorized-user github:alice --login-command herdr
+
+  # On a CI runner, with nobody there to ask: a session alice can open in
+  # VS Code (Remote-SSH), which runs its server and forwards to its port:
+  upterm host --detach --accept --authorized-user github:alice --allow-exec --allow-forwarding=loopback
 .EE
 
 
