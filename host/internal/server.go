@@ -838,10 +838,10 @@ func (h *sessionHandler) takeAdmission(sess gssh.Session) func() {
 
 const (
 	// forceCommandDrainIdle is how long a forced command's exit waits for more
-	// output after the last byte was read. EOF is not a portable signal here:
-	// Windows' ConPTY only reports EOF once the pty is closed, and deferring
-	// that close is the entire point of the drain, so "nothing has arrived for
-	// a while" is what has to stand in for it there.
+	// output after the last byte was read and written to the guest. EOF is not
+	// a portable signal here: Windows' ConPTY only reports EOF once the pty is
+	// closed, and deferring that close is the entire point of the drain, so
+	// "nothing has arrived for a while" is what has to stand in for it there.
 	forceCommandDrainIdle = 100 * time.Millisecond
 
 	// forceCommandDrainTimeout caps the drain overall, so a command that exits
@@ -878,8 +878,10 @@ func (a *activityReader) Read(p []byte) (int, error) {
 
 // drainForceCommandOutput holds the forced command's exit until its output has
 // reached the guest: until the reader reports EOF, or until nothing has arrived
-// for forceCommandDrainIdle, whichever happens first.
-func drainForceCommandOutput(logger *slog.Logger, output *activityReader, drained, done <-chan struct{}) {
+// for forceCommandDrainIdle, whichever happens first. busy, if not nil,
+// reports output still being written to the guest, which is activity as much
+// as a read is: the quiet starts only once that write has returned.
+func drainForceCommandOutput(logger *slog.Logger, output *activityReader, busy func() bool, drained, done <-chan struct{}) {
 	// Start the idle window now rather than at construction. The command may
 	// have run for a while before exiting, and a stale timestamp would read as
 	// "idle" immediately and skip the drain entirely.
@@ -890,6 +892,7 @@ func drainForceCommandOutput(logger *slog.Logger, output *activityReader, draine
 	ticker := time.NewTicker(forceCommandDrainIdle / 2)
 	defer ticker.Stop()
 
+	writing := false
 	for {
 		select {
 		case <-drained:
@@ -900,6 +903,16 @@ func drainForceCommandOutput(logger *slog.Logger, output *activityReader, draine
 			logger.Warn("timed out draining forced command output", "timeout", forceCommandDrainTimeout)
 			return
 		case <-ticker.C:
+			if busy != nil && busy() {
+				writing = true
+				continue
+			}
+			if writing {
+				// The write returned since the last tick.
+				writing = false
+				output.touch()
+				continue
+			}
 			if output.idleFor() >= forceCommandDrainIdle {
 				return
 			}

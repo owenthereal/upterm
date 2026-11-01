@@ -3,6 +3,7 @@ package internal
 import (
 	"io"
 	"log/slog"
+	"sync/atomic"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -35,7 +36,7 @@ func TestDrainForceCommandOutput(t *testing.T) {
 				returned := make(chan struct{})
 				go func() {
 					defer close(returned)
-					drainForceCommandOutput(discardLogger(), newActivityReader(blockingReader{}), drained, session)
+					drainForceCommandOutput(discardLogger(), newActivityReader(blockingReader{}), nil, drained, session)
 				}()
 				requireCompleted(t, returned)
 			})
@@ -54,7 +55,7 @@ func TestDrainForceCommandOutput(t *testing.T) {
 				returned := make(chan struct{})
 				go func() {
 					defer close(returned)
-					drainForceCommandOutput(discardLogger(), output, make(chan struct{}), session)
+					drainForceCommandOutput(discardLogger(), output, nil, make(chan struct{}), session)
 				}()
 				synctest.Wait()
 				bound := 100 * time.Millisecond
@@ -88,7 +89,7 @@ func TestDrainForceCommandOutput(t *testing.T) {
 			defer close(session)
 			go func() {
 				defer close(returned)
-				drainForceCommandOutput(discardLogger(), output, make(chan struct{}), session)
+				drainForceCommandOutput(discardLogger(), output, nil, make(chan struct{}), session)
 			}()
 			synctest.Wait()
 			for range 6 {
@@ -104,6 +105,50 @@ func TestDrainForceCommandOutput(t *testing.T) {
 			requireCompleted(t, returned)
 		})
 	})
+	// A write to the guest still under way is output on its way, however
+	// long it takes: the quiet that ends the drain starts once it returns,
+	// and a write that never does is held to the hard bound.
+	for _, returns := range []bool{true, false} {
+		name := "a write under way is activity"
+		if !returns {
+			name = "a write held to the hard bound"
+		}
+		t.Run(name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				output := newActivityReader(blockingReader{})
+				session, returned := make(chan struct{}), make(chan struct{})
+				defer close(session)
+				var writing atomic.Bool
+				writing.Store(true)
+				go func() {
+					defer close(returned)
+					drainForceCommandOutput(discardLogger(), output, writing.Load, make(chan struct{}), session)
+				}()
+				synctest.Wait()
+				if !returns {
+					time.Sleep(2*time.Second - time.Nanosecond)
+					synctest.Wait()
+					requirePending(t, returned, "drain returned before its deadline")
+					time.Sleep(time.Nanosecond)
+					requireCompleted(t, returned)
+					return
+				}
+				// Well past the quiet that ends a drain with nothing written.
+				time.Sleep(300 * time.Millisecond)
+				synctest.Wait()
+				requirePending(t, returned, "drain returned while a write was under way")
+				// The write returns between ticks, and the quiet starts at the
+				// next one, at 350ms.
+				time.Sleep(25 * time.Millisecond)
+				writing.Store(false)
+				time.Sleep(125*time.Millisecond - time.Nanosecond)
+				synctest.Wait()
+				requirePending(t, returned, "drain skipped the quiet after the write")
+				time.Sleep(time.Nanosecond)
+				requireCompleted(t, returned)
+			})
+		})
+	}
 }
 
 func TestActivityReaderTracksReads(t *testing.T) {
