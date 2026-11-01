@@ -25,6 +25,7 @@ import (
 	"github.com/owenthereal/upterm/host"
 	"github.com/owenthereal/upterm/host/sessiondir"
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/crypto/ssh"
@@ -1459,9 +1460,12 @@ func TestForwardingFlags(t *testing.T) {
 // a daemon, or contacting the public relay.
 func TestDocumentedGuestToolOptionsParseOffline(t *testing.T) {
 	defer hostCmd()
+	origSupplied, origCommandLine := suppliedFlags, commandLineFlags
+	t.Cleanup(func() { suppliedFlags, commandLineFlags = origSupplied, origCommandLine })
 	for _, args := range [][]string{
 		{},
-		{"--detach", "--name", "home", "--accept", "--authorized-user", "github:YOUR_GITHUB_USER", "--login-command", "herdr", "--allow-exec", "--allow-forwarding=loopback"},
+		{"--detach", "--name", "home", "--full-access", "--authorized-user", "github:YOUR_GITHUB_USER", "--login-command", "herdr"},
+		{"--detach", "--name", "home", "--no-exec", "--no-sftp", "--authorized-user", "github:YOUR_GITHUB_USER", "--allow-forwarding=loopback"},
 		{"--force-command", "tmux attach -t pair-programming", "--", "tmux", "new", "-t", "pair-programming"},
 		{"--allow-forwarding=loopback"},
 		{"--allow-forwarding=any"},
@@ -1470,6 +1474,10 @@ func TestDocumentedGuestToolOptionsParseOffline(t *testing.T) {
 	} {
 		cmd := hostCmd()
 		require.NoError(t, cmd.ParseFlags(args))
+		// As the CLI records them: these flags came from the command line, so
+		// --full-access sees the --authorized-user beside it.
+		suppliedFlags, commandLineFlags = map[string]bool{}, map[string]bool{}
+		cmd.Flags().Visit(func(f *pflag.Flag) { suppliedFlags[f.Name], commandLineFlags[f.Name] = true, true })
 		require.NoError(t, validateShareRequiredFlags(cmd, cmd.Flags().Args()))
 		opts, err := parseHostOptions(cmd.Flags().Args())
 		require.NoError(t, err)
