@@ -1191,11 +1191,14 @@ func TestClientTreatsAShortWriteToStdoutAsADetach(t *testing.T) {
 // entered is closed when the first write parks, so a test can know it did.
 //
 // fail is the other failure mode: a socket that is simply gone, whose writes
-// return at once instead of parking. entered is closed for that one too.
+// return at once instead of parking, and from which nothing more is read. A
+// read, even one already waiting, returns only once the connection is
+// closed, so nothing the peer does from then on reaches the client.
+// entered is closed for that one too.
 type blockableConn struct {
 	net.Conn
 	block   chan struct{} // closed to make writes block
-	fail    chan struct{} // closed to make writes fail immediately
+	fail    chan struct{} // closed to make writes fail immediately and reads deliver nothing
 	closed  chan struct{}
 	entered chan struct{}
 	once    sync.Once
@@ -1220,6 +1223,17 @@ func (b *blockableConn) Write(p []byte) (int, error) {
 		return 0, net.ErrClosed
 	default:
 		return b.Conn.Write(p)
+	}
+}
+
+func (b *blockableConn) Read(p []byte) (int, error) {
+	n, err := b.Conn.Read(p)
+	select {
+	case <-b.fail:
+		<-b.closed
+		return 0, net.ErrClosed
+	default:
+		return n, err
 	}
 }
 
@@ -1619,23 +1633,30 @@ func TestClientDropsInputBeyondTheBacklogAndStillDetaches(t *testing.T) {
 // 634-639). So the first window-change arms the error and the second one
 // receives it, and it is the second that the actor logs.
 //
-// Barriers, not sleeps: the door signals that the shell is up before the
-// transport is broken, the connection signals that a write has failed before
-// the second resize is sent, and the handler signals that it was entered —
-// so the test cannot pass by cancelling before anything it is about happened.
+// Barriers, not sleeps: the door's output on the terminal signals that the
+// shell is up before the transport is broken, the connection signals that a
+// write has failed before the second resize is sent, and the handler signals
+// that it was entered — so the test cannot pass by cancelling before anything
+// it is about happened.
+//
+// The broken socket delivers nothing either: anything the client read from
+// then on could end the session before the cancel does, and Run would report
+// a disconnect, not the detach this test is about. That is safe because the
+// output is the last thing the door sends, so once it is on the terminal the
+// client has read all of it.
 func TestClientResizeFailureWithABlockedLoggerDoesNotHoldRun(t *testing.T) {
 	release := make(chan struct{})
 	defer close(release)
 	handler := newBlockingHandler(release)
 
-	attached := make(chan struct{})
 	door := serveDoor(t, func(s gssh.Session) {
-		close(attached)
+		_, _ = io.WriteString(s, "up")
 		_, _ = io.Copy(io.Discard, s)
 	})
 	conn := newBlockableConn()
 	resizes := make(chan termsize.Size, 1)
-	c := &Client{Socket: door.socket, HostKeys: door.pin(), Stdout: io.Discard,
+	out := &syncSink{}
+	c := &Client{Socket: door.socket, HostKeys: door.pin(), Stdout: out,
 		Logger:  slog.New(handler),
 		Pty:     &Pty{Term: "xterm", Size: termsize.Default},
 		Resizes: resizes,
@@ -1645,12 +1666,8 @@ func TestClientResizeFailureWithABlockedLoggerDoesNotHoldRun(t *testing.T) {
 	defer cancel()
 	done := runAsync(t, ctx, c)
 
-	select {
-	case <-attached:
-	case <-time.After(testTimeout):
-		t.Fatal("the shell never started")
-	}
-	close(conn.fail)                              // every write to the socket now fails
+	waitFor(t, func() bool { return out.String() == "up" }, "the shell never started")
+	close(conn.fail)                              // the socket is gone: writes fail, nothing more is read
 	resizes <- termsize.Size{Cols: 100, Rows: 30} // arms the transport's writeError
 	select {
 	case <-conn.entered:

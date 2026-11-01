@@ -109,6 +109,10 @@ type Server struct {
 	OnCommandStarted func()
 	// beforePublishPTY holds the real command-start/publication boundary for tests.
 	beforePublishPTY func()
+	// onPrivateCommandExit runs once a private command's handler has recorded
+	// how its leader exited. Nil in production; a test uses it to end the
+	// session only after that, which the leader's reap alone doesn't show.
+	onPrivateCommandExit func()
 
 	// OnGuestServerStopped is called when the guest listener stops serving,
 	// which behind a TunnelListener means the tunnel is lost for good. The
@@ -361,6 +365,8 @@ func (s *Server) ServeWithContext(ctx context.Context, guest, host net.Listener)
 		kind:              kindGuest,
 		cmdDone:           cmdDone,
 		commandResult:     cmd.Result,
+
+		onPrivateCommandExit: s.onPrivateCommandExit,
 	}
 
 	ss := []gssh.Signer{s.HostKey}
@@ -1046,6 +1052,8 @@ type sessionHandler struct {
 
 	// runPrivateProcess is a controllable process fixture; nil uses the real runner.
 	runPrivateProcess func(context.Context, gssh.Session, guestProcessSpec) (int, error)
+	// onPrivateCommandExit is the Server's. Nil in a test's handler.
+	onPrivateCommandExit func()
 	// SFTP configuration
 	permissionChecker consent.PermissionChecker
 	sftpAutoAccept    bool

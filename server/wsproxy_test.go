@@ -483,16 +483,24 @@ func Test_WebSocketProxy_ANeighboursGuestIsDialedDirectly(t *testing.T) {
 func Test_WebSocketProxy_AGuestEndingItsWebSocketIsNotAnError(t *testing.T) {
 	for _, tc := range []struct {
 		name string
-		end  func(guest *websocket.Conn, node *net.TCPConn)
+		end  func(t *testing.T, guest *websocket.Conn, node *net.TCPConn)
 		want []string
 	}{
-		{"the guest closes without a close frame", func(guest *websocket.Conn, _ *net.TCPConn) {
+		{"the guest closes without a close frame", func(_ *testing.T, guest *websocket.Conn, _ *net.TCPConn) {
 			_ = guest.Close()
 		}, nil},
-		{"the guest sends a close frame", func(guest *websocket.Conn, _ *net.TCPConn) {
+		{"the guest sends a close frame", func(_ *testing.T, guest *websocket.Conn, _ *net.TCPConn) {
 			_ = guest.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""))
 		}, nil},
-		{"the node resets the connection", func(_ *websocket.Conn, node *net.TCPConn) {
+		{"the node resets the connection", func(t *testing.T, guest *websocket.Conn, node *net.TCPConn) {
+			// Only once a byte has come through, which the handler forwards
+			// only after its dial has returned. Accept returns as soon as the
+			// node's kernel has the connection, and a reset that reaches the
+			// dial while it is still waiting to learn the connect finished
+			// fails the dial, not the pipe.
+			require.NoError(t, guest.WriteMessage(websocket.BinaryMessage, []byte("x")))
+			_, err := io.ReadFull(node, make([]byte, 1))
+			require.NoError(t, err)
 			_ = node.SetLinger(0)
 			_ = node.Close()
 		}, []string{"ERROR error piping"}},
@@ -517,7 +525,7 @@ func Test_WebSocketProxy_AGuestEndingItsWebSocketIsNotAnError(t *testing.T) {
 			node, err := ln.Accept()
 			require.NoError(t, err)
 			t.Cleanup(func() { _ = node.Close() })
-			tc.end(guest, node.(*net.TCPConn))
+			tc.end(t, guest, node.(*net.TCPConn))
 
 			select {
 			case <-served:

@@ -326,6 +326,9 @@ func (h *sessionHandler) handlePrivateCommand(sess gssh.Session, selection guest
 			observedCode.Store(int64(code))
 			observedOutcome.Store(normal)
 			ended.Store(true)
+			if h.onPrivateCommandExit != nil {
+				h.onPrivateCommandExit()
+			}
 		},
 		onStarted: func() {
 			if isGuest {
