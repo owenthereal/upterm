@@ -28,6 +28,7 @@ import (
 	"github.com/owenthereal/upterm/attach"
 	"github.com/owenthereal/upterm/host"
 	"github.com/owenthereal/upterm/host/api"
+	"github.com/owenthereal/upterm/host/consent"
 	"github.com/owenthereal/upterm/internal/logging"
 	"github.com/owenthereal/upterm/internal/testhelpers"
 	uio "github.com/owenthereal/upterm/io"
@@ -739,20 +740,25 @@ func (s *Server) Shutdown() error {
 type Host struct {
 	*host.Host
 
-	Command                  []string
-	ForceCommand             []string
-	PrivateKeys              []string
-	AdminSocketFile          string
-	SessionCreatedCallback   func(context.Context, *api.GetSessionResponse) error
-	ClientJoinedCallback     func(*api.Client)
-	ClientLeftCallback       func(*api.Client)
-	PermittedClientPublicKey string
-	HostKeyCallback          ssh.HostKeyCallback
-	AllowLocalTCPForwarding  bool
-	ReadOnly                 bool
-	SFTPDisabled             bool // Disable SFTP subsystem
-	SFTPAutoAccept           bool // Explicit SFTP pregrant; zero keeps protected operations denied
-	HideClientIP             bool
+	Command                    []string
+	ForceCommand               []string
+	LoginCommand               []string
+	CommandDir                 string
+	AcceptExec                 bool
+	AllowLoopbackTCPForwarding bool
+	PermissionChecker          consent.PermissionChecker
+	PrivateKeys                []string
+	AdminSocketFile            string
+	SessionCreatedCallback     func(context.Context, *api.GetSessionResponse) error
+	ClientJoinedCallback       func(*api.Client)
+	ClientLeftCallback         func(*api.Client)
+	PermittedClientPublicKey   string
+	HostKeyCallback            ssh.HostKeyCallback
+	AllowLocalTCPForwarding    bool
+	ReadOnly                   bool
+	SFTPDisabled               bool // Disable SFTP subsystem
+	SFTPAutoAccept             bool // Explicit SFTP pregrant; zero keeps protected operations denied
+	HideClientIP               bool
 	// Reconnect paces the tunnel's liveness and its redials; a field left
 	// zero takes host.ReconnectTiming's default.
 	Reconnect host.ReconnectTiming
@@ -860,28 +866,33 @@ func (c *Host) Share(url string) error {
 	}
 
 	c.Host = &host.Host{
-		Host:                    url,
-		Command:                 c.Command,
-		ForceCommand:            c.ForceCommand,
-		Signers:                 signers,
-		HostKey:                 hostKey,
-		AuthorizedKeys:          authorizedKeys,
-		AdminSocketFile:         c.AdminSocketFile,
-		SessionCreatedCallback:  c.SessionCreatedCallback,
-		ClientJoinedCallback:    c.ClientJoinedCallback,
-		ClientLeftCallback:      c.ClientLeftCallback,
-		KeepAliveDuration:       keepAliveDuration,
-		Reconnect:               c.Reconnect,
-		Logger:                  logger,
-		HostKeyCallback:         c.HostKeyCallback,
-		AllowLocalTCPForwarding: c.AllowLocalTCPForwarding,
-		ReadOnly:                c.ReadOnly,
-		SFTPDisabled:            c.SFTPDisabled,
-		AutoAccept:              c.SFTPAutoAccept,
-		HideClientIP:            c.HideClientIP,
-		AttachSocketFile:        attachSocket,
-		AwaitInitialClient:      true,
-		AttachListeningCallback: func(s string) { attachReady <- s },
+		Host:                       url,
+		Command:                    c.Command,
+		ForceCommand:               c.ForceCommand,
+		LoginCommand:               c.LoginCommand,
+		CommandDir:                 c.CommandDir,
+		AcceptExec:                 c.AcceptExec,
+		AllowLoopbackTCPForwarding: c.AllowLoopbackTCPForwarding,
+		PermissionChecker:          c.PermissionChecker,
+		Signers:                    signers,
+		HostKey:                    hostKey,
+		AuthorizedKeys:             authorizedKeys,
+		AdminSocketFile:            c.AdminSocketFile,
+		SessionCreatedCallback:     c.SessionCreatedCallback,
+		ClientJoinedCallback:       c.ClientJoinedCallback,
+		ClientLeftCallback:         c.ClientLeftCallback,
+		KeepAliveDuration:          keepAliveDuration,
+		Reconnect:                  c.Reconnect,
+		Logger:                     logger,
+		HostKeyCallback:            c.HostKeyCallback,
+		AllowLocalTCPForwarding:    c.AllowLocalTCPForwarding,
+		ReadOnly:                   c.ReadOnly,
+		SFTPDisabled:               c.SFTPDisabled,
+		AutoAccept:                 c.SFTPAutoAccept,
+		HideClientIP:               c.HideClientIP,
+		AttachSocketFile:           attachSocket,
+		AwaitInitialClient:         true,
+		AttachListeningCallback:    func(s string) { attachReady <- s },
 	}
 
 	errCh := make(chan error, 1)
@@ -1071,8 +1082,8 @@ func (c *Client) Close() {
 	}
 }
 
-func (c *Client) JoinWithContext(ctx context.Context, session *api.GetSessionResponse, clientJoinURL string) error {
-	c.init()
+// Connect opens only the transport, so tools can open independent channels.
+func (c *Client) Connect(session *api.GetSessionResponse, clientJoinURL string) error {
 
 	auths, err := authMethodsFromFiles(c.PrivateKeys)
 	if err != nil {
@@ -1107,6 +1118,16 @@ func (c *Client) JoinWithContext(ctx context.Context, session *api.GetSessionRes
 	if err != nil {
 		return err
 	}
+
+	return nil
+}
+
+func (c *Client) JoinWithContext(ctx context.Context, session *api.GetSessionResponse, clientJoinURL string) error {
+	c.init()
+	if err := c.Connect(session, clientJoinURL); err != nil {
+		return err
+	}
+	var err error
 
 	c.session, err = c.sshClient.NewSession()
 	if err != nil {

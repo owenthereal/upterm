@@ -1,6 +1,7 @@
 package ftests
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -17,6 +18,7 @@ import (
 	"github.com/owenthereal/upterm/upterm"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/crypto/ssh"
 )
 
 func testHostNoAuthorizedKeyAnyClientJoin(t *testing.T, hostShareURL, hostNodeAddr, clientJoinURL string) {
@@ -662,4 +664,75 @@ func keyRefusal(session *api.GetSessionResponse, hostShareURL, clientJoinURL str
 		return "upterm: session " + session.SessionId + " refused your key; if another key is authorized, pass it with ssh -i, or ask the host to add yours."
 	}
 	return "unable to authenticate"
+}
+
+// connectRelayGuest uses the production relay transport without opening a shared
+// terminal: Herdr and Remote-SSH issue their own session and forwarding channels.
+func connectRelayGuest(t *testing.T, record *api.GetSessionResponse, joinURL string) *Client {
+	t.Helper()
+	c := &Client{PrivateKeys: []string{ClientPrivateKey}}
+	require.NoError(t, c.Connect(record, joinURL))
+	t.Cleanup(c.Close)
+	return c
+}
+
+func awaitRelayWait(t *testing.T, done <-chan error) error {
+	t.Helper()
+	select {
+	case err := <-done:
+		return err
+	case <-time.After(reachTimeout):
+		t.Fatal("relay channel did not finish")
+		return nil
+	}
+}
+
+func relayStatus(t *testing.T, err error) int {
+	t.Helper()
+	if err == nil {
+		return 0
+	}
+	var status *ssh.ExitError
+	require.ErrorAs(t, err, &status)
+	return status.ExitStatus()
+}
+
+func relayExec(t *testing.T, c *Client, raw string, stdin io.Reader) ([]byte, []byte, int) {
+	t.Helper()
+	s, err := c.sshClient.NewSession()
+	require.NoError(t, err)
+	defer func() { _ = s.Close() }()
+	var out, stderr bytes.Buffer
+	s.Stdout = &out
+	s.Stderr = &stderr
+	s.Stdin = stdin
+	done := make(chan error, 1)
+	go func() { done <- s.Run(raw) }()
+	status := relayStatus(t, awaitRelayWait(t, done))
+	return out.Bytes(), stderr.Bytes(), status
+}
+
+func requireGuestPresence(t *testing.T, h *Host, want int) {
+	t.Helper()
+	requireRelayPresence(t, h, api.Client_GUEST, want)
+}
+func requireForwardPresence(t *testing.T, h *Host, want int) {
+	t.Helper()
+	requireRelayPresence(t, h, api.Client_FORWARD, want)
+}
+func requireRelayPresence(t *testing.T, h *Host, kind api.Client_Kind, want int) {
+	t.Helper()
+	require.Eventually(t, func() bool {
+		record, err := adminClientSession(h.AdminSocketFile)
+		if err != nil {
+			return false
+		}
+		n := 0
+		for _, c := range record.ConnectedClients {
+			if c.Kind == kind {
+				n++
+			}
+		}
+		return n == want
+	}, reachTimeout, redialPoll, "visible session clients of kind %s: want %d", kind, want)
 }

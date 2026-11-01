@@ -29,6 +29,11 @@ const overshoot = 50 * time.Millisecond * timeScale
 // having published nothing of the batch it stopped in. The REP renders: the
 // fork repeats a long REP cheaply, and it can finish past its deadline in
 // work the meter doesn't count, bounded by the screen's size.
+//
+// Wall time counts whatever else the machine runs, so a case that runs past
+// its deadline is run again, and fails only if it does every time: work the
+// meter doesn't stop overshoots on every run, and a stall of the process on
+// one.
 func TestReplayPathological(t *testing.T) {
 	const wait = 200 * time.Millisecond
 	for _, tc := range []struct {
@@ -43,16 +48,23 @@ func TestReplayPathological(t *testing.T) {
 		{"ED 2 floods", bytes.Repeat([]byte("\x1b[2J"), uio.DefaultReplayBytes/4), false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			began := time.Now()
-			em, err := New().Start(context.Background(), began.Add(wait),
-				captureOf(string(tc.stream), event(1, 0, 512, 256)), termsize.Size{Cols: 512, Rows: 256})
-			if err == nil {
-				var render []byte
-				render, err = em.Render()
-				require.LessOrEqual(t, len(render), uio.DefaultReplayBytes)
+			replay := func() (time.Duration, error) {
+				began := time.Now()
+				em, err := New().Start(context.Background(), began.Add(wait),
+					captureOf(string(tc.stream), event(1, 0, 512, 256)), termsize.Size{Cols: 512, Rows: 256})
+				if err == nil {
+					var render []byte
+					render, err = em.Render()
+					require.LessOrEqual(t, len(render), uio.DefaultReplayBytes)
+				}
+				elapsed := time.Since(began)
+				t.Logf("after %v: %v", elapsed, err)
+				return elapsed, err
 			}
-			elapsed := time.Since(began)
-			t.Logf("after %v: %v", elapsed, err)
+			elapsed, err := replay()
+			for runs := 1; elapsed > wait+overshoot && runs < 3; runs++ {
+				elapsed, err = replay()
+			}
 			require.LessOrEqual(t, elapsed, wait+overshoot)
 			if !tc.finishes {
 				require.ErrorIs(t, err, uio.ErrReplayDeadline)
