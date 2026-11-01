@@ -59,12 +59,13 @@ var exitStatuses = map[string]string{
 	"upterm join":   "Exits with the session's status when one arrives, 0 when you leave (~.), 130 when stopped, and 255 when it can't join, including a usage or configuration error.",
 	"upterm proxy":  "Exit status: 1 when it can't connect to the relay, including a usage or configuration error. Once connected, 0 for end-of-input from ssh unless a relay close or read or write failure is also reported; those failures take precedence and give 1. Errors caused by proxy's own cleanup do not change the result.",
 
-	"upterm session current": "Exits 4 when not in a session ($UPTERM_ADMIN_SOCKET is unset, or no session answers at it), and 1 for any other failure. With -o, not being in a session prints nothing.",
-	"upterm session info":    "Exits 4 when no session has the name, and 1 for any other failure.",
-	"upterm session list":    "Exit status: 0, or 1 when the records directory can't be read, or for a usage or configuration error. A session whose own record can't be read is left out of the list.",
-	"upterm session set":     "Exits 0 when the session took the change, was already claimed, is ending, or has already ended, 4 when no session has the name, and 1 for any other failure -- including a change that could not be confirmed, which may still have taken effect: running set again restarts the window, and 'upterm session info NAME' shows what the session holds.",
-	"upterm session stop":    "Exits 4 when no session has the name, and 1 for any other failure.",
-	"upterm session wait":    "Exit status follows the session: its command's status when the command exited; 0 when it was stopped, or no guest joined within its join timeout; 128+N when the host or its command was killed by signal N; 125 when the outcome can't be known or read, when no session has the name, or for a usage or configuration error. A command can exit 125 too; 'upterm session info NAME -o json' has the reason. Ctrl-C stops waiting, with 130 on Unix, and leaves the session running.",
+	"upterm session current":    "Exits 4 when not in a session ($UPTERM_ADMIN_SOCKET is unset, or no session answers at it), and 1 for any other failure. With -o, not being in a session prints nothing.",
+	"upterm session info":       "Exits 4 when no session has the name, and 1 for any other failure.",
+	"upterm session list":       "Exit status: 0, or 1 when the records directory can't be read, or for a usage or configuration error. A session whose own record can't be read is left out of the list.",
+	"upterm session ssh-config": "Exits 4 when no session has the name, and 1 for any other failure.",
+	"upterm session set":        "Exits 0 when the session took the change, was already claimed, is ending, or has already ended, 4 when no session has the name, and 1 for any other failure -- including a change that could not be confirmed, which may still have taken effect: running set again restarts the window, and 'upterm session info NAME' shows what the session holds.",
+	"upterm session stop":       "Exits 4 when no session has the name, and 1 for any other failure.",
+	"upterm session wait":       "Exit status follows the session: its command's status when the command exited; 0 when it was stopped, or no guest joined within its join timeout; 128+N when the host or its command was killed by signal N; 125 when the outcome can't be known or read, when no session has the name, or for a usage or configuration error. A command can exit 125 too; 'upterm session info NAME -o json' has the reason. Ctrl-C stops waiting, with 130 on Unix, and leaves the session running.",
 
 	"upterm upgrade":     "Exit status: 0 when upterm is up to date or was replaced; 1 when it couldn't be, a package manager owns it, or its arguments are wrong.",
 	"upterm version":     "Exit status: 0, or 1 on failure.",
@@ -104,14 +105,15 @@ func TestUsageLinesNameTheirArguments(t *testing.T) {
 	setupSessionRoots(t)
 	withConfig(t, "")
 	for path, want := range map[string]string{
-		"upterm host":         "upterm host [flags] [-- COMMAND [ARGS...]]",
-		"upterm proxy":        "upterm proxy [flags] URL",
-		"upterm upgrade":      "upterm upgrade [VERSION] [flags]",
-		"upterm session info": "upterm session info NAME|ID [flags]",
-		"upterm session wait": "upterm session wait NAME|ID [flags]",
-		"upterm session stop": "upterm session stop NAME|ID [flags]",
-		"upterm session set":  "upterm session set NAME|ID [flags]",
-		"upterm attach":       "upterm attach [NAME|ID] [flags]",
+		"upterm host":               "upterm host [flags] [-- COMMAND [ARGS...]]",
+		"upterm proxy":              "upterm proxy [flags] URL",
+		"upterm upgrade":            "upterm upgrade [VERSION] [flags]",
+		"upterm session info":       "upterm session info NAME|ID [flags]",
+		"upterm session wait":       "upterm session wait NAME|ID [flags]",
+		"upterm session stop":       "upterm session stop NAME|ID [flags]",
+		"upterm session set":        "upterm session set NAME|ID [flags]",
+		"upterm session ssh-config": "upterm session ssh-config NAME|ID [flags]",
+		"upterm attach":             "upterm attach [NAME|ID] [flags]",
 	} {
 		stdout, _, code := runCLI(t, append(strings.Fields(path)[1:], "--help")...)
 		require.Equal(t, 0, code, path)
@@ -125,7 +127,7 @@ func TestUsageLinesNameTheirArguments(t *testing.T) {
 // The commands that take a session say it may be given by name or by ID,
 // and show an ID in an example.
 func TestSessionArgumentsAreANameOrAnID(t *testing.T) {
-	for _, path := range []string{"upterm attach", "upterm session info", "upterm session wait", "upterm session stop", "upterm session set"} {
+	for _, path := range []string{"upterm attach", "upterm session info", "upterm session wait", "upterm session stop", "upterm session set", "upterm session ssh-config"} {
 		c := findCommand(t, path)
 		require.Contains(t, oneSpaced(c.Long), oneSpaced(nameOrIDHelp), path)
 		require.Contains(t, c.Example, exampleSessionID, path)

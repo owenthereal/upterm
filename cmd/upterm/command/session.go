@@ -295,13 +295,21 @@ type currentInfo struct {
 	TCPForwarding                *string   `json:"tcpForwarding,omitempty"`
 	ApprovalMethod               *string   `json:"approvalMethod,omitempty"`
 
+	// The relay key the session's host trusted, as `session info` reports it:
+	// see sessionInfo. Left out when the daemon doesn't say.
+	KnownHosts    string `json:"knownHosts,omitempty"`
+	RelayKeyTrust string `json:"relayKeyTrust,omitempty"`
+
 	// The connect strings, built from the host and SSH user every daemon
 	// sends, but printed only when the status the daemon reports says guests
 	// can use them, which is `session info`'s rule: a disconnected session
 	// keeps a connect string that can't connect, and a daemon that doesn't
-	// report its status doesn't say whether its can.
+	// report its status doesn't say whether its can. SSHConfig is the Host
+	// block for ~/.ssh/config, under the session's name, or its ID when the
+	// daemon doesn't give one.
 	SSHCommand  string `json:"sshCommand,omitempty"`
 	JoinCommand string `json:"joinCommand,omitempty"`
+	SSHConfig   string `json:"sshConfig,omitempty"`
 }
 
 // currentInfoFrom builds currentInfo from the daemon's answer alone. The
@@ -349,12 +357,22 @@ func currentInfoFrom(sess *api.GetSessionResponse) currentInfo {
 	info.JoinDeadline = join.JoinDeadline
 	info.FirstGuestJoinedAt = join.FirstGuestJoinedAt
 
+	report := withSessionReport(sessionInfo{}, sess)
+	info.KnownHosts, info.RelayKeyTrust = report.KnownHosts, report.RelayKeyTrust
+
 	if joinable(info.Status) {
 		// A host URL that won't parse costs the connect strings, not the
 		// answer: the rest of it is still the daemon's.
 		if detail, err := buildSessionDetail(sess); err == nil {
 			info.SSHCommand = detail.SSHCommand
 			info.JoinCommand = detail.JoinCommand
+		}
+		alias := sess.GetName()
+		if alias == "" {
+			alias = sess.GetSessionId()
+		}
+		if block, err := sshConfigFor(sess, alias); err == nil {
+			info.SSHConfig = block
 		}
 	}
 	return info
@@ -385,6 +403,7 @@ func sessionCmd() *cobra.Command {
 	cmd.AddCommand(show())
 	cmd.AddCommand(stop())
 	cmd.AddCommand(setCmd())
+	cmd.AddCommand(sshConfigCmd())
 	cmd.AddCommand(wait())
 
 	return cmd
@@ -1072,7 +1091,7 @@ ConnectedClients, LaunchID, Open, JoinStateSource, JoinTimeout, JoinDeadline,
 FirstGuestJoinedAt, Name, Status, Reconnect, TunnelReason, TunnelLostAt,
 NextAttemptAt, StartConfirmed, ReadOnly, FileTransfer,
 FileTransferApprovalRequired, LocalForwarding, GuestShell, Execution, TCPForwarding,
-ApprovalMethod, SSHCommand and JoinCommand.
+ApprovalMethod, KnownHosts, RelayKeyTrust, SSHCommand, JoinCommand and SSHConfig.
 From LaunchID on, a variable the session's upterm doesn't report is empty,
 false, nil or a zero time (0001-01-01 ...), so test it first:
 {{with .Name}}{{.}}{{end}}, or {{if not .TunnelLostAt.IsZero}}...{{end}}.
@@ -1225,6 +1244,10 @@ type sessionInfo struct {
 	LoginCommand string `json:"loginCommand,omitempty"`
 	SSHCommand   string `json:"sshCommand,omitempty"`
 	JoinCommand  string `json:"joinCommand,omitempty"`
+	// SSHConfig is the Host block for ~/.ssh/config that reaches the
+	// session under its name, as `session ssh-config` prints it. Present with
+	// the connect strings.
+	SSHConfig string `json:"sshConfig,omitempty"`
 	// Host is the relay the session was started against, as the daemon
 	// reports it (`session current` prints the same value under the same
 	// key). Absent unless the daemon answered for this launch.
@@ -1266,6 +1289,15 @@ type sessionInfo struct {
 	Execution                    *string `json:"execution,omitempty"`
 	TCPForwarding                *string `json:"tcpForwarding,omitempty"`
 	ApprovalMethod               *string `json:"approvalMethod,omitempty"`
+	// KnownHosts is the known_hosts text for the relay key the session's
+	// host trusted on its first connection, which a guest pins: the key's
+	// line, after a comment saying so when the host accepted the key on first
+	// use. RelayKeyTrust is how the host came to trust it: "known" (a line in
+	// its known_hosts already did), "prompted" (accepted when it asked) or
+	// "auto-accepted" (--skip-host-key-check). Both are absent when the
+	// daemon doesn't say.
+	KnownHosts    string `json:"knownHosts,omitempty"`
+	RelayKeyTrust string `json:"relayKeyTrust,omitempty"`
 	// FirstGuestJoinedAt is when a terminal or SFTP guest first joined,
 	// latched and never moved by a later join; zero and omitted when none
 	// ever did. Unlike this timestamp, guestCount includes forwarding
@@ -1491,6 +1523,9 @@ func withSessionReport(info sessionInfo, sess *api.GetSessionResponse) sessionIn
 	info.Execution = sess.Execution
 	info.TCPForwarding = sess.TcpForwarding
 	info.ApprovalMethod = sess.ApprovalMethod
+	if pin, ok := relayPin(sess); ok {
+		info.KnownHosts, info.RelayKeyTrust = pin, sess.GetRelayKeyTrust()
+	}
 	return info
 }
 
@@ -1667,6 +1702,9 @@ func withLiveDetail(info sessionInfo, sess *api.GetSessionResponse) sessionInfo 
 	if detail, err := buildSessionDetail(sess); err == nil {
 		info.SSHCommand = detail.SSHCommand
 		info.JoinCommand = detail.JoinCommand
+	}
+	if block, err := sshConfigFor(sess, info.Name); err == nil {
+		info.SSHConfig = block
 	}
 	return info
 }
@@ -2145,11 +2183,7 @@ func defaultPort(scheme string) string {
 
 // buildSessionDetail returns session detail for TUI display
 func buildSessionDetail(sess *api.GetSessionResponse) (tui.SessionDetail, error) {
-	user := sess.SshUser
-	if user == "" {
-		// Fallback to encoding for backward compatibility with older servers
-		user = routing.NewEncodeDecoder(routing.ModeEmbedded).Encode(sess.SessionId, sess.NodeAddr)
-	}
+	user := sshUser(sess)
 
 	u, scheme, host, port, err := parseURL(sess.Host)
 	if err != nil {
@@ -2175,17 +2209,8 @@ func buildSessionDetail(sess *api.GetSessionResponse) (tui.SessionDetail, error)
 			sshCmd = fmt.Sprintf("%s -p %s", sshCmd, port)
 		}
 	} else {
-		userSplit := strings.SplitN(user, ":", 2)
-		if len(userSplit) == 1 {
-			u.User = url.User(userSplit[0])
-		} else {
-			u.User = url.UserPassword(userSplit[0], userSplit[1])
-		}
-		// SSH expands percent tokens before executing ProxyCommand in a shell.
-		// Quote the URL for that shell, then the command for the caller's shell.
-		proxyURL := strings.ReplaceAll(u.String(), "%", "%%")
-		proxyCommand := "upterm proxy " + quoteShellArg(proxyURL)
-		sshCmd = fmt.Sprintf("ssh -o ProxyCommand=%s %s@%s", quoteShellArg(proxyCommand), user, host+":"+port)
+		// Quoted again, for the caller's shell.
+		sshCmd = fmt.Sprintf("ssh -o ProxyCommand=%s %s@%s", quoteShellArg(proxyCommand(*u, user)), user, host+":"+port)
 	}
 
 	var clients []string
@@ -2227,6 +2252,31 @@ func buildSessionDetail(sess *api.GetSessionResponse) (tui.SessionDetail, error)
 		Access:           accessOf(sess.AuthorizedKeys),
 		Guests:           guestPermissions(sess),
 	}, nil
+}
+
+// sshUser is the user guests connect to the session as: the daemon's, or for
+// a daemon from before it sent one, the embedded relay's encoding of the
+// session's ID and node.
+func sshUser(sess *api.GetSessionResponse) string {
+	if user := sess.GetSshUser(); user != "" {
+		return user
+	}
+	// Fallback to encoding for backward compatibility with older servers
+	return routing.NewEncodeDecoder(routing.ModeEmbedded).Encode(sess.GetSessionId(), sess.GetNodeAddr())
+}
+
+// proxyCommand is the ssh ProxyCommand that carries a guest's connection to
+// the ws or wss relay u as user, through upterm proxy, which reads the user
+// from the URL: the session ID, and the node after a colon where the relay
+// routes by one. SSH expands percent tokens before executing ProxyCommand in a
+// shell, so the URL's '%' is doubled, and it is quoted for that shell.
+func proxyCommand(u url.URL, user string) string {
+	if name, node, ok := strings.Cut(user, ":"); ok {
+		u.User = url.UserPassword(name, node)
+	} else {
+		u.User = url.User(user)
+	}
+	return "upterm proxy " + quoteShellArg(strings.ReplaceAll(u.String(), "%", "%%"))
 }
 
 // guestPermissions is what guests may do, as the daemon reports it, or nil when

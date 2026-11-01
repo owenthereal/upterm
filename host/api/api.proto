@@ -95,6 +95,16 @@ message GetSessionResponse {
   optional string execution = 26;      // off, approval, granted, forced
   optional string tcp_forwarding = 27; // off, loopback-approval, loopback, all
   optional string approval_method = 28; // terminal, custom, unavailable
+  // The relay key the host trusted on its first connection, for a guest to
+  // pin the relay as the host did. relay_known_hosts is that key's
+  // known_hosts line, for the host and port the host dialled, and
+  // relay_key_trust is how the host came to trust it: known (a line in its
+  // known_hosts already did), prompted (accepted at its prompt) or
+  // auto-accepted (accepted without asking, --skip-host-key-check). Both are
+  // unset when the host can't say: its host key check isn't one upterm
+  // built.
+  optional string relay_known_hosts = 29;
+  optional string relay_key_trust = 30;
 }
 
 message AuthorizedKey {

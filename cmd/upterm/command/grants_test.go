@@ -66,20 +66,14 @@ func guestKeysFile(t *testing.T) string {
 	return path
 }
 
-// grantsOf is grantsWith, with an empty config file and no variables.
-func grantsOf(t *testing.T, args ...string) (serverGrants, reportedGrants) {
-	t.Helper()
-	return grantsWith(t, "", nil, args...)
-}
-
-// grantsWith hosts a session with the host flags args, the config file
-// config and the variables env, as the daemon does, up to the moment the
-// relay has created it, and returns the policy the Host enforces and the
-// policy the session reports. The config file and the variables set the
+// hostedSession hosts a session on relay with the host flags args, the
+// config file config and the variables env, as the daemon does, up to the
+// moment the relay has created it, and returns the Host the daemon built and
+// the session it reported created. The config file and the variables set the
 // flags as the root's pre-run has them do; the environment the test runs in
-// sets none. The report is read as `session info` reads it: the JSON's keys,
-// and the view's Guests row, which must say the same.
-func grantsWith(t *testing.T, config string, env map[string]string, args ...string) (serverGrants, reportedGrants) {
+// sets none. stdin answers whatever the daemon asks the operator, such as
+// the relay's host key; nil answers nothing.
+func hostedSession(t *testing.T, relay *fakerelay.Relay, stdin io.Reader, config string, env map[string]string, args ...string) (*host.Host, *api.GetSessionResponse) {
 	t.Helper()
 	cmd := hostCmd()
 	t.Cleanup(func() { hostCmd() })
@@ -87,10 +81,7 @@ func grantsWith(t *testing.T, config string, env map[string]string, args ...stri
 	daemonTestRoots(t)
 	withConfig(t, config)
 
-	key, err := host.NewHostKey()
-	require.NoError(t, err)
-	relay := fakerelay.Start(t, key, fakerelay.RandomID)
-	require.NoError(t, cmd.ParseFlags(append([]string{"--server", "ssh://" + relay.Addr, "--skip-host-key-check"}, args...)))
+	require.NoError(t, cmd.ParseFlags(append([]string{"--server", "ssh://" + relay.Addr}, args...)))
 	// The variables are env's alone. Every other one the binding reads is
 	// unset, not emptied, since an empty variable is a value too: the
 	// developer's own UPTERM_KNOWN_HOSTS, UPTERM_PRIVATE_KEY or
@@ -121,7 +112,7 @@ func grantsWith(t *testing.T, config string, env map[string]string, args ...stri
 	a, b := net.Pipe()
 	t.Cleanup(func() { _ = a.Close(); _ = b.Close() })
 	created := make(chan *api.GetSessionResponse, 1)
-	parent := bootstrap.NewParent(b, nil, io.Discard, nil)
+	parent := bootstrap.NewParent(b, stdin, io.Discard, nil)
 	parentDone := make(chan error, 1)
 	go func() {
 		_, err := parent.Run(ctx, bootstrap.Handlers{
@@ -138,7 +129,28 @@ func grantsWith(t *testing.T, config string, env map[string]string, args ...stri
 	require.ErrorAs(t, h.Run(ctx), new(UserDiscardedError))
 	require.NoError(t, child.Close())
 	require.ErrorIs(t, <-parentDone, bootstrap.ErrDaemonGone)
-	sess := <-created
+	return h, <-created
+}
+
+// grantsOf is grantsWith, with an empty config file and no variables.
+func grantsOf(t *testing.T, args ...string) (serverGrants, reportedGrants) {
+	t.Helper()
+	return grantsWith(t, "", nil, args...)
+}
+
+// grantsWith hosts a session with the host flags args, the config file
+// config and the variables env, as the daemon does, up to the moment the
+// relay has created it, and returns the policy the Host enforces and the
+// policy the session reports. The config file and the variables set the
+// flags as the root's pre-run has them do; the environment the test runs in
+// sets none. The report is read as `session info` reads it: the JSON's keys,
+// and the view's Guests row, which must say the same.
+func grantsWith(t *testing.T, config string, env map[string]string, args ...string) (serverGrants, reportedGrants) {
+	t.Helper()
+	key, err := host.NewHostKey()
+	require.NoError(t, err)
+	relay := fakerelay.Start(t, key, fakerelay.RandomID)
+	h, sess := hostedSession(t, relay, nil, config, env, append([]string{"--skip-host-key-check"}, args...)...)
 
 	server := serverGrants{
 		AcceptExec: h.AcceptExec, ExecDisabled: h.ExecDisabled,

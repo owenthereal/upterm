@@ -670,6 +670,30 @@ func TestEveryCommandAndClientPrintsWhole(t *testing.T) {
 	assert.Equal(t, want, renderSessionDetail(detail, 80))
 }
 
+// The ssh config block is two files' lines a person pastes, so it prints
+// last among the commands, each of its lines whole and indented as they
+// are, its own indentation kept.
+func TestSSHConfigPrintsWholeUnderTheCommands(t *testing.T) {
+	pinTerminal(t)
+	block := "# ~/.ssh/config\nHost home\n  HostName uptermd.upterm.dev\n  User " + strings.Repeat("x", 120) + "\n" +
+		"# ~/.ssh/known_hosts, once per device\n@cert-authority uptermd.upterm.dev ssh-ed25519 AAAA\n"
+	detail := SessionDetail{SessionID: "id", SSHCommand: "ssh id@h", SSHConfig: block}
+	assert.Equal(t, "Session: id\n\n"+
+		"\n➤ SSH:\n    ssh id@h\n"+
+		"➤ SSH config:\n"+
+		"    # ~/.ssh/config\n"+
+		"    Host home\n"+
+		"      HostName uptermd.upterm.dev\n"+
+		"      User "+strings.Repeat("x", 120)+"\n"+
+		"    # ~/.ssh/known_hosts, once per device\n"+
+		"    @cert-authority uptermd.upterm.dev ssh-ed25519 AAAA\n",
+		renderSessionDetail(detail, 80))
+
+	// It is a way in of its own, so the commands' section opens for it.
+	detail.SSHCommand = ""
+	require.True(t, strings.HasPrefix(renderSessionDetail(detail, 80), "Session: id\n\n\n➤ SSH config:\n"))
+}
+
 // A guest's version string is theirs to choose, and the view prints it as
 // text: an escape sequence or a control character in it comes out as '?',
 // the way ~? prints it, rather than reaching the terminal reading the view.

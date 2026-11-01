@@ -76,18 +76,31 @@ func (hostKeyChangedError) Unwrap() error   { return ErrHostKeyChanged }
 // trusts is checked by its own key, once its signer is found not revoked.
 // Anything else is as knownhosts returns it.
 func (k KnownHosts) Check(hostname string, remote net.Addr, key ssh.PublicKey) error {
+	_, err := k.check(hostname, remote, key)
+	return err
+}
+
+// check is Check, and when a line trusts key, that line as a file needs it to
+// trust key the same way for hostname: an @cert-authority line for the
+// certificate's signer when an authority trusted it, and otherwise the plain
+// line for the key that matched, a certificate's own key included.
+func (k KnownHosts) check(hostname string, remote net.Addr, key ssh.PublicKey) (string, error) {
 	cb, err := knownhosts.New(k.File)
 	if errors.Is(err, fs.ErrNotExist) {
-		return ErrUnknownHostKey
+		return "", ErrUnknownHostKey
 	}
 	if err != nil {
-		return err
+		return "", err
 	}
 
 	// checked is the key that err is about: key, or a certificate's own key.
 	checked := key
 	err = cb(hostname, remote, key)
-	if cert, isCert := key.(*ssh.Certificate); isCert && err != nil && strings.HasPrefix(err.Error(), errNoAuthoritiesHostname) {
+	cert, isCert := key.(*ssh.Certificate)
+	if isCert && err == nil {
+		return knownHostsLine(hostname, cert.SignatureKey, true), nil
+	}
+	if isCert && err != nil && strings.HasPrefix(err.Error(), errNoAuthoritiesHostname) {
 		// No @cert-authority line trusts the certificate's signer, so its own
 		// key is checked as a plain key would be, as OpenSSH does. Unlike
 		// OpenSSH's, this check counts the host's @cert-authority lines too,
@@ -99,29 +112,47 @@ func (k KnownHosts) Check(hostname string, remote net.Addr, key ssh.PublicKey) e
 		// does: a revoked key is refused before any line is looked at.
 		var revoked *knownhosts.RevokedError
 		if serr := cb(hostname, remote, cert.SignatureKey); errors.As(serr, &revoked) {
-			return serr
+			return "", serr
 		}
 		checked = cert.Key
 		err = cb(hostname, remote, checked)
 	}
 	if err == nil {
-		return nil
+		return knownHostsLine(hostname, checked, false), nil
 	}
 
 	kerr, ok := err.(*knownhosts.KeyError)
 	if !ok {
-		return err
+		return "", err
 	}
 
 	// If kerr.Want is non-empty, there was a mismatch, which can signify a MITM attack
 	if len(kerr.Want) != 0 {
 		kk := kerr.Want[0] // TODO: take care of multiple key mismatches
-		return hostKeyChangedError(fmt.Sprintf(errKeyMismatch,
+		return "", hostKeyChangedError(fmt.Sprintf(errKeyMismatch,
 			keyType(checked.Type()), utils.FingerprintSHA256(checked),
 			kk.Filename, keyType(kk.Key.Type()), kk.Filename, kk.Line))
 	}
 
-	return ErrUnknownHostKey
+	return "", ErrUnknownHostKey
+}
+
+// knownHostsLine is the known_hosts line that trusts key for hostname, as an
+// authority for its host certificates when authority is set.
+func knownHostsLine(hostname string, key ssh.PublicKey, authority bool) string {
+	line := knownhosts.Line([]string{hostname}, key)
+	if authority {
+		line = markerCert + " " + line
+	}
+	return line
+}
+
+// recordedLine is the line Record writes for key at hostname.
+func recordedLine(hostname string, key ssh.PublicKey) string {
+	if cert, ok := key.(*ssh.Certificate); ok {
+		return knownHostsLine(hostname, cert.SignatureKey, true)
+	}
+	return knownHostsLine(hostname, key, false)
 }
 
 // Confirm prints the prompt and reads the answer from in, which is "yes", the
@@ -252,13 +283,7 @@ func (k KnownHosts) Record(hostname string, key ssh.PublicKey, announce bool) er
 	// The security benefit of storing IPs is minimal in modern infrastructure
 	// since we already trust DNS, and MITM attacks would need to compromise
 	// both DNS and the host key.
-	addr := []string{hostname}
-
-	line := knownhosts.Line(addr, key)
-
-	if isCert {
-		line = fmt.Sprintf("%s %s", markerCert, line)
-	}
+	line := knownHostsLine(hostname, key, isCert)
 
 	// A last line without its newline would swallow this one, and the file
 	// would no longer parse.

@@ -18,6 +18,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/proto"
 )
 
 // shortTempDir returns a directory a unix socket can actually be bound in.
@@ -457,6 +458,22 @@ func TestGetSessionReportsTheNewFields(t *testing.T) {
 	require.True(t, resp.GetReadOnly())
 	require.True(t, resp.GetFileTransferApprovalRequired())
 	require.Equal(t, at.UnixNano(), resp.GetTunnelLostAtUnixNano())
+}
+
+// The relay key the host trusted is in the startup snapshot, and every answer
+// carries it; a host that couldn't say leaves both fields unset, unknown.
+func TestGetSessionReportsTheRelayKeyTheHostTrusted(t *testing.T) {
+	srv := newAdminServer(t, adminServerOptions{})
+	resp := getSession(t, srv)
+	require.Nil(t, resp.RelayKnownHosts)
+	require.Nil(t, resp.RelayKeyTrust)
+
+	const line = "@cert-authority uptermd.upterm.dev ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICiecex8Dq718eSe1CCLgLvDmI7AagvCtax7brPFWkh4"
+	srv.Session.RelayKnownHosts = proto.String(line)
+	srv.Session.RelayKeyTrust = proto.String("prompted")
+	resp = getSession(t, srv)
+	require.Equal(t, line, resp.GetRelayKnownHosts())
+	require.Equal(t, "prompted", resp.GetRelayKeyTrust())
 }
 
 func TestAnOlderDaemonsAnswerIsUnknownNotFalse(t *testing.T) {

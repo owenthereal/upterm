@@ -1,0 +1,7 @@
+# ~/.ssh/config
+Host home
+  HostName uptermd.upterm.dev
+  User d3k5fia7m4us73ehblug
+# ~/.ssh/known_hosts, once per device
+# The upterm running this session doesn't say which relay key it trusted.
+# Add the key the relay's operator publishes.

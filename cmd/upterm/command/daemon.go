@@ -126,11 +126,13 @@ func buildDaemonHost(ctx context.Context, name string, opts hostOptions, child *
 	// frame above it to defer into.
 	_ = cleanup
 
-	var hkcb ssh.HostKeyCallback
+	// A check that remembers how it trusted the relay's key, so the session
+	// can tell guests which key to pin, and whether anything vouched for it.
+	var relayKey *host.RelayKeyCheck
 	if flagSkipHostKeyCheck {
-		hkcb, err = host.NewAutoAcceptingHostKeyCallback(child.Writer(), flagKnownHostsFilename)
+		relayKey, err = host.NewAutoAcceptingRelayKeyCheck(child.Writer(), flagKnownHostsFilename)
 	} else {
-		hkcb, err = host.NewPromptingHostKeyCallback(child.Reader(), child.Writer(), flagKnownHostsFilename, connectionIsProxied(flagServer, opts.proxyURL))
+		relayKey, err = host.NewPromptingRelayKeyCheck(child.Reader(), child.Writer(), flagKnownHostsFilename, connectionIsProxied(flagServer, opts.proxyURL))
 	}
 	if err != nil {
 		return nil, err
@@ -178,7 +180,8 @@ func buildDaemonHost(ctx context.Context, name string, opts hostOptions, child *
 		Signers:           signers,
 		IdentitiesOnly:    identitiesOnlyRequested(),
 		HostKey:           hostKey,
-		HostKeyCallback:   hkcb,
+		HostKeyCallback:   relayKey.HostKeyCallback,
+		RelayKeyTrusted:   relayKey.Trusted,
 		AuthorizedKeys:    authorizedKeys,
 		AutoAccept:        flagAccept,
 		SFTPAutoAccept:    allowSFTP,

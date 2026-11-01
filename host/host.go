@@ -31,7 +31,7 @@ import (
 	"github.com/owenthereal/upterm/upterm"
 	"github.com/owenthereal/upterm/utils"
 	"golang.org/x/crypto/ssh"
-	"golang.org/x/crypto/ssh/knownhosts"
+	"google.golang.org/protobuf/proto"
 )
 
 // NewPromptingHostKeyCallback creates a host key callback that asks before
@@ -43,8 +43,15 @@ import (
 // prints a placeholder in the same situation. It is display-only: knownhosts
 // matches on the hostname argument and KnownHosts.Record stores only that, so
 // verification is unaffected either way.
+//
+// It is NewPromptingRelayKeyCheck's check, for a caller that doesn't ask what
+// it trusted.
 func NewPromptingHostKeyCallback(stdin io.Reader, stdout io.Writer, knownHostsFilename string, proxied bool) (ssh.HostKeyCallback, error) {
-	return newHostKeyCallback(stdin, stdout, knownHostsFilename, false, proxied)
+	check, err := NewPromptingRelayKeyCheck(stdin, stdout, knownHostsFilename, proxied)
+	if err != nil {
+		return nil, err
+	}
+	return check.HostKeyCallback, nil
 }
 
 // NewAutoAcceptingHostKeyCallback creates a host key callback that automatically
@@ -55,44 +62,15 @@ func NewPromptingHostKeyCallback(stdin io.Reader, stdout io.Writer, knownHostsFi
 //
 // It takes no proxied flag: its message names the hostname and the key type,
 // never the peer address.
+//
+// It is NewAutoAcceptingRelayKeyCheck's check, for a caller that doesn't ask
+// what it trusted.
 func NewAutoAcceptingHostKeyCallback(stdout io.Writer, knownHostsFilename string) (ssh.HostKeyCallback, error) {
-	return newHostKeyCallback(nil, stdout, knownHostsFilename, true, false)
-}
-
-func newHostKeyCallback(stdin io.Reader, stdout io.Writer, knownHostsFilename string, autoAccept, proxied bool) (ssh.HostKeyCallback, error) {
-	if err := createFileIfNotExist(knownHostsFilename); err != nil {
+	check, err := NewAutoAcceptingRelayKeyCheck(stdout, knownHostsFilename)
+	if err != nil {
 		return nil, err
 	}
-
-	// KnownHosts.Check reads the file on every call; parse it once here so that
-	// a malformed file fails the command now rather than at the handshake.
-	if _, err := knownhosts.New(knownHostsFilename); err != nil {
-		return nil, err
-	}
-
-	kh := KnownHosts{File: knownHostsFilename, Stdout: stdout, Proxied: proxied}
-
-	return func(hostname string, remote net.Addr, key ssh.PublicKey) error {
-		err := kh.Check(hostname, remote, key)
-		if !errors.Is(err, ErrUnknownHostKey) {
-			return err
-		}
-
-		// Auto-accept unknown host keys if enabled
-		if autoAccept {
-			return kh.Record(hostname, key, true)
-		}
-
-		ok, err := kh.Confirm(context.Background(), stdin, hostname, remote, key)
-		if err != nil {
-			return err
-		}
-		if !ok {
-			return fmt.Errorf("Host key verification failed")
-		}
-
-		return nil
-	}, nil
+	return check.HostKeyCallback, nil
 }
 
 // RelayWarningKind is what a RelayWarning is about.
@@ -143,8 +121,15 @@ type Host struct {
 	// keep it, so a Host run twice presents two keys; a caller that needs
 	// the public half before Run — the CLI, to pin its own attach — sets it
 	// and it is used as given.
-	HostKey                    ssh.Signer
-	HostKeyCallback            ssh.HostKeyCallback
+	HostKey         ssh.Signer
+	HostKeyCallback ssh.HostKeyCallback
+	// RelayKeyTrusted, when set, says which relay key HostKeyCallback
+	// trusted, and how: a RelayKeyCheck's Trusted, with its HostKeyCallback
+	// as HostKeyCallback. Run asks it once the first connection is up, and
+	// the session reports the answer (relay_known_hosts, relay_key_trust),
+	// for guests who pin the relay as this host did. Nil reports nothing: a
+	// Host can't tell how a callback it was handed decided.
+	RelayKeyTrusted            func() (TrustedRelayKey, bool)
 	AuthorizedKeys             []*AuthorizedKey
 	AdminSocketFile            string
 	SessionCreatedCallback     func(context.Context, *api.GetSessionResponse) error
@@ -900,6 +885,15 @@ func (c *Host) Run(ctx context.Context) (runErr error) {
 		SftpDisabled:   c.SFTPDisabled,
 		// The same emptiness the guest door admits anyone on.
 		Open: c.AutoAccept && len(aks) == 0,
+	}
+	// The relay key the first connection trusted, and how. Redials never
+	// ask the callback that decided it: they are pinned to the key it
+	// accepted, so this stays true for the session's life.
+	if c.RelayKeyTrusted != nil {
+		if trusted, ok := c.RelayKeyTrusted(); ok {
+			session.RelayKnownHosts = proto.String(trusted.KnownHostsLine)
+			session.RelayKeyTrust = proto.String(trusted.Trust)
+		}
 	}
 	internal.Permissions{
 		AutoAccept:                   c.AutoAccept,

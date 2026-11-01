@@ -92,6 +92,12 @@ type SessionDetail struct {
 	// there is nothing to say, and the view then has no row.
 	JoinLabel string
 	JoinValue string
+
+	// SSHConfig is the ssh config that reaches the session from elsewhere,
+	// as upterm session ssh-config prints it: a Host block and the relay's
+	// known_hosts lines, each under a comment naming its file. Shown last
+	// among the commands when set, which the --detach banner of a door does.
+	SSHConfig string
 }
 
 // LabelWidth is the width of the label column, in the view and in any text
@@ -450,7 +456,7 @@ func renderSessionDetailAt(detail SessionDetail, width int, at time.Time) string
 
 	// SFTP and SCP commands (only shown if SFTP is enabled)
 	sftp := detail.SFTPEnabled && detail.SFTPCommand != ""
-	if detail.JoinCommand != "" || detail.SSHCommand != "" || sftp {
+	if detail.JoinCommand != "" || detail.SSHCommand != "" || sftp || detail.SSHConfig != "" {
 		b.WriteString("\n")
 	}
 
@@ -467,6 +473,8 @@ func renderSessionDetailAt(detail SessionDetail, width int, at time.Time) string
 			}
 		}
 	}
+	// Each line whole and at its own indentation, as the files take it.
+	writeCommand("➤ SSH config:", strings.TrimSuffix(detail.SSHConfig, "\n"))
 
 	// Connected clients, one per line. Each is printed as text: a guest's
 	// version string is theirs to choose, and their client sends whatever it
