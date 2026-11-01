@@ -305,7 +305,7 @@ func (h *sessionHandler) handlePrivateCommand(sess gssh.Session, selection guest
 		exitBeforeStart()
 		return
 	}
-	env := withoutSSHSessionVars(append(os.Environ(), h.commandEnv...))
+	env := withoutHostSessionVars(append(os.Environ(), h.commandEnv...))
 	env = append(env, guestConnectionEnv(auth, h.hideClientIP)...)
 	if selection.ForcedExec {
 		env = append(env, "SSH_ORIGINAL_COMMAND="+selection.RawCommand)

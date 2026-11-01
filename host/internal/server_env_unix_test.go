@@ -4,7 +4,10 @@ package internal
 
 import (
 	"bufio"
+	"fmt"
 	"os"
+	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -57,6 +60,69 @@ func TestServerCommandEnvironment(t *testing.T) {
 			assert.Equal(t, "SOCKET=/tmp/upterm-current.sock\nTERM=xterm\nINHERITED=inherited-ok\x04", got, "forced command environment")
 		})
 	}
+}
+
+// A guest's private command runs on a pty or pipes of its own, not in the
+// multiplexer pane the host started upterm from, so it isn't told it is:
+// tmux, screen, zellij and Herdr would take a guest's own to be nested in the
+// host's pane, and refuse or reach for it. The hosted command is in that pane
+// and keeps them, and every command keeps where a Herdr server listens.
+func TestGuestCommandsDontInheritTheHostsPane(t *testing.T) {
+	pane := []string{"TMUX", "TMUX_PANE", "STY", "ZELLIJ", "ZELLIJ_SESSION_NAME", "ZELLIJ_PANE_ID", "HERDR_ENV", "HERDR_PANE_ID"}
+	hostEnv := map[string]string{"HERDR_SOCKET_PATH": "/tmp/herdr.sock"}
+	for i, name := range pane {
+		hostEnv[name] = "host-pane-" + strconv.Itoa(i)
+	}
+	for name, value := range hostEnv {
+		t.Setenv(name, value)
+	}
+	t.Setenv("SHELL", "/bin/sh")
+	var report strings.Builder
+	for _, name := range append(slices.Clone(pane), "HERDR_SOCKET_PATH") {
+		fmt.Fprintf(&report, `printf '%s=%%s\n' "${%s-unset}"; `, name, name)
+	}
+	report.WriteString(`printf '\004'`)
+	script := report.String()
+	parse := func(out string) map[string]string {
+		got := map[string]string{}
+		for _, line := range strings.FieldsFunc(strings.TrimSuffix(out, "\x04"), func(r rune) bool { return r == '\r' || r == '\n' }) {
+			name, value, _ := strings.Cut(line, "=")
+			got[name] = value
+		}
+		return got
+	}
+	guestWant := map[string]string{"HERDR_SOCKET_PATH": "/tmp/herdr.sock"}
+	for _, name := range pane {
+		guestWant[name] = "unset"
+	}
+
+	t.Run("hosted and login", func(t *testing.T) {
+		h := startHost(t, &Server{
+			Command:      []string{"sh", "-c", "stty -echo -opost; " + script + "; IFS= read -r line"},
+			LoginCommand: []string{"sh", "-c", script + "; IFS= read -r line"},
+		})
+		_, out, _ := h.connectHost(t, nil)
+		got, err := bufio.NewReader(out).ReadString('\x04')
+		require.NoError(t, err)
+		assert.Equal(t, hostEnv, parse(got), "the hosted command")
+
+		_, guestOutput := h.connectGuest(t)
+		got, err = bufio.NewReader(guestOutput).ReadString('\x04')
+		require.NoError(t, err)
+		assert.Equal(t, guestWant, parse(got), "the login command")
+	})
+	t.Run("forced", func(t *testing.T) {
+		h := startHost(t, &Server{Command: readsALine("HOST", 0), ForceCommand: []string{"sh", "-c", script}})
+		out, err := execSession(t, h.guestClient(t), false).Output("ignored")
+		require.NoError(t, err)
+		assert.Equal(t, guestWant, parse(string(out)))
+	})
+	t.Run("exec", func(t *testing.T) {
+		h := startHost(t, &Server{Command: readsALine("HOST", 0), AcceptExec: true})
+		out, err := execSession(t, h.guestClient(t), false).Output(script)
+		require.NoError(t, err)
+		assert.Equal(t, guestWant, parse(string(out)))
+	})
 }
 
 // A guest's forced command is that guest's SSH session as far as the programs

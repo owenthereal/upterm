@@ -17,14 +17,23 @@ import (
 // which describe another connection and a terminal the command is not on.
 var sshSessionVars = []string{"SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY", "SSH_ORIGINAL_COMMAND"}
 
-// withoutSSHSessionVars returns a copy of env with sshSessionVars taken out.
-func withoutSSHSessionVars(env []string) []string {
+// hostPaneVars are the variables a terminal multiplexer sets to say a process
+// is inside one of its panes: tmux's, screen's, zellij's and Herdr's. A
+// guest's private command runs on its own pty or pipes, so they describe a
+// pane it isn't in, the host's, and a multiplexer the guest starts takes
+// itself to be nested in that pane. Not HERDR_SOCKET_PATH, which says where a
+// Herdr server listens rather than which pane this is.
+var hostPaneVars = []string{"TMUX", "TMUX_PANE", "STY", "ZELLIJ", "ZELLIJ_SESSION_NAME", "ZELLIJ_PANE_ID", "HERDR_ENV", "HERDR_PANE_ID"}
+
+// withoutHostSessionVars returns a copy of env with sshSessionVars and
+// hostPaneVars taken out.
+func withoutHostSessionVars(env []string) []string {
 	return slices.DeleteFunc(slices.Clone(env), func(kv string) bool {
 		name, _, _ := strings.Cut(kv, "=")
 		if runtime.GOOS == "windows" {
 			name = strings.ToUpper(name)
 		}
-		return slices.Contains(sshSessionVars, name)
+		return slices.Contains(sshSessionVars, name) || slices.Contains(hostPaneVars, name)
 	})
 }
 
