@@ -385,11 +385,11 @@ func TestGuestGrantContradictionsFromEnvOrConfigAreWarnings(t *testing.T) {
 	}
 }
 
-// A grant on the command line that a denial from the environment or the
-// config file contradicts has the effect its warning says: none. The Host is
-// given both, and enforces the denial first, so what session info reports is
-// the denial's.
-func TestADenialFromEnvOrConfigWinsOverAGrant(t *testing.T) {
+// A grant and a denial of the same thing, one of them from the environment
+// or the config file, have the effect upterm's warning says: the grant has
+// none. The Host is given both, and enforces the denial first, so what
+// session info reports is the denial's.
+func TestTheDenialWinsWithOneSideFromEnvOrConfig(t *testing.T) {
 	readOnly := func(s *serverGrants, r *reportedGrants) {
 		s.ReadOnly, r.ReadOnly, r.FileTransfer, r.Execution, r.TCPForwarding = true, true, "downloads", "off", "off"
 	}
@@ -765,8 +765,8 @@ func TestAllowLocalTCPForwardingIsDeprecatedOnTheCommandLine(t *testing.T) {
 
 // allow-local-tcp-forwarding from the environment or the config file lets
 // guests forward to any destination, and a command line that asks for
-// forwards to loopback addresses alone doesn't narrow it. upterm says so,
-// once, from the process the command line was given to, naming where the
+// forwards to loopback addresses alone doesn't narrow it. upterm says so
+// once, in the parent and not in the daemon it starts, naming where the
 // value came from.
 func TestAllowLocalTCPForwardingFromEnvOrConfigSaysItWidensLoopbackForwarding(t *testing.T) {
 	keys := guestKeysFile(t)
@@ -830,7 +830,8 @@ func TestAllowLocalTCPForwardingFromEnvOrConfigSaysItWidensLoopbackForwarding(t 
 // Where allow-local-tcp-forwarding from the environment or the config file
 // widens nothing the command line asked for, upterm says nothing of it: the
 // command line asks for no forwards, or for forwards anywhere itself, or
-// gives the flag a value of its own; or forwarding is off anyway.
+// gives the flag a value of its own; the variable turns the key off; or
+// forwarding is off anyway.
 func TestAllowLocalTCPForwardingFromEnvOrConfigIsQuietWhenItWidensNothing(t *testing.T) {
 	keys := guestKeysFile(t)
 	const (
