@@ -173,8 +173,9 @@ func TestSSHConfigUserIsTheSSHLines(t *testing.T) {
 	}
 }
 
-// The session has to be one guests can connect to now, and the alias one
-// ssh can be given; otherwise there is nothing to print, and upterm says why.
+// The session has to be one guests can connect to now, on a relay ssh can
+// reach, and the alias one ssh can be given; otherwise there is nothing to
+// print, and upterm says why.
 func TestSSHConfigRefusals(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
@@ -196,6 +197,9 @@ func TestSSHConfigRefusals(t *testing.T) {
 			"upterm: session home isn't answering on its admin socket (" + pidOf(&sessiondir.Record{Pid: os.Getpid()}) + ")"},
 		{"an alias ssh can't take", func(t *testing.T) { buildReady(t, "home") }, []string{"--alias", "my home"}, 1,
 			`upterm: invalid --alias "my home": use letters, digits, '.', '_' and '-', starting with a letter or digit`},
+		{"a relay ssh can't reach", func(t *testing.T) {
+			servedReady(t, "home", relayAnswer("https://relay.example.com", exampleSessionID, "relay.example.com "+publicRelayKey, "known"))
+		}, nil, 1, "upterm: the session's relay https://relay.example.com is not one ssh can reach"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			setupSessionRoots(t)
