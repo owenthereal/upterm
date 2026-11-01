@@ -44,11 +44,15 @@ func TestAttachAsksForTheDoorNoticeOnlyInRawMode(t *testing.T) {
 			ptmx, tty, err := ptylib.Open()
 			require.NoError(t, err)
 			defer func() { _ = ptmx.Close(); _ = tty.Close() }()
-			go func() { _, _ = io.Copy(io.Discard, ptmx) }()
 			lt := localTerminal{stdin: tty, rawMode: raw, pty: &attach.Pty{Term: "xterm", Size: termsize.Default}}
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
 			_, err = attachLocalTerminalWith(ctx, door.socket, []ssh.PublicKey{door.key}, lt, '~', statusSource{}, notice, tty, tty, func(*os.File) bool { return true }, discardLogger())
+			require.NoError(t, err)
+			// A line for the reader the attachment left on the terminal: a
+			// read of a pty can't be interrupted, and this one returns,
+			// finds the attachment over and ends.
+			_, err = io.WriteString(ptmx, "\n")
 			require.NoError(t, err)
 			env := <-envs
 			require.Equal(t, raw, slices.Contains(env, upterm.AttachNoticeEnvVar+"="+notice), "env: %v", env)
