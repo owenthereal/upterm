@@ -9,6 +9,7 @@ import (
 	"net"
 	"path/filepath"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -1440,6 +1441,15 @@ func (h *sessionHandler) HandleSession(sess gssh.Session) {
 			guestOutput = sink
 		}
 
+		// The line a client of the host door asked to be shown, as upterm
+		// attach asks on a door: behind the replay its sink was handed,
+		// which would scroll away a line it wrote before attaching.
+		if h.kind == kindHost {
+			if notice := attachNotice(sess); notice != "" {
+				_, _ = io.WriteString(guestOutput, "\r\n"+notice+"\r\n")
+			}
+		}
+
 		// Attached, in the sense the gate is defined by: the subscription is
 		// installed, so nothing the command writes from here on can be missed.
 		// The geometry the command's start reads the moment the gate opens is
@@ -1777,6 +1787,17 @@ func guestDropHandler(closeSession func() error, logger *slog.Logger, sessionID 
 // query into whatever shell owns it.
 func isInteractive(sess gssh.Session) bool {
 	return slices.Contains(sess.Environ(), upterm.AttachInteractiveEnvVar+"=1")
+}
+
+// attachNotice is the line a client asked by upterm.AttachNoticeEnvVar to be
+// shown once attached, bounded and as text alone, or "" for none.
+func attachNotice(sess gssh.Session) string {
+	for _, kv := range sess.Environ() {
+		if notice, ok := strings.CutPrefix(kv, upterm.AttachNoticeEnvVar+"="); ok {
+			return guestText(notice)
+		}
+	}
+	return ""
 }
 
 func emitClientJoinEvent(eventEmmiter *emitter.Emitter, sessionID string, auth *server.AuthRequest, pk ssh.PublicKey) {

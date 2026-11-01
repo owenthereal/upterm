@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/google/shlex"
 	"github.com/owenthereal/upterm/attach"
 	"github.com/owenthereal/upterm/host/sessiondir"
 	"github.com/owenthereal/upterm/utils"
@@ -43,6 +44,49 @@ func TestAttachTarget(t *testing.T) {
 
 	_, err = attachTarget(context.Background(), resolved{Name: "never-existed"})
 	require.ErrorContains(t, err, "no session named")
+}
+
+// A door is a session that gives guests a login or forced command of the
+// host's, kept open by the default shell -- the one upterm host runs without a
+// command -- which is what attaching types into, and whose exit ends the
+// session for every guest.
+func TestAttachTargetSaysWhetherTheSessionIsADoor(t *testing.T) {
+	setupSessionRoots(t)
+	shell, err := shlex.Split(getDefaultShell())
+	require.NoError(t, err)
+	for _, tc := range []struct {
+		name         string
+		command      []string
+		login, force []string
+		door         bool
+	}{
+		{"login-command", shell, []string{"herdr"}, nil, true},
+		{"forced-command", shell, nil, []string{"herdr"}, true},
+		{"no-guest-command", shell, nil, nil, false},
+		{"a-hosted-command-of-its-own", []string{"htop"}, []string{"herdr"}, nil, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d := claimSession(t, tc.name)
+			releaseAtEnd(t, d)
+			require.NoError(t, d.Update(func(r *sessiondir.Record) {
+				r.Status = sessiondir.StatusReady
+				r.HostKeys = []string{testHostKeyLine(t)}
+				r.Command, r.LoginCommand, r.ForceCommand = tc.command, tc.login, tc.force
+			}))
+			got, err := attachTarget(context.Background(), resolved{Name: tc.name})
+			require.NoError(t, err)
+			require.Equal(t, tc.door, got.Door)
+		})
+	}
+}
+
+// What attach says on a door names it, warns that exit closes it for every
+// guest, and gives this terminal's own keys for leaving and for answering
+// guests instead, where it has keys at all.
+func TestDoorNotice(t *testing.T) {
+	require.Equal(t, "upterm: this is home's door; 'exit' closes it for every guest. ~. detaches; ~a reviews requests.", doorNotice("home", '~'))
+	require.Equal(t, "upterm: this is home's door; 'exit' closes it for every guest. !. detaches; !a reviews requests.", doorNotice("home", '!'))
+	require.Equal(t, "upterm: this is home's door; 'exit' closes it for every guest.", doorNotice("home", 0))
 }
 
 // TestAttachTargetExplainsHowAnEndedSessionEnded covers the two outcomes no

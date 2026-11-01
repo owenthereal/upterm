@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"sync"
 	"syscall"
 	"testing"
@@ -384,6 +385,49 @@ func TestHostDoorReportsHostKind(t *testing.T) {
 	case <-time.After(harnessTimeout):
 		t.Fatal("no client-joined event for the host client")
 	}
+}
+
+// A client of the host door can ask, as upterm attach does on a door, to be
+// shown a line of its own below the screen it attaches to: written after the
+// replay, which would scroll a line printed before attaching out of sight,
+// and as text alone. A guest's asking shows it nothing.
+func TestHostDoorShowsTheNoticeItsClientAsksFor(t *testing.T) {
+	h := startHost(t, &Server{Command: readsALine("READY", 0)})
+	// The command's first output is in the session's history before the
+	// client with the notice attaches, so its replay carries it.
+	_, viewer, _ := h.connectHost(t, nil)
+	readUntil(t, viewer, "READY")
+
+	sess, err := h.dialHost(t).NewSession()
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = sess.Close() })
+	require.NoError(t, sess.RequestPty("xterm", 24, 80, ssh.TerminalModes{}))
+	require.NoError(t, sess.Setenv(upterm.AttachInteractiveEnvVar, "1"))
+	require.NoError(t, sess.Setenv(upterm.AttachNoticeEnvVar, "upterm: this is home's door;\x1b[2J 'exit' closes it"))
+	// Held open, as attach holds it: a closed input would end this client.
+	_, err = sess.StdinPipe()
+	require.NoError(t, err)
+	out, err := sess.StdoutPipe()
+	require.NoError(t, err)
+	require.NoError(t, sess.Shell())
+	got := readUntil(t, out, "'exit' closes it\r\n")
+	require.Contains(t, got, "\r\nupterm: this is home's door;?[2J 'exit' closes it\r\n")
+	require.Less(t, strings.Index(got, "READY"), strings.Index(got, "upterm: this is home's door"), "below the screen the replay draws")
+
+	guest, err := h.guestClient(t).NewSession()
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = guest.Close() })
+	require.NoError(t, guest.RequestPty("xterm", 24, 80, ssh.TerminalModes{}))
+	_ = guest.Setenv(upterm.AttachNoticeEnvVar, "upterm: a guest's notice")
+	guestIn, err := guest.StdinPipe()
+	require.NoError(t, err)
+	guestOut, err := guest.StdoutPipe()
+	require.NoError(t, err)
+	require.NoError(t, guest.Shell())
+	readUntil(t, guestOut, "READY")
+	_, err = io.WriteString(guestIn, "typed\n")
+	require.NoError(t, err)
+	require.NotContains(t, readUntil(t, guestOut, "got:typed"), "a guest's notice")
 }
 
 func TestHostDoorIgnoresReadOnly(t *testing.T) {

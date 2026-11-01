@@ -6,11 +6,13 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"fmt"
 	"io"
 	"net"
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"syscall"
@@ -22,10 +24,37 @@ import (
 	"github.com/owenthereal/upterm/attach"
 	"github.com/owenthereal/upterm/internal/termsize"
 	uio "github.com/owenthereal/upterm/io"
+	"github.com/owenthereal/upterm/upterm"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/term"
 )
+
+// The door's notice is asked for only where someone types into the session:
+// a terminal this process holds in raw mode.
+func TestAttachAsksForTheDoorNoticeOnlyInRawMode(t *testing.T) {
+	const notice = "upterm: this is home's door; 'exit' closes it for every guest."
+	for _, raw := range []bool{true, false} {
+		t.Run(fmt.Sprint(raw), func(t *testing.T) {
+			envs := make(chan []string, 1)
+			door := serveTestDoor(t, func(s gssh.Session) {
+				envs <- s.Environ()
+				_ = s.Exit(0)
+			})
+			ptmx, tty, err := ptylib.Open()
+			require.NoError(t, err)
+			defer func() { _ = ptmx.Close(); _ = tty.Close() }()
+			go func() { _, _ = io.Copy(io.Discard, ptmx) }()
+			lt := localTerminal{stdin: tty, rawMode: raw, pty: &attach.Pty{Term: "xterm", Size: termsize.Default}}
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			_, err = attachLocalTerminalWith(ctx, door.socket, []ssh.PublicKey{door.key}, lt, '~', statusSource{}, notice, tty, tty, func(*os.File) bool { return true }, discardLogger())
+			require.NoError(t, err)
+			env := <-envs
+			require.Equal(t, raw, slices.Contains(env, upterm.AttachNoticeEnvVar+"="+notice), "env: %v", env)
+		})
+	}
+}
 
 // testDoor is a charm ssh server on a unix socket whose handler is the
 // test's. It accepts any public key, as the host door does. key is its own
@@ -111,7 +140,7 @@ func TestAttachDetachesOnSIGTERMAndRestoresTheTerminal(t *testing.T) {
 	go func() {
 		// owned is injected as always-true: a pty pair is nobody's
 		// foreground, and what is under test is the signal, not ownership.
-		res, err := attachLocalTerminalWith(ctx, door.socket, []ssh.PublicKey{door.key}, lt, '~', statusSource{}, tty, tty, func(*os.File) bool { return true }, discardLogger())
+		res, err := attachLocalTerminalWith(ctx, door.socket, []ssh.PublicKey{door.key}, lt, '~', statusSource{}, "", tty, tty, func(*os.File) bool { return true }, discardLogger())
 		require.NoError(t, err)
 		done <- res
 	}()

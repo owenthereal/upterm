@@ -11,6 +11,10 @@ const (
 	ClientSSHClientVersion  = "SSH-2.0-upterm-client-client"
 	AttachSSHClientVersion  = "SSH-2.0-upterm-attach"
 	AttachInteractiveEnvVar = "UPTERM_ATTACH_INTERACTIVE"
+	// AttachNoticeEnvVar is a line a client of the host door asks to be shown
+	// once its screen is drawn: below the replay, which would scroll a line
+	// printed before attaching out of sight.
+	AttachNoticeEnvVar = "UPTERM_ATTACH_NOTICE"
 
 	// server
 	ServerSSHServerVersion         = "SSH-2.0-uptermd"
