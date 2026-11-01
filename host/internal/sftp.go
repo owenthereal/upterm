@@ -59,9 +59,18 @@ func (h *sessionHandler) HandleSFTP(sess gssh.Session) {
 	h.logger.Info("SFTP session started", "readonly", h.readonly, "client", clientInfo.Fingerprint)
 
 	// Channel CLOSE cancels workers independently of pkg/sftp's own request
-	// cancellation, which happens only after its workers have returned.
+	// cancellation, which happens only after its workers have returned. A
+	// host stop is its parent, so a stop ends it at once and with the stop's
+	// cause: h.ctx outlives a stop until the session's sessions are released.
+	// But a command that exits on its own ends only h.ctx, so h.ctx ends it
+	// too, and with it any request still waiting for approval.
 	ctx, cancel := sessionOperationContext(h.stopCtx, sess)
 	defer cancel()
+	stopSessionWatch := context.AfterFunc(h.ctx, cancel)
+	defer stopSessionWatch()
+	if h.ctx.Err() != nil {
+		cancel()
+	}
 
 	// Create permission-checking handlers
 	sftpSession := &SFTPSession{
@@ -105,8 +114,9 @@ func (h *sessionHandler) HandleSFTP(sess gssh.Session) {
 	h.logger.Info("SFTP session ended")
 }
 
-// operationContext combines the request lifetime with channel and host loss.
-// Consent gets its own deadline; an allowed transfer retains this context.
+// operationContext combines the request lifetime with channel, host and
+// session loss. Consent gets its own deadline; an allowed transfer retains
+// this context.
 func (s *SFTPSession) operationContext(parent context.Context) (context.Context, context.CancelFunc) {
 	ctx, cancel := context.WithCancel(parent)
 	stop := context.AfterFunc(s.ctx, cancel)
