@@ -421,9 +421,10 @@ func TestGuestExecStatusSurvivesTheCommandsOwnExit(t *testing.T) {
 	t.Setenv("SHELL", "/bin/sh")
 	dir := t.TempDir()
 	end := filepath.Join(dir, "end")
-	require.NoError(t, syscall.Mkfifo(end, 0o600))
-	// The hosted command exits 0 once the test opens and closes the FIFO.
-	srv := &Server{Command: []string{"sh", "-c", `read -r line < "$0"; exit 0`, end}, AcceptExec: true}
+	// The hosted command exits 0 once the test creates the file. Polled
+	// rather than a FIFO's EOF, which a hosted command here has been seen
+	// to miss.
+	srv := &Server{Command: []string{"sh", "-c", `while [ ! -e "$0" ]; do sleep 0.01; done; exit 0`, end}, AcceptExec: true}
 	recorded := make(chan struct{})
 	srv.onPrivateCommandExit = func() { close(recorded) }
 	h := startHost(t, srv)
@@ -447,9 +448,7 @@ func TestGuestExecStatusSurvivesTheCommandsOwnExit(t *testing.T) {
 	case <-time.After(harnessTimeout):
 		t.Fatal("the handler never recorded the leader's exit")
 	}
-	w, err := os.OpenFile(end, os.O_WRONLY, 0)
-	require.NoError(t, err)
-	require.NoError(t, w.Close())
+	require.NoError(t, os.WriteFile(end, nil, 0o600))
 	requireExitStatus(t, s.Wait(), 0)
 }
 
