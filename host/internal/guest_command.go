@@ -226,11 +226,12 @@ func startFailureReason(program string, code int, err *guestProcessStartError) s
 // bytes, and a guest can send far more.
 const maxGuestText = 255
 
-// guestText is s as a guest is told it: cut to maxGuestText bytes, at a
-// character, and plain, so nothing in it can act on the guest's terminal.
+// guestText is s as a guest is told it: cut to maxGuestText bytes, the
+// ellipsis that says so among them, at a character, and plain, so nothing in
+// it can act on the guest's terminal.
 func guestText(s string) string {
 	if len(s) > maxGuestText {
-		cut := maxGuestText
+		cut := maxGuestText - len("…")
 		for cut > 0 && !utf8.RuneStart(s[cut]) {
 			cut--
 		}

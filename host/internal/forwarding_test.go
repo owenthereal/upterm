@@ -792,7 +792,11 @@ func TestForwardingRefusalNamesTheDestination(t *testing.T) {
 		{"zoned remote", "fe80::1%en0", 22, "upterm: forwarding to [fe80::1%en0]:22 refused: " + rule},
 		{"controls", "x\x1b]0;owned\a\r\nb\u0085", 80, "upterm: forwarding to x?]0;owned???b?:80 refused: " + rule},
 		{"invalid UTF-8", "x\xff", 80, "upterm: forwarding to x?:80 refused: " + rule},
-		{"long", strings.Repeat("a", 254) + "é" + strings.Repeat("b", 4096), 80, "upterm: forwarding to " + strings.Repeat("a", 254) + "…:80 refused: " + rule},
+		// At most 255 bytes of it, the ellipsis that says it was cut among
+		// them, and cut between characters.
+		{"long", strings.Repeat("a", 4096), 80, "upterm: forwarding to " + strings.Repeat("a", 252) + "…:80 refused: " + rule},
+		{"long, cut inside a character", strings.Repeat("a", 251) + "é" + strings.Repeat("b", 4096), 80, "upterm: forwarding to " + strings.Repeat("a", 251) + "…:80 refused: " + rule},
+		{"a hostname's longest", strings.Repeat("a", 253), 80, "upterm: forwarding to " + strings.Repeat("a", 253) + ":80 refused: " + rule},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			asked := false
