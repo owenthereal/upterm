@@ -762,10 +762,53 @@ func forwardingAuditRecords(t *testing.T, data string) []map[string]any {
 	return records
 }
 
+// A destination upterm doesn't forward to is named back to the guest, with
+// the fix where a loopback one is what the guest meant: a name, localhost
+// among them, which upterm never resolves, or a loopback address in a form it
+// doesn't take. An address somewhere else gets no such advice, since
+// 127.0.0.1 is not where it asked to go. The destination is the guest's own
+// input, so what is echoed of it is bounded and plain, and the refusal is
+// still made before anything is asked or dialed.
+func TestForwardingRefusalNamesTheDestination(t *testing.T) {
+	const rule = "upterm forwards only to literal loopback addresses"
+	for _, tt := range []struct {
+		name, address string
+		port          uint32
+		want          string
+	}{
+		{"localhost", "localhost", 8080, "upterm: forwarding to localhost:8080 refused: " + rule + "; use 127.0.0.1:8080 or [::1]:8080"},
+		{"another name", "db.example.com", 5432, "upterm: forwarding to db.example.com:5432 refused: " + rule + "; use 127.0.0.1:5432 or [::1]:5432"},
+		{"mapped loopback", "::ffff:127.0.0.1", 22, "upterm: forwarding to [::ffff:127.0.0.1]:22 refused: " + rule + "; use 127.0.0.1:22 or [::1]:22"},
+		{"zoned loopback", "::1%lo0", 22, "upterm: forwarding to [::1%lo0]:22 refused: " + rule + "; use 127.0.0.1:22 or [::1]:22"},
+		{"remote IPv4", "192.0.2.1", 5432, "upterm: forwarding to 192.0.2.1:5432 refused: " + rule},
+		{"remote IPv6", "2001:db8::1", 5432, "upterm: forwarding to [2001:db8::1]:5432 refused: " + rule},
+		{"zoned remote", "fe80::1%en0", 22, "upterm: forwarding to [fe80::1%en0]:22 refused: " + rule},
+		{"controls", "x\x1b]0;owned\a\r\nb\u0085", 80, "upterm: forwarding to x?]0;owned???b?:80 refused: " + rule + "; use 127.0.0.1:80 or [::1]:80"},
+		{"invalid UTF-8", "x\xff", 80, "upterm: forwarding to x?:80 refused: " + rule + "; use 127.0.0.1:80 or [::1]:80"},
+		{"long", strings.Repeat("a", 254) + "é" + strings.Repeat("b", 4096), 80, "upterm: forwarding to " + strings.Repeat("a", 254) + "…:80 refused: " + rule + "; use 127.0.0.1:80 or [::1]:80"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			asked := false
+			policy := forwardingPolicy{Checker: forwardPermissionFunc(func(context.Context, consent.Operation, consent.ClientInfo, ...string) (consent.Decision, error) {
+				asked = true
+				return consent.AllowGuest, nil
+			})}
+			for _, p := range []forwardingPolicy{policy, {AllowLoopback: true}} {
+				open := &forwardOpen{address: tt.address, port: tt.port}
+				forwardingHandler(emitter.New(1), &Forwards{}, p, context.Background(), context.Background(), discardLogger())(nil, nil, open, forwardContext(t, context.Background()))
+				require.Equal(t, ssh.Prohibited, open.rejectReason)
+				require.Equal(t, tt.want, open.rejection)
+				require.Zero(t, open.accepts.Load())
+			}
+			require.False(t, asked, "a destination upterm doesn't forward to is never offered for approval")
+		})
+	}
+}
+
 // What a refused guest is told: the session's own rule, or why approval
 // didn't happen in its terms, never the internal error behind it.
 const (
-	forwardUnavailableRefusal = "upterm: port forwarding denied; nothing on the host can approve it now. The host can attach its terminal or run with --allow-loopback-tcp-forwarding."
+	forwardUnavailableRefusal = "upterm: port forwarding denied; nothing on the host can approve it now. The host can attach its terminal or run with --allow-forwarding=loopback."
 	forwardDeniedRefusal      = "upterm: the host denied this port forward."
 	forwardTimeoutRefusal     = "upterm: port forwarding denied; the request timed out before it was approved."
 	forwardCanceledRefusal    = "upterm: port forwarding request canceled."
@@ -782,7 +825,8 @@ func TestForwardingAuditPolicyOutcomes(t *testing.T) {
 	}{
 		{name: "read-only", outcome: "denied", refusal: "upterm: this session is read-only, so it doesn't allow port forwarding", policy: forwardingPolicy{ReadOnly: true, AllowAny: true}},
 		{name: "disabled", outcome: "denied", refusal: "upterm: port forwarding is disabled for this session", policy: forwardingPolicy{Disabled: true, AllowLoopback: true}},
-		{name: "ineligible hostname", outcome: "denied", refusal: "upterm: forwarding requires a literal loopback IP address", address: "localhost", policy: forwardingPolicy{AllowLoopback: true}},
+		{name: "ineligible hostname", outcome: "denied", refusal: "upterm: forwarding to localhost:PORT refused: upterm forwards only to literal loopback addresses; use 127.0.0.1:PORT or [::1]:PORT", address: "localhost", policy: forwardingPolicy{AllowLoopback: true}},
+		{name: "ineligible remote address", outcome: "denied", refusal: "upterm: forwarding to 192.0.2.1:PORT refused: upterm forwards only to literal loopback addresses", address: "192.0.2.1", policy: forwardingPolicy{AllowLoopback: true}},
 		{name: "unrestricted pregrant", outcome: "allowed", policy: forwardingPolicy{AllowAny: true}},
 		{name: "loopback pregrant", outcome: "allowed", policy: forwardingPolicy{AllowLoopback: true}},
 		{name: "nil checker", outcome: "unavailable", refusal: forwardUnavailableRefusal},
@@ -878,7 +922,8 @@ func TestForwardingAuditPolicyOutcomes(t *testing.T) {
 				require.NotEmpty(t, record["reason"])
 				require.Zero(t, open.accepts.Load())
 			}
-			require.Equal(t, tt.refusal, open.rejection)
+			// The listener's port, where a refusal names the destination.
+			require.Equal(t, strings.ReplaceAll(tt.refusal, "PORT", strconv.Itoa(listener.Addr().(*net.TCPAddr).Port)), open.rejection)
 			if tt.cancelBefore || tt.hostBefore || tt.sessionBefore || tt.expired {
 				require.False(t, checked, "canceled request must be recorded without asking")
 			}

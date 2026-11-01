@@ -13,11 +13,13 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	gssh "charm.land/ssh"
 	"github.com/olebedev/emitter"
 	"github.com/owenthereal/upterm/host/api"
 	"github.com/owenthereal/upterm/host/consent"
+	uio "github.com/owenthereal/upterm/io"
 	"github.com/owenthereal/upterm/upterm"
 	"github.com/owenthereal/upterm/utils"
 	"golang.org/x/crypto/ssh"
@@ -117,13 +119,19 @@ type forwardingPolicy struct {
 	Checker                                     consent.PermissionChecker
 }
 
-// The session's own forwarding rules. Each says itself to a refused guest.
+// The session's own forwarding rules. Each says itself to a refused guest,
+// but for the loopback rule, whose refusal names the destination as well
+// (notLoopbackRefusal).
 var (
 	errForwardReadOnly    = errors.New("upterm: this session is read-only, so it doesn't allow port forwarding")
 	errForwardDisabled    = errors.New("upterm: port forwarding is disabled for this session")
 	errForwardDestination = errors.New("invalid forwarding destination")
-	errForwardNotLoopback = errors.New("upterm: forwarding requires a literal loopback IP address")
+	errForwardNotLoopback = errors.New("upterm forwards only to literal loopback addresses")
 )
+
+// maxEchoedDestination bounds how much of a refused destination the refusal
+// echoes: a name is at most 253 bytes, and a guest can send far more.
+const maxEchoedDestination = 255
 
 // The address and decimal port form the complete consent subject, and the same
 // tuple is used by the dial. Never resolve names to qualify for loopback trust.
@@ -208,18 +216,22 @@ func forwardLogText(text string) string {
 	return strconv.QuoteToASCII(text)
 }
 
-// forwardRefusal is what a guest whose forward is refused is told, in the
-// order the audit classifies the same error: one of the session's rules, or
-// why approval didn't happen, never the internal or custom error text itself.
-func forwardRefusal(err error) string {
-	for _, rule := range []error{errForwardReadOnly, errForwardDisabled, errForwardDestination, errForwardNotLoopback} {
+// forwardRefusal is what a guest whose forward to address and port is refused
+// is told, in the order the audit classifies the same error: one of the
+// session's rules, or why approval didn't happen, never the internal or custom
+// error text itself.
+func forwardRefusal(err error, address string, port uint32) string {
+	if errors.Is(err, errForwardNotLoopback) {
+		return notLoopbackRefusal(address, port)
+	}
+	for _, rule := range []error{errForwardReadOnly, errForwardDisabled, errForwardDestination} {
 		if errors.Is(err, rule) {
 			return rule.Error()
 		}
 	}
 	switch {
 	case errors.Is(err, consent.ErrUnavailable):
-		return "upterm: port forwarding denied; nothing on the host can approve it now. The host can attach its terminal or run with --allow-loopback-tcp-forwarding."
+		return "upterm: port forwarding denied; nothing on the host can approve it now. The host can attach its terminal or run with --allow-forwarding=loopback."
 	case errors.Is(err, context.DeadlineExceeded), errors.Is(err, consent.ErrTimeout):
 		return "upterm: port forwarding denied; the request timed out before it was approved."
 	case errors.Is(err, context.Canceled), errors.Is(err, consent.ErrCanceled):
@@ -234,6 +246,26 @@ func forwardRefusal(err error) string {
 		return "upterm: the host denied this port forward."
 	}
 	return "upterm: port forwarding denied."
+}
+
+// notLoopbackRefusal is the loopback rule's refusal of address and port. It
+// names the destination, the guest's own input and so bounded and plain, and
+// how to write it as one the session forwards to: unless it is an address
+// somewhere else, where loopback is not what the guest asked for.
+func notLoopbackRefusal(address string, port uint32) string {
+	p := strconv.FormatUint(uint64(port), 10)
+	if len(address) > maxEchoedDestination {
+		cut := maxEchoedDestination
+		for cut > 0 && !utf8.RuneStart(address[cut]) {
+			cut--
+		}
+		address = address[:cut] + "…"
+	}
+	refusal := "upterm: forwarding to " + net.JoinHostPort(uio.PlainText(address), p) + " refused: " + errForwardNotLoopback.Error()
+	if ip, err := netip.ParseAddr(address); err == nil && !ip.WithZone("").Unmap().IsLoopback() {
+		return refusal
+	}
+	return refusal + "; use 127.0.0.1:" + p + " or [::1]:" + p
 }
 
 // Pending opens have no per-channel CLOSE notification until acceptance. The
@@ -307,7 +339,7 @@ func forwardingHandler(events *emitter.Emitter, forwards *Forwards, policy forwa
 		}
 		logForwardPermission(logger, client, requestID, req.DestAddr, req.DestPort, permissionErr)
 		if permissionErr != nil {
-			_ = channel.Reject(ssh.Prohibited, forwardRefusal(permissionErr))
+			_ = channel.Reject(ssh.Prohibited, forwardRefusal(permissionErr, req.DestAddr, req.DestPort))
 			return
 		}
 		dest := net.JoinHostPort(req.DestAddr, strconv.FormatUint(uint64(req.DestPort), 10))
@@ -316,7 +348,7 @@ func forwardingHandler(events *emitter.Emitter, forwards *Forwards, policy forwa
 		// Preserve the original-owner check immediately before dialing.
 		if err := openError(); err != nil {
 			logForwardPermission(logger, client, requestID, req.DestAddr, req.DestPort, err)
-			_ = channel.Reject(ssh.Prohibited, forwardRefusal(err))
+			_ = channel.Reject(ssh.Prohibited, forwardRefusal(err, req.DestAddr, req.DestPort))
 			return
 		}
 		socket, err := dialer.DialContext(openCtx, "tcp", dest)
@@ -326,7 +358,7 @@ func forwardingHandler(events *emitter.Emitter, forwards *Forwards, policy forwa
 		}
 		defer func() { _ = socket.Close() }()
 		if err := openError(); err != nil {
-			_ = channel.Reject(ssh.Prohibited, forwardRefusal(err))
+			_ = channel.Reject(ssh.Prohibited, forwardRefusal(err, req.DestAddr, req.DestPort))
 			return
 		}
 		stream, requests, err := channel.Accept()
