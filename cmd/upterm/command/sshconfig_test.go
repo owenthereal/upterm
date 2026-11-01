@@ -23,6 +23,10 @@ const (
 	publicRelayFingerprint = "SHA256:9ajV8JqMe6jJE/s3TYjb/9xw7T0pfJ2+gADiBIJWDPE"
 )
 
+// otherAuthorityKey is a certificate authority's key that isn't the relay's
+// own, for a relay whose host certificate another key signs.
+const otherAuthorityKey = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIIYDCWOa+7MWp4LZrLkQTrf5TgLXSKGwzT15aRto2m3t"
+
 // embeddedSSHUser is the SSH user an embedded-mode relay routes the example
 // session by: its ID and, encoded, the node 10.0.0.5:2222 it is on.
 const embeddedSSHUser = exampleSessionID + ":MTAuMC4wLjU6MjIyMg=="
@@ -100,21 +104,24 @@ func TestSSHConfigGolden(t *testing.T) {
 		resp   *api.GetSessionResponse
 		args   []string
 	}{
-		{"public-relay", relayAnswer("ssh://uptermd.upterm.dev:22", exampleSessionID, "@cert-authority uptermd.upterm.dev "+publicRelayKey, "known"), nil},
+		{"public-relay", relayAnswer("ssh://uptermd.upterm.dev:22", exampleSessionID, "uptermd.upterm.dev "+publicRelayKey, "known"), nil},
 		// A self-hosted relay routing in embedded mode, which reaches the
 		// session by its node as well as its ID.
-		{"embedded-relay", relayAnswer("ssh://relay.example.com", embeddedSSHUser, "@cert-authority relay.example.com "+publicRelayKey, "known"), nil},
-		{"port", relayAnswer("ssh://relay.example.com:2222", exampleSessionID, "@cert-authority [relay.example.com]:2222 "+publicRelayKey, "known"), nil},
+		{"embedded-relay", relayAnswer("ssh://relay.example.com", embeddedSSHUser, "relay.example.com "+publicRelayKey, "known"), nil},
+		{"port", relayAnswer("ssh://relay.example.com:2222", exampleSessionID, "[relay.example.com]:2222 "+publicRelayKey, "known"), nil},
 		{"ipv6", relayAnswer("ssh://[::1]:2222", exampleSessionID, "[::1]:2222 "+publicRelayKey, "known"), nil},
-		{"wss", relayAnswer("wss://uptermd.upterm.dev", exampleSessionID, "@cert-authority [uptermd.upterm.dev]:443 "+publicRelayKey, "known"), nil},
-		{"ws-embedded-relay", relayAnswer("ws://relay.example.com:8080", embeddedSSHUser, "@cert-authority [relay.example.com]:8080 "+publicRelayKey, "known"), nil},
-		{"prompted", relayAnswer("ssh://uptermd.upterm.dev:22", exampleSessionID, "@cert-authority uptermd.upterm.dev "+publicRelayKey, "prompted"), nil},
-		{"auto-accepted", relayAnswer("ssh://uptermd.upterm.dev:22", exampleSessionID, "@cert-authority uptermd.upterm.dev "+publicRelayKey, "auto-accepted"), nil},
+		{"wss", relayAnswer("wss://uptermd.upterm.dev", exampleSessionID, "[uptermd.upterm.dev]:443 "+publicRelayKey, "known"), nil},
+		{"ws-embedded-relay", relayAnswer("ws://relay.example.com:8080", embeddedSSHUser, "[relay.example.com]:8080 "+publicRelayKey, "known"), nil},
+		// A relay whose host certificate another key signs, which the host
+		// trusted as that certificate's authority.
+		{"authority", relayAnswer("ssh://relay.example.com", exampleSessionID, "@cert-authority relay.example.com "+otherAuthorityKey, "known"), nil},
+		{"prompted", relayAnswer("ssh://uptermd.upterm.dev:22", exampleSessionID, "uptermd.upterm.dev "+publicRelayKey, "prompted"), nil},
+		{"auto-accepted", relayAnswer("ssh://uptermd.upterm.dev:22", exampleSessionID, "uptermd.upterm.dev "+publicRelayKey, "auto-accepted"), nil},
 		{"unreported", relayAnswer("ssh://uptermd.upterm.dev:22", exampleSessionID, "", ""), nil},
 		// A way of trusting the key this version doesn't know is not read as
 		// one that vouches for it.
-		{"unknown-trust", relayAnswer("ssh://uptermd.upterm.dev:22", exampleSessionID, "@cert-authority uptermd.upterm.dev "+publicRelayKey, "pinned-elsewhere"), nil},
-		{"alias", relayAnswer("ssh://uptermd.upterm.dev:22", exampleSessionID, "@cert-authority uptermd.upterm.dev "+publicRelayKey, "known"), []string{"--alias", "laptop-home"}},
+		{"unknown-trust", relayAnswer("ssh://uptermd.upterm.dev:22", exampleSessionID, "uptermd.upterm.dev "+publicRelayKey, "pinned-elsewhere"), nil},
+		{"alias", relayAnswer("ssh://uptermd.upterm.dev:22", exampleSessionID, "uptermd.upterm.dev "+publicRelayKey, "known"), []string{"--alias", "laptop-home"}},
 	} {
 		t.Run(tc.golden, func(t *testing.T) {
 			setupSessionRoots(t)
@@ -219,7 +226,7 @@ func requireGoldenWith(t *testing.T, name, got string, added ...map[string]any) 
 // The JSON says a first-use pin's caveat with it, as the command does: a
 // script that adds knownHosts to a file adds the comment that says so.
 func TestSessionJSONCarriesAFirstUsePinsCaveat(t *testing.T) {
-	line := "@cert-authority uptermd.upterm.dev " + publicRelayKey
+	line := "uptermd.upterm.dev " + publicRelayKey
 	m := currentJSON(t, relayAnswer("ssh://uptermd.upterm.dev:22", exampleSessionID, line, "prompted"))
 	require.Equal(t, "prompted", m["relayKeyTrust"])
 	require.Equal(t, "# The host's known_hosts didn't have this key when it first connected; the\n"+
@@ -238,7 +245,7 @@ func TestTheDetachBannerShowsADoorsSSHConfig(t *testing.T) {
 	flagAccept = true
 
 	asked := func(edit func(*api.GetSessionResponse)) *api.GetSessionResponse {
-		resp := relayAnswer("ssh://uptermd.upterm.dev:22", exampleSessionID, "@cert-authority uptermd.upterm.dev "+publicRelayKey, "known")
+		resp := relayAnswer("ssh://uptermd.upterm.dev:22", exampleSessionID, "uptermd.upterm.dev "+publicRelayKey, "known")
 		resp.FileTransfer, resp.FileTransferApprovalRequired = proto.String("all"), proto.Bool(true)
 		resp.GuestShell, resp.Execution, resp.TcpForwarding = proto.String("shared"), proto.String("approval"), proto.String("loopback-approval")
 		if edit != nil {

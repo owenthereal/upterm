@@ -28,8 +28,11 @@ const (
 // it, and how the check came to trust it.
 type TrustedRelayKey struct {
 	// KnownHostsLine trusts the key for the host and port it was checked
-	// for: an @cert-authority line for a certificate's signer, when that is
-	// what was trusted, and a plain key line otherwise.
+	// for. It is a plain key line for the key the relay proved it holds,
+	// which for a certificate signed by its own key, as every uptermd's is,
+	// is the key its authority line names. A certificate trusted by an
+	// authority other than its own key gets an @cert-authority line for that
+	// authority.
 	KnownHostsLine string
 	// Trust is RelayKeyKnown, RelayKeyPrompted or RelayKeyAutoAccepted.
 	Trust string
@@ -100,7 +103,7 @@ func (c *RelayKeyCheck) HostKeyCallback(hostname string, remote net.Addr, key ss
 		if err := c.kh.Record(hostname, key, true); err != nil {
 			return err
 		}
-		c.trust(recordedLine(hostname, key), RelayKeyAutoAccepted)
+		c.trust(pinLine(hostname, key), RelayKeyAutoAccepted)
 		return nil
 	}
 
@@ -111,7 +114,7 @@ func (c *RelayKeyCheck) HostKeyCallback(hostname string, remote net.Addr, key ss
 	if !ok {
 		return fmt.Errorf("Host key verification failed")
 	}
-	c.trust(recordedLine(hostname, key), RelayKeyPrompted)
+	c.trust(pinLine(hostname, key), RelayKeyPrompted)
 	return nil
 }
 

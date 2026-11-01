@@ -35,15 +35,18 @@ func authorityLine(host string, key ssh.PublicKey) string {
 	return "@cert-authority " + knownhosts.Line([]string{host}, key)
 }
 
-// A check says which known_hosts line trusts the key it accepted, for the
-// host and port it was checked for, and how: known when the line was there
-// already, and otherwise the way it took the key on first use, with the line
-// it recorded then.
+// A check says which known_hosts line a guest pins the key it accepted with,
+// for the host and port it was checked for, and how it came to trust it:
+// known when a line was there already, and otherwise the way it took the key
+// on first use, recording it.
 func TestRelayKeyCheckSaysWhatItTrustedAndHow(t *testing.T) {
 	ca, hostKey := newSigner(t), newSigner(t)
 	cert := signHostCert(t, ca, hostKey.PublicKey(), "relay.test")
+	// Signed by its own key, as every uptermd's certificate is.
+	selfSigned := signHostCert(t, hostKey, hostKey.PublicKey(), "relay.test")
 	plain := knownhosts.Line([]string{"relay.test"}, hostKey.PublicKey())
 	authority := authorityLine("relay.test", ca.PublicKey())
+	ownAuthority := authorityLine("relay.test", hostKey.PublicKey())
 
 	for _, tc := range []struct {
 		name       string
@@ -52,16 +55,22 @@ func TestRelayKeyCheckSaysWhatItTrustedAndHow(t *testing.T) {
 		key        ssh.PublicKey
 		wantLine   string
 		known      bool
+		recorded   string // what a first use writes to the file; wantLine when empty
 	}{
-		{"a plain key its line names", plain + "\n", "relay.test:22", hostKey.PublicKey(), plain, true},
-		{"a certificate its authority's line trusts", authority + "\n", "relay.test:22", cert, authority, true},
+		{"a plain key its line names", plain + "\n", "relay.test:22", hostKey.PublicKey(), plain, true, ""},
+		{"a certificate its authority's line trusts", authority + "\n", "relay.test:22", cert, authority, true, ""},
 		// The certificate is trusted by its own key, which is all the line
 		// vouches for: its authority was never checked.
-		{"a certificate a line for its own key trusts", plain + "\n", "relay.test:22", cert, plain, true},
-		{"a plain key no line names", "", "relay.test:22", hostKey.PublicKey(), plain, false},
-		{"a certificate no line names", "", "relay.test:22", cert, authority, false},
+		{"a certificate a line for its own key trusts", plain + "\n", "relay.test:22", cert, plain, true, ""},
+		// Its authority is the key the relay proved it holds, so a guest pins
+		// that key itself, the form ssh accepts whatever names the certificate
+		// lists.
+		{"a self-signed certificate its key's authority line trusts", ownAuthority + "\n", "relay.test:22", selfSigned, plain, true, ""},
+		{"a plain key no line names", "", "relay.test:22", hostKey.PublicKey(), plain, false, ""},
+		{"a certificate no line names", "", "relay.test:22", cert, authority, false, ""},
+		{"a self-signed certificate no line names", "", "relay.test:22", selfSigned, plain, false, ownAuthority},
 		{"a key on another port", "", "relay.test:2222", hostKey.PublicKey(),
-			knownhosts.Line([]string{"[relay.test]:2222"}, hostKey.PublicKey()), false},
+			knownhosts.Line([]string{"[relay.test]:2222"}, hostKey.PublicKey()), false, ""},
 	} {
 		for _, c := range relayKeyChecks {
 			t.Run(c.name+"/"+tc.name, func(t *testing.T) {
@@ -78,13 +87,16 @@ func TestRelayKeyCheckSaysWhatItTrustedAndHow(t *testing.T) {
 				if !tc.known {
 					want.Trust = c.firstUse
 					wantFile = tc.wantLine + "\n"
+					if tc.recorded != "" {
+						wantFile = tc.recorded + "\n"
+					}
 				}
 				got, ok := check.Trusted()
 				require.True(t, ok)
 				require.Equal(t, want, got)
 				content, err := os.ReadFile(file)
 				require.NoError(t, err)
-				require.Equal(t, wantFile, string(content), "a key taken on first use is reported by the line recorded for it")
+				require.Equal(t, wantFile, string(content), "what the file has afterwards")
 			})
 		}
 	}
@@ -131,15 +143,16 @@ func TestRelayKeyCheckReportsNothingItRefused(t *testing.T) {
 }
 
 // With the published file, the public relay's certificate is trusted by its
-// @cert-authority line, on each of the ports a host dials it on: that line is
-// what a guest pins.
+// @cert-authority line, on each of the ports a host dials it on. Its
+// authority is its own key, so a guest pins that key, for the same host and
+// port.
 func TestRelayKeyCheckReportsThePublishedPin(t *testing.T) {
 	published, err := os.ReadFile(publishedKnownHosts)
 	require.NoError(t, err)
 	const key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICiecex8Dq718eSe1CCLgLvDmI7AagvCtax7brPFWkh4"
 	for addr, want := range map[string]string{
-		"uptermd.upterm.dev:22":  "@cert-authority uptermd.upterm.dev " + key,
-		"uptermd.upterm.dev:443": "@cert-authority [uptermd.upterm.dev]:443 " + key,
+		"uptermd.upterm.dev:22":  "uptermd.upterm.dev " + key,
+		"uptermd.upterm.dev:443": "[uptermd.upterm.dev]:443 " + key,
 	} {
 		t.Run(addr, func(t *testing.T) {
 			check, err := NewPromptingRelayKeyCheck(strings.NewReader(""), io.Discard, writeKnownHosts(t, string(published)), false)

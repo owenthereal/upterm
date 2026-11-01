@@ -1,6 +1,7 @@
 package host
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -80,10 +81,9 @@ func (k KnownHosts) Check(hostname string, remote net.Addr, key ssh.PublicKey) e
 	return err
 }
 
-// check is Check, and when a line trusts key, that line as a file needs it to
-// trust key the same way for hostname: an @cert-authority line for the
-// certificate's signer when an authority trusted it, and otherwise the plain
-// line for the key that matched, a certificate's own key included.
+// check is Check, and when a line trusts key, the line a guest pins the relay
+// with for hostname: pinLine's for an authority's certificate, and the plain
+// line for the key that matched otherwise, a certificate's own key included.
 func (k KnownHosts) check(hostname string, remote net.Addr, key ssh.PublicKey) (string, error) {
 	cb, err := knownhosts.New(k.File)
 	if errors.Is(err, fs.ErrNotExist) {
@@ -98,7 +98,7 @@ func (k KnownHosts) check(hostname string, remote net.Addr, key ssh.PublicKey) (
 	err = cb(hostname, remote, key)
 	cert, isCert := key.(*ssh.Certificate)
 	if isCert && err == nil {
-		return knownHostsLine(hostname, cert.SignatureKey, true), nil
+		return pinLine(hostname, cert), nil
 	}
 	if isCert && err != nil && strings.HasPrefix(err.Error(), errNoAuthoritiesHostname) {
 		// No @cert-authority line trusts the certificate's signer, so its own
@@ -147,10 +147,20 @@ func knownHostsLine(hostname string, key ssh.PublicKey, authority bool) string {
 	return line
 }
 
-// recordedLine is the line Record writes for key at hostname.
-func recordedLine(hostname string, key ssh.PublicKey) string {
+// pinLine is the known_hosts line a guest pins a relay with, for key at
+// hostname, once a check has trusted it: the key itself, and for a
+// certificate, the key it certifies when its signer is that key, as every
+// uptermd's is, else an @cert-authority line for its signer. The key itself
+// is what the relay proved it holds, and ssh accepts a line for it whatever
+// the certificate says: OpenSSH refuses a host certificate that lists no
+// principals, which an uptermd started without --hostname presents, and then
+// checks its key as a plain one.
+func pinLine(hostname string, key ssh.PublicKey) string {
 	if cert, ok := key.(*ssh.Certificate); ok {
-		return knownHostsLine(hostname, cert.SignatureKey, true)
+		if !bytes.Equal(cert.SignatureKey.Marshal(), cert.Key.Marshal()) {
+			return knownHostsLine(hostname, cert.SignatureKey, true)
+		}
+		key = cert.Key
 	}
 	return knownHostsLine(hostname, key, false)
 }
