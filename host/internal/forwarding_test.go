@@ -101,7 +101,7 @@ func TestForwardingRejectsMissingConnectionMetadata(t *testing.T) {
 				return false // A mistaken delegation still cannot dial a target.
 			}}
 
-			forwardingHandler(events, &Forwards{}, forwardingPolicy{}, context.Background(), discardLogger())(srv, nil, channel, ctx)
+			forwardingHandler(events, &Forwards{}, forwardingPolicy{}, context.Background(), context.Background(), discardLogger())(srv, nil, channel, ctx)
 
 			require.Equal(t, ssh.ConnectionFailed, channel.rejectReason)
 			require.Contains(t, channel.rejectMessage, "metadata")
@@ -326,7 +326,7 @@ func forwardContext(t *testing.T, parent context.Context) forwardHandlerContext 
 // Removing any cancellation/pregrant check or dialing before permission must
 // create a real, observable connection to this accepting listener.
 func TestForwardingConsentCancellation(t *testing.T) {
-	for _, mode := range []string{"denied", "unavailable primary", "transport", "host", "expired", "late checker grant", "late host checker grant", "read-only unrestricted", "disabled unrestricted"} {
+	for _, mode := range []string{"denied", "unavailable primary", "transport", "host", "session", "expired", "late checker grant", "late host checker grant", "read-only unrestricted", "disabled unrestricted"} {
 		t.Run(mode, func(t *testing.T) {
 			ln, err := net.ListenTCP("tcp", &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1)})
 			require.NoError(t, err)
@@ -335,6 +335,8 @@ func TestForwardingConsentCancellation(t *testing.T) {
 			defer cancel()
 			host, cancelHost := context.WithCancel(context.Background())
 			defer cancelHost()
+			session, endSession := context.WithCancel(context.Background())
+			defer endSession()
 			if mode == "expired" {
 				var deadlineCancel context.CancelFunc
 				transport, deadlineCancel = context.WithDeadline(transport, time.Now().Add(-time.Second))
@@ -346,7 +348,7 @@ func TestForwardingConsentCancellation(t *testing.T) {
 			checker := forwardPermissionFunc(func(ctx context.Context, _ consent.Operation, _ consent.ClientInfo, _ ...string) (consent.Decision, error) {
 				asked <- struct{}{}
 				switch mode {
-				case "transport", "host":
+				case "transport", "host", "session":
 					<-ctx.Done()
 					return consent.AllowGuest, nil
 				case "late host checker grant":
@@ -364,20 +366,23 @@ func TestForwardingConsentCancellation(t *testing.T) {
 			policy := forwardingPolicy{Checker: checker, ReadOnly: mode == "read-only unrestricted", Disabled: mode == "disabled unrestricted", AllowAny: mode == "read-only unrestricted" || mode == "disabled unrestricted"}
 			done := make(chan struct{})
 			go func() {
-				forwardingHandler(emitter.New(1), &Forwards{}, policy, host, discardLogger())(nil, nil, open, c)
+				forwardingHandler(emitter.New(1), &Forwards{}, policy, host, session, discardLogger())(nil, nil, open, c)
 				close(done)
 			}()
-			if mode == "transport" || mode == "host" {
+			if mode == "transport" || mode == "host" || mode == "session" {
 				select {
 				case <-asked:
 				case <-time.After(time.Second):
 					t.Fatal("permission not requested")
 				}
 				require.Zero(t, open.accepts.Load())
-				if mode == "transport" {
+				switch mode {
+				case "transport":
 					cancel()
-				} else {
+				case "host":
 					cancelHost()
+				default:
+					endSession()
 				}
 			}
 			select {
@@ -410,7 +415,7 @@ func TestForwardingFailedAcceptDoesNotAnnounce(t *testing.T) {
 	joined := events.On(upterm.EventForwardingClientJoined)
 	done := make(chan struct{})
 	go func() {
-		forwardingHandler(events, &Forwards{}, forwardingPolicy{AllowLoopback: true}, context.Background(), discardLogger())(nil, nil, open, c)
+		forwardingHandler(events, &Forwards{}, forwardingPolicy{AllowLoopback: true}, context.Background(), context.Background(), discardLogger())(nil, nil, open, c)
 		close(done)
 	}()
 	require.NoError(t, ln.SetDeadline(time.Now().Add(time.Second)))
@@ -461,7 +466,7 @@ func TestForwardingAcceptedChannelCloseStopsTransfer(t *testing.T) {
 	firstDone := make(chan struct{})
 	var opened atomic.Int32
 	var handlers sync.WaitGroup
-	handle := forwardingHandler(emitter.New(1), &Forwards{}, forwardingPolicy{AllowLoopback: true}, context.Background(), discardLogger())
+	handle := forwardingHandler(emitter.New(1), &Forwards{}, forwardingPolicy{AllowLoopback: true}, context.Background(), context.Background(), discardLogger())
 	srv := &gssh.Server{
 		HostSigners:      []gssh.Signer{signer},
 		PublicKeyHandler: func(gssh.Context, gssh.PublicKey) bool { return true },
@@ -567,7 +572,7 @@ func startForwardingRig(t *testing.T, hostCtx context.Context, holdReads bool) *
 	}
 	var opened atomic.Int32
 	var handlers sync.WaitGroup
-	handle := forwardingHandler(emitter.New(1), &Forwards{}, forwardingPolicy{AllowLoopback: true}, hostCtx, discardLogger())
+	handle := forwardingHandler(emitter.New(1), &Forwards{}, forwardingPolicy{AllowLoopback: true}, hostCtx, context.Background(), discardLogger())
 	srv := &gssh.Server{
 		HostSigners:      []gssh.Signer{signer},
 		PublicKeyHandler: func(gssh.Context, gssh.PublicKey) bool { return true },
@@ -768,11 +773,12 @@ const (
 
 func TestForwardingAuditPolicyOutcomes(t *testing.T) {
 	for _, tt := range []struct {
-		name, outcome, address, refusal                            string
-		policy                                                     forwardingPolicy
-		decision                                                   consent.Decision
-		err                                                        error
-		cancelBefore, hostBefore, expired, lateTransport, lateHost bool
+		name, outcome, address, refusal                  string
+		policy                                           forwardingPolicy
+		decision                                         consent.Decision
+		err                                              error
+		cancelBefore, hostBefore, sessionBefore, expired bool
+		lateTransport, lateHost, lateSession             bool
 	}{
 		{name: "read-only", outcome: "denied", refusal: "upterm: this session is read-only, so it doesn't allow port forwarding", policy: forwardingPolicy{ReadOnly: true, AllowAny: true}},
 		{name: "disabled", outcome: "denied", refusal: "upterm: port forwarding is disabled for this session", policy: forwardingPolicy{Disabled: true, AllowLoopback: true}},
@@ -795,9 +801,11 @@ func TestForwardingAuditPolicyOutcomes(t *testing.T) {
 		{name: "custom other failure", outcome: "denied", refusal: "upterm: port forwarding denied.", err: errors.New("checker failed")},
 		{name: "transport canceled before checker", outcome: "canceled", refusal: forwardCanceledRefusal, cancelBefore: true},
 		{name: "host canceled before checker", outcome: "canceled", refusal: forwardCanceledRefusal, hostBefore: true},
+		{name: "session ended before checker", outcome: "canceled", refusal: forwardCanceledRefusal, sessionBefore: true},
 		{name: "deadline expired before checker", outcome: "timeout", refusal: forwardTimeoutRefusal, expired: true},
 		{name: "custom late transport allowance", outcome: "canceled", refusal: forwardCanceledRefusal, decision: consent.AllowGuest, lateTransport: true},
 		{name: "custom late host allowance", outcome: "canceled", refusal: forwardCanceledRefusal, decision: consent.AllowGuest, lateHost: true},
+		{name: "custom late session allowance", outcome: "canceled", refusal: forwardCanceledRefusal, decision: consent.AllowGuest, lateSession: true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			listener, err := net.ListenTCP("tcp", &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1)})
@@ -813,6 +821,11 @@ func TestForwardingAuditPolicyOutcomes(t *testing.T) {
 			if tt.hostBefore {
 				cancelHost()
 			}
+			session, endSession := context.WithCancel(context.Background())
+			defer endSession()
+			if tt.sessionBefore {
+				endSession()
+			}
 			if tt.expired {
 				var stop context.CancelFunc
 				parent, stop = context.WithDeadline(parent, time.Now().Add(-time.Second))
@@ -821,7 +834,7 @@ func TestForwardingAuditPolicyOutcomes(t *testing.T) {
 			ctx := forwardContext(t, parent)
 			checked := false
 			policy := tt.policy
-			if strings.HasPrefix(tt.name, "custom") || tt.cancelBefore || tt.hostBefore || tt.expired {
+			if strings.HasPrefix(tt.name, "custom") || tt.cancelBefore || tt.hostBefore || tt.sessionBefore || tt.expired {
 				policy.Checker = forwardPermissionFunc(func(_ context.Context, _ consent.Operation, _ consent.ClientInfo, _ ...string) (consent.Decision, error) {
 					checked = true
 					if tt.lateTransport {
@@ -829,6 +842,9 @@ func TestForwardingAuditPolicyOutcomes(t *testing.T) {
 					}
 					if tt.lateHost {
 						cancelHost()
+					}
+					if tt.lateSession {
+						endSession()
 					}
 					return tt.decision, tt.err
 				})
@@ -840,7 +856,7 @@ func TestForwardingAuditPolicyOutcomes(t *testing.T) {
 			open := &forwardOpen{address: address, port: uint32(listener.Addr().(*net.TCPAddr).Port)}
 			var logs bytes.Buffer
 			logger := slog.New(slog.NewJSONHandler(&logs, nil))
-			forwardingHandler(emitter.New(1), &Forwards{}, policy, host, logger)(nil, nil, open, ctx)
+			forwardingHandler(emitter.New(1), &Forwards{}, policy, host, session, logger)(nil, nil, open, ctx)
 			records := forwardingAuditRecords(t, logs.String())
 			require.Len(t, records, 1)
 			record := records[0]
@@ -863,10 +879,10 @@ func TestForwardingAuditPolicyOutcomes(t *testing.T) {
 				require.Zero(t, open.accepts.Load())
 			}
 			require.Equal(t, tt.refusal, open.rejection)
-			if tt.cancelBefore || tt.hostBefore || tt.expired {
+			if tt.cancelBefore || tt.hostBefore || tt.sessionBefore || tt.expired {
 				require.False(t, checked, "canceled request must be recorded without asking")
 			}
-			if tt.lateTransport || tt.lateHost {
+			if tt.lateTransport || tt.lateHost || tt.lateSession {
 				require.True(t, checked)
 			}
 		})
@@ -896,7 +912,7 @@ func TestForwardingAuditBoundsUntrustedText(t *testing.T) {
 						address = hostile
 					}
 					open := &forwardOpen{address: address, port: 22}
-					forwardingHandler(emitter.New(1), &Forwards{}, policy, context.Background(), slog.New(sink))(nil, nil, open, c)
+					forwardingHandler(emitter.New(1), &Forwards{}, policy, context.Background(), context.Background(), slog.New(sink))(nil, nil, open, c)
 					data := logs.String()
 					require.NotEmpty(t, data)
 					require.Less(t, len(data), 4096)
@@ -936,7 +952,7 @@ func TestForwardingAuditPreservesManagerEvents(t *testing.T) {
 	parent, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	c := forwardContext(t, parent)
-	handle := forwardingHandler(emitter.New(1), &Forwards{}, forwardingPolicy{Checker: manager}, context.Background(), logger)
+	handle := forwardingHandler(emitter.New(1), &Forwards{}, forwardingPolicy{Checker: manager}, context.Background(), context.Background(), logger)
 	for range 2 {
 		handle(nil, nil, &forwardOpen{address: "127.0.0.1", port: uint32(listener.Addr().(*net.TCPAddr).Port)}, c)
 	}
@@ -987,7 +1003,7 @@ func TestForwardingAuditCancellationDuringLogging(t *testing.T) {
 			})
 			logger := slog.New(slog.NewJSONHandler(writer, nil))
 			open := &forwardOpen{address: "127.0.0.1", port: uint32(listener.Addr().(*net.TCPAddr).Port)}
-			forwardingHandler(emitter.New(1), &Forwards{}, forwardingPolicy{AllowLoopback: true}, host, logger)(nil, nil, open, forwardContext(t, parent))
+			forwardingHandler(emitter.New(1), &Forwards{}, forwardingPolicy{AllowLoopback: true}, host, context.Background(), logger)(nil, nil, open, forwardContext(t, parent))
 			records := forwardingAuditRecords(t, logs.String())
 			require.NotEmpty(t, records)
 			require.Equal(t, "canceled", records[len(records)-1]["outcome"], "synchronous logging must not hide owner loss before dial")

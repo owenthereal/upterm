@@ -319,6 +319,85 @@ func TestSFTPConsentQueuedBehindReview(t *testing.T) {
 	})
 }
 
+// sftpPipeChannel carries an SFTP channel over pipes to a client in the test;
+// fakeGuestSession is the rest of its session.
+type sftpPipeChannel struct {
+	fakeGuestSession
+	in  *io.PipeReader
+	out *io.PipeWriter
+}
+
+func (c *sftpPipeChannel) Read(p []byte) (int, error)  { return c.in.Read(p) }
+func (c *sftpPipeChannel) Write(p []byte) (int, error) { return c.out.Write(p) }
+func (c *sftpPipeChannel) Close() error                { _ = c.in.Close(); return c.out.Close() }
+
+// A request still waiting for approval ends at once with the session it
+// arrived in, however that ends: its channel closes, the host stops, or the
+// hosted command exits on its own, which ends the session's context and never
+// the stop's. Each is a cancellation, and audited as one.
+func TestSFTPConsentEndedBySessionEnd(t *testing.T) {
+	for _, end := range []string{"channel", "stop", "command exit"} {
+		t.Run(end, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				stop, cancelStop := context.WithCancelCause(t.Context())
+				defer cancelStop(nil)
+				// The session's context as the server makes it: one a stop
+				// doesn't end, cancelled once its sessions are released.
+				sessCtx, endSession := context.WithCancel(sessionContext(stop))
+				defer endSession()
+				asked, ended := make(chan struct{}), make(chan struct{})
+				output := &recordingWriter{}
+				h := &sessionHandler{kind: kindGuest, ctx: sessCtx, stopCtx: stop, logger: slog.New(slog.NewJSONHandler(output, nil)), permissionChecker: sftpConsentChecker{check: func(ctx context.Context, _ consent.Operation, _ consent.ClientInfo, _ ...string) (consent.Decision, error) {
+					close(asked)
+					<-ctx.Done()
+					close(ended)
+					return consent.Deny, consent.ErrCanceled
+				}}}
+				serverIn, clientOut := io.Pipe()
+				clientIn, serverOut := io.Pipe()
+				channel := &sftpPipeChannel{fakeGuestSession: fakeGuestSession{ctx: fakeGuestContext{sessionID: "sftp"}}, in: serverIn, out: serverOut}
+				closed := make(chan struct{})
+				served := make(chan struct{})
+				go func() {
+					defer close(served)
+					h.HandleSFTP(&rawSession{Session: channel, channel: channel, closed: closed})
+				}()
+				client, err := sftp.NewClientPipe(clientIn, clientOut)
+				require.NoError(t, err)
+				path := filepath.Join(t.TempDir(), "new")
+				result := make(chan error, 1)
+				go func() { result <- client.Mkdir(path) }()
+				<-asked
+				switch end {
+				case "channel":
+					close(closed)
+				case "stop":
+					cancelStop(ErrSessionStopped)
+				default:
+					endSession()
+				}
+				synctest.Wait()
+				select {
+				case <-ended:
+				default:
+					// Not Fatal: the handler still has to be let finish.
+					t.Error("SFTP request still waiting for approval after its session ended")
+				}
+				// A no-op unless the end above left the request waiting.
+				cancelStop(nil)
+				require.ErrorIs(t, <-result, os.ErrPermission)
+				require.NoError(t, client.Close())
+				<-served
+				_, err = os.Stat(path)
+				require.ErrorIs(t, err, os.ErrNotExist)
+				records := sftpAuditRecords(t, output)
+				require.Len(t, records, 1)
+				requireSFTPAudit(t, records[0], "mkdir", "canceled", []string{path})
+			})
+		})
+	}
+}
+
 // sftpMkdirStatus checks the real protocol reply before pkg/sftp's client
 // normalizes permission-denied text away. This session owns its only reader.
 func sftpMkdirStatus(t *testing.T, client *ssh.Client, path string) (uint32, string) {

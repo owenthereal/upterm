@@ -29,9 +29,9 @@ type guestProcessSpec struct {
 	ReadOnly  bool
 	onWait    func(error)
 	onStarted func()
-	// onDrainBound runs as the pipe drain bound fires, after the runner has
-	// seen whether its copies were still writing. Nil in production; a test
-	// uses it to act at exactly that point.
+	// onDrainBound runs as the drain gives up on copies still running, after
+	// the runner has seen whether they were still writing. Nil in production;
+	// a test uses it to act at exactly that point.
 	onDrainBound func()
 	// beforeWait runs in the runner's waiter before it waits for the leader,
 	// so holding it holds the reap. Nil in production; a test uses it to keep
@@ -196,7 +196,7 @@ func (h *sessionHandler) runGuestProcess(ctx context.Context, sess gssh.Session,
 	var writes guestWrites
 	if isPTY {
 		modes := uio.NewModeTracker()
-		copyOutput(sess, io.TeeReader(output, modes), modes.Restore)
+		copyOutput(writes.track(sess), io.TeeReader(output, modes), modes.Restore)
 	} else {
 		copyOutput(writes.track(sess), output, nil)
 	}
@@ -226,26 +226,40 @@ func (h *sessionHandler) runGuestProcess(ctx context.Context, sess gssh.Session,
 	if pipes != nil {
 		_ = pipes.stdin.Close()
 	}
+	// Whether the drain gave up on copies still running: the pipes' at their
+	// bound, and a terminal's at its own or once nothing has been read from it
+	// or written to the guest for a while.
+	gaveUp := false
 	if isPTY {
-		drainForceCommandOutput(logger, output, drained, nil)
+		drainForceCommandOutput(logger, output, writes.inFlight, drained, nil)
+		select {
+		case <-drained:
+		default:
+			gaveUp = true
+		}
 	} else {
 		timer := time.NewTimer(forceCommandDrainTimeout)
 		select {
 		case <-drained:
 		case <-timer.C:
-			// A copy still writing to the guest holds output the guest hasn't
-			// taken, and the bound cuts off the rest behind it: that is not a
-			// complete result, even if this write finishes before the close.
-			// One waiting to read has passed on everything it was given, as when
-			// a background descendant keeps the pipe open.
-			if writes.inFlight() && operationErr == nil {
-				operationErr = errGuestOutputUndrained
-			}
-			if spec.onDrainBound != nil {
-				spec.onDrainBound()
-			}
+			gaveUp = true
 		}
 		timer.Stop()
+	}
+	if gaveUp {
+		// A copy still writing to the guest holds output the guest hasn't
+		// taken, and giving up cuts off the rest behind it: that is not a
+		// complete result, even if this write finishes before the close. A
+		// terminal's drain counts a write under way as activity, so like the
+		// pipes' it gives up on one only at its bound. One waiting to read has
+		// passed on everything it was given, as when a background descendant
+		// keeps the pipe or the terminal open.
+		if writes.inFlight() && operationErr == nil {
+			operationErr = errGuestOutputUndrained
+		}
+		if spec.onDrainBound != nil {
+			spec.onDrainBound()
+		}
 	}
 	cancelOut()
 	closer.start()
@@ -335,9 +349,10 @@ func reapedBy(exited <-chan struct{}, deadline time.Time) bool {
 // all of it.
 var errGuestOutputUndrained = errors.New("guest output did not drain")
 
-// guestWrites counts the pipe copies inside a write to the guest, so the drain
-// bound can tell output the guest is holding back from a pipe that is only
-// still open.
+// guestWrites counts the output copies inside a write to the guest: a
+// terminal's drain counts one as activity, and a drain that gives up can tell
+// output the guest is holding back from a pipe or terminal that is only still
+// open.
 type guestWrites struct{ n atomic.Int32 }
 
 func (g *guestWrites) track(w io.Writer) io.Writer { return guestWrite{w, g} }

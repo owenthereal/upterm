@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -365,62 +366,110 @@ func (g *pipeGuest) Write(p []byte) (int, error) {
 }
 func (g *pipeGuest) written() string { g.mu.Lock(); defer g.mu.Unlock(); return g.output.String() }
 
-// The drain bound cuts off whatever output the guest hasn't taken by then.
-// A copy still writing to the guest as it fires means some of it was, even if
-// that write then finishes inside the close's idle window, so the command
-// can't report success. A copy waiting to read has passed on all it was given:
-// a background child holding the pipe open leaves the leader's status alone.
+// ptyGuest is a pipeGuest with a terminal.
+type ptyGuest struct{ *pipeGuest }
+
+func (g ptyGuest) Pty() (gssh.Pty, <-chan gssh.Window, bool) {
+	return gssh.Pty{Term: "xterm"}, nil, true
+}
+
+// The drain cuts off whatever output the guest hasn't taken when it gives up:
+// the pipes' at their bound, and a terminal's at its own, or once nothing has
+// been read from it or written to the guest for a while. A copy still writing
+// to the guest as the drain gives up means some of it was cut, even if that
+// write then finishes inside the close's idle window, so the command can't
+// report success. A write the guest takes before the bound has delivered its
+// output, however long it was held. A copy waiting to read has passed on all
+// it was given: a background child holding the pipe or the terminal open
+// leaves the leader's status alone, and a terminal's drain gives up on that
+// once it is quiet, well inside the bound.
 func TestGuestProcessDrainBound(t *testing.T) {
 	for _, tc := range []struct {
-		name        string
-		script      string
-		hold, bound bool
+		name   string
+		script string
+		// hold is when the guest takes the copy's first write: at once (""),
+		// once the drain gives up ("bound"), or a while after the leader's
+		// exit, well inside the bound ("early").
+		hold        string
+		bound       bool
 		code        int
 		undelivered bool
 	}{
-		{"write held across the bound", `printf data; exit 0`, true, true, 1, true},
-		{"descendant holds the pipe", `sleep 60 & echo $! > "$1"; printf data; exit 0`, false, true, 0, false},
-		{"output reaches EOF", `printf data; exit 0`, false, false, 0, false},
+		{"write held across the bound", `printf data; exit 0`, "bound", true, 1, true},
+		{"write taken before the bound", `printf data; exit 0`, "early", false, 0, false},
+		// It ignores the hangup a terminal's leader sends its group on exit.
+		{"descendant holds the output", `trap '' HUP; sleep 60 & echo $! > "$1"; printf data; exit 0`, "", true, 0, false},
+		{"output reaches EOF", `printf data; exit 0`, "", false, 0, false},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			pidfile := filepath.Join(t.TempDir(), "pid")
-			t.Cleanup(func() {
-				if b, err := os.ReadFile(pidfile); err == nil {
-					if pid, err := strconv.Atoi(strings.TrimSpace(string(b))); err == nil {
-						p, _ := os.FindProcess(pid)
-						_ = p.Kill()
+		for _, pty := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/pty=%v", tc.name, pty), func(t *testing.T) {
+				// With no write held, only a descendant holding the output open
+				// makes the drain give up, and only Linux lets one hold a
+				// terminal open past its session leader.
+				if pty && tc.bound && tc.hold == "" && runtime.GOOS != "linux" {
+					t.Skip("XNU revokes a terminal as its session leader exits, so no descendant holds it open")
+				}
+				pidfile := filepath.Join(t.TempDir(), "pid")
+				t.Cleanup(func() {
+					if b, err := os.ReadFile(pidfile); err == nil {
+						if pid, err := strconv.Atoi(strings.TrimSpace(string(b))); err == nil {
+							p, _ := os.FindProcess(pid)
+							_ = p.Kill()
+						}
+					}
+				})
+				guest := &pipeGuest{}
+				if tc.hold != "" {
+					guest.hold, guest.writing = make(chan struct{}), make(chan struct{})
+				}
+				var sess gssh.Session = guest
+				if pty {
+					sess = ptyGuest{guest}
+				}
+				spec := guestShell(tc.script)
+				spec.Argv = append(spec.Argv, "sh", pidfile)
+				var reaped, gaveUp time.Time
+				spec.onWait = func(error) {
+					reaped = time.Now()
+					if tc.hold == "early" {
+						// Long past the quiet that ends a drain with nothing
+						// written, and well inside the bound.
+						time.AfterFunc(500*time.Millisecond, func() { close(guest.hold) })
+					}
+				}
+				fired := false
+				spec.onDrainBound = func() {
+					fired, gaveUp = true, time.Now()
+					if tc.hold == "bound" {
+						select {
+						case <-guest.writing:
+						default:
+							t.Error("no write to the guest was waiting at the bound")
+						}
+						close(guest.hold)
+					}
+				}
+				h := &sessionHandler{logger: discardLogger(), timing: serverTiming{hangup: 50 * time.Millisecond, forceCommandStop: 50 * time.Millisecond}}
+				code, err := h.runGuestProcess(t.Context(), sess, spec)
+				require.Equal(t, tc.code, code)
+				if tc.undelivered {
+					require.ErrorContains(t, err, "guest output did not drain")
+				} else {
+					require.NoError(t, err)
+				}
+				require.Equal(t, tc.bound, fired, "whether the drain gave up")
+				require.Equal(t, "data", guest.written())
+				if fired {
+					// A terminal's drain gives up on quiet only with no write
+					// under way; the pipes' only ever at their bound.
+					if tc.hold == "bound" || !pty {
+						require.GreaterOrEqual(t, gaveUp.Sub(reaped), forceCommandDrainTimeout, "the drain gave up before its bound")
+					} else {
+						require.Less(t, gaveUp.Sub(reaped), forceCommandDrainTimeout, "a quiet terminal's drain waited for its bound")
 					}
 				}
 			})
-			guest := &pipeGuest{}
-			if tc.hold {
-				guest.hold, guest.writing = make(chan struct{}), make(chan struct{})
-			}
-			spec := guestShell(tc.script)
-			spec.Argv = append(spec.Argv, "sh", pidfile)
-			fired := false
-			spec.onDrainBound = func() {
-				fired = true
-				if tc.hold {
-					select {
-					case <-guest.writing:
-					default:
-						t.Error("no write to the guest was waiting at the bound")
-					}
-					close(guest.hold)
-				}
-			}
-			h := &sessionHandler{logger: discardLogger(), timing: serverTiming{hangup: 50 * time.Millisecond, forceCommandStop: 50 * time.Millisecond}}
-			code, err := h.runGuestProcess(t.Context(), guest, spec)
-			require.Equal(t, tc.bound, fired, "whether the drain bound fired")
-			require.Equal(t, "data", guest.written())
-			require.Equal(t, tc.code, code)
-			if tc.undelivered {
-				require.ErrorContains(t, err, "guest output did not drain")
-			} else {
-				require.NoError(t, err)
-			}
-		})
+		}
 	}
 }
 
