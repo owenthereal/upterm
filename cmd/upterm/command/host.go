@@ -113,6 +113,7 @@ var (
 	flagAllowForwarding         forwardingGrant
 	flagAllowLocalTCPForwarding bool
 	flagNoForwarding            bool
+	flagFullAccess              bool
 	flagPtySize                 string
 	flagTerm                    string
 	flagName                    string
@@ -184,10 +185,11 @@ What guests can do: type into the session, or only watch it with
   forwarding   ssh -L 8080:127.0.0.1:8080, to this machine's loopback
                addresses (--allow-forwarding=loopback, --no-forwarding)
 --allow-X lets guests do X without asking, --no-X never lets them, and with
-neither, upterm asks in your terminal. Forwards anywhere else are refused
-unless --allow-forwarding=any, which lets guests reach anything this machine
-can, without asking. --read-only also turns off commands, uploads and
-forwarding.
+neither, upterm asks in your terminal. --full-access allows all three, for
+the keys --authorized-user or --authorized-keys names. Forwards anywhere else
+are refused unless --allow-forwarding=any, which lets guests reach anything
+this machine can, without asking. --read-only also turns off commands,
+uploads and forwarding.
 
 The session runs in a process of its own, and this terminal is attached to
 it. NAME is the session's name, which upterm prints (--name chooses it).
@@ -269,6 +271,7 @@ reports the command's status.`,
 	_ = cmd.RegisterFlagCompletionFunc("allow-forwarding", completeValues(string(forwardLoopback), string(forwardAny)))
 	cmd.PersistentFlags().BoolVar(&flagAllowLocalTCPForwarding, "allow-local-tcp-forwarding", false, "--allow-forwarding=any, by its earlier name.")
 	cmd.PersistentFlags().BoolVar(&flagNoForwarding, "no-forwarding", false, "Deny guest TCP forwarding, including pregranted and approved destinations.")
+	cmd.PersistentFlags().BoolVar(&flagFullAccess, "full-access", false, "Let authorized guests do what an SSH login to your account can, without asking: run commands (ssh SESSION CMD, VS Code, herdr --remote), transfer files (scp, sftp), and forward ports to this machine's loopback addresses (ssh -L 8080:127.0.0.1:8080). Requires --authorized-user or --authorized-keys.")
 	cmd.PersistentFlags().StringVar(&flagPtySize, "pty-size", "", "Pin the session's terminal size as COLSxROWS (e.g. 132x43); resize requests are then ignored. Defaults to the attached terminal's size, or 80x24 when there is none.")
 	cmd.PersistentFlags().StringVar(&flagTerm, "term", "", "Set TERM for the hosted command. Defaults to the inherited TERM, or "+defaultTerm+" when TERM is unset or "+dumbTerm+".")
 	cmd.PersistentFlags().StringVar(&flagName, "name", "", "Name the session, for upterm attach and the session commands to find it by. Defaults to the command's name and four hex digits, e.g. bash-1f3a.")
@@ -280,7 +283,7 @@ reports the command's status.`,
 
 	// One run's choices, not standing configuration. --join-timeout stays
 	// bound to env and config: CI sets it there.
-	perRun(cmd.PersistentFlags(), "name", "detach", "output", "login-command", "allow-exec", "allow-sftp", "no-exec", "allow-forwarding", "no-forwarding")
+	perRun(cmd.PersistentFlags(), "name", "detach", "output", "login-command", "allow-exec", "allow-sftp", "no-exec", "allow-forwarding", "no-forwarding", "full-access")
 
 	// --allow-forwarding=any's released name, kept working, and as the config
 	// key it was, for the scripts and files that say it. Hidden, and not
@@ -476,6 +479,10 @@ func grantConflicts() []grantConflict {
 		{"allow-forwarding", "read-only", forwards, flagReadOnly, "port forwarding"},
 		{"allow-local-tcp-forwarding", "no-forwarding", flagAllowLocalTCPForwarding, flagNoForwarding, "port forwarding"},
 		{"allow-local-tcp-forwarding", "read-only", flagAllowLocalTCPForwarding, flagReadOnly, "port forwarding"},
+		{"full-access", "no-exec", flagFullAccess, flagNoExec, "guest commands"},
+		{"full-access", "no-sftp", flagFullAccess, flagNoSFTP, "file transfers"},
+		{"full-access", "no-forwarding", flagFullAccess, flagNoForwarding, "port forwarding"},
+		{"full-access", "read-only", flagFullAccess, flagReadOnly, "guest commands"},
 	}
 }
 
@@ -483,22 +490,27 @@ func grantConflicts() []grantConflict {
 // Both on the command line, the command contradicts itself: an error. With
 // one from the environment or the config file, which origin says, the denial
 // wins and the session starts, with a warning naming where that side came
-// from. With neither on the command line the file contradicts itself, which
-// is the error config edit reports for it: only read-only and
-// allow-local-tcp-forwarding are both keys.
+// from; but --full-access asks for all of what it grants, so a denial of any
+// of it refuses the run wherever it came from. With neither on the command
+// line the file contradicts itself, which is the error config edit reports
+// for it: only read-only and allow-local-tcp-forwarding are both keys.
+//
+// --full-access is a shell as you, so it also needs an allowlist.
 func validateGrants(origin func(name string) string) (errs []error, warnings []string) {
+	if flagFullAccess && !authorizationRequested() {
+		errs = append(errs, errors.New("--full-access needs --authorized-user or --authorized-keys: without one, anyone with the session ID would get a shell as you"))
+	}
 	for _, c := range grantConflicts() {
 		if !c.granted || !c.denied {
 			continue
 		}
 		grantFrom, denialFrom := origin(c.grant), origin(c.denial)
+		grant, denial := grantSide(c.grant, grantFrom), grantSide(c.denial, denialFrom)
 		switch {
-		case grantFrom == "" && denialFrom == "":
-			errs = append(errs, fmt.Errorf("--%s and --%s contradict each other; pick one", c.grant, c.denial))
-		case grantFrom == "":
-			warnings = append(warnings, fmt.Sprintf("upterm: --%s has no effect: %s (from %s) denies %s", c.grant, c.denial, denialFrom, c.what))
-		case denialFrom == "":
-			warnings = append(warnings, fmt.Sprintf("upterm: %s (from %s) has no effect: --%s denies %s", c.grant, grantFrom, c.denial, c.what))
+		case grantFrom == "" && (denialFrom == "" || c.grant == "full-access"):
+			errs = append(errs, fmt.Errorf("%s and %s contradict each other; pick one", grant, denial))
+		case grantFrom == "" || denialFrom == "":
+			warnings = append(warnings, fmt.Sprintf("upterm: %s has no effect: %s denies %s", grant, denial, c.what))
 		}
 	}
 	if origin("read-only") != "" && origin("allow-local-tcp-forwarding") != "" {
@@ -507,6 +519,15 @@ func validateGrants(origin func(name string) string) (errs []error, warnings []s
 		}
 	}
 	return errs, warnings
+}
+
+// grantSide is one side of a grant conflict as upterm says it: the flag, or
+// the key or variable with where its value came from.
+func grantSide(name, from string) string {
+	if from == "" {
+		return "--" + name
+	}
+	return name + " (from " + from + ")"
 }
 
 // flagOrigin is where this run's value of the flag name came from: "" for

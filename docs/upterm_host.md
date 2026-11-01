@@ -32,10 +32,11 @@ What guests can do: type into the session, or only watch it with
   forwarding   ssh -L 8080:127.0.0.1:8080, to this machine's loopback
                addresses (--allow-forwarding=loopback, --no-forwarding)
 --allow-X lets guests do X without asking, --no-X never lets them, and with
-neither, upterm asks in your terminal. Forwards anywhere else are refused
-unless --allow-forwarding=any, which lets guests reach anything this machine
-can, without asking. --read-only also turns off commands, uploads and
-forwarding.
+neither, upterm asks in your terminal. --full-access allows all three, for
+the keys --authorized-user or --authorized-keys names. Forwards anywhere else
+are refused unless --allow-forwarding=any, which lets guests reach anything
+this machine can, without asking. --read-only also turns off commands,
+uploads and forwarding.
 
 The session runs in a process of its own, and this terminal is attached to
 it. NAME is the session's name, which upterm prints (--name chooses it).
@@ -125,6 +126,7 @@ upterm host [flags] [-- COMMAND [ARGS...]]
       --detach                          Start the session in the background and exit once it is running. Requires --accept. Attach a terminal later with 'upterm attach NAME'; stop it with 'upterm session stop NAME'.
       --escape-char string              The character that starts upterm's keys at the start of a line, or 'none' to turn them off. (default "~")
   -f, --force-command string            Run this host-chosen command for guest shell and exec requests, with a private PTY when requested and pipes otherwise. --no-exec and --read-only still deny explicit exec. Mutually exclusive with --login-command.
+      --full-access                     Let authorized guests do what an SSH login to your account can, without asking: run commands (ssh SESSION CMD, VS Code, herdr --remote), transfer files (scp, sftp), and forward ports to this machine's loopback addresses (ssh -L 8080:127.0.0.1:8080). Requires --authorized-user or --authorized-keys.
   -h, --help                            help for host
       --hide-client-ip                  Hide guests' IP addresses from upterm's output, and from forced commands' SSH_CONNECTION and SSH_CLIENT. When it isn't set (by flag, environment or config file), they are hidden in CI only; --hide-client-ip=false shows them there too.
       --join-timeout duration           End the session if no guest has joined within this long (e.g. 10m). 0 waits forever. A guest who joins disarms it permanently, so a guest who joins and then leaves does not re-arm it. Change it later with 'upterm session set NAME --join-timeout'.

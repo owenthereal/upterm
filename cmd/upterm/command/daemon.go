@@ -136,9 +136,12 @@ func buildDaemonHost(ctx context.Context, name string, opts hostOptions, child *
 		return nil, err
 	}
 
-	// --accept grants file transfers too, as well as a start nobody is asked
-	// about.
-	allowSFTP := flagAllowSFTP || flagAccept
+	// --full-access is --allow-exec, --allow-sftp and
+	// --allow-forwarding=loopback. --accept grants file transfers too, as
+	// well as a start nobody is asked about.
+	allowExec := flagAllowExec || flagFullAccess
+	allowSFTP := flagAllowSFTP || flagFullAccess || flagAccept
+	allowLoopback := flagAllowForwarding == forwardLoopback || flagFullAccess
 
 	// Generated here rather than left to Run: the parent pins the door's keys
 	// from what Listening reports, and it must be this run's session host
@@ -168,7 +171,7 @@ func buildDaemonHost(ctx context.Context, name string, opts hostOptions, child *
 		ForceCommand:      opts.forceCommand,
 		LoginCommand:      opts.loginCommand,
 		CommandDir:        opts.commandDir,
-		AcceptExec:        flagAllowExec,
+		AcceptExec:        allowExec,
 		ExecDisabled:      flagNoExec,
 		HideClientIP:      shouldHideClientIP(),
 		Signers:           signers,
@@ -212,7 +215,7 @@ func buildDaemonHost(ctx context.Context, name string, opts hostOptions, child *
 		Logger:                     logger,
 		ReadOnly:                   flagReadOnly,
 		AllowLocalTCPForwarding:    flagAllowForwarding == forwardAny || flagAllowLocalTCPForwarding,
-		AllowLoopbackTCPForwarding: flagAllowForwarding == forwardLoopback,
+		AllowLoopbackTCPForwarding: allowLoopback,
 		ForwardingDisabled:         flagNoForwarding,
 		PtySize:                    opts.ptySize,
 		PinPtySize:                 flagPtySize != "",

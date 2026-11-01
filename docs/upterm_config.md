@@ -24,8 +24,8 @@ A flag's value comes from the first of these that sets it:
 These flags take values only from the command line:
   --output on host, session info, session current, session list and version
   --name and --detach on host
-  --login-command, --allow-exec, --allow-sftp, --allow-forwarding, --no-exec
-    and --no-forwarding on host
+  --login-command, --allow-exec, --allow-sftp, --allow-forwarding,
+    --full-access, --no-exec and --no-forwarding on host
   --join-timeout on session set
   --wait on join
 Host's --join-timeout still reads env and config.

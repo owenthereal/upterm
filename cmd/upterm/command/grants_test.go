@@ -217,6 +217,24 @@ func TestGuestGrantsReachTheSessionAsSpelled(t *testing.T) {
 			s.AcceptExec, s.AllowLoopbackTCPForwarding, s.AllowLocalTCPForwarding = true, true, true
 			r.Access, r.Execution, r.TCPForwarding, r.LocalForwarding = "allowlist", "granted", "all", true
 		}},
+		{"full access", []string{"--full-access", "--authorized-keys", keys}, func(s *serverGrants, r *reportedGrants) {
+			granted(s, r)
+			s.AcceptExec, s.AllowLoopbackTCPForwarding, r.Access, r.Execution, r.TCPForwarding = true, true, "allowlist", "granted", "loopback"
+		}},
+		{"full access, forwarding anywhere", []string{"--full-access", "--allow-forwarding=any", "--authorized-keys", keys}, func(s *serverGrants, r *reportedGrants) {
+			granted(s, r)
+			s.AcceptExec, s.AllowLoopbackTCPForwarding, s.AllowLocalTCPForwarding = true, true, true
+			r.Access, r.Execution, r.TCPForwarding, r.LocalForwarding = "allowlist", "granted", "all", true
+		}},
+		{"a CI session for VS Code, with full access", []string{"--accept", "--full-access", "--authorized-keys", keys}, func(s *serverGrants, r *reportedGrants) {
+			unasked(s, r)
+			s.AcceptExec, s.AllowLoopbackTCPForwarding, r.Access, r.Execution, r.TCPForwarding = true, true, "allowlist", "granted", "loopback"
+		}},
+		{"a CI session forwarding anywhere, with full access", []string{"--accept", "--full-access", "--allow-forwarding=any", "--authorized-keys", keys}, func(s *serverGrants, r *reportedGrants) {
+			unasked(s, r)
+			s.AcceptExec, s.AllowLoopbackTCPForwarding, s.AllowLocalTCPForwarding = true, true, true
+			r.Access, r.Execution, r.TCPForwarding, r.LocalForwarding = "allowlist", "granted", "all", true
+		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			wantServer, wantReported := asked()
@@ -230,13 +248,26 @@ func TestGuestGrantsReachTheSessionAsSpelled(t *testing.T) {
 
 // Spellings that mean the same grant give the session the same policy.
 func TestGuestGrantSpellingsThatMeanTheSameAreTheSame(t *testing.T) {
-	for _, pair := range [][2][]string{
-		{{"--allow-local-tcp-forwarding"}, {"--allow-forwarding=any"}},
-		{{"--accept"}, {"--accept", "--allow-sftp"}},
+	keys := guestKeysFile(t)
+	allowlist := []string{"--authorized-keys", keys}
+	for _, pair := range []struct {
+		name string
+		a, b []string
+	}{
+		{"forwards anywhere", []string{"--allow-local-tcp-forwarding"}, []string{"--allow-forwarding=any"}},
+		{"started unasked", []string{"--accept"}, []string{"--accept", "--allow-sftp"}},
+		{"full access", []string{"--full-access"}, []string{"--allow-exec", "--allow-sftp", "--allow-forwarding=loopback"}},
+		{"full access, forwarding anywhere", []string{"--full-access", "--allow-forwarding=any"},
+			[]string{"--allow-exec", "--allow-sftp", "--allow-forwarding=loopback", "--allow-local-tcp-forwarding"}},
+		{"full access, started unasked", []string{"--accept", "--full-access"}, []string{"--accept", "--allow-exec", "--allow-forwarding=loopback"}},
 	} {
-		t.Run(strings.Join(pair[0], " "), func(t *testing.T) {
-			server, reported := grantsOf(t, pair[0]...)
-			sameServer, sameReported := grantsOf(t, pair[1]...)
+		t.Run(pair.name, func(t *testing.T) {
+			a, b := pair.a, pair.b
+			if strings.HasPrefix(pair.name, "full access") {
+				a, b = append(a, allowlist...), append(b, allowlist...)
+			}
+			server, reported := grantsOf(t, a...)
+			sameServer, sameReported := grantsOf(t, b...)
 			require.Equal(t, server, sameServer, "the Host")
 			require.Equal(t, reported, sameReported, "what session info reports")
 		})
@@ -424,4 +455,80 @@ func TestTheGrantFlagsEarlierNames(t *testing.T) {
 	require.NoError(t, err)
 	require.Empty(t, deps, "a key config still sets")
 	require.True(t, flagAllowLocalTCPForwarding)
+}
+
+// --full-access grants a shell as you, so it needs an allowlist, from any
+// origin; and it asks for all of what it grants, so a denial of any of it,
+// from any origin, refuses the run rather than narrowing it.
+func TestFullAccessNeedsAnAllowlistAndNoDenial(t *testing.T) {
+	keys := guestKeysFile(t)
+	for _, tc := range []struct {
+		name   string
+		config string
+		env    map[string]string
+		args   []string
+		want   string // with %s for the config file
+	}{
+		{name: "no allowlist", args: []string{"--full-access"},
+			want: "upterm: --full-access needs --authorized-user or --authorized-keys: without one, anyone with the session ID would get a shell as you"},
+		{name: "--no-exec", args: []string{"--full-access", "--authorized-keys", keys, "--no-exec"},
+			want: "upterm: --full-access and --no-exec contradict each other; pick one"},
+		{name: "--no-sftp", args: []string{"--full-access", "--authorized-keys", keys, "--no-sftp"},
+			want: "upterm: --full-access and --no-sftp contradict each other; pick one"},
+		{name: "--no-forwarding", args: []string{"--full-access", "--authorized-keys", keys, "--no-forwarding"},
+			want: "upterm: --full-access and --no-forwarding contradict each other; pick one"},
+		{name: "--read-only", args: []string{"--full-access", "--authorized-keys", keys, "--read-only"},
+			want: "upterm: --full-access and --read-only contradict each other; pick one"},
+		{name: "read-only in config", config: "read-only: true\n", args: []string{"--full-access", "--authorized-keys", keys},
+			want: "upterm: --full-access and read-only (from %s) contradict each other; pick one"},
+		{name: "no-sftp in the environment", env: map[string]string{"UPTERM_NO_SFTP": "true"}, args: []string{"--full-access", "--authorized-keys", keys},
+			want: "upterm: --full-access and no-sftp (from UPTERM_NO_SFTP) contradict each other; pick one"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			setupSessionRoots(t)
+			withConfig(t, tc.config)
+			for k, v := range tc.env {
+				t.Setenv(k, v)
+			}
+			want := tc.want
+			if strings.Contains(want, "%s") {
+				want = fmt.Sprintf(want, utils.UptermConfigFilePath())
+			}
+			_, stderr, code := runCLI(t, append(append([]string{"host", "--accept"}, tc.args...), "--", "true")...)
+			require.Equal(t, 1, code)
+			require.Equal(t, want+"\n", stderr)
+		})
+	}
+
+	// An allowlist from the config file is an allowlist, and forwarding
+	// anywhere widens what --full-access grants rather than contradicting it.
+	for name, tc := range map[string]struct {
+		config string
+		args   []string
+	}{
+		"an allowlist in config":  {"authorized-keys: " + keys + "\n", []string{"--full-access"}},
+		"forwarding anywhere too": {"", []string{"--full-access", "--authorized-keys", keys, "--allow-forwarding=any"}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			setupSessionRoots(t)
+			withConfig(t, tc.config)
+			_, stderr, code := runCLI(t, append(append([]string{"host", "--accept", "--proxy", "://not-a-url"}, tc.args...), "--", "true")...)
+			require.Equal(t, 1, code)
+			require.Equal(t, 1, strings.Count(stderr, "\n"), stderr)
+			require.Contains(t, stderr, "proxy", "the run went on to the proxy")
+		})
+	}
+}
+
+// --full-access's help says what an SSH login gets, and that it needs an
+// allowlist; the description says it once among the grants.
+func TestFullAccessHelp(t *testing.T) {
+	host := findCommand(t, "upterm host")
+	f := host.Flag("full-access")
+	require.NotNil(t, f)
+	require.Equal(t, "Let authorized guests do what an SSH login to your account can, without asking: "+
+		"run commands (ssh SESSION CMD, VS Code, herdr --remote), transfer files (scp, sftp), "+
+		"and forward ports to this machine's loopback addresses (ssh -L 8080:127.0.0.1:8080). "+
+		"Requires --authorized-user or --authorized-keys.", f.Usage)
+	require.Contains(t, oneSpaced(host.Long), "--full-access allows all three, for the keys --authorized-user or --authorized-keys names.")
 }
