@@ -18,12 +18,15 @@ import (
 var sshSessionVars = []string{"SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY", "SSH_ORIGINAL_COMMAND"}
 
 // hostPaneVars are the variables a terminal multiplexer sets to say a process
-// is inside one of its panes: tmux's, screen's, zellij's and Herdr's. A
-// guest's private command runs on its own pty or pipes, so they describe a
-// pane it isn't in, the host's, and a multiplexer the guest starts takes
-// itself to be nested in that pane. Not HERDR_SOCKET_PATH, which says where a
-// Herdr server listens rather than which pane this is.
-var hostPaneVars = []string{"TMUX", "TMUX_PANE", "STY", "ZELLIJ", "ZELLIJ_SESSION_NAME", "ZELLIJ_PANE_ID", "HERDR_ENV", "HERDR_PANE_ID"}
+// is inside one of its panes, or which session, workspace or tab that pane
+// belongs to: tmux's, screen's, zellij's and Herdr's. A guest's private
+// command runs on its own pty or pipes, so they describe a pane it isn't in,
+// the host's, and a multiplexer the guest starts takes itself to be nested in
+// that pane, or reaches for its session. Not HERDR_SOCKET_PATH or
+// HERDR_BIN_PATH, which say where a Herdr server listens and where its binary
+// is rather than which pane this is.
+var hostPaneVars = []string{"TMUX", "TMUX_PANE", "STY", "ZELLIJ", "ZELLIJ_SESSION_NAME", "ZELLIJ_PANE_ID",
+	"HERDR_ENV", "HERDR_PANE_ID", "HERDR_SESSION", "HERDR_TAB_ID", "HERDR_WORKSPACE_ID"}
 
 // withoutHostSessionVars returns a copy of env with sshSessionVars and
 // hostPaneVars taken out.

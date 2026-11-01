@@ -5,6 +5,7 @@ package internal
 import (
 	"bufio"
 	"fmt"
+	"maps"
 	"os"
 	"slices"
 	"strconv"
@@ -65,11 +66,14 @@ func TestServerCommandEnvironment(t *testing.T) {
 // A guest's private command runs on a pty or pipes of its own, not in the
 // multiplexer pane the host started upterm from, so it isn't told it is:
 // tmux, screen, zellij and Herdr would take a guest's own to be nested in the
-// host's pane, and refuse or reach for it. The hosted command is in that pane
-// and keeps them, and every command keeps where a Herdr server listens.
+// host's pane, and refuse or reach for it, or for the Herdr session,
+// workspace or tab that pane is in. The hosted command is in that pane and
+// keeps them, and every command keeps where a Herdr server listens and where
+// its binary is.
 func TestGuestCommandsDontInheritTheHostsPane(t *testing.T) {
-	pane := []string{"TMUX", "TMUX_PANE", "STY", "ZELLIJ", "ZELLIJ_SESSION_NAME", "ZELLIJ_PANE_ID", "HERDR_ENV", "HERDR_PANE_ID"}
-	hostEnv := map[string]string{"HERDR_SOCKET_PATH": "/tmp/herdr.sock"}
+	pane := []string{"TMUX", "TMUX_PANE", "STY", "ZELLIJ", "ZELLIJ_SESSION_NAME", "ZELLIJ_PANE_ID", "HERDR_ENV", "HERDR_PANE_ID", "HERDR_SESSION", "HERDR_TAB_ID", "HERDR_WORKSPACE_ID"}
+	kept := map[string]string{"HERDR_SOCKET_PATH": "/tmp/herdr.sock", "HERDR_BIN_PATH": "/opt/homebrew/bin/herdr"}
+	hostEnv := maps.Clone(kept)
 	for i, name := range pane {
 		hostEnv[name] = "host-pane-" + strconv.Itoa(i)
 	}
@@ -78,7 +82,7 @@ func TestGuestCommandsDontInheritTheHostsPane(t *testing.T) {
 	}
 	t.Setenv("SHELL", "/bin/sh")
 	var report strings.Builder
-	for _, name := range append(slices.Clone(pane), "HERDR_SOCKET_PATH") {
+	for _, name := range append(slices.Clone(pane), slices.Sorted(maps.Keys(kept))...) {
 		fmt.Fprintf(&report, `printf '%s=%%s\n' "${%s-unset}"; `, name, name)
 	}
 	report.WriteString(`printf '\004'`)
@@ -91,7 +95,7 @@ func TestGuestCommandsDontInheritTheHostsPane(t *testing.T) {
 		}
 		return got
 	}
-	guestWant := map[string]string{"HERDR_SOCKET_PATH": "/tmp/herdr.sock"}
+	guestWant := maps.Clone(kept)
 	for _, name := range pane {
 		guestWant[name] = "unset"
 	}
