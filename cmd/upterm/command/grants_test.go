@@ -615,6 +615,48 @@ func TestFullAccessHelp(t *testing.T) {
 	require.Contains(t, oneSpaced(host.Long), "--full-access allows all three, for the keys --authorized-user or --authorized-keys names.")
 }
 
+// Each flag that grants guests something or denies it says exactly what it
+// does, and the description's grant table and the paragraph under it, as
+// they are laid out, say how the flags fit together.
+func TestGuestGrantHelp(t *testing.T) {
+	host := findCommand(t, "upterm host")
+	for _, tc := range []struct{ name, usage string }{
+		{"allow-exec", "Let guests run commands (ssh SESSION CMD, VS Code, herdr --remote) without approval. Each runs as you, and its stdin can carry further code."},
+		{"allow-sftp", "Let guests transfer files (scp, sftp) without approval, with your access; downloads only with --read-only."},
+		{"allow-forwarding", "Let guests forward ports (ssh -L) without approval: loopback, to this machine's literal 127.0.0.0/8 and ::1 addresses; any, to anything this machine can reach."},
+		{"no-sftp", "Turn off file transfer (sftp and scp) for guests."},
+		{"read-only", "Let guests only watch: they can't type into the session, run commands or forward ports, and can only download files."},
+		{"no-exec", "Deny explicit guest exec requests, including forced exec. Host-chosen login and forced shell commands still run."},
+		{"no-forwarding", "Deny guest TCP forwarding, including pregranted and approved destinations."},
+		{"full-access", "Let authorized guests do what an SSH login to your account can, without asking: " +
+			"run commands (ssh SESSION CMD, VS Code, herdr --remote), transfer files (scp, sftp), " +
+			"and forward ports to this machine's loopback addresses (ssh -L 8080:127.0.0.1:8080). " +
+			"Requires --authorized-user or --authorized-keys."},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := host.Flag(tc.name)
+			require.NotNil(t, f)
+			require.Equal(t, tc.usage, f.Usage)
+		})
+	}
+
+	const grants = `What guests can do: type into the session, or only watch it with
+--read-only. A guest's plain ssh shares this terminal, or runs the program
+--login-command names instead. Anything more needs a grant:
+  commands     ssh SESSION CMD, VS Code, herdr --remote, run as you
+               (--allow-exec, --no-exec)
+  files        scp and sftp, with your access (--allow-sftp, --no-sftp)
+  forwarding   ssh -L 8080:127.0.0.1:8080, to this machine's loopback
+               addresses (--allow-forwarding=loopback, --no-forwarding)
+--allow-X lets guests do X without asking, --no-X never lets them, and with
+neither, upterm asks in your terminal. --full-access allows all three, for
+the keys --authorized-user or --authorized-keys names. Forwards anywhere else
+are refused unless --allow-forwarding=any, which lets guests reach anything
+this machine can, without asking. --read-only also turns off commands,
+uploads and forwarding.`
+	require.Contains(t, host.Long, "\n\n"+grants+"\n\n", "a paragraph of its own")
+}
+
 // --detach asks its start question as upterm host does, on the terminal it
 // was started from; with no terminal to ask in it needs --accept, and says
 // that --accept grants file transfers too. It never implies consent.
