@@ -1294,10 +1294,10 @@ type sessionInfo struct {
 	// KnownHosts is the known_hosts text for the relay key the session's
 	// host trusted on its first connection, which a guest pins: the key's
 	// line, after a comment saying so when the host accepted the key on first
-	// use. RelayKeyTrust is how the host came to trust it: "known" (a line in
-	// its known_hosts already did), "prompted" (accepted when it asked) or
-	// "auto-accepted" (--skip-host-key-check). Both are absent when the
-	// daemon doesn't say.
+	// use. RelayKeyTrust is how the host came to trust it: "known" (a line
+	// already in its known_hosts matched the key, which makes it only as good
+	// as that line), "prompted" (accepted when it asked) or "auto-accepted"
+	// (--skip-host-key-check). Both are absent when the daemon doesn't say.
 	KnownHosts    string `json:"knownHosts,omitempty"`
 	RelayKeyTrust string `json:"relayKeyTrust,omitempty"`
 	// FirstGuestJoinedAt is when a terminal or SFTP guest first joined,

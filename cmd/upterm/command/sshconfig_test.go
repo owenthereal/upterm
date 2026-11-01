@@ -137,7 +137,7 @@ func TestSSHConfigGolden(t *testing.T) {
 		{"auto-accepted", relayAnswer("ssh://uptermd.upterm.dev:22", exampleSessionID, "uptermd.upterm.dev "+publicRelayKey, "auto-accepted"), nil},
 		{"unreported", relayAnswer("ssh://uptermd.upterm.dev:22", exampleSessionID, "", ""), nil},
 		// A way of trusting the key this version doesn't know is not read as
-		// one that vouches for it.
+		// known.
 		{"unknown-trust", relayAnswer("ssh://uptermd.upterm.dev:22", exampleSessionID, "uptermd.upterm.dev "+publicRelayKey, "pinned-elsewhere"), nil},
 		{"alias", relayAnswer("ssh://uptermd.upterm.dev:22", exampleSessionID, "uptermd.upterm.dev "+publicRelayKey, "known"), []string{"--alias", "laptop-home"}},
 		// A relay that routes by owner and name.
@@ -522,6 +522,7 @@ func TestSSHConfigHelp(t *testing.T) {
 		"Put the Host block in ~/.ssh/config on each device you connect from.",
 		"Its User is the session's SSH user, which changes whenever the session restarts, and on a relay that routes by node, also when the session comes back on another node: run this again then, and replace the block.",
 		"Add the known_hosts lines to ~/.ssh/known_hosts on each device, once.",
+		"With no comment above it, a line already in the host's known_hosts matched the key, which makes it only as good as that line.",
 		"'upterm session info NAME -o json' has the same block as sshConfig, and the known_hosts lines as knownHosts, beside how the host came to trust the key (relayKeyTrust).",
 	} {
 		require.Contains(t, long, want)

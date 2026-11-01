@@ -127,7 +127,8 @@ func buildDaemonHost(ctx context.Context, name string, opts hostOptions, child *
 	_ = cleanup
 
 	// A check that remembers how it trusted the relay's key, so the session
-	// can tell guests which key to pin, and whether anything vouched for it.
+	// can tell guests which key to pin, and whether a line already in the
+	// known_hosts file matched it.
 	var relayKey *host.RelayKeyCheck
 	if flagSkipHostKeyCheck {
 		relayKey, err = host.NewAutoAcceptingRelayKeyCheck(child.Writer(), flagKnownHostsFilename)

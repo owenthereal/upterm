@@ -36,7 +36,9 @@ Add the known_hosts lines to ~/.ssh/known_hosts on each device, once. They
 are the relay key this session's host trusted when it connected. When the
 host accepted that key on first use, with no line in its known_hosts to check
 it against, a comment above it says so: compare its fingerprint with the one
-the relay's operator publishes before you add it.
+the relay's operator publishes before you add it. With no comment above it, a
+line already in the host's known_hosts matched the key, which makes it only
+as good as that line.
 
 The two parts go in different files: the known_hosts lines aren't ssh
 config, so don't append the whole output to ~/.ssh/config.
@@ -211,8 +213,8 @@ func configValue(v string) string {
 }
 
 // The comments that say how the host came to trust a relay key, for a key no
-// line of its known_hosts vouched for. Each ends where the key's fingerprint
-// follows.
+// line already in its known_hosts matched. Each ends where the key's
+// fingerprint follows.
 const (
 	promptedPin = "# The host's known_hosts didn't have this key when it first connected; the\n" +
 		"# host accepted it when upterm asked. Before you add it, compare its\n" +

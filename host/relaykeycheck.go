@@ -14,7 +14,8 @@ import (
 
 // How a relay's host key came to be trusted, as a session reports it.
 const (
-	// RelayKeyKnown is a key a line already in the known_hosts file trusted.
+	// RelayKeyKnown is a key a line already in the known_hosts file matched,
+	// which makes it only as good as that line.
 	RelayKeyKnown = "known"
 	// RelayKeyPrompted is a key no line trusted, which the person at the
 	// prompt accepted, on first use.
@@ -46,7 +47,7 @@ type TrustedRelayKey struct {
 // is refused.
 //
 // It remembers what it trusted, so that the session can tell guests which
-// key to pin, and whether a line in the file vouched for it.
+// key to pin, and whether a line already in the file matched it.
 type RelayKeyCheck struct {
 	kh         KnownHosts
 	stdin      io.Reader
