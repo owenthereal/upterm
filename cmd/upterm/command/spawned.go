@@ -194,10 +194,11 @@ func (s *spawnedSession) runWithDetachContext(ctx context.Context, notify func(c
 				// Anywhere else stderr may be a pipe nobody drains, and nothing
 				// takes the terminal after it, so the write keeps its bound
 				// rather than hold the session.
+				warning := openSessionWarningFor(sess)
 				if stderrHandedOver {
-					_, _ = io.WriteString(s.stderr, openSessionWarning+"\n")
+					_, _ = io.WriteString(s.stderr, warning+"\n")
 				} else {
-					logging.WriteWithin(s.stderr, logging.LogBound, openSessionWarning+"\n")
+					logging.WriteWithin(s.stderr, logging.LogBound, warning+"\n")
 				}
 			}
 			if displayErr == nil && !s.detach && s.keyHint != "" {
@@ -380,6 +381,16 @@ func (s *spawnedSession) drainClient(done <-chan clientOutcome, cancel context.C
 // openSessionWarning is what upterm host says as an open session starts: one
 // anyone with the session ID can join, with nobody asked.
 const openSessionWarning = "upterm: warning: anyone with the session ID can join; restrict who can with --authorized-user or --authorized-keys"
+
+// openSessionWarningFor is the warning for the open session sess, which
+// says what is at stake when its guests' commands run without asking
+// (--allow-exec): the daemon reports that execution as "granted".
+func openSessionWarningFor(sess *api.GetSessionResponse) string {
+	if sess.GetExecution() == "granted" {
+		return "upterm: warning: anyone with the session ID can join and run commands as you; restrict who can with --authorized-user or --authorized-keys"
+	}
+	return openSessionWarning
+}
 
 // keyHint is the line a foreground upterm host says after the banner: the
 // keys its escape character gives the attached terminal. Nothing with

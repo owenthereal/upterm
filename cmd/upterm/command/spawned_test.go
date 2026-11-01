@@ -540,6 +540,40 @@ func TestSpawnedSessionWarnsThatItIsOpen(t *testing.T) {
 	}
 }
 
+// An open session that runs guests' commands without asking says what is at
+// stake: anyone with the session ID can run commands as you. One whose
+// guests' commands are asked about, refused or replaced by a forced command
+// gets the open-session warning, and one with an allowlist neither.
+func TestAnOpenSessionThatRunsGuestsCommandsSaysSo(t *testing.T) {
+	const open = "upterm: warning: anyone with the session ID can join; restrict who can with --authorized-user or --authorized-keys\n"
+	for _, tc := range []struct {
+		execution string
+		open      bool
+		want      string
+	}{
+		{"granted", true, "upterm: warning: anyone with the session ID can join and run commands as you; restrict who can with --authorized-user or --authorized-keys\n"},
+		{"approval", true, open},
+		{"off", true, open},
+		{"forced", true, open},
+		{"granted", false, ""},
+	} {
+		t.Run(fmt.Sprintf("%s, open=%t", tc.execution, tc.open), func(t *testing.T) {
+			setupSessionRoots(t)
+			spawn, d := newScriptedDaemon(t)
+			d.open = tc.open
+			d.amend = func(r *api.GetSessionResponse) { r.Execution = proto.String(tc.execution) }
+			var stdout, stderr bytes.Buffer
+			s := newSession(t, spawn, nil, &stdout, &stderr)
+			s.detach = true
+			dec := d.startup(t, "s")
+			go func() { <-dec; d.start() }()
+
+			require.NoError(t, s.run(context.Background()))
+			require.Equal(t, tc.want, stderr.String())
+		})
+	}
+}
+
 func TestSpawnedSessionDetachPrintsHowToAttach(t *testing.T) {
 	spawn, d := newScriptedDaemon(t)
 	var stdout, stderr bytes.Buffer
