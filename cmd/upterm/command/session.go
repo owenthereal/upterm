@@ -245,6 +245,7 @@ type currentInfo struct {
 	Host         string `json:"host"`
 	Command      string `json:"command"`
 	ForceCommand string `json:"forceCommand"`
+	LoginCommand string `json:"loginCommand,omitempty"`
 
 	// Always present too, and from the same kind of field: the connected
 	// clients and the authorized keys, which every daemon sends. ClientCount
@@ -289,6 +290,10 @@ type currentInfo struct {
 	FileTransfer                 string    `json:"fileTransfer,omitempty"`
 	FileTransferApprovalRequired *bool     `json:"fileTransferApprovalRequired,omitempty"`
 	LocalForwarding              *bool     `json:"localForwarding,omitempty"`
+	GuestShell                   *string   `json:"guestShell,omitempty"`
+	Execution                    *string   `json:"execution,omitempty"`
+	TCPForwarding                *string   `json:"tcpForwarding,omitempty"`
+	ApprovalMethod               *string   `json:"approvalMethod,omitempty"`
 
 	// The connect strings, built from the host and SSH user every daemon
 	// sends, but printed only when the status the daemon reports says guests
@@ -309,6 +314,7 @@ func currentInfoFrom(sess *api.GetSessionResponse) currentInfo {
 		Host:         sess.GetHost(),
 		Command:      strings.Join(sess.GetCommand(), " "),
 		ForceCommand: strings.Join(sess.GetForceCommand(), " "),
+		LoginCommand: strings.Join(sess.GetLoginCommand(), " "),
 
 		GuestCount:  countGuests(sess.GetConnectedClients()),
 		CountsKnown: true,
@@ -328,6 +334,10 @@ func currentInfoFrom(sess *api.GetSessionResponse) currentInfo {
 		FileTransfer:                 sess.GetFileTransfer(),
 		FileTransferApprovalRequired: sess.FileTransferApprovalRequired,
 		LocalForwarding:              sess.LocalForwarding,
+		GuestShell:                   sess.GuestShell,
+		Execution:                    sess.Execution,
+		TCPForwarding:                sess.TcpForwarding,
+		ApprovalMethod:               sess.ApprovalMethod,
 	}
 	for _, c := range sess.GetConnectedClients() {
 		info.ConnectedClients = append(info.ConnectedClients, clientDesc(c))
@@ -1057,11 +1067,12 @@ Output formats:
   -o go-template='{{.ClientCount}}'   a Go template
 
 Template variables: SessionID, ClientCount (this session's terminals and
-guests), GuestCount, CountsKnown, Host, Command, ForceCommand, Access,
+guests), GuestCount, CountsKnown, Host, Command, ForceCommand, LoginCommand, Access,
 ConnectedClients, LaunchID, Open, JoinStateSource, JoinTimeout, JoinDeadline,
 FirstGuestJoinedAt, Name, Status, Reconnect, TunnelReason, TunnelLostAt,
 NextAttemptAt, StartConfirmed, ReadOnly, FileTransfer,
-FileTransferApprovalRequired, LocalForwarding, SSHCommand and JoinCommand.
+FileTransferApprovalRequired, LocalForwarding, GuestShell, Execution, TCPForwarding,
+ApprovalMethod, SSHCommand and JoinCommand.
 From LaunchID on, a variable the session's upterm doesn't report is empty,
 false, nil or a zero time (0001-01-01 ...), so test it first:
 {{with .Name}}{{.}}{{end}}, or {{if not .TunnelLostAt.IsZero}}...{{end}}.
@@ -1211,6 +1222,7 @@ type sessionInfo struct {
 	Pid          int    `json:"pid,omitempty"`
 	Command      string `json:"command,omitempty"`
 	ForceCommand string `json:"forceCommand,omitempty"`
+	LoginCommand string `json:"loginCommand,omitempty"`
 	SSHCommand   string `json:"sshCommand,omitempty"`
 	JoinCommand  string `json:"joinCommand,omitempty"`
 	// Host is the relay the session was started against, as the daemon
@@ -1245,11 +1257,15 @@ type sessionInfo struct {
 	// waits for the host's approval, and local port forwarding. Each is the
 	// daemon's own optional field, absent when the daemon doesn't report it:
 	// unknown, not false. A daemon that reports them reports false as false.
-	StartConfirmed               *bool  `json:"startConfirmed,omitempty"`
-	ReadOnly                     *bool  `json:"readOnly,omitempty"`
-	FileTransfer                 string `json:"fileTransfer,omitempty"`
-	FileTransferApprovalRequired *bool  `json:"fileTransferApprovalRequired,omitempty"`
-	LocalForwarding              *bool  `json:"localForwarding,omitempty"`
+	StartConfirmed               *bool   `json:"startConfirmed,omitempty"`
+	ReadOnly                     *bool   `json:"readOnly,omitempty"`
+	FileTransfer                 string  `json:"fileTransfer,omitempty"`
+	FileTransferApprovalRequired *bool   `json:"fileTransferApprovalRequired,omitempty"`
+	LocalForwarding              *bool   `json:"localForwarding,omitempty"`
+	GuestShell                   *string `json:"guestShell,omitempty"`
+	Execution                    *string `json:"execution,omitempty"`
+	TCPForwarding                *string `json:"tcpForwarding,omitempty"`
+	ApprovalMethod               *string `json:"approvalMethod,omitempty"`
 	// FirstGuestJoinedAt is when a terminal or SFTP guest first joined,
 	// latched and never moved by a later join; zero and omitted when none
 	// ever did. Unlike this timestamp, guestCount includes forwarding
@@ -1471,6 +1487,10 @@ func withSessionReport(info sessionInfo, sess *api.GetSessionResponse) sessionIn
 	info.FileTransfer = sess.GetFileTransfer()
 	info.FileTransferApprovalRequired = sess.FileTransferApprovalRequired
 	info.LocalForwarding = sess.LocalForwarding
+	info.GuestShell = sess.GuestShell
+	info.Execution = sess.Execution
+	info.TCPForwarding = sess.TcpForwarding
+	info.ApprovalMethod = sess.ApprovalMethod
 	return info
 }
 
@@ -1494,6 +1514,7 @@ func infoFromRecord(rec *sessiondir.Record, status string) sessionInfo {
 		SessionID:          rec.SessionID,
 		Command:            strings.Join(rec.Command, " "),
 		ForceCommand:       strings.Join(rec.ForceCommand, " "),
+		LoginCommand:       strings.Join(rec.LoginCommand, " "),
 		LogPath:            rec.LogPath,
 		Pid:                rec.Pid,
 		Reason:             rec.Reason,
@@ -1634,6 +1655,7 @@ func joinTimeoutRowIn(info sessionInfo, loc *time.Location) (label, value string
 func withLiveDetail(info sessionInfo, sess *api.GetSessionResponse) sessionInfo {
 	info.Command = strings.Join(sess.GetCommand(), " ")
 	info.ForceCommand = strings.Join(sess.GetForceCommand(), " ")
+	info.LoginCommand = strings.Join(sess.GetLoginCommand(), " ")
 	for _, c := range sess.GetConnectedClients() {
 		info.ConnectedClients = append(info.ConnectedClients, clientDesc(c))
 	}
@@ -2013,6 +2035,7 @@ func listSessions(ctx context.Context, runtimeRoot, stateRoot string) ([]tui.Ses
 			SessionID:    rec.SessionID,
 			Command:      strings.Join(rec.Command, " "),
 			ForceCommand: strings.Join(rec.ForceCommand, " "),
+			LoginCommand: strings.Join(rec.LoginCommand, " "),
 		}
 
 		if live, ok := liveDetail(ctx, runtimeRoot, rec); ok {
@@ -2190,6 +2213,7 @@ func buildSessionDetail(sess *api.GetSessionResponse) (tui.SessionDetail, error)
 		SessionID:        sess.SessionId,
 		Command:          strings.Join(sess.Command, " "),
 		ForceCommand:     strings.Join(sess.ForceCommand, " "),
+		LoginCommand:     strings.Join(sess.LoginCommand, " "),
 		Host:             relay,
 		JoinCommand:      joinCommand(u, user, host, port),
 		SSHCommand:       sshCmd,
@@ -2226,6 +2250,10 @@ func guestPermissions(sess *api.GetSessionResponse) *tui.GuestPermissions {
 		FileTransfer:     sess.GetFileTransfer(),
 		ApprovalRequired: sess.GetFileTransferApprovalRequired(),
 		LocalForwarding:  sess.GetLocalForwarding(),
+		GuestShell:       sess.GuestShell,
+		Execution:        sess.Execution,
+		TCPForwarding:    sess.TcpForwarding,
+		ApprovalMethod:   sess.ApprovalMethod,
 	}
 }
 

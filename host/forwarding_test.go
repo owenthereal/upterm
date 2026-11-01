@@ -2,15 +2,20 @@ package host
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/owenthereal/upterm/host/api"
+	"github.com/owenthereal/upterm/host/consent"
 	"github.com/owenthereal/upterm/host/internal"
 	"github.com/owenthereal/upterm/host/sessiondir"
 	"github.com/pkg/sftp"
@@ -94,10 +99,10 @@ func forwardingCallback(t *testing.T, events <-chan *api.Client) *api.Client {
 	}
 }
 
-func TestForwardingPresenceFollowsTransport(t *testing.T) {
+func TestForwardingPresenceLifetime(t *testing.T) {
 	target := forwardingTarget(t)
 	f := newJoinTimeoutHost(t)
-	f.h.AllowLocalTCPForwarding = true
+	f.h.AllowLoopbackTCPForwarding = true
 	joined, left := make(chan *api.Client, 32), make(chan *api.Client, 32)
 	f.h.ClientJoinedCallback = func(c *api.Client) { joined <- c }
 	f.h.ClientLeftCallback = func(c *api.Client) { left <- c }
@@ -383,4 +388,196 @@ func TestForwardingLifecycleReconcilesLeftBeforePresenceWithoutJoining(t *testin
 	require.Empty(t, repo.Clients())
 	require.Empty(t, lifecycle.pendingLeft)
 	require.Equal(t, []string{"joined", "left"}, events)
+}
+
+// Skipping forwarding consent must fail before a listening destination sees a socket.
+type forwardingPermission struct {
+	check func(context.Context, consent.Operation, consent.ClientInfo, ...string) (consent.Decision, error)
+}
+
+func (p forwardingPermission) CheckPermission(ctx context.Context, op consent.Operation, c consent.ClientInfo, subjects ...string) (consent.Decision, error) {
+	return p.check(ctx, op, c, subjects...)
+}
+func (forwardingPermission) ClearConnection(string) {}
+
+func TestForwardingConsentCancellation(t *testing.T) {
+	target := forwardingTarget(t)
+	f := newJoinTimeoutHost(t)
+	called := make(chan struct{}, 1)
+	release := make(chan struct{})
+	f.h.PermissionChecker = forwardingPermission{check: func(ctx context.Context, op consent.Operation, c consent.ClientInfo, subjects ...string) (consent.Decision, error) {
+		require.Equal(t, consent.OpForward, op)
+		require.NotEmpty(t, c.Fingerprint)
+		require.NotEmpty(t, c.ConnectionID)
+		host, port, err := net.SplitHostPort(target)
+		require.NoError(t, err)
+		require.Equal(t, []string{host, port}, subjects)
+		called <- struct{}{}
+		select {
+		case <-release:
+			return consent.AllowConnection, nil
+		case <-ctx.Done():
+			return consent.Deny, ctx.Err()
+		}
+	}}
+	f.start(t)
+	awaitJoinTimeoutSignal(t, f.ready, "readiness")
+	client := f.guestClient(t)
+	result := make(chan error, 1)
+	go func() {
+		c, err := transferForward(client, target)
+		if c != nil {
+			_ = c.Close()
+		}
+		result <- err
+	}()
+	select {
+	case <-called:
+	case err := <-result:
+		t.Fatalf("forwarding permission was not consulted: %v", err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("permission not requested")
+	}
+	select {
+	case err := <-result:
+		t.Fatalf("forward accepted before permission: %v", err)
+	default:
+	}
+	require.Empty(t, connectedForwardingGuests(t, forwardingAdmin(t, f)))
+	close(release)
+	require.NoError(t, <-result)
+	require.NoError(t, client.Close())
+	f.finish(t, "0")
+	require.NoError(t, f.result(t))
+}
+
+func TestForwardingHalfCloseDrainsTarget(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = ln.Close() })
+	targetDone := make(chan error, 1)
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			targetDone <- err
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		_ = conn.SetDeadline(time.Now().Add(2 * time.Second))
+		data, err := io.ReadAll(conn)
+		if err == nil && string(data) != "request until EOF" {
+			err = fmt.Errorf("wrong request %q", data)
+		}
+		if err == nil {
+			_, err = conn.Write([]byte("response after EOF"))
+		}
+		targetDone <- err
+	}()
+	f := newJoinTimeoutHost(t)
+	f.h.AllowLoopbackTCPForwarding = true
+	f.start(t)
+	awaitJoinTimeoutSignal(t, f.ready, "readiness")
+	client := f.guestClient(t)
+	conn, err := client.Dial("tcp", ln.Addr().String())
+	require.NoError(t, err)
+	defer func() { _ = conn.Close() }()
+	_, err = conn.Write([]byte("request until EOF"))
+	require.NoError(t, err)
+	half, ok := conn.(interface{ CloseWrite() error })
+	require.True(t, ok)
+	require.NoError(t, half.CloseWrite())
+	reply := make(chan string, 1)
+	go func() {
+		data, err := io.ReadAll(conn)
+		if err != nil {
+			reply <- err.Error()
+		} else {
+			reply <- string(data)
+		}
+	}()
+	select {
+	case data := <-reply:
+		require.Equal(t, "response after EOF", data)
+	case <-time.After(3 * time.Second):
+		t.Fatal("half-closed forwarding did not drain")
+	}
+	require.NoError(t, <-targetDone)
+	require.NoError(t, client.Close())
+	f.finish(t, "0")
+	require.NoError(t, f.result(t))
+}
+
+func TestForwardingActiveTransferStopsWithHost(t *testing.T) {
+	target := forwardingTarget(t)
+	f := newJoinTimeoutHost(t)
+	f.h.AllowLoopbackTCPForwarding = true
+	f.start(t)
+	awaitJoinTimeoutSignal(t, f.ready, "readiness")
+	client := f.guestClient(t)
+	conn, err := transferForward(client, target)
+	require.NoError(t, err)
+	defer func() { _ = conn.Close() }()
+	done := make(chan error, 1)
+	go func() { _, err := conn.Read(make([]byte, 1)); done <- err }()
+	f.finish(t, "0")
+	require.NoError(t, f.result(t))
+	select {
+	case err := <-done:
+		require.Error(t, err)
+	case <-time.After(time.Second):
+		t.Fatal("active forward survived host teardown")
+	}
+	_ = client.Close()
+}
+
+func TestForwardingAuditHostBoundary(t *testing.T) {
+	for _, allowed := range []bool{false, true} {
+		t.Run(fmt.Sprintf("loopback_pregrant_%v", allowed), func(t *testing.T) {
+			target := forwardingTarget(t)
+			f := newJoinTimeoutHost(t)
+			var logs lockedBuffer
+			f.h.Logger = slog.New(slog.NewJSONHandler(&logs, nil))
+			f.h.AllowLoopbackTCPForwarding = allowed
+			f.start(t)
+			awaitJoinTimeoutSignal(t, f.ready, "readiness")
+			client := f.guestClient(t)
+			conn, err := transferForward(client, target)
+			if allowed {
+				require.NoError(t, err)
+				require.NoError(t, conn.Close())
+			} else {
+				require.Error(t, err)
+			}
+			require.NoError(t, client.Close())
+			f.finish(t, "0")
+			require.NoError(t, f.result(t))
+			var records []map[string]any
+			for _, line := range strings.Split(strings.TrimSpace(logs.String()), "\n") {
+				var record map[string]any
+				require.NoError(t, json.Unmarshal([]byte(line), &record))
+				if record["msg"] == "forwarding permission policy" {
+					records = append(records, record)
+				}
+			}
+			require.Len(t, records, 1, "every forwarding permission decision must reach the configured host logger")
+			record := records[0]
+			outcome := "unavailable"
+			if allowed {
+				outcome = "allowed"
+			}
+			require.Equal(t, outcome, record["outcome"])
+			require.Equal(t, "forward", record["capability"])
+			require.Equal(t, "forward", record["operation"])
+			address, port, err := net.SplitHostPort(target)
+			require.NoError(t, err)
+			require.Equal(t, []any{strconv.QuoteToASCII(address), strconv.QuoteToASCII(port)}, record["subjects"])
+			for _, field := range []string{"fingerprint", "connection_id", "request_id"} {
+				value, ok := record[field].(string)
+				require.True(t, ok, field)
+				raw, err := strconv.Unquote(value)
+				require.NoError(t, err)
+				require.NotEmpty(t, raw, field)
+			}
+		})
+	}
 }

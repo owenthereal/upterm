@@ -2,6 +2,8 @@ package internal
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"net"
 	"os"
 	"path/filepath"
@@ -10,6 +12,7 @@ import (
 	"time"
 
 	"github.com/owenthereal/upterm/host/api"
+	"github.com/owenthereal/upterm/host/consent"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -569,6 +572,99 @@ func TestPermissionsSayWhatGuestsMayDo(t *testing.T) {
 			require.Equal(t, tc.wantForward, r.GetLocalForwarding())
 			require.Equal(t, tc.wantTransfer, r.GetFileTransfer())
 			require.Equal(t, tc.wantApproval, r.GetFileTransferApprovalRequired())
+		})
+	}
+}
+
+// Ignoring a configured grant/denial or command mode changes the policy a
+// reader sees; cached consent must never affect this startup snapshot.
+func TestGuestToolPolicyReport(t *testing.T) {
+	for _, mode := range []string{"shared", "login", "forced"} {
+		for _, accept := range []bool{false, true} {
+			for _, loopback := range []bool{false, true} {
+				for _, all := range []bool{false, true} {
+					for _, hard := range []string{"none", "readonly", "noexec", "noforwarding"} {
+						t.Run(fmt.Sprintf("%s/exec=%t/loop=%t/all=%t/%s", mode, accept, loopback, all, hard), func(t *testing.T) {
+							p := Permissions{AcceptExec: accept, AllowLoopbackTCPForwarding: loopback, AllowLocalTCPForwarding: all, ReadOnly: hard == "readonly", ExecDisabled: hard == "noexec", ForwardingDisabled: hard == "noforwarding", TerminalConsent: true}
+							var r api.GetSessionResponse
+							if mode == "login" {
+								r.LoginCommand = []string{"herdr"}
+							}
+							if mode == "forced" {
+								r.ForceCommand = []string{"herdr"}
+							}
+							p.Report(&r)
+							raw, err := json.Marshal(&r)
+							require.NoError(t, err)
+							var got map[string]any
+							require.NoError(t, json.Unmarshal(raw, &got))
+							exec, forward := "approval", "loopback-approval"
+							if accept {
+								exec = "granted"
+							}
+							if mode == "forced" {
+								exec = "forced"
+							}
+							if loopback {
+								forward = "loopback"
+							}
+							if all {
+								forward = "all"
+							}
+							if hard == "readonly" || hard == "noexec" {
+								exec = "off"
+							}
+							if hard == "readonly" || hard == "noforwarding" {
+								forward = "off"
+							}
+							require.Equal(t, mode, got["guest_shell"])
+							require.Equal(t, exec, got["execution"])
+							require.Equal(t, forward, got["tcp_forwarding"])
+							require.Equal(t, "terminal", got["approval_method"])
+							require.Equal(t, forward == "all", r.GetLocalForwarding())
+							// Exercise the real admin projection, not only Report's snapshot.
+							srv := newAdminServer(t, adminServerOptions{})
+							srv.Session = &r
+							reply := getSession(t, srv)
+							raw, err = json.Marshal(reply)
+							require.NoError(t, err)
+							var live map[string]any
+							require.NoError(t, json.Unmarshal(raw, &live))
+							for _, key := range []string{"guest_shell", "execution", "tcp_forwarding", "approval_method", "login_command"} {
+								require.Equal(t, got[key], live[key], key)
+							}
+						})
+					}
+				}
+			}
+		}
+	}
+}
+
+// Reporting a custom checker must not ask it or expose its transient grants.
+type reportingChecker struct{}
+
+func (reportingChecker) CheckPermission(context.Context, consent.Operation, consent.ClientInfo, ...string) (consent.Decision, error) {
+	panic("reporting consulted live policy")
+}
+func (reportingChecker) ClearConnection(string) { panic("reporting cleared live policy") }
+func TestGuestApprovalMethodReportsConfiguration(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		p      Permissions
+		method string
+	}{
+		{name: "unavailable", method: "unavailable"},
+		{name: "terminal", p: Permissions{TerminalConsent: true}, method: "terminal"},
+		{name: "custom", p: Permissions{PermissionChecker: reportingChecker{}}, method: "custom"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var r api.GetSessionResponse
+			tc.p.Report(&r)
+			require.Equal(t, tc.method, r.GetApprovalMethod())
+			require.Equal(t, "approval", r.GetExecution())
+			require.Equal(t, "loopback-approval", r.GetTcpForwarding())
+			require.Equal(t, "shared", r.GetGuestShell())
 		})
 	}
 }

@@ -28,12 +28,20 @@ Keys, at the start of a line (--escape-char changes the ~, or turns them off):
         and 'upterm session stop NAME' ends it
   ~?    show the session's status and keys, in this terminal only; the
         program may need its own redraw afterwards
+  ~a    review pending guest permissions in the primary local terminal; type
+        d CODE, c CODE or g CODE then Enter using the displayed confirmation
+        (deny, connection + complete tuple, or guest + capability for this host)
   ~^Z   suspend this terminal (Unix); fg resumes it
-  ~~    send a ~
+  ~~    send a ~; ~~a sends literal ~a
 
 .PP
 Through an outer ssh connection, ssh's own ~ escapes come first: type ~~.,
-~~? and ~~^Z, or connect with 'ssh -e none' and type them plain.
+~~?, ~~a and ~~^Z, or connect with 'ssh -e none' and type them plain.
+
+.PP
+With --escape-char none or without a capable primary local terminal,
+interactive approval is unavailable; requests without a grant are denied.
+Escape leaves review without answering; pending requests still expire.
 
 .PP
 On Unix you can also suspend with ~^Z, run 'upterm session info NAME', and

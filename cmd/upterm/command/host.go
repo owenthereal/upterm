@@ -93,30 +93,32 @@ func (e UserInterruptedError) Unwrap() error {
 }
 
 var (
-	flagServer                  string
-	flagForceCommand            string
-	flagLoginCommand            string
-	flagAcceptExec, flagNoExec  bool
-	flagPrivateKeys             []string
-	flagKnownHostsFilename      string
-	flagAuthorizedKeys          string
-	flagAuthorizedUsers         []string
-	flagCodebergUsers           []string
-	flagGitHubUsers             []string
-	flagGitLabUsers             []string
-	flagSourceHutUsers          []string
-	flagReadOnly                bool
-	flagAccept                  bool
-	flagSkipHostKeyCheck        bool
-	flagProxy                   string
-	flagNoSFTP                  bool
-	flagAllowLocalTCPForwarding bool
-	flagPtySize                 string
-	flagTerm                    string
-	flagName                    string
-	flagDetach                  bool
-	flagHostOutput              string
-	flagJoinTimeout             time.Duration
+	flagServer                     string
+	flagForceCommand               string
+	flagLoginCommand               string
+	flagAcceptExec, flagNoExec     bool
+	flagPrivateKeys                []string
+	flagKnownHostsFilename         string
+	flagAuthorizedKeys             string
+	flagAuthorizedUsers            []string
+	flagCodebergUsers              []string
+	flagGitHubUsers                []string
+	flagGitLabUsers                []string
+	flagSourceHutUsers             []string
+	flagReadOnly                   bool
+	flagAccept                     bool
+	flagSkipHostKeyCheck           bool
+	flagProxy                      string
+	flagNoSFTP                     bool
+	flagAllowLocalTCPForwarding    bool
+	flagAllowLoopbackTCPForwarding bool
+	flagNoForwarding               bool
+	flagPtySize                    string
+	flagTerm                       string
+	flagName                       string
+	flagDetach                     bool
+	flagHostOutput                 string
+	flagJoinTimeout                time.Duration
 	// flagHostEscapeChar carries its flag's default here as well as in the
 	// registration below, so parseEscapeChar has a value to accept when the
 	// var is read without hostCmd having run — which is every unit test that
@@ -157,7 +159,9 @@ keys a guest must have.
 What guests may do: type into the session, or only watch it with
 --read-only; transfer files with sftp or scp, with your access (downloads
 only with --read-only, none with --no-sftp); and forward TCP ports (ssh -L)
-to what this machine can reach, only with --allow-local-tcp-forwarding.
+to literal loopback destinations after approval or with
+--allow-loopback-tcp-forwarding, or to anything this machine can reach with
+--allow-local-tcp-forwarding. --no-forwarding and --read-only deny forwarding.
 Guest shell requests share the hosted terminal by default. --login-command runs a
 host-chosen program instead. Explicit exec needs approval or --accept-exec; stdin
 can contain further code. --read-only and --no-exec deny explicit exec.
@@ -214,7 +218,7 @@ reports the command's status.`,
 	}
 
 	cmd.PersistentFlags().StringVarP(&flagServer, "server", "", "ssh://uptermd.upterm.dev:22", "Relay to host the session on: ssh://HOST[:PORT], ws://HOST[:PORT] or wss://HOST[:PORT]. Without a port, ssh uses 22, ws 80 and wss 443.")
-	cmd.PersistentFlags().StringVarP(&flagForceCommand, "force-command", "f", "", "Run this command for each guest who joins, on a terminal of its own, instead of showing them the session's command (e.g. 'tmux attach -t pair-programming', for a tmux session of that name).")
+	cmd.PersistentFlags().StringVarP(&flagForceCommand, "force-command", "f", "", "Run this host-chosen command for guest shell and exec requests, with a private PTY when requested and pipes otherwise. --no-exec and --read-only still deny explicit exec. Mutually exclusive with --login-command.")
 	cmd.PersistentFlags().StringVar(&flagLoginCommand, "login-command", "", "Run this host-chosen command for guest shell requests, without exec approval. Mutually exclusive with --force-command; explicit guest exec still needs approval.")
 	cmd.PersistentFlags().BoolVar(&flagAcceptExec, "accept-exec", false, "Let guests execute private commands without approval. Command stdin can contain further code; this grants execution trust.")
 	cmd.PersistentFlags().BoolVar(&flagNoExec, "no-exec", false, "Deny explicit guest exec requests, including forced exec. Host-chosen login and forced shell commands still run.")
@@ -237,6 +241,8 @@ reports the command's status.`,
 	cmd.PersistentFlags().StringVar(&flagProxy, "proxy", "", proxyHelp)
 	cmd.PersistentFlags().BoolVar(&flagNoSFTP, "no-sftp", false, "Turn off file transfer (sftp and scp) for guests. Without it, guests transfer files with your access (downloads only with --read-only), and unless --accept, a guest's "+transferApprovalHelp+"; "+transferDeniedHelp+".")
 	cmd.PersistentFlags().BoolVar(&flagAllowLocalTCPForwarding, "allow-local-tcp-forwarding", false, "Let guests forward TCP ports (ssh -L) through the session, to whatever this machine can reach. Can't be used with --read-only.")
+	cmd.PersistentFlags().BoolVar(&flagAllowLoopbackTCPForwarding, "allow-loopback-tcp-forwarding", false, "Let guests forward TCP ports to literal 127.0.0.0/8 or ::1 destinations without approval.")
+	cmd.PersistentFlags().BoolVar(&flagNoForwarding, "no-forwarding", false, "Deny guest TCP forwarding, including pregranted and approved destinations.")
 	cmd.PersistentFlags().StringVar(&flagPtySize, "pty-size", "", "Pin the session's terminal size as COLSxROWS (e.g. 132x43); resize requests are then ignored. Defaults to the attached terminal's size, or 80x24 when there is none.")
 	cmd.PersistentFlags().StringVar(&flagTerm, "term", "", "Set TERM for the hosted command. Defaults to the inherited TERM, or "+defaultTerm+" when TERM is unset or "+dumbTerm+".")
 	cmd.PersistentFlags().StringVar(&flagName, "name", "", "Name the session, for upterm attach and the session commands to find it by. Defaults to the command's name and four hex digits, e.g. bash-1f3a.")
@@ -248,7 +254,7 @@ reports the command's status.`,
 
 	// One run's choices, not standing configuration. --join-timeout stays
 	// bound to env and config: CI sets it there.
-	perRun(cmd.PersistentFlags(), "name", "detach", "output", "login-command", "accept-exec", "no-exec")
+	perRun(cmd.PersistentFlags(), "name", "detach", "output", "login-command", "accept-exec", "no-exec", "allow-loopback-tcp-forwarding", "no-forwarding")
 
 	// The provider list comes from host.ProviderList so --help, the generated
 	// docs and the parser's own error messages cannot disagree about which

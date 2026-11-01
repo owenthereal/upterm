@@ -858,3 +858,21 @@ func TestDaemonGuestCommandConfiguration(t *testing.T) {
 	require.Equal(t, cwd, h.CommandDir)
 	hostCmd()
 }
+
+func TestForwardingDaemonConfiguration(t *testing.T) {
+	cmd := hostCmd()
+	defer hostCmd()
+	daemonTestRoots(t)
+	require.NoError(t, cmd.ParseFlags([]string{"--allow-loopback-tcp-forwarding", "--no-forwarding"}))
+	opts, err := parseHostOptions([]string{"sh"})
+	require.NoError(t, err)
+	a, b := net.Pipe()
+	t.Cleanup(func() { _ = a.Close(); _ = b.Close() })
+	child := bootstrap.NewChild(a, nil)
+	t.Cleanup(func() { _ = child.Close() })
+	h, err := buildDaemonHost(context.Background(), "forward-options", opts, child, discardLogger())
+	require.NoError(t, err)
+	require.True(t, h.AllowLoopbackTCPForwarding)
+	require.True(t, h.ForwardingDisabled)
+	require.False(t, h.AllowLocalTCPForwarding)
+}

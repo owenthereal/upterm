@@ -516,3 +516,24 @@ func TestRecordJSONNames(t *testing.T) {
 		require.NotContains(t, fields, name)
 	}
 }
+
+// Dropping LoginCommand during record decoding or claim publication loses the
+// private shell metadata once the daemon stops answering.
+func TestLoginCommandSurvivesRecordRelease(t *testing.T) {
+	runtimeRoot, stateRoot := roots(t)
+	opts := ClaimOptions{LoginCommand: []string{"env", "-u", "HERDR_ENV", "herdr"}}
+	opts.RuntimeRoot, opts.StateRoot, opts.Name = runtimeRoot, stateRoot, "login"
+	d, err := Claim(context.Background(), opts)
+	require.NoError(t, err)
+	require.NoError(t, d.Release(context.Background()))
+	rec, err := ReadRecord(stateRoot, "login")
+	require.NoError(t, err)
+	raw, err := json.Marshal(rec)
+	require.NoError(t, err)
+	var got map[string]any
+	require.NoError(t, json.Unmarshal(raw, &got))
+	require.Equal(t, []any{"env", "-u", "HERDR_ENV", "herdr"}, got["login_command"])
+	for _, key := range []string{"guest_shell", "execution", "tcp_forwarding", "approval_method"} {
+		require.NotContains(t, got, key)
+	}
+}

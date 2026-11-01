@@ -35,11 +35,15 @@ keys a guest must have.
 What guests may do: type into the session, or only watch it with
 --read-only; transfer files with sftp or scp, with your access (downloads
 only with --read-only, none with --no-sftp); and forward TCP ports (ssh -L)
-to what this machine can reach, only with --allow-local-tcp-forwarding.
-Unless --accept, a guest's file transfers need your approval in a desktop
-dialog on this machine, which can allow the file asked about, or everything
-in that scp or sftp command; where no dialog can be shown, transfers are
-denied.
+to literal loopback destinations after approval or with
+--allow-loopback-tcp-forwarding, or to anything this machine can reach with
+--allow-local-tcp-forwarding. --no-forwarding and --read-only deny forwarding.
+Guest shell requests share the hosted terminal by default. --login-command runs a
+host-chosen program instead. Explicit exec needs approval or --accept-exec; stdin
+can contain further code. --read-only and --no-exec deny explicit exec.
+
+.PP
+Unless --accept, a guest's file transfers need your approval in the primary host terminal, which can allow the displayed paths on this connection, or SFTP for this guest until the host session ends; without a primary terminal with approval escapes enabled, ungranted transfers are denied; attach with escapes enabled or use --accept.
 
 .PP
 The session runs in a process of its own, and this terminal is attached to
@@ -51,12 +55,20 @@ Keys, at the start of a line (--escape-char changes the ~, or turns them off):
         and 'upterm session stop NAME' ends it
   ~?    show the session's status and keys, in this terminal only; the
         program may need its own redraw afterwards
+  ~a    review pending guest permissions in the primary local terminal; type
+        d CODE, c CODE or g CODE then Enter using the displayed confirmation
+        (deny, connection + complete tuple, or guest + capability for this host)
   ~^Z   suspend this terminal (Unix); fg resumes it
-  ~~    send a ~
+  ~~    send a ~; ~~a sends literal ~a
 
 .PP
 Through an outer ssh connection, ssh's own ~ escapes come first: type ~~.,
-~~? and ~~^Z, or connect with 'ssh -e none' and type them plain.
+~~?, ~~a and ~~^Z, or connect with 'ssh -e none' and type them plain.
+
+.PP
+With --escape-char none or without a capable primary local terminal,
+interactive approval is unavailable; requests without a grant are denied.
+Escape leaves review without answering; pending requests still expire.
 
 .PP
 On Unix you can also suspend with ~^Z, run 'upterm session info NAME', and
@@ -80,11 +92,19 @@ reports the command's status.
 
 .SH OPTIONS
 \fB--accept\fP[=false]
-	Start the session without asking, and let guests transfer files without your approval. Without it, a guest's file transfers need your approval in a desktop dialog on this machine, which can allow the file asked about, or everything in that scp or sftp command; where no dialog can be shown, transfers are denied.
+	Start the session without asking, and let guests transfer files without your approval. Without it, a guest's file transfers need your approval in the primary host terminal, which can allow the displayed paths on this connection, or SFTP for this guest until the host session ends; without a primary terminal with approval escapes enabled, ungranted transfers are denied; attach with escapes enabled or use --accept.
+
+.PP
+\fB--accept-exec\fP[=false]
+	Let guests execute private commands without approval. Command stdin can contain further code; this grants execution trust.
 
 .PP
 \fB--allow-local-tcp-forwarding\fP[=false]
 	Let guests forward TCP ports (ssh -L) through the session, to whatever this machine can reach. Can't be used with --read-only.
+
+.PP
+\fB--allow-loopback-tcp-forwarding\fP[=false]
+	Let guests forward TCP ports to literal 127.0.0.0/8 or ::1 destinations without approval.
 
 .PP
 \fB--authorized-keys\fP=""
@@ -104,7 +124,7 @@ reports the command's status.
 
 .PP
 \fB-f\fP, \fB--force-command\fP=""
-	Run this command for each guest who joins, on a terminal of its own, instead of showing them the session's command (e.g. 'tmux attach -t pair-programming', for a tmux session of that name).
+	Run this host-chosen command for guest shell and exec requests, with a private PTY when requested and pipes otherwise. --no-exec and --read-only still deny explicit exec. Mutually exclusive with --login-command.
 
 .PP
 \fB-h\fP, \fB--help\fP[=false]
@@ -123,12 +143,24 @@ reports the command's status.
 	Known keys of relays. An unknown relay key is shown for confirmation, as ssh does.
 
 .PP
+\fB--login-command\fP=""
+	Run this host-chosen command for guest shell requests, without exec approval. Mutually exclusive with --force-command; explicit guest exec still needs approval.
+
+.PP
 \fB--name\fP=""
 	Name the session, for upterm attach and the session commands to find it by. Defaults to the command's name and four hex digits, e.g. bash-1f3a.
 
 .PP
+\fB--no-exec\fP[=false]
+	Deny explicit guest exec requests, including forced exec. Host-chosen login and forced shell commands still run.
+
+.PP
+\fB--no-forwarding\fP[=false]
+	Deny guest TCP forwarding, including pregranted and approved destinations.
+
+.PP
 \fB--no-sftp\fP[=false]
-	Turn off file transfer (sftp and scp) for guests. Without it, guests transfer files with your access (downloads only with --read-only), and unless --accept, a guest's file transfers need your approval in a desktop dialog on this machine, which can allow the file asked about, or everything in that scp or sftp command; where no dialog can be shown, transfers are denied.
+	Turn off file transfer (sftp and scp) for guests. Without it, guests transfer files with your access (downloads only with --read-only), and unless --accept, a guest's file transfers need your approval in the primary host terminal, which can allow the displayed paths on this connection, or SFTP for this guest until the host session ends; without a primary terminal with approval escapes enabled, ungranted transfers are denied; attach with escapes enabled or use --accept.
 
 .PP
 \fB-o\fP, \fB--output\fP=""
@@ -148,7 +180,7 @@ reports the command's status.
 
 .PP
 \fB-r\fP, \fB--read-only\fP[=false]
-	Let guests only watch: they can't type into the session, and can only download files. Unless --accept, a guest's file transfers need your approval in a desktop dialog on this machine, which can allow the file asked about, or everything in that scp or sftp command; where no dialog can be shown, transfers are denied. Can't be used with --allow-local-tcp-forwarding.
+	Let guests only watch: they can't type into the session, and can only download files. Unless --accept, a guest's file transfers need your approval in the primary host terminal, which can allow the displayed paths on this connection, or SFTP for this guest until the host session ends; without a primary terminal with approval escapes enabled, ungranted transfers are denied; attach with escapes enabled or use --accept. Can't be used with --allow-local-tcp-forwarding.
 
 .PP
 \fB--server\fP="ssh://uptermd.upterm.dev:22"

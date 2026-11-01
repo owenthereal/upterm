@@ -453,3 +453,13 @@ func TestGuestCommandConfigIsPerRun(t *testing.T) {
 		})
 	}
 }
+
+func TestForwardingConfigIsPerRun(t *testing.T) {
+	for _, key := range []string{"allow-loopback-tcp-forwarding", "no-forwarding"} {
+		t.Run(key, func(t *testing.T) {
+			restoreFlags(t)
+			path := writeConfig(t, key+": [invalid]\n")
+			require.Empty(t, validateConfigFile(Root(), path))
+		})
+	}
+}

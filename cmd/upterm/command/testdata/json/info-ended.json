@@ -6,6 +6,7 @@
   "guestCount": 0,
   "joinStateSource": "record",
   "launchId": "LAUNCH",
+  "loginCommand": "herdr",
   "name": "build",
   "nextAttemptAt": "2026-10-13T12:00:30Z",
   "pid": "PID",

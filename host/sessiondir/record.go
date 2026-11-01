@@ -97,6 +97,7 @@ type Record struct {
 	SessionID    string    `json:"session_id,omitempty"`
 	Command      []string  `json:"command,omitempty"`
 	ForceCommand []string  `json:"force_command,omitempty"`
+	LoginCommand []string  `json:"login_command,omitempty"`
 	StartedAt    time.Time `json:"started_at"`
 	UpdatedAt    time.Time `json:"updated_at"`
 	// omitzero, not omitempty: omitempty does nothing for a struct, so a

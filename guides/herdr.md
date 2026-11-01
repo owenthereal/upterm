@@ -6,44 +6,25 @@ another laptop. upterm is the door: it gives the machine an address you can
 reach from anywhere, without opening a port. Herdr keeps the agents, so losing
 the door costs a rejoin, not the work.
 
-You need upterm v0.37.0 or later and Herdr 0.9.0 or later, with the machine at
-home on macOS or Linux.
+Use an upterm build whose `upterm host --help` lists `--login-command`,
+`--accept-exec` and `--allow-loopback-tcp-forwarding`, and Herdr 0.9.0 or
+later, with the machine at home on macOS or Linux.
 
-There are two ways in:
-
-- **`ssh home`** lands you straight in Herdr, from a laptop or a phone. It
-  needs nothing on the machine but the door.
-- **`ssh home-sshd`** jumps through the door to the machine's own SSH server,
-  for tools that need a real one: `herdr --remote`, Herdr's saved machines, VS
-  Code and scp. [Set it up](#herdr---remote-vs-code-and-scp-jump-to-the-machines-sshd)
-  once the first way works.
+For ordinary terminal sharing, start `upterm host` and share its join command.
+Every guest sees the same terminal. This guide instead gives each guest a
+private Herdr client and lets remote tools connect directly, without sshd.
+The optional [sshd jump](#optional-jump-to-the-machines-sshd) adds an inner
+SSH connection encrypted through the relay.
 
 ```mermaid
 flowchart LR
-  subgraph away["Laptop or phone"]
-    door["ssh home"]
-    jump["herdr --remote home-sshd<br>VS Code, scp"]
-  end
-  relay["relay<br>uptermd.upterm.dev"]
-  subgraph home["Machine at home"]
-    upterm["upterm host<br>(the door)"]
-    client["herdr client<br>(forced command)"]
-    sshd["sshd<br>localhost:22"]
-    herdr["Herdr<br>(your agents)"]
-  end
-  door --> relay
-  jump --> relay
-  relay --> upterm
-  upterm --> client
-  client --> herdr
-  upterm -- "forwards to localhost:22" --> sshd
-  sshd --> herdr
-  jump -. "inner SSH, end to end" .-> sshd
+  away["Laptop or phone<br>ssh home, Herdr, VS Code, scp"] --> relay["relay<br>uptermd.upterm.dev"]
+  relay --> upterm["upterm host<br>machine at home"]
+  upterm --> client["private Herdr client<br>login command"]
+  upterm --> tools["private exec / SFTP / loopback forwarding"]
+  client --> herdr["Herdr server<br>your agents"]
+  tools --> herdr
 ```
-
-Both ways go through the relay to the door. `ssh home` stops there: the door
-runs a Herdr client for you. `ssh home-sshd` carries a second SSH connection
-inside the first, which the door hands to the machine's sshd.
 
 ## Pin the relay
 
@@ -66,8 +47,19 @@ On the machine running Herdr:
 ```console
 upterm host --detach --name home --accept \
   --authorized-user github:YOUR_GITHUB_USER \
-  --force-command 'env -u HERDR_ENV herdr'
+  --login-command 'env -u HERDR_ENV herdr' \
+  --accept-exec \
+  --allow-loopback-tcp-forwarding
 ```
+
+`--login-command` selects what plain `ssh home` opens. Explicit commands from
+Herdr remote mode and VS Code run separately, with `--accept-exec` granting
+execution trust: a guest can send further code over stdin. `--accept` grants
+SFTP and skips the startup prompt; it grants neither exec nor forwarding.
+Herdr alone needs no forwarding grant. The literal loopback grant above lets
+VS Code reach services on 127.0.0.0/8 or ::1 without asking; it excludes
+`localhost`, other hostnames, mapped IPv6 and addresses with zones. It is not
+network containment: an exec-authorized guest can open sockets as your account.
 
 - **Who can join:** only the keys on your GitHub account, as they are when the
   door starts. After you add, change or revoke a key on GitHub, restart the
@@ -137,59 +129,64 @@ its fingerprint is `SHA256:9ajV8JqMe6jJE/s3TYjb/9xw7T0pfJ2+gADiBIJWDPE`, the
 one [Running Without a Terminal](../README.md#running-without-a-terminal)
 publishes.
 
-## `herdr --remote`, VS Code and scp: jump to the machine's sshd
+## Herdr remote mode, saved machines, VS Code and scp
 
-These need a real SSH server. If the machine at home runs one, you can jump to
-it through the door. The inner connection is end to end between you and that
-sshd; the relay forwards only ciphertext.
+The same `home` alias works for all of these, directly through upterm:
 
-1. **Turn on the machine's sshd** (on macOS, System Settings → General →
-   Sharing → Remote Login), and add your key to your account's
-   `~/.ssh/authorized_keys` there.
-2. **Let the door forward.** Start it with `--allow-local-tcp-forwarding`
-   added to the command above. If the door is already running, stop it first
-   (`upterm session stop home`). The new door has a new session ID, so update
-   `User` under `Host home`, and on a Mac, start `caffeinate` again.
-3. **Name the jump** in the laptop's `~/.ssh/config`, below `Host home`:
+- `herdr --remote home` (add `--session NAME` for a named session);
+- a saved machine: `herdr machine add home --label Home` (add
+  `--remote-session NAME` for a named session), then choose Home in Herdr's
+  sidebar;
+- VS Code's "Remote-SSH: Connect to Host…" → `home`;
+- `scp file home:` or `sftp home`. Modern scp uses SFTP; it needs the existing
+  file-transfer permission, not exec or forwarding. Legacy `scp -O` uses exec.
+
+Herdr uses strict host-key checking, so pin the relay key before connecting.
+Saved machines can't ask for a key passphrase: load a passphrase-protected key
+into your agent first with `ssh-add`. Put `herdr` and any remote tools on the
+host's non-interactive PATH, since guest exec inherits the door's environment.
+Guest commands start in the directory where the door launched; relative SFTP
+paths retain their home-directory base.
+
+Run `herdr --remote` from an ordinary terminal, outside a Herdr pane: the
+pane's `HERDR_ENV` trips the nested guard, and its `HERDR_SESSION` can select
+a remote session you didn't mean. The login command above clears `HERDR_ENV`
+for plain SSH clients.
+
+If a tool fails, check `ssh -v home`, the key allowlist, the session ID and the
+host's PATH. After restarting the door, update `User` under `Host home` and
+phone entries; on a Mac, start `caffeinate` again. Flags are fixed for one run.
+
+## Optional jump to the machine's sshd
+
+Use this when you want an inner SSH connection encrypted end to end between
+your laptop and sshd. The relay sees only its ciphertext. Direct upterm shell,
+exec, SFTP and forwarding traffic is decrypted at the relay.
+
+1. Enable the machine's sshd (on macOS: System Settings → General → Sharing →
+   Remote Login), and add your key to your account's `~/.ssh/authorized_keys`.
+2. Keep the loopback grant in the door command above. It covers the literal
+   `127.0.0.1:22` below. The unrestricted `--allow-local-tcp-forwarding` also
+   works but grants access to anything the machine can reach, including its LAN.
+3. Add a separate alias below `Host home` in the laptop's `~/.ssh/config`:
 
    ```
    Host home-sshd
-     HostName localhost
+     HostName 127.0.0.1
      User YOUR_USER_ON_THE_MACHINE
      HostKeyAlias home-sshd
      ProxyJump home
    ```
 
-   If ssh doesn't offer the right key by default, give `home-sshd` its own
-   `IdentityFile`: it doesn't inherit `home`'s.
-4. **Record the machine's host key.** Herdr connects with
-   `StrictHostKeyChecking=yes`, so an unknown key fails instead of prompting.
-   Run `ssh home-sshd` once, and before you accept the key, check its
-   fingerprint against the line of the same type from
-   `ssh-keyscan localhost | ssh-keygen -lf -`, run on the machine.
+   Give it its own `IdentityFile` if needed; it doesn't inherit `home`'s.
+4. Run `ssh home-sshd` once to pin the machine's host key. Before accepting,
+   compare its fingerprint with the same key type from
+   `ssh-keyscan 127.0.0.1 | ssh-keygen -lf -`, run on the home machine.
 
-Now these work from the laptop:
-
-- `herdr --remote home-sshd` (add `--session NAME` for a named session);
-- `scp file home-sshd:`;
-- VS Code's "Remote-SSH: Connect to Host…" → `home-sshd`;
-- a saved machine: `herdr machine add home-sshd --label Home` (add
-  `--remote-session NAME` for a named session), then choose Home in Herdr's
-  sidebar. Saved machines can't ask for a passphrase, so load a
-  passphrase-protected key into your agent first (`ssh-add`).
-
-Run `herdr --remote` from an ordinary terminal, not from a Herdr pane: the
-pane's `HERDR_ENV` trips the same nested guard, and its `HERDR_SESSION` can
-pick a remote session you didn't mean.
-
-`upterm session info home` lists each jump as `jump … → localhost:22`. If
-ssh or Herdr reports `Connection closed by UNKNOWN port 65535`, the jump
-failed; `ssh -v home-sshd` shows why. The usual causes: no `Host home`, a
-stale session ID after a door restart, a door without
-`--allow-local-tcp-forwarding`, or no sshd listening on the machine.
-
-`--allow-local-tcp-forwarding` lets a guest reach anything the machine can,
-your LAN included, so use it only with `--authorized-user`.
+Then use `home-sshd` instead of `home` for tools that should use this inner
+connection. `upterm session info home` lists the jump and its destination.
+`Connection closed by UNKNOWN port 65535` can indicate a failed jump; inspect
+`ssh -v home-sshd`, the alias, session ID, forwarding grant and sshd listener.
 
 ## Share an agent through a door, not its own terminal
 

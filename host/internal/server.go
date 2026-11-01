@@ -75,16 +75,18 @@ type Server struct {
 	// callback accepted, via RelayAuthority. Nil admits no guest: the only
 	// legitimate guest credential is one the relay minted, and without knowing
 	// which relay, no claim in one can be believed.
-	GuestCertAuthority      func(ssh.PublicKey) bool
-	EventEmitter            *emitter.Emitter
-	KeepAliveDuration       time.Duration
-	Logger                  *slog.Logger
-	ReadOnly                bool
-	AllowLocalTCPForwarding bool
-	Forwards                *Forwards // where each jump's destinations are recorded, for GetSession; optional
-	PtySize                 termsize.Size
-	PinPtySize              bool
-	Term                    string
+	GuestCertAuthority         func(ssh.PublicKey) bool
+	EventEmitter               *emitter.Emitter
+	KeepAliveDuration          time.Duration
+	Logger                     *slog.Logger
+	ReadOnly                   bool
+	AllowLocalTCPForwarding    bool
+	AllowLoopbackTCPForwarding bool
+	ForwardingDisabled         bool
+	Forwards                   *Forwards // where each jump's destinations are recorded, for GetSession; optional
+	PtySize                    termsize.Size
+	PinPtySize                 bool
+	Term                       string
 
 	// AwaitInitialClient defers starting the command until the first host
 	// client's output subscription is installed, and defers serving guests
@@ -400,25 +402,9 @@ func (s *Server) ServeWithContext(ctx context.Context, guest, host net.Listener)
 				}
 				return conn
 			},
-			LocalPortForwardingCallback: func(ctx gssh.Context, destinationHost string, destinationPort uint32) bool {
-				logArgs := []any{
-					"destination-host", destinationHost,
-					"destination-port", destinationPort,
-					"remote-addr", ctx.RemoteAddr().String(),
-					"user", ctx.User(),
-					"session-id", ctx.SessionID(),
-				}
-				if !s.AllowLocalTCPForwarding {
-					s.Logger.Warn("rejecting local port forwarding", logArgs...)
-					return false
-				}
-
-				s.Logger.Info("allowing local port forwarding", logArgs...)
-				return true
-			},
 			ChannelHandlers: map[string]gssh.ChannelHandler{
 				"session":      rawSessionHandler,
-				"direct-tcpip": forwardingHandler(s.EventEmitter, s.Forwards, s.ReadOnly),
+				"direct-tcpip": forwardingHandler(s.EventEmitter, s.Forwards, forwardingPolicy{ReadOnly: s.ReadOnly, Disabled: s.ForwardingDisabled, AllowAny: s.AllowLocalTCPForwarding, AllowLoopback: s.AllowLoopbackTCPForwarding, Checker: permissionChecker}, ctx, s.Logger),
 			},
 			SubsystemHandlers: subsystemHandlers,
 			// Admits a guest's shell with the session's end, or refuses it

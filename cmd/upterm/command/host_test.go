@@ -1488,3 +1488,34 @@ func TestHostGuestCommandOptions(t *testing.T) {
 	require.True(t, flagNoExec)
 	hostCmd()
 }
+
+func TestForwardingFlags(t *testing.T) {
+	cmd := hostCmd()
+	defer hostCmd()
+	require.NoError(t, cmd.ParseFlags([]string{"--allow-loopback-tcp-forwarding", "--no-forwarding", "--accept"}))
+	require.True(t, flagAllowLoopbackTCPForwarding)
+	require.True(t, flagNoForwarding)
+}
+
+// Parse guide examples without invoking RunE, resolving GitHub keys, starting
+// a daemon, or contacting the public relay.
+func TestDocumentedGuestToolOptionsParseOffline(t *testing.T) {
+	defer hostCmd()
+	for _, args := range [][]string{
+		{},
+		{"--detach", "--name", "home", "--accept", "--authorized-user", "github:YOUR_GITHUB_USER", "--login-command", "env -u HERDR_ENV herdr", "--accept-exec", "--allow-loopback-tcp-forwarding"},
+		{"--force-command", "tmux attach -t pair-programming", "--", "tmux", "new", "-t", "pair-programming"},
+		{"--allow-loopback-tcp-forwarding"},
+		{"--allow-local-tcp-forwarding"},
+		{"--login-command", "env -u HERDR_ENV herdr", "--no-exec", "--no-forwarding"},
+	} {
+		cmd := hostCmd()
+		require.NoError(t, cmd.ParseFlags(args))
+		require.NoError(t, validateShareRequiredFlags(cmd, cmd.Flags().Args()))
+		opts, err := parseHostOptions(cmd.Flags().Args())
+		require.NoError(t, err)
+		if cmd.Flags().Changed("login-command") {
+			require.Equal(t, []string{"env", "-u", "HERDR_ENV", "herdr"}, opts.loginCommand)
+		}
+	}
+}

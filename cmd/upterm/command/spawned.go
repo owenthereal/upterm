@@ -506,6 +506,7 @@ func (s *spawnedSession) printStarted(ctx context.Context, claimed *api.Claimed,
 		if detail, err := buildSessionDetail(sess); err == nil {
 			info.Command = detail.Command
 			info.ForceCommand = detail.ForceCommand
+			info.LoginCommand = detail.LoginCommand
 			info.SSHCommand = detail.SSHCommand
 			info.JoinCommand = detail.JoinCommand
 			info.Open = detail.Open

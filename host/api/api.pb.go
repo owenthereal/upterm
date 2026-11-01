@@ -495,17 +495,22 @@ type GetSessionResponse struct {
 	Open bool `protobuf:"varint,12,opt,name=open,proto3" json:"open,omitempty"`
 	// The fields below are each optional: a daemon from before one leaves it
 	// unset, and a reader must treat unset as unknown, never as false or empty.
-	Name                         *string `protobuf:"bytes,13,opt,name=name,proto3,oneof" json:"name,omitempty"`                                                                       // the session's name
-	Status                       *string `protobuf:"bytes,14,opt,name=status,proto3,oneof" json:"status,omitempty"`                                                                   // starting, ready, reconnecting, disconnected, ending
-	Reconnect                    *string `protobuf:"bytes,15,opt,name=reconnect,proto3,oneof" json:"reconnect,omitempty"`                                                             // supported, unsupported
-	TunnelReason                 *string `protobuf:"bytes,16,opt,name=tunnel_reason,json=tunnelReason,proto3,oneof" json:"tunnel_reason,omitempty"`                                   // why the tunnel is down, one of sessiondir's TunnelReason values; empty when it is up
-	TunnelLostAtUnixNano         *int64  `protobuf:"varint,17,opt,name=tunnel_lost_at_unix_nano,json=tunnelLostAtUnixNano,proto3,oneof" json:"tunnel_lost_at_unix_nano,omitempty"`    // UTC; unset when the tunnel is up
-	NextAttemptAtUnixNano        *int64  `protobuf:"varint,18,opt,name=next_attempt_at_unix_nano,json=nextAttemptAtUnixNano,proto3,oneof" json:"next_attempt_at_unix_nano,omitempty"` // UTC; unset when no attempt is scheduled
-	StartConfirmed               *bool   `protobuf:"varint,19,opt,name=start_confirmed,json=startConfirmed,proto3,oneof" json:"start_confirmed,omitempty"`                            // the host answered the start prompt, rather than passing --accept
-	ReadOnly                     *bool   `protobuf:"varint,20,opt,name=read_only,json=readOnly,proto3,oneof" json:"read_only,omitempty"`
-	FileTransfer                 *string `protobuf:"bytes,21,opt,name=file_transfer,json=fileTransfer,proto3,oneof" json:"file_transfer,omitempty"`                                                      // off, downloads, all
-	FileTransferApprovalRequired *bool   `protobuf:"varint,22,opt,name=file_transfer_approval_required,json=fileTransferApprovalRequired,proto3,oneof" json:"file_transfer_approval_required,omitempty"` // each guest file transfer waits for approval in the primary host terminal
-	LocalForwarding              *bool   `protobuf:"varint,23,opt,name=local_forwarding,json=localForwarding,proto3,oneof" json:"local_forwarding,omitempty"`
+	Name                         *string  `protobuf:"bytes,13,opt,name=name,proto3,oneof" json:"name,omitempty"`                                                                       // the session's name
+	Status                       *string  `protobuf:"bytes,14,opt,name=status,proto3,oneof" json:"status,omitempty"`                                                                   // starting, ready, reconnecting, disconnected, ending
+	Reconnect                    *string  `protobuf:"bytes,15,opt,name=reconnect,proto3,oneof" json:"reconnect,omitempty"`                                                             // supported, unsupported
+	TunnelReason                 *string  `protobuf:"bytes,16,opt,name=tunnel_reason,json=tunnelReason,proto3,oneof" json:"tunnel_reason,omitempty"`                                   // why the tunnel is down, one of sessiondir's TunnelReason values; empty when it is up
+	TunnelLostAtUnixNano         *int64   `protobuf:"varint,17,opt,name=tunnel_lost_at_unix_nano,json=tunnelLostAtUnixNano,proto3,oneof" json:"tunnel_lost_at_unix_nano,omitempty"`    // UTC; unset when the tunnel is up
+	NextAttemptAtUnixNano        *int64   `protobuf:"varint,18,opt,name=next_attempt_at_unix_nano,json=nextAttemptAtUnixNano,proto3,oneof" json:"next_attempt_at_unix_nano,omitempty"` // UTC; unset when no attempt is scheduled
+	StartConfirmed               *bool    `protobuf:"varint,19,opt,name=start_confirmed,json=startConfirmed,proto3,oneof" json:"start_confirmed,omitempty"`                            // the host answered the start prompt, rather than passing --accept
+	ReadOnly                     *bool    `protobuf:"varint,20,opt,name=read_only,json=readOnly,proto3,oneof" json:"read_only,omitempty"`
+	FileTransfer                 *string  `protobuf:"bytes,21,opt,name=file_transfer,json=fileTransfer,proto3,oneof" json:"file_transfer,omitempty"`                                                      // off, downloads, all
+	FileTransferApprovalRequired *bool    `protobuf:"varint,22,opt,name=file_transfer_approval_required,json=fileTransferApprovalRequired,proto3,oneof" json:"file_transfer_approval_required,omitempty"` // each guest file transfer waits for approval in the primary host terminal
+	LocalForwarding              *bool    `protobuf:"varint,23,opt,name=local_forwarding,json=localForwarding,proto3,oneof" json:"local_forwarding,omitempty"`                                            // unrestricted effective grant only
+	LoginCommand                 []string `protobuf:"bytes,24,rep,name=login_command,json=loginCommand,proto3" json:"login_command,omitempty"`
+	GuestShell                   *string  `protobuf:"bytes,25,opt,name=guest_shell,json=guestShell,proto3,oneof" json:"guest_shell,omitempty"`             // shared, login, forced
+	Execution                    *string  `protobuf:"bytes,26,opt,name=execution,proto3,oneof" json:"execution,omitempty"`                                 // off, approval, granted, forced
+	TcpForwarding                *string  `protobuf:"bytes,27,opt,name=tcp_forwarding,json=tcpForwarding,proto3,oneof" json:"tcp_forwarding,omitempty"`    // off, loopback-approval, loopback, all
+	ApprovalMethod               *string  `protobuf:"bytes,28,opt,name=approval_method,json=approvalMethod,proto3,oneof" json:"approval_method,omitempty"` // terminal, custom, unavailable
 	unknownFields                protoimpl.UnknownFields
 	sizeCache                    protoimpl.SizeCache
 }
@@ -699,6 +704,41 @@ func (x *GetSessionResponse) GetLocalForwarding() bool {
 		return *x.LocalForwarding
 	}
 	return false
+}
+
+func (x *GetSessionResponse) GetLoginCommand() []string {
+	if x != nil {
+		return x.LoginCommand
+	}
+	return nil
+}
+
+func (x *GetSessionResponse) GetGuestShell() string {
+	if x != nil && x.GuestShell != nil {
+		return *x.GuestShell
+	}
+	return ""
+}
+
+func (x *GetSessionResponse) GetExecution() string {
+	if x != nil && x.Execution != nil {
+		return *x.Execution
+	}
+	return ""
+}
+
+func (x *GetSessionResponse) GetTcpForwarding() string {
+	if x != nil && x.TcpForwarding != nil {
+		return *x.TcpForwarding
+	}
+	return ""
+}
+
+func (x *GetSessionResponse) GetApprovalMethod() string {
+	if x != nil && x.ApprovalMethod != nil {
+		return *x.ApprovalMethod
+	}
+	return ""
 }
 
 type AuthorizedKey struct {
@@ -937,7 +977,7 @@ const file_api_proto_rawDesc = "" +
 	"\tJoinState\x12#\n" +
 	"\rtimeout_nanos\x18\x01 \x01(\x03R\ftimeoutNanos\x12,\n" +
 	"\x12deadline_unix_nano\x18\x02 \x01(\x03R\x10deadlineUnixNano\x12>\n" +
-	"\x1cfirst_guest_joined_unix_nano\x18\x03 \x01(\x03R\x18firstGuestJoinedUnixNano\"\x8b\t\n" +
+	"\x1cfirst_guest_joined_unix_nano\x18\x03 \x01(\x03R\x18firstGuestJoinedUnixNano\"\x98\v\n" +
 	"\x12GetSessionResponse\x12\x1d\n" +
 	"\n" +
 	"session_id\x18\x01 \x01(\tR\tsessionId\x12\x18\n" +
@@ -965,7 +1005,13 @@ const file_api_proto_rawDesc = "" +
 	"\rfile_transfer\x18\x15 \x01(\tH\bR\ffileTransfer\x88\x01\x01\x12J\n" +
 	"\x1ffile_transfer_approval_required\x18\x16 \x01(\bH\tR\x1cfileTransferApprovalRequired\x88\x01\x01\x12.\n" +
 	"\x10local_forwarding\x18\x17 \x01(\bH\n" +
-	"R\x0flocalForwarding\x88\x01\x01B\a\n" +
+	"R\x0flocalForwarding\x88\x01\x01\x12#\n" +
+	"\rlogin_command\x18\x18 \x03(\tR\floginCommand\x12$\n" +
+	"\vguest_shell\x18\x19 \x01(\tH\vR\n" +
+	"guestShell\x88\x01\x01\x12!\n" +
+	"\texecution\x18\x1a \x01(\tH\fR\texecution\x88\x01\x01\x12*\n" +
+	"\x0etcp_forwarding\x18\x1b \x01(\tH\rR\rtcpForwarding\x88\x01\x01\x12,\n" +
+	"\x0fapproval_method\x18\x1c \x01(\tH\x0eR\x0eapprovalMethod\x88\x01\x01B\a\n" +
 	"\x05_nameB\t\n" +
 	"\a_statusB\f\n" +
 	"\n" +
@@ -978,7 +1024,12 @@ const file_api_proto_rawDesc = "" +
 	"_read_onlyB\x10\n" +
 	"\x0e_file_transferB\"\n" +
 	" _file_transfer_approval_requiredB\x13\n" +
-	"\x11_local_forwarding\"a\n" +
+	"\x11_local_forwardingB\x0e\n" +
+	"\f_guest_shellB\f\n" +
+	"\n" +
+	"_executionB\x11\n" +
+	"\x0f_tcp_forwardingB\x12\n" +
+	"\x10_approval_method\"a\n" +
 	"\rAuthorizedKey\x126\n" +
 	"\x17public_key_fingerprints\x18\x01 \x03(\tR\x15publicKeyFingerprints\x12\x18\n" +
 	"\acomment\x18\x02 \x01(\tR\acomment\"\xac\x02\n" +

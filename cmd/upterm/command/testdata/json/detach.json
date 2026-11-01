@@ -1,13 +1,16 @@
 {
   "access": "anyone",
   "adminSocket": "PATH",
+  "approvalMethod": "terminal",
   "attachSocket": "PATH",
   "clientCount": 0,
   "command": "bash",
   "countsKnown": false,
+  "execution": "approval",
   "fileTransfer": "all",
   "fileTransferApprovalRequired": false,
   "guestCount": 0,
+  "guestShell": "shared",
   "host": "ssh://127.0.0.1:2222",
   "joinCommand": "upterm join ssh://u@127.0.0.1:2222",
   "joinStateSource": "daemon",
@@ -22,5 +25,6 @@
   "sessionId": "sid-1",
   "sshCommand": "ssh u@127.0.0.1 -p 2222",
   "startConfirmed": false,
-  "status": "ready"
+  "status": "ready",
+  "tcpForwarding": "loopback-approval"
 }

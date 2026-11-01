@@ -24,11 +24,12 @@ Output formats:
 
 .PP
 Template variables: SessionID, ClientCount (this session's terminals and
-guests), GuestCount, CountsKnown, Host, Command, ForceCommand, Access,
+guests), GuestCount, CountsKnown, Host, Command, ForceCommand, LoginCommand, Access,
 ConnectedClients, LaunchID, Open, JoinStateSource, JoinTimeout, JoinDeadline,
 FirstGuestJoinedAt, Name, Status, Reconnect, TunnelReason, TunnelLostAt,
 NextAttemptAt, StartConfirmed, ReadOnly, FileTransfer,
-FileTransferApprovalRequired, LocalForwarding, SSHCommand and JoinCommand.
+FileTransferApprovalRequired, LocalForwarding, GuestShell, Execution, TCPForwarding,
+ApprovalMethod, SSHCommand and JoinCommand.
 From LaunchID on, a variable the session's upterm doesn't report is empty,
 false, nil or a zero time (0001-01-01 ...), so test it first:
 {{with .Name}}{{.}}{{end}}, or {{if not .TunnelLostAt.IsZero}}...{{end}}.

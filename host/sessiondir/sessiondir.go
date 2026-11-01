@@ -203,6 +203,7 @@ type ClaimOptions struct {
 	Name         string
 	Command      []string
 	ForceCommand []string
+	LoginCommand []string
 }
 
 // Dir is a claimed session name and the paths that belong to it. The claim
@@ -387,6 +388,7 @@ func Claim(ctx context.Context, opts ClaimOptions) (*Dir, error) {
 	if err := d.Update(func(r *Record) {
 		r.Command = opts.Command
 		r.ForceCommand = opts.ForceCommand
+		r.LoginCommand = opts.LoginCommand
 		r.StartedAt = d.startedAt
 		r.Status = StatusStarting
 		r.Reason = ReasonUnknown
