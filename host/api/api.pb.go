@@ -511,8 +511,18 @@ type GetSessionResponse struct {
 	Execution                    *string  `protobuf:"bytes,26,opt,name=execution,proto3,oneof" json:"execution,omitempty"`                                 // off, approval, granted, forced
 	TcpForwarding                *string  `protobuf:"bytes,27,opt,name=tcp_forwarding,json=tcpForwarding,proto3,oneof" json:"tcp_forwarding,omitempty"`    // off, loopback-approval, loopback, all
 	ApprovalMethod               *string  `protobuf:"bytes,28,opt,name=approval_method,json=approvalMethod,proto3,oneof" json:"approval_method,omitempty"` // terminal, custom, unavailable
-	unknownFields                protoimpl.UnknownFields
-	sizeCache                    protoimpl.SizeCache
+	// The relay key the host trusted on its first connection, for a guest to
+	// pin the relay as the host did. relay_known_hosts is that key's
+	// known_hosts line, for the host and port the host dialled, and
+	// relay_key_trust is how the host came to trust it: known (a line in its
+	// known_hosts already did), prompted (accepted at its prompt) or
+	// auto-accepted (accepted without asking, --skip-host-key-check). Both are
+	// unset when the host can't say: its host key check isn't one upterm
+	// built.
+	RelayKnownHosts *string `protobuf:"bytes,29,opt,name=relay_known_hosts,json=relayKnownHosts,proto3,oneof" json:"relay_known_hosts,omitempty"`
+	RelayKeyTrust   *string `protobuf:"bytes,30,opt,name=relay_key_trust,json=relayKeyTrust,proto3,oneof" json:"relay_key_trust,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
 }
 
 func (x *GetSessionResponse) Reset() {
@@ -737,6 +747,20 @@ func (x *GetSessionResponse) GetTcpForwarding() string {
 func (x *GetSessionResponse) GetApprovalMethod() string {
 	if x != nil && x.ApprovalMethod != nil {
 		return *x.ApprovalMethod
+	}
+	return ""
+}
+
+func (x *GetSessionResponse) GetRelayKnownHosts() string {
+	if x != nil && x.RelayKnownHosts != nil {
+		return *x.RelayKnownHosts
+	}
+	return ""
+}
+
+func (x *GetSessionResponse) GetRelayKeyTrust() string {
+	if x != nil && x.RelayKeyTrust != nil {
+		return *x.RelayKeyTrust
 	}
 	return ""
 }
@@ -977,7 +1001,7 @@ const file_api_proto_rawDesc = "" +
 	"\tJoinState\x12#\n" +
 	"\rtimeout_nanos\x18\x01 \x01(\x03R\ftimeoutNanos\x12,\n" +
 	"\x12deadline_unix_nano\x18\x02 \x01(\x03R\x10deadlineUnixNano\x12>\n" +
-	"\x1cfirst_guest_joined_unix_nano\x18\x03 \x01(\x03R\x18firstGuestJoinedUnixNano\"\x98\v\n" +
+	"\x1cfirst_guest_joined_unix_nano\x18\x03 \x01(\x03R\x18firstGuestJoinedUnixNano\"\xa0\f\n" +
 	"\x12GetSessionResponse\x12\x1d\n" +
 	"\n" +
 	"session_id\x18\x01 \x01(\tR\tsessionId\x12\x18\n" +
@@ -1011,7 +1035,9 @@ const file_api_proto_rawDesc = "" +
 	"guestShell\x88\x01\x01\x12!\n" +
 	"\texecution\x18\x1a \x01(\tH\fR\texecution\x88\x01\x01\x12*\n" +
 	"\x0etcp_forwarding\x18\x1b \x01(\tH\rR\rtcpForwarding\x88\x01\x01\x12,\n" +
-	"\x0fapproval_method\x18\x1c \x01(\tH\x0eR\x0eapprovalMethod\x88\x01\x01B\a\n" +
+	"\x0fapproval_method\x18\x1c \x01(\tH\x0eR\x0eapprovalMethod\x88\x01\x01\x12/\n" +
+	"\x11relay_known_hosts\x18\x1d \x01(\tH\x0fR\x0frelayKnownHosts\x88\x01\x01\x12+\n" +
+	"\x0frelay_key_trust\x18\x1e \x01(\tH\x10R\rrelayKeyTrust\x88\x01\x01B\a\n" +
 	"\x05_nameB\t\n" +
 	"\a_statusB\f\n" +
 	"\n" +
@@ -1029,7 +1055,9 @@ const file_api_proto_rawDesc = "" +
 	"\n" +
 	"_executionB\x11\n" +
 	"\x0f_tcp_forwardingB\x12\n" +
-	"\x10_approval_method\"a\n" +
+	"\x10_approval_methodB\x14\n" +
+	"\x12_relay_known_hostsB\x12\n" +
+	"\x10_relay_key_trust\"a\n" +
 	"\rAuthorizedKey\x126\n" +
 	"\x17public_key_fingerprints\x18\x01 \x03(\tR\x15publicKeyFingerprints\x12\x18\n" +
 	"\acomment\x18\x02 \x01(\tR\acomment\"\xac\x02\n" +

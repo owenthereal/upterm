@@ -320,6 +320,18 @@ func newDaemonAnswer(launch string) *api.GetSessionResponse {
 		Execution:                    proto.String("granted"),
 		TcpForwarding:                proto.String("loopback"),
 		ApprovalMethod:               proto.String("terminal"),
+		RelayKnownHosts:              proto.String("[127.0.0.1]:2222 " + publicRelayKey),
+		RelayKeyTrust:                proto.String("known"),
+	}
+}
+
+// newDaemonSSHConfig is the ssh config keys newDaemonAnswer's session adds to
+// the JSON, for alias.
+func newDaemonSSHConfig(alias string) map[string]any {
+	return map[string]any{
+		"sshConfig":     "Host " + alias + "\n  HostName 127.0.0.1\n  User sid-1\n  Port 2222",
+		"knownHosts":    "[127.0.0.1]:2222 " + publicRelayKey,
+		"relayKeyTrust": "known",
 	}
 }
 
@@ -336,7 +348,7 @@ func TestInfoJSONGoldenReady(t *testing.T) {
 
 	stdout, stderr, code := runCLI(t, "session", "info", "build", "-o", "json", "--hide-client-ip")
 	require.Equal(t, 0, code, stderr)
-	requireGolden(t, "info-ready", stdout)
+	requireGoldenWith(t, "info-ready", stdout, newDaemonSSHConfig("build"))
 }
 
 func TestInfoJSONGoldenEnded(t *testing.T) {
@@ -360,7 +372,7 @@ func TestInfoJSONGoldenEnded(t *testing.T) {
 
 	stdout, stderr, exit := runCLI(t, "session", "info", "build", "-o", "json")
 	require.Equal(t, 0, exit, stderr)
-	requireGolden(t, "info-ended", stdout)
+	requireGoldenWith(t, "info-ended", stdout, map[string]any{})
 }
 
 func TestCurrentJSONGolden(t *testing.T) {
@@ -369,7 +381,7 @@ func TestCurrentJSONGolden(t *testing.T) {
 	serveStubAdmin(t, socket, newDaemonAnswer("launch-1"))
 	stdout, stderr, code := runCurrent(t, socket, "-o", "json", "--hide-client-ip")
 	require.Equal(t, 0, code, stderr)
-	requireGolden(t, "current", stdout)
+	requireGoldenWith(t, "current", stdout, newDaemonSSHConfig("build"))
 }
 
 // An answer from a daemon from before the optional fields: what 0.38.0 sends.
@@ -390,10 +402,14 @@ func TestCurrentJSONGoldenOldDaemon(t *testing.T) {
 	})
 	stdout, stderr, code := runCurrent(t, socket, "-o", "json", "--hide-client-ip")
 	require.Equal(t, 0, code, stderr)
-	requireGolden(t, "current-old-daemon", stdout)
+	requireGoldenWith(t, "current-old-daemon", stdout, map[string]any{})
 }
 
-func TestDetachJSONGolden(t *testing.T) {
+// detachJSON is what --detach -o json prints for a session named s that its
+// daemon reports created as amend leaves the scripted daemon's answer, and
+// then ready.
+func detachJSON(t *testing.T, amend func(*api.GetSessionResponse)) string {
+	t.Helper()
 	setupSessionRoots(t)
 	dir := claimSession(t, "s")
 	releaseAtEnd(t, dir)
@@ -403,7 +419,18 @@ func TestDetachJSONGolden(t *testing.T) {
 	}))
 	spawn, d := newScriptedDaemon(t)
 	d.launchID = dir.LaunchID()
-	d.amend = func(r *api.GetSessionResponse) {
+	d.amend = amend
+	var stdout, stderr bytes.Buffer
+	s := newSession(t, spawn, nil, &stdout, &stderr)
+	s.detach, s.jsonOut = true, true
+	dec := d.startup(t, "s")
+	go func() { <-dec; d.start() }()
+	require.NoError(t, s.run(context.Background()))
+	return stdout.String()
+}
+
+func TestDetachJSONGolden(t *testing.T) {
+	stdout := detachJSON(t, func(r *api.GetSessionResponse) {
 		r.StartConfirmed = proto.Bool(false)
 		r.ReadOnly = proto.Bool(false)
 		r.FileTransfer = proto.String("all")
@@ -413,14 +440,8 @@ func TestDetachJSONGolden(t *testing.T) {
 		r.Execution = proto.String("approval")
 		r.TcpForwarding = proto.String("loopback-approval")
 		r.ApprovalMethod = proto.String("terminal")
-	}
-	var stdout, stderr bytes.Buffer
-	s := newSession(t, spawn, nil, &stdout, &stderr)
-	s.detach, s.jsonOut = true, true
-	dec := d.startup(t, "s")
-	go func() { <-dec; d.start() }()
-	require.NoError(t, s.run(context.Background()))
-	requireGolden(t, "detach", stdout.String())
+	})
+	requireGoldenWith(t, "detach", stdout, map[string]any{"sshConfig": "Host s\n  HostName 127.0.0.1\n  User u\n  Port 2222"})
 }
 
 func TestListJSONGolden(t *testing.T) {
@@ -429,7 +450,9 @@ func TestListJSONGolden(t *testing.T) {
 	buildStarting(t, "starting")
 	stdout, stderr, code := runCLI(t, "session", "list", "-o", "json")
 	require.Equal(t, 0, code, stderr)
-	requireGolden(t, "list", stdout)
+	requireGoldenWith(t, "list", stdout,
+		map[string]any{"sshConfig": "Host answering\n  HostName 127.0.0.1\n  User \"sid-1:MTI3LjAuMC4xOjIyMjI=\"\n  Port 2222"},
+		map[string]any{})
 }
 
 // New policy is additive; old daemons and ended records cannot answer it.
@@ -490,7 +513,7 @@ func TestInfoJSONGoldenReconnectingWithGuestPolicy(t *testing.T) {
 	serveStubAdmin(t, d.AdminSocket(), response)
 	stdout, stderr, code := runCLI(t, "session", "info", "build", "-o", "json", "--hide-client-ip")
 	require.Equal(t, 0, code, stderr)
-	requireGolden(t, "info-reconnecting", stdout)
+	requireGoldenWith(t, "info-reconnecting", stdout, newDaemonSSHConfig("build"))
 }
 func TestCurrentJSONGoldenForcedGuestPolicy(t *testing.T) {
 	setupSessionRoots(t)
@@ -505,5 +528,5 @@ func TestCurrentJSONGoldenForcedGuestPolicy(t *testing.T) {
 	serveStubAdmin(t, socket, response)
 	stdout, stderr, code := runCurrent(t, socket, "-o", "json", "--hide-client-ip")
 	require.Equal(t, 0, code, stderr)
-	requireGolden(t, "current-forced", stdout)
+	requireGoldenWith(t, "current-forced", stdout, newDaemonSSHConfig("build"))
 }

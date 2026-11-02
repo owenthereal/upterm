@@ -38,12 +38,12 @@ func writeKnownHosts(t *testing.T, content string) string {
 	return file
 }
 
-func signHostCert(t *testing.T, ca ssh.Signer, key ssh.PublicKey, principal string) *ssh.Certificate {
+func signHostCert(t *testing.T, ca ssh.Signer, key ssh.PublicKey, principals ...string) *ssh.Certificate {
 	t.Helper()
 	cert := &ssh.Certificate{
 		Key:             key,
 		CertType:        ssh.HostCert,
-		ValidPrincipals: []string{principal},
+		ValidPrincipals: principals,
 		ValidBefore:     ssh.CertTimeInfinity,
 	}
 	require.NoError(t, cert.SignCert(rand.Reader, ca))

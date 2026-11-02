@@ -1,6 +1,7 @@
 package host
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -8,6 +9,7 @@ import (
 	"io/fs"
 	"net"
 	"os"
+	"slices"
 	"strings"
 
 	"github.com/owenthereal/upterm/utils"
@@ -76,18 +78,30 @@ func (hostKeyChangedError) Unwrap() error   { return ErrHostKeyChanged }
 // trusts is checked by its own key, once its signer is found not revoked.
 // Anything else is as knownhosts returns it.
 func (k KnownHosts) Check(hostname string, remote net.Addr, key ssh.PublicKey) error {
+	_, err := k.check(hostname, remote, key)
+	return err
+}
+
+// check is Check, and when a line trusts key, the line a guest pins the relay
+// with for hostname: pinLine's for an authority's certificate, and the plain
+// line for the key that matched otherwise, a certificate's own key included.
+func (k KnownHosts) check(hostname string, remote net.Addr, key ssh.PublicKey) (string, error) {
 	cb, err := knownhosts.New(k.File)
 	if errors.Is(err, fs.ErrNotExist) {
-		return ErrUnknownHostKey
+		return "", ErrUnknownHostKey
 	}
 	if err != nil {
-		return err
+		return "", err
 	}
 
 	// checked is the key that err is about: key, or a certificate's own key.
 	checked := key
 	err = cb(hostname, remote, key)
-	if cert, isCert := key.(*ssh.Certificate); isCert && err != nil && strings.HasPrefix(err.Error(), errNoAuthoritiesHostname) {
+	cert, isCert := key.(*ssh.Certificate)
+	if isCert && err == nil {
+		return pinLine(hostname, cert), nil
+	}
+	if isCert && err != nil && strings.HasPrefix(err.Error(), errNoAuthoritiesHostname) {
 		// No @cert-authority line trusts the certificate's signer, so its own
 		// key is checked as a plain key would be, as OpenSSH does. Unlike
 		// OpenSSH's, this check counts the host's @cert-authority lines too,
@@ -99,29 +113,75 @@ func (k KnownHosts) Check(hostname string, remote net.Addr, key ssh.PublicKey) e
 		// does: a revoked key is refused before any line is looked at.
 		var revoked *knownhosts.RevokedError
 		if serr := cb(hostname, remote, cert.SignatureKey); errors.As(serr, &revoked) {
-			return serr
+			return "", serr
 		}
 		checked = cert.Key
 		err = cb(hostname, remote, checked)
 	}
 	if err == nil {
-		return nil
+		return knownHostsLine(hostname, checked, false), nil
 	}
 
 	kerr, ok := err.(*knownhosts.KeyError)
 	if !ok {
-		return err
+		return "", err
 	}
 
 	// If kerr.Want is non-empty, there was a mismatch, which can signify a MITM attack
 	if len(kerr.Want) != 0 {
 		kk := kerr.Want[0] // TODO: take care of multiple key mismatches
-		return hostKeyChangedError(fmt.Sprintf(errKeyMismatch,
+		return "", hostKeyChangedError(fmt.Sprintf(errKeyMismatch,
 			keyType(checked.Type()), utils.FingerprintSHA256(checked),
 			kk.Filename, keyType(kk.Key.Type()), kk.Filename, kk.Line))
 	}
 
-	return ErrUnknownHostKey
+	return "", ErrUnknownHostKey
+}
+
+// knownHostsLine is the known_hosts line that trusts key for hostname, as an
+// authority for its host certificates when authority is set.
+func knownHostsLine(hostname string, key ssh.PublicKey, authority bool) string {
+	line := knownhosts.Line([]string{hostname}, key)
+	if authority {
+		line = markerCert + " " + line
+	}
+	return line
+}
+
+// pinLine is the known_hosts line a guest pins a relay with, for key at
+// hostname, once a check has trusted it: the key itself, and for a
+// certificate, an @cert-authority line for its signer where ssh accepts one,
+// else the key it certifies. The key is what the relay proved it holds, and
+// ssh accepts a line for it whatever the certificate says: OpenSSH refuses a
+// host certificate that lists no principals (as an uptermd started without
+// --hostname presents) or doesn't list the host it dialled, and then checks
+// the certificate's key as a plain one.
+//
+// So the signer gets the line only when the certificate lists the host and
+// the signer is another key: every uptermd signs its certificate with the
+// key it certifies, which its own line pins.
+func pinLine(hostname string, key ssh.PublicKey) string {
+	if cert, ok := key.(*ssh.Certificate); ok {
+		if !bytes.Equal(cert.SignatureKey.Marshal(), cert.Key.Marshal()) && listsHost(cert, hostname) {
+			return knownHostsLine(hostname, cert.SignatureKey, true)
+		}
+		key = cert.Key
+	}
+	return knownHostsLine(hostname, key, false)
+}
+
+// listsHost reports whether cert lists, among its principals, the host of
+// address, the host:port a check was asked about, as OpenSSH matches a host
+// certificate: the host without its port or brackets, lowercased, since ssh
+// lowercases the name it dials, against each principal letter for letter. A
+// principal that is a pattern matches nothing here, which costs only the
+// @cert-authority line: ssh accepts the plain one all the same.
+func listsHost(cert *ssh.Certificate, address string) bool {
+	host, _, err := net.SplitHostPort(address)
+	if err != nil {
+		host = strings.TrimSuffix(strings.TrimPrefix(address, "["), "]")
+	}
+	return slices.Contains(cert.ValidPrincipals, strings.ToLower(host))
 }
 
 // Confirm prints the prompt and reads the answer from in, which is "yes", the
@@ -252,13 +312,7 @@ func (k KnownHosts) Record(hostname string, key ssh.PublicKey, announce bool) er
 	// The security benefit of storing IPs is minimal in modern infrastructure
 	// since we already trust DNS, and MITM attacks would need to compromise
 	// both DNS and the host key.
-	addr := []string{hostname}
-
-	line := knownhosts.Line(addr, key)
-
-	if isCert {
-		line = fmt.Sprintf("%s %s", markerCert, line)
-	}
+	line := knownHostsLine(hostname, key, isCert)
 
 	// A last line without its newline would swallow this one, and the file
 	// would no longer parse.

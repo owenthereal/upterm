@@ -78,6 +78,7 @@ homebrew_casks:
       - "etc/man/man1/upterm-session-info.1"
       - "etc/man/man1/upterm-session-list.1"
       - "etc/man/man1/upterm-session-set.1"
+      - "etc/man/man1/upterm-session-ssh-config.1"
       - "etc/man/man1/upterm-session-stop.1"
       - "etc/man/man1/upterm-session-wait.1"
       - "etc/man/man1/upterm-upgrade.1"

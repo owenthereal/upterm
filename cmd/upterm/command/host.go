@@ -1122,6 +1122,15 @@ func displaySession(ctx context.Context, session *api.GetSessionResponse, name s
 		return fmt.Errorf("failed to build session detail: %w", err)
 	}
 	detail.Name = name
+	// --detach leaves this terminal as soon as the session runs, and a door
+	// is reached from elsewhere: its banner says how, with what upterm
+	// session ssh-config prints. Where it would print none, as for a relay's
+	// SSH user or address sshConfigFor won't write, the section is left out.
+	if flagDetach && doorShaped(session) {
+		if text, err := sshConfigText(session, name); err == nil {
+			detail.SSHConfig = text
+		}
+	}
 
 	// The logger root.go put in the context: it writes to upterm's log
 	// file, which is where an operator goes to find out what became of a

@@ -1,0 +1,7 @@
+# ~/.ssh/config
+Host home
+  HostName relay.example.com
+  User d3k5fia7m4us73ehblug
+  Port 2222
+# ~/.ssh/known_hosts, once per device
+[relay.example.com]:2222 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICiecex8Dq718eSe1CCLgLvDmI7AagvCtax7brPFWkh4

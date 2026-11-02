@@ -1,0 +1,6 @@
+# ~/.ssh/config
+Host home
+  HostName relay.example.com
+  User d3k5fia7m4us73ehblug
+# ~/.ssh/known_hosts, once per device
+@cert-authority relay.example.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIIYDCWOa+7MWp4LZrLkQTrf5TgLXSKGwzT15aRto2m3t

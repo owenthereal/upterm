@@ -33,7 +33,7 @@ import (
 // and flagKnownHostsFilename at a file under it. Production always reaches
 // buildDaemonHost through hostCmd(), whose flag registration gives that
 // global a real default; a unit test that calls runDaemonProcess directly
-// never runs that registration; without this, newHostKeyCallback's
+// never runs that registration; without this, the relay key check's
 // createFileIfNotExist("") fails every case here with "open : no such file
 // or directory".
 //

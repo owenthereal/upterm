@@ -1,0 +1,8 @@
+# ~/.ssh/config
+Host home
+  HostName uptermd.upterm.dev
+  User d3k5fia7m4us73ehblug
+  Port 443
+  ProxyCommand upterm proxy "wss://d3k5fia7m4us73ehblug@uptermd.upterm.dev"
+# ~/.ssh/known_hosts, once per device
+[uptermd.upterm.dev]:443 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICiecex8Dq718eSe1CCLgLvDmI7AagvCtax7brPFWkh4

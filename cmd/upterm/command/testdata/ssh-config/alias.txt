@@ -1,0 +1,6 @@
+# ~/.ssh/config
+Host laptop-home
+  HostName uptermd.upterm.dev
+  User d3k5fia7m4us73ehblug
+# ~/.ssh/known_hosts, once per device
+uptermd.upterm.dev ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICiecex8Dq718eSe1CCLgLvDmI7AagvCtax7brPFWkh4

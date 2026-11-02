@@ -522,6 +522,11 @@ func (s *spawnedSession) printStarted(ctx context.Context, claimed *api.Claimed,
 			info.JoinCommand = detail.JoinCommand
 			info.Open = detail.Open
 		}
+		// Present whatever the status, as the connect strings are, unless
+		// the relay's SSH user or its address is one sshConfigFor won't write.
+		if block, err := sshConfigFor(sess, claimed.Name); err == nil {
+			info.SSHConfig = block
+		}
 		// The relay, who can join and what guests may do, as the daemon
 		// reported them when it created the session: none of them can
 		// change while it runs. The counts are not taken from it: it was

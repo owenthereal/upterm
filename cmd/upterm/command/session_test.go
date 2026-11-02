@@ -1615,10 +1615,11 @@ func Test_sessionInfo_PublishesExactlyWhatEachStateCanAnswer(t *testing.T) {
 			// session's socket answers too, but it is never advertised as
 			// joinable. The daemon answered, so the relay and who can join
 			// are known; it is one from before the permission fields, so
-			// what guests may do is not.
+			// what guests may do is not, and from before the relay key's,
+			// so neither is the key its host trusted.
 			name:  "ready",
 			build: buildReady,
-			want:  []string{"name", "launchId", "status", "clientCount", "guestCount", "countsKnown", "pid", "command", "reason", "sessionId", "sshCommand", "joinCommand", "host", "access", "adminSocket", "attachSocket", "joinStateSource"},
+			want:  []string{"name", "launchId", "status", "clientCount", "guestCount", "countsKnown", "pid", "command", "reason", "sessionId", "sshCommand", "joinCommand", "sshConfig", "host", "access", "adminSocket", "attachSocket", "joinStateSource"},
 		},
 		{
 			// A session ID and a socket that answers, because the host keeps

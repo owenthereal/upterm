@@ -335,6 +335,11 @@ func (s *adminServiceServer) GetSession(ctx context.Context, in *api.GetSessionR
 		ApprovalMethod:               s.Session.ApprovalMethod,
 		FileTransfer:                 s.Session.FileTransfer,
 		FileTransferApprovalRequired: s.Session.FileTransferApprovalRequired,
+
+		// The relay key the first connection trusted: redials are pinned to
+		// it, so it is the session's for its life.
+		RelayKnownHosts: s.Session.RelayKnownHosts,
+		RelayKeyTrust:   s.Session.RelayKeyTrust,
 	}
 	DescribeSession(resp, s.Name, s.State)
 	return resp, nil
