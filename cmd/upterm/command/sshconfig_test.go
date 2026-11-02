@@ -32,9 +32,9 @@ const otherAuthorityKey = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIIYDCWOa+7MWp4LZr
 // session by: its ID and, encoded, the node 10.0.0.5:2222 it is on.
 const embeddedSSHUser = exampleSessionID + ":MTAuMC4wLjU6MjIyMg=="
 
-// ownerNameSSHUser is the SSH user of a relay that routes a session by its
-// owner and name.
-const ownerNameSSHUser = "alice+home"
+// punctuatedSSHUser holds the punctuation a User may have beyond what the
+// session ID and the embedded relay's user already use.
+const punctuatedSSHUser = "a1.b_c~d+e-f"
 
 // unwritableSSHUsers are SSH users a relay could give that ssh_config doesn't
 // read as one word. Written into a Host block, each would add lines of the
@@ -156,8 +156,8 @@ func TestSSHConfigGolden(t *testing.T) {
 		// known.
 		{"unknown-trust", relayAnswer("ssh://uptermd.upterm.dev:22", exampleSessionID, "uptermd.upterm.dev "+publicRelayKey, "pinned-elsewhere"), nil},
 		{"alias", relayAnswer("ssh://uptermd.upterm.dev:22", exampleSessionID, "uptermd.upterm.dev "+publicRelayKey, "known"), []string{"--alias", "laptop-home"}},
-		// A relay that routes by owner and name.
-		{"owner-name", relayAnswer("ssh://uptermd.upterm.dev:22", ownerNameSSHUser, "uptermd.upterm.dev "+publicRelayKey, "known"), nil},
+		// A user with the rest of the punctuation a User may have.
+		{"punctuation", relayAnswer("ssh://uptermd.upterm.dev:22", punctuatedSSHUser, "uptermd.upterm.dev "+publicRelayKey, "known"), nil},
 	} {
 		t.Run(tc.golden, func(t *testing.T) {
 			setupSessionRoots(t)
@@ -308,15 +308,15 @@ func TestSSHConfigRefusesARelayAddressItWontWrite(t *testing.T) {
 
 // The users a Host block takes are the ones relays give: a session ID, an
 // embedded relay's ID and node, the node in URL-safe base64 with its '='
-// padding, and an owner+name. Nothing else is written, an empty user
-// included: sshUser never makes one, but a block with one would have a User
-// line that ssh refuses.
+// padding, and the rest of the punctuation sshUserRe allows. Nothing else is
+// written, an empty user included: sshUser never makes one, but a block with
+// one would have a User line that ssh refuses.
 func TestSSHConfigWritesOnlyTheSSHUsersRelaysGive(t *testing.T) {
 	for _, user := range []string{
 		exampleSessionID,
 		embeddedSSHUser,
 		exampleSessionID + ":" + base64.URLEncoding.EncodeToString([]byte{0xfb, 0xff}),
-		ownerNameSSHUser,
+		punctuatedSSHUser,
 	} {
 		require.True(t, sshUserRe.MatchString(user), "%q", user)
 	}
@@ -337,7 +337,7 @@ func TestSSHConfigWritesOnlyProxyURLsDoubleQuotesKeepLiteral(t *testing.T) {
 		"wss://" + exampleSessionID + "@uptermd.upterm.dev",
 		"ws://" + embeddedSSHUser + "@relay.example.com:8080",
 		"ws://" + exampleSessionID + ":" + base64.URLEncoding.EncodeToString([]byte{0xfb, 0xff}) + "@[::1]:8080/",
-		"wss://" + ownerNameSSHUser + "@relay.example.com/~upterm",
+		"wss://" + punctuatedSSHUser + "@relay.example.com/~upterm",
 	} {
 		require.True(t, proxyURLRe.MatchString(u), u)
 	}
@@ -405,9 +405,9 @@ func TestSessionJSONLeavesOutAnSSHConfigItWontWrite(t *testing.T) {
 					require.Equal(t, "known", m["relayKeyTrust"])
 				})
 			}
-			t.Run("an owner+name", func(t *testing.T) {
-				m := c.json(t, relayAnswer("ssh://uptermd.upterm.dev:22", ownerNameSSHUser, pin, "known"))
-				require.Equal(t, "Host home\n  HostName uptermd.upterm.dev\n  User "+ownerNameSSHUser, m["sshConfig"])
+			t.Run("a punctuated user", func(t *testing.T) {
+				m := c.json(t, relayAnswer("ssh://uptermd.upterm.dev:22", punctuatedSSHUser, pin, "known"))
+				require.Equal(t, "Host home\n  HostName uptermd.upterm.dev\n  User "+punctuatedSSHUser, m["sshConfig"])
 			})
 		})
 	}
@@ -440,9 +440,9 @@ func TestSessionJSONLeavesOutAnSSHConfigItWontWrite(t *testing.T) {
 				require.Equal(t, "known", m["relayKeyTrust"])
 			})
 		}
-		t.Run("an owner+name", func(t *testing.T) {
-			m := detached(t, func(r *api.GetSessionResponse) { r.SshUser = ownerNameSSHUser })
-			require.Equal(t, "Host s\n  HostName 127.0.0.1\n  User "+ownerNameSSHUser+"\n  Port 2222", m["sshConfig"])
+		t.Run("a punctuated user", func(t *testing.T) {
+			m := detached(t, func(r *api.GetSessionResponse) { r.SshUser = punctuatedSSHUser })
+			require.Equal(t, "Host s\n  HostName 127.0.0.1\n  User "+punctuatedSSHUser+"\n  Port 2222", m["sshConfig"])
 		})
 	})
 }

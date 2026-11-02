@@ -147,10 +147,10 @@ func sshConfigText(sess *api.GetSessionResponse, alias string) (string, error) {
 	return "# ~/.ssh/config\n" + block + "\n# ~/.ssh/known_hosts, once per device\n" + pin + "\n", nil
 }
 
-// sshUserRe is what a Host block's User may be: the characters of the
-// session IDs upterm relays give, of an embedded relay's ID and node, the
-// node in URL-safe base64 with its '=' padding, and of an owner+name. None of
-// them ends the line, quotes, or starts a comment or a token; configValue
+// sshUserRe is what a Host block's User may be: letters, digits and
+// ._~+=:-, which hold the session IDs upterm relays give and an embedded
+// relay's ID and node, the node in URL-safe base64 with its '=' padding. None
+// of them ends the line, quotes, or starts a comment or a token; configValue
 // quotes the '='.
 var sshUserRe = regexp.MustCompile(`^[A-Za-z0-9._~+=:-]+$`)
 
