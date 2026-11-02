@@ -678,6 +678,7 @@ func TestApprovalControlCoalesces(t *testing.T) {
 
 func TestApprovalSuspendAndDetach(t *testing.T) {
 	program := &syncSink{}
+	inputEnded := make(chan struct{})
 	door := serveDoor(t, func(s gssh.Session) {
 		_, wins, _ := s.Pty()
 		go func() {
@@ -685,7 +686,8 @@ func TestApprovalSuspendAndDetach(t *testing.T) {
 			}
 		}()
 		_, _ = io.WriteString(s, "READY")
-		_, _ = io.Copy(program, s)
+		_, _ = io.Copy(program, s) // returns when the client's input ends
+		close(inputEnded)
 	})
 	review := &approvalTestReview{make(chan upterm.ApprovalState, 8), make(chan upterm.ApprovalAnswer, 8)}
 	pr, pw := io.Pipe()
@@ -727,6 +729,11 @@ func TestApprovalSuspendAndDetach(t *testing.T) {
 	res := awaitResult(t, done)
 	require.Equal(t, Detached, res.Reason)
 	require.Empty(t, review.answers)
+	// The detach waits for what was typed to be sent, not for the door to
+	// have read it: the door reads on its own goroutine, on the far side of
+	// the connection, and may not have got to it yet. So the door's input is
+	// read to its end before it is looked at.
+	awaitClosed(t, inputEnded, "the door's input never ended")
 	require.Contains(t, program.String(), "program\r")
 }
 

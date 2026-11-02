@@ -17,6 +17,7 @@ import (
 	"sync"
 	"syscall"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	gssh "charm.land/ssh"
@@ -27,6 +28,7 @@ import (
 	"github.com/owenthereal/upterm/upterm"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/crypto/ssh"
+	"google.golang.org/grpc/test/bufconn"
 )
 
 // With --force-command, the host door reaches the original command; a guest
@@ -121,8 +123,12 @@ func TestGuestsAreNeverSentTheCause(t *testing.T) {
 }
 
 // A local client that never answers the session's end -- a terminal suspended
-// with ^Z -- is still sent its status, once the reply has had its bound and no
-// longer.
+// with ^Z -- is still sent its status, once the reply has had its bound. The
+// time since the stop takes in the command's teardown too, which has bounds of
+// its own -- the hangup's grace, and the wait for the command before the
+// session's clients are released -- so it can show that the reply was waited
+// for, but not for how long: the test below bounds that by the client's own
+// events.
 func TestAClientThatNeverRepliesDoesntHoldTheStatus(t *testing.T) {
 	h := startHost(t, &Server{Command: trapsHangupAndExits(0)})
 	conn, out, sess := h.connectHostConnIgnoringRequests(t, newHostPty(t))
@@ -132,10 +138,36 @@ func TestAClientThatNeverRepliesDoesntHoldTheStatus(t *testing.T) {
 	h.stopWith(t, ErrSessionStopped)
 
 	requireExitStatus(t, sess.Wait(), 1)
-	took := time.Since(start)
-	require.GreaterOrEqual(t, took, upterm.SessionEndReplyBound, "the status was sent without waiting for the reply")
-	require.Less(t, took, upterm.SessionEndReplyBound+time.Second)
+	require.GreaterOrEqual(t, time.Since(start), upterm.SessionEndReplyBound, "the status was sent without waiting for the reply")
 	require.Equal(t, []upterm.SessionEnd{{Cause: upterm.CauseStopped}}, hostEnds(t, conn))
+}
+
+// A client that never answers holds its status for the reply's bound and no
+// longer, from the session-end request it is sent to the status that follows
+// it, on a bubble's clock: the status is still unsent a moment before the
+// bound has passed, and sent the moment it has.
+func TestASilentClientHoldsItsStatusForTheReplyBoundAndNoLonger(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		ln := bufconn.Listen(1 << 16)
+		log := &requestLog{ignore: true}
+		h := &sessionHandler{kind: kindHost, logger: discardLogger()}
+		sess := serveOneSessionOn(t, ln, ln.Dial, log, func(s gssh.Session) { h.exitWith(s, shutdownStopped.end(0), 1) })
+		ended := make(chan error, 1)
+		go func() { ended <- sess.Wait() }()
+
+		synctest.Wait()
+		require.Equal(t, []upterm.SessionEnd{{Cause: upterm.CauseStopped}}, hostEnds(t, log), "the client has the session-end request")
+		require.Empty(t, ended, "the status was sent without waiting for the reply")
+
+		time.Sleep(upterm.SessionEndReplyBound - time.Nanosecond)
+		synctest.Wait()
+		require.Empty(t, ended, "the status was sent before the reply had its bound")
+
+		time.Sleep(time.Nanosecond)
+		synctest.Wait()
+		require.Len(t, ended, 1, "the client held its status past the reply's bound")
+		requireExitStatus(t, <-ended, 1)
+	})
 }
 
 // A client that reaches the host door as the session ends is sent 1, and told
@@ -177,13 +209,23 @@ func TestALateHostClientIsToldWhyOnlyWhenAShutdownOverrodeItsStatus(t *testing.T
 // answering its connection's global requests.
 func serveOneSession(t *testing.T, handler gssh.Handler) (*requestLog, *ssh.Session) {
 	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	dial := func() (net.Conn, error) { return net.DialTimeout("tcp", ln.Addr().String(), harnessTimeout) }
+	log := &requestLog{}
+	return log, serveOneSessionOn(t, ln, dial, log, handler)
+}
+
+// serveOneSessionOn is serveOneSession on ln, reached through dial, with log
+// answering the connection's global requests. On a bufconn listener made in a
+// synctest bubble, the door runs on the bubble's clock.
+func serveOneSessionOn(t *testing.T, ln net.Listener, dial func() (net.Conn, error), log *requestLog, handler gssh.Handler) *ssh.Session {
+	t.Helper()
 	_, key, err := ed25519.GenerateKey(rand.Reader)
 	require.NoError(t, err)
 	signer, err := ssh.NewSignerFromKey(key)
 	require.NoError(t, err)
 	srv := &gssh.Server{HostSigners: []gssh.Signer{signer}, Handler: handler}
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	require.NoError(t, err)
 	served := make(chan struct{})
 	go func() { defer close(served); _ = srv.Serve(ln) }()
 	t.Cleanup(func() {
@@ -191,7 +233,7 @@ func serveOneSession(t *testing.T, handler gssh.Handler) (*requestLog, *ssh.Sess
 		<-served
 	})
 
-	raw, err := net.DialTimeout("tcp", ln.Addr().String(), harnessTimeout)
+	raw, err := dial()
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = raw.Close() })
 	require.NoError(t, raw.SetDeadline(time.Now().Add(harnessTimeout)))
@@ -199,13 +241,12 @@ func serveOneSession(t *testing.T, handler gssh.Handler) (*requestLog, *ssh.Sess
 		User: "host", HostKeyCallback: ssh.FixedHostKey(signer.PublicKey()),
 	})
 	require.NoError(t, err)
-	log := &requestLog{}
 	client := ssh.NewClient(conn, chans, log.serve(reqs))
 	t.Cleanup(func() { _ = client.Close() })
 	sess, err := client.NewSession()
 	require.NoError(t, err)
 	require.NoError(t, sess.Shell())
-	return log, sess
+	return sess
 }
 
 // requestLog is a client's own loop over the global requests its connection
