@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"sync"
 	"sync/atomic"
@@ -983,6 +984,120 @@ func TestSupervisorRefusesARegistrationUnderAnotherSessionID(t *testing.T) {
 	require.Equal(t, "node-3:22", nodeAddr, "the route never takes the other session's")
 	require.Equal(t, "user-3", sshUser)
 	require.Equal(t, []uint64{2, 3}, f.script.gens)
+}
+
+// attemptLog is a supervisor's log, as text, and the error each failed
+// attempt was logged with, as the error itself rather than its text.
+type attemptLog struct {
+	text lockedBuffer
+
+	mu       sync.Mutex
+	failures []error
+}
+
+func (l *attemptLog) logger() *slog.Logger {
+	return slog.New(attemptLogHandler{Handler: slog.NewTextHandler(&l.text, nil), log: l})
+}
+
+// failed is the error of every attempt logged as failed so far, in order.
+func (l *attemptLog) failed() []error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return append([]error(nil), l.failures...)
+}
+
+type attemptLogHandler struct {
+	slog.Handler
+	log *attemptLog
+}
+
+func (h attemptLogHandler) Handle(ctx context.Context, r slog.Record) error {
+	if r.Message == "failed to reconnect the tunnel" {
+		r.Attrs(func(a slog.Attr) bool {
+			if err, ok := a.Value.Any().(error); ok && a.Key == "error" {
+				h.log.mu.Lock()
+				h.log.failures = append(h.log.failures, err)
+				h.log.mu.Unlock()
+			}
+			return true
+		})
+	}
+	return h.Handler.Handle(ctx, r)
+}
+
+func (h attemptLogHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
+	return attemptLogHandler{Handler: h.Handler.WithAttrs(attrs), log: h.log}
+}
+
+func (h attemptLogHandler) WithGroup(name string) slog.Handler {
+	return attemptLogHandler{Handler: h.Handler.WithGroup(name), log: h.log}
+}
+
+// A redial the relay answers with characters upterm won't put in a command,
+// in the SSH user or the session ID, is a relay the host can't keep using. The
+// tunnel it gave is closed, the route guests were given stays as it was, and
+// the value is repeated nowhere, the session-ID check's error included: the
+// relay chose it.
+func TestSupervisorRefusesARegistrationWithCharactersUptermWontPutInACommand(t *testing.T) {
+	const refused = "the relay re-registered the session with an SSH user or session ID upterm won't put in a command"
+	for _, tc := range []struct {
+		name               string
+		sessionID, sshUser string
+	}{
+		{"in the SSH user", supervisorSessionID, "evil;id"},
+		{"in the session ID", "evil;id", "user-2"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newSupervisorFixture(t, true)
+			logs := &attemptLog{}
+			f.sup.logger = logs.logger()
+			stray, next := newFakeTunnel(t, true), newFakeTunnel(t, true)
+			f.script.response = func(generation uint64) *server.CreateSessionResponse {
+				if generation == 2 {
+					return &server.CreateSessionResponse{SessionID: tc.sessionID, NodeAddr: "node-2:22", SshUser: tc.sshUser}
+				}
+				return &server.CreateSessionResponse{
+					SessionID: supervisorSessionID,
+					NodeAddr:  fmt.Sprintf("node-%d:22", generation),
+					SshUser:   fmt.Sprintf("user-%d", generation),
+				}
+			}
+			var (
+				waiting    sessiondir.Record
+				node, user string
+			)
+			redialled := make(chan struct{})
+			f.script.steps = []func(context.Context) (tunnel, error){
+				func(context.Context) (tunnel, error) { return stray, nil },
+				func(context.Context) (tunnel, error) {
+					// What the refusal left, before anything replaces it.
+					waiting = f.record(t)
+					node, user = f.route.Get()
+					close(redialled)
+					return next, nil
+				},
+			}
+			f.first.drop(io.EOF)
+			select {
+			case <-redialled:
+			case <-stray.watched:
+				t.Fatal("the tunnel the relay registered that way serves the guest door")
+			case <-time.After(5 * time.Second):
+				t.Fatal("the supervisor never redialled after the refusal")
+			}
+
+			require.True(t, stray.closed.Load(), "the tunnel the relay registered that way is open")
+			require.Equal(t, sessiondir.StatusReconnecting, waiting.Status)
+			require.Equal(t, sessiondir.TunnelReasonRelayUnsupported, waiting.TunnelReason)
+			require.Equal(t, refused, waiting.TunnelError)
+			require.Equal(t, []string{"node-1:22", "user-1"}, []string{node, user}, "the route guests were given changed")
+			failed := logs.failed()
+			require.NotEmpty(t, failed, "no attempt was logged as failed")
+			require.EqualError(t, failed[0], refused)
+			require.ErrorIs(t, failed[0], internal.ErrRelayUnsupported)
+			require.NotContains(t, logs.text.String(), "evil", "the log repeats the relay's value")
+		})
+	}
 }
 
 func TestSupervisorBoundsEachAttemptAndClosesItsAgent(t *testing.T) {

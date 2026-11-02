@@ -222,13 +222,14 @@ func startFailureReason(program string, code int, err *guestProcessStartError) s
 	return program + " was not found"
 }
 
-// maxGuestText bounds a name echoed to a guest: a hostname is at most 253
-// bytes, and a guest can send far more.
+// maxGuestText bounds text someone else chose that upterm prints: a name
+// echoed to a guest, where a hostname is at most 253 bytes, or a relay's
+// reason for refusing a registration. A guest or a relay can send far more.
 const maxGuestText = 255
 
-// guestText is s as a guest is told it: cut to maxGuestText bytes, the
-// ellipsis that says so among them, at a character, and plain, so nothing in
-// it can act on the guest's terminal.
+// guestText is s as a guest is told it, and as the host is told a relay's
+// refusal: cut to maxGuestText bytes, the ellipsis that says so among them, at
+// a character, and plain, so nothing in it can act on the terminal it reaches.
 func guestText(s string) string {
 	if len(s) > maxGuestText {
 		cut := maxGuestText - len("…")

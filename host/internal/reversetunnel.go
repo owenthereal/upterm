@@ -133,10 +133,14 @@ var errNeverConnected = errors.New("reverse tunnel: never connected")
 
 // CreateSessionRefusedError is the relay refusing the registration, with the
 // reason it gave: a refused proof, a newer registration, a store that failed.
+// Body is the reason as the relay sent it, which is what a caller classifies.
 type CreateSessionRefusedError struct{ Body string }
 
+// Error gives the reason as guestText makes it: the relay chose it, and it is
+// printed on the host's terminal, where an escape sequence in it would be the
+// terminal's to act on.
 func (e *CreateSessionRefusedError) Error() string {
-	return "could not initialize session: " + e.Body
+	return "could not initialize session: " + guestText(e.Body)
 }
 
 // ForwardRefusedError is the relay registering the session but refusing the

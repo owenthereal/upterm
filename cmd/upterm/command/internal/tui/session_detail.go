@@ -191,7 +191,7 @@ var tunnelHints = map[string]string{
 	sessiondir.TunnelReasonAgentRefused:         "the SSH agent didn't sign: approve or unlock it, or restart the session with a key file (--private-key).",
 	sessiondir.TunnelReasonAuthRefused:          "the relay refused every identity offered; if its --authorized-keys changed, add your key back.",
 	sessiondir.TunnelReasonRelayKeyChanged:      "the relay's key differs from the one this session started with; not accepted. If the change is legitimate, restart the session.",
-	sessiondir.TunnelReasonRelayUnsupported:     "the relay node reached doesn't support reconnecting (as during a rollback); upterm keeps retrying.",
+	sessiondir.TunnelReasonRelayUnsupported:     "the relay node reached can't take this session back (as during a rollback), or answered with characters upterm won't put in a command; upterm keeps retrying.",
 	sessiondir.TunnelReasonProofRefused:         "the relay refused this session's proof of its key; upterm keeps retrying.",
 	sessiondir.TunnelReasonReconnectUnsupported: "this relay doesn't support reconnecting, so guests can't reach this session again. Restart it for a new connect string.",
 }

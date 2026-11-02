@@ -39,6 +39,16 @@ var _ tunnel = (*internal.ReverseTunnel)(nil)
 // or an error and no tunnel: a failed attempt leaves nothing open.
 type attemptFunc func(ctx context.Context, generation uint64, signers []ssh.Signer) (tunnel, *server.CreateSessionResponse, error)
 
+// notCommandSafeError is a redial the relay answered with an SSH user or a
+// session ID that commandSafe refuses. Such a relay is one the host can't
+// keep using, so the error is internal.ErrRelayUnsupported, but with a text of
+// its own: that one's says the session ID isn't derived from the host's key,
+// and a redial's tunnel has already refused any ID that isn't.
+type notCommandSafeError string
+
+func (e notCommandSafeError) Error() string { return string(e) }
+func (notCommandSafeError) Unwrap() error   { return internal.ErrRelayUnsupported }
+
 // TunnelEvent says that guests could not reach the session through the relay,
 // or that they can again.
 type TunnelEvent struct {
@@ -203,6 +213,15 @@ func (s *supervisor) reconnect(ctx context.Context, sched *schedule, deadline ti
 			// tunnel the attempt did establish has nothing left to serve.
 			closeTunnel(t)
 			return nil, false
+		}
+		if err == nil && !commandSafe(resp) {
+			// Before the session ID is compared, since that error names the
+			// ID the relay answered with, and nothing repeats this answer:
+			// the relay chose it.
+			t.Close()
+			t = nil
+			err = notCommandSafeError("the relay re-registered the session with an SSH user or session ID upterm won't put in a command")
+			s.logger.Error("the relay answered a reconnect with an SSH user or session ID upterm won't put in a command", "generation", generation, "error", err)
 		}
 		if err == nil && resp.SessionID != s.sessionID {
 			// No guest knows this ID: the relay can't find the session

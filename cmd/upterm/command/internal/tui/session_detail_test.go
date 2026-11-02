@@ -271,7 +271,7 @@ var wantHints = []struct{ reason, hint string }{
 	{"agent_refused", "the SSH agent didn't sign: approve or unlock it, or restart the session with a key file (--private-key)."},
 	{"auth_refused", "the relay refused every identity offered; if its --authorized-keys changed, add your key back."},
 	{"relay_key_changed", "the relay's key differs from the one this session started with; not accepted. If the change is legitimate, restart the session."},
-	{"relay_unsupported", "the relay node reached doesn't support reconnecting (as during a rollback); upterm keeps retrying."},
+	{"relay_unsupported", "the relay node reached can't take this session back (as during a rollback), or answered with characters upterm won't put in a command; upterm keeps retrying."},
 	{"proof_refused", "the relay refused this session's proof of its key; upterm keeps retrying."},
 	{"reconnect_unsupported", "this relay doesn't support reconnecting, so guests can't reach this session again. Restart it for a new connect string."},
 }
