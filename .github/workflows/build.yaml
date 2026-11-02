@@ -222,9 +222,6 @@ jobs:
         shard: [ftests, others]
     steps:
       - uses: actions/checkout@v7
-      - name: Fail on purpose
-        if: matrix.shard == 'others'
-        run: exit 1
       - name: Set up Go
         id: setup-go
         uses: actions/setup-go@v7
