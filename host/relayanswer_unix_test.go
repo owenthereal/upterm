@@ -99,24 +99,12 @@ func (r answeredRun) parsedRecord(t *testing.T) sessiondir.Record {
 // join lines, and the JSON that carries the ssh and join lines. An answer
 // with anything in either beyond the few characters upterm puts in a command
 // starts no session: Run says so, reports and records nothing of it, and
-// never repeats the value. Each value is marked "evil", so that a repetition
-// shows in any escaping.
+// never repeats the value, whose "evil" mark is in neither the log nor the
+// record.
 func TestRunRefusesARelayAnswerWithCharactersUptermWontPutInACommand(t *testing.T) {
 	const refused = "the relay's answer has an SSH user or session ID upterm won't put in a command; not starting the session"
 	valid := xid.New().String()
-	for _, bad := range []struct{ name, value string }{
-		{"a newline", "evil\nid"},
-		{"a semicolon", "evil;id"},
-		{"a command substitution", "evil$(id)"},
-		{"a backquote", "evil`id`"},
-		{"a space", "evil id"},
-		{"a double quote", `evil"id`},
-		{"a single quote", "evil'id"},
-		{"a leading dash", "-oProxyCommand=evil"},
-		{"a percent sign", "evil%id"},
-		{"a non-ASCII letter", "evilé"},
-		{"a tilde a shell expands", "x=~:evil"},
-	} {
+	for _, bad := range unsafeAnswerValues {
 		for _, at := range []struct {
 			name string
 			resp *server.CreateSessionResponse
@@ -139,12 +127,13 @@ func TestRunRefusesARelayAnswerWithCharactersUptermWontPutInACommand(t *testing.
 	}
 }
 
-// What real relays answer is taken: an xid, as the session ID and the user a
-// relay that routes by ID gives; an embedded relay's ID:base64url(node), its
-// '=' padding included; a user with the rest of the punctuation the check
-// allows; and an older relay's empty user, from which the CLI builds
-// ID:base64url(node).
-func TestRunTakesTheAnswersRealRelaysGive(t *testing.T) {
+// An answer upterm will put in a command is taken. Relays answer with an xid,
+// as the session ID and the user a relay that routes by ID gives; with an
+// embedded relay's ID:base64url(node), its '=' padding included; and, older
+// relays, with an empty user, from which the CLI builds ID:base64url(node).
+// No relay answers with the rest of the punctuation the check allows, which
+// is taken all the same.
+func TestRunTakesAnAnswerUptermWillPutInACommand(t *testing.T) {
 	id := xid.New().String()
 	const node = "127.0.0.1:2222"
 	embedded := routing.NewEncodeDecoder(routing.ModeEmbedded).Encode(id, node)
