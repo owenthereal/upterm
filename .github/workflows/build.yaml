@@ -65,6 +65,16 @@ jobs:
       - name: Compile
         if: matrix.shard == 'others'
         run: make install
+      # Records CPU and memory use once a second while the tests run, with a
+      # timestamp on every sample, to size how many tests a runner can run in
+      # parallel. The sampler runs in the background until a later step stops
+      # it, and neither step can fail the job.
+      - name: Start load sampler
+        continue-on-error: true
+        shell: bash
+        run: |
+          nohup vmstat -n -t 1 > load.txt 2>&1 < /dev/null &
+          echo $! > "$RUNNER_TEMP/load-sampler.pid"
       - name: Test
         shell: bash
         run: make test-${{ matrix.shard }} TEST_COVER= TEST_FORMAT=-json 2>&1 | tee test.json | jq -R -j --unbuffered "$GO_TEST_LOG_JQ"
@@ -87,6 +97,21 @@ jobs:
             exit 1
           fi
           echo "No test skipped for want of Consul."
+      - name: Stop load sampler
+        if: always()
+        continue-on-error: true
+        shell: bash
+        run: kill "$(cat "$RUNNER_TEMP/load-sampler.pid")"
+      - name: Upload load samples
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ci-load-${{ runner.os }}-${{ matrix.shard }}-attempt${{ github.run_attempt }}
+          path: |
+            load.txt
+            test.json
+          retention-days: 30
+          if-no-files-found: warn
       # Builds ftests' race test binary too, so the one entry this job saves
       # holds every test build on this OS.
       - name: Build ftests for the cache
@@ -140,11 +165,36 @@ jobs:
       - name: Compile
         if: matrix.shard == 'others'
         run: make install
+      # Records CPU and memory use once a second while the tests run, with a
+      # timestamp on every sample, to size how many tests a runner can run in
+      # parallel. The sampler runs in the background until a later step stops
+      # it, and neither step can fail the job.
+      - name: Start load sampler
+        continue-on-error: true
+        shell: bash
+        run: |
+          nohup top -l 0 -s 1 -n 0 > load.txt 2>&1 < /dev/null &
+          echo $! > "$RUNNER_TEMP/load-sampler.pid"
       - name: Test
         shell: bash
         run: make test-${{ matrix.shard }} TEST_COVER= TEST_FORMAT=-json 2>&1 | tee test.json | jq -R -j --unbuffered "$GO_TEST_LOG_JQ"
         env:
           BASH_SILENCE_DEPRECATION_WARNING: 1
+      - name: Stop load sampler
+        if: always()
+        continue-on-error: true
+        shell: bash
+        run: kill "$(cat "$RUNNER_TEMP/load-sampler.pid")"
+      - name: Upload load samples
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ci-load-${{ runner.os }}-${{ matrix.shard }}-attempt${{ github.run_attempt }}
+          path: |
+            load.txt
+            test.json
+          retention-days: 30
+          if-no-files-found: warn
       # Builds ftests' race test binary too, so the one entry this job saves
       # holds every test build on this OS.
       - name: Build ftests for the cache
@@ -198,9 +248,34 @@ jobs:
       - name: Compile
         if: matrix.shard == 'others'
         run: make install
+      # Records CPU and memory use once a second while the tests run, with a
+      # timestamp on every sample, to size how many tests a runner can run in
+      # parallel. The sampler runs in its own hidden window until a later step
+      # stops it, and neither step can fail the job.
+      - name: Start load sampler
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $sampler = Start-Process -FilePath typeperf -ArgumentList '"\Processor(_Total)\% Processor Time" "\Memory\Available MBytes" -si 1 -y -o load.csv' -WindowStyle Hidden -PassThru
+          Set-Content -Path "$env:RUNNER_TEMP\load-sampler.pid" -Value $sampler.Id
       - name: Test
         shell: bash
         run: make test-${{ matrix.shard }} TEST_COVER= TEST_FORMAT=-json 2>&1 | tee test.json | jq -R -j --unbuffered "$GO_TEST_LOG_JQ"
+      - name: Stop load sampler
+        if: always()
+        continue-on-error: true
+        shell: pwsh
+        run: Stop-Process -Id (Get-Content "$env:RUNNER_TEMP\load-sampler.pid")
+      - name: Upload load samples
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ci-load-${{ runner.os }}-${{ matrix.shard }}-attempt${{ github.run_attempt }}
+          path: |
+            load.csv
+            test.json
+          retention-days: 30
+          if-no-files-found: warn
       # Builds ftests' race test binary too, so the one entry this job saves
       # holds every test build on this OS.
       - name: Build ftests for the cache
