@@ -540,6 +540,40 @@ func TestSpawnedSessionWarnsThatItIsOpen(t *testing.T) {
 	}
 }
 
+// An open session that runs guests' commands without asking says what is at
+// stake: anyone with the session ID can run commands as you. One whose
+// guests' commands are asked about, refused or replaced by a forced command
+// gets the open-session warning, and one with an allowlist neither.
+func TestAnOpenSessionThatRunsGuestsCommandsSaysSo(t *testing.T) {
+	const open = "upterm: warning: anyone with the session ID can join; restrict who can with --authorized-user or --authorized-keys\n"
+	for _, tc := range []struct {
+		execution string
+		open      bool
+		want      string
+	}{
+		{"granted", true, "upterm: warning: anyone with the session ID can join and run commands as you; restrict who can with --authorized-user or --authorized-keys\n"},
+		{"approval", true, open},
+		{"off", true, open},
+		{"forced", true, open},
+		{"granted", false, ""},
+	} {
+		t.Run(fmt.Sprintf("%s, open=%t", tc.execution, tc.open), func(t *testing.T) {
+			setupSessionRoots(t)
+			spawn, d := newScriptedDaemon(t)
+			d.open = tc.open
+			d.amend = func(r *api.GetSessionResponse) { r.Execution = proto.String(tc.execution) }
+			var stdout, stderr bytes.Buffer
+			s := newSession(t, spawn, nil, &stdout, &stderr)
+			s.detach = true
+			dec := d.startup(t, "s")
+			go func() { <-dec; d.start() }()
+
+			require.NoError(t, s.run(context.Background()))
+			require.Equal(t, tc.want, stderr.String())
+		})
+	}
+}
+
 func TestSpawnedSessionDetachPrintsHowToAttach(t *testing.T) {
 	spawn, d := newScriptedDaemon(t)
 	var stdout, stderr bytes.Buffer
@@ -956,6 +990,37 @@ func TestSpawnedSessionDeclineIsNotAnError(t *testing.T) {
 	require.Equal(t, api.Accept_DECLINED, <-dec)
 	var discarded UserDiscardedError
 	require.ErrorAs(t, err, &discarded, "shareRunE maps this to exit 0")
+}
+
+// A detached session asks its start question too, and one declined there
+// never starts: nothing says it is running, and the answer reaches the
+// daemon. One accepted there goes to the background as with --accept.
+func TestADetachedSessionStartsOnlyWhenItsQuestionIsAnsweredYes(t *testing.T) {
+	t.Run("declined", func(t *testing.T) {
+		spawn, d := newScriptedDaemon(t)
+		var stdout, stderr bytes.Buffer
+		s := newSession(t, spawn, nil, &stdout, &stderr)
+		s.detach = true
+		s.display = func(context.Context, *api.GetSessionResponse, string) error { return UserDiscardedError{} }
+		dec := d.startup(t, "s")
+		err := s.run(context.Background())
+		require.Equal(t, api.Accept_DECLINED, <-dec)
+		require.ErrorAs(t, err, new(UserDiscardedError), "shareRunE maps this to exit 0")
+		require.Empty(t, stdout.String())
+	})
+	t.Run("accepted", func(t *testing.T) {
+		spawn, d := newScriptedDaemon(t)
+		var stdout, stderr bytes.Buffer
+		s := newSession(t, spawn, nil, &stdout, &stderr)
+		s.detach = true
+		asked := false
+		s.display = func(context.Context, *api.GetSessionResponse, string) error { asked = true; return nil }
+		dec := d.startup(t, "s")
+		go func() { <-dec; d.start() }()
+		require.NoError(t, s.run(context.Background()))
+		require.True(t, asked)
+		require.Equal(t, "Session s is running in the background. Attach with upterm attach s; stop it with upterm session stop s.\n", stdout.String())
+	})
 }
 
 // Ctrl-C at the accept prompt, as the foreground host meets it: answered

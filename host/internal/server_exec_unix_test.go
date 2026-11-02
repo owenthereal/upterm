@@ -45,7 +45,7 @@ func execSession(t *testing.T, c *ssh.Client, pty bool) *ssh.Session {
 // cause, and a remedy only where one could change the answer.
 const (
 	execDisabledNotice    = "upterm: guest exec is disabled for this session.\r\n"
-	execUnavailableNotice = "upterm: guest exec denied; nothing on the host can approve it now. The host can attach its terminal or run with --accept-exec.\r\n"
+	execUnavailableNotice = "upterm: guest exec denied; nothing on the host can approve it now. The host can attach its terminal or run with --allow-exec.\r\n"
 	execDeniedNotice      = "upterm: the host denied this command.\r\n"
 	execTimeoutNotice     = "upterm: guest exec denied; the request timed out before it was approved.\r\n"
 )

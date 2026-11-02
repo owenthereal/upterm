@@ -168,8 +168,13 @@ type Host struct {
 	// AutoAccept says the session was started without anyone confirming it
 	// (--accept). With no AuthorizedKeys as well, it is open: anyone with
 	// the session ID can join, and nobody was asked. GetSessionResponse.open
-	// reports that; it changes nothing about who may join.
+	// reports that; it changes nothing about who may join. It grants what
+	// SFTPAutoAccept does, too.
 	AutoAccept bool
+	// SFTPAutoAccept lets guests' file transfers run without approval
+	// (--allow-sftp), once the hard policy has passed them: SFTPDisabled
+	// still turns them off, and ReadOnly still refuses all but downloads.
+	SFTPAutoAccept bool
 	// FileTransferApprovalRequired says each guest file transfer waits for
 	// the primary host terminal (no --accept). The daemon sets it alongside
 	// TerminalConsent. It is reported to readers
@@ -1211,7 +1216,7 @@ func (c *Host) Run(ctx context.Context) (runErr error) {
 			SFTPDisabled:               c.SFTPDisabled,
 			PermissionChecker:          c.PermissionChecker,
 			TerminalConsent:            c.TerminalConsent,
-			SFTPAutoAccept:             c.AutoAccept,
+			SFTPAutoAccept:             c.AutoAccept || c.SFTPAutoAccept,
 			OnCommandStarted: func() {
 				cmdOnce.Do(func() { close(cmdReady) })
 				if c.CommandStartedCallback != nil {

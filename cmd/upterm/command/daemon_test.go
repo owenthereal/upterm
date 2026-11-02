@@ -62,9 +62,9 @@ func daemonTestRoots(t *testing.T) {
 	flagKnownHostsFilename = filepath.Join(dir, "known_hosts")
 	t.Cleanup(func() { flagKnownHostsFilename = origKnownHosts })
 
-	origSupplied := suppliedFlags
-	suppliedFlags = map[string]bool{}
-	t.Cleanup(func() { suppliedFlags = origSupplied })
+	origSupplied, origCommandLine := suppliedFlags, commandLineFlags
+	suppliedFlags, commandLineFlags = map[string]bool{}, map[string]bool{}
+	t.Cleanup(func() { suppliedFlags, commandLineFlags = origSupplied, origCommandLine })
 
 	// The developer's own SSH identities stay out of it. hostCmd resets
 	// --private-key to whichever ~/.ssh files exist, and with no agent to
@@ -505,6 +505,7 @@ func TestDaemonConsentConfiguration(t *testing.T) {
 			h, err := buildDaemonHost(context.Background(), "d", testHostOptions(), child, discardLogger())
 			require.NoError(t, err)
 			require.Equal(t, accept, h.AutoAccept)
+			require.Equal(t, accept, h.SFTPAutoAccept, "--accept grants file transfers")
 			require.True(t, h.TerminalConsent)
 			require.Nil(t, h.PermissionChecker)
 			require.Equal(t, !accept, h.FileTransferApprovalRequired)
@@ -841,7 +842,7 @@ func runDaemonAgainstUnsupportedRelay(t *testing.T) string {
 func TestDaemonGuestCommandConfiguration(t *testing.T) {
 	cmd := hostCmd()
 	daemonTestRoots(t)
-	require.NoError(t, cmd.ParseFlags([]string{"--login-command=tool 'a b'", "--accept-exec", "--no-exec"}))
+	require.NoError(t, cmd.ParseFlags([]string{"--login-command=tool 'a b'", "--allow-exec"}))
 	opts, err := parseHostOptions([]string{"sh"})
 	require.NoError(t, err)
 	a, b := net.Pipe()
@@ -852,7 +853,7 @@ func TestDaemonGuestCommandConfiguration(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, []string{"tool", "a b"}, h.LoginCommand)
 	require.True(t, h.AcceptExec)
-	require.True(t, h.ExecDisabled)
+	require.False(t, h.ExecDisabled)
 	cwd, err := os.Getwd()
 	require.NoError(t, err)
 	require.Equal(t, cwd, h.CommandDir)
@@ -863,7 +864,7 @@ func TestForwardingDaemonConfiguration(t *testing.T) {
 	cmd := hostCmd()
 	defer hostCmd()
 	daemonTestRoots(t)
-	require.NoError(t, cmd.ParseFlags([]string{"--allow-loopback-tcp-forwarding", "--no-forwarding"}))
+	require.NoError(t, cmd.ParseFlags([]string{"--allow-forwarding=loopback"}))
 	opts, err := parseHostOptions([]string{"sh"})
 	require.NoError(t, err)
 	a, b := net.Pipe()
@@ -873,6 +874,6 @@ func TestForwardingDaemonConfiguration(t *testing.T) {
 	h, err := buildDaemonHost(context.Background(), "forward-options", opts, child, discardLogger())
 	require.NoError(t, err)
 	require.True(t, h.AllowLoopbackTCPForwarding)
-	require.True(t, h.ForwardingDisabled)
+	require.False(t, h.ForwardingDisabled)
 	require.False(t, h.AllowLocalTCPForwarding)
 }

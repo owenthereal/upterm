@@ -30,51 +30,6 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
-func Test_validateShareRequiredFlags_readOnlyAndLocalTCPForwarding(t *testing.T) {
-	origServer := flagServer
-	origReadOnly := flagReadOnly
-	origAllowLocalTCPForwarding := flagAllowLocalTCPForwarding
-	t.Cleanup(func() {
-		flagServer = origServer
-		flagReadOnly = origReadOnly
-		flagAllowLocalTCPForwarding = origAllowLocalTCPForwarding
-	})
-
-	flagServer = "ssh://uptermd.upterm.dev:22"
-
-	cases := []struct {
-		name                    string
-		readOnly                bool
-		allowLocalTCPForwarding bool
-		wantErrSubstr           string
-	}{
-		{name: "neither", readOnly: false, allowLocalTCPForwarding: false},
-		{name: "read-only only", readOnly: true, allowLocalTCPForwarding: false},
-		{name: "forwarding only", readOnly: false, allowLocalTCPForwarding: true},
-		{
-			name:                    "both rejected",
-			readOnly:                true,
-			allowLocalTCPForwarding: true,
-			wantErrSubstr:           "--read-only and --allow-local-tcp-forwarding cannot be used together",
-		},
-	}
-
-	for _, c := range cases {
-		cc := c
-		t.Run(cc.name, func(t *testing.T) {
-			flagReadOnly = cc.readOnly
-			flagAllowLocalTCPForwarding = cc.allowLocalTCPForwarding
-
-			err := validateShareRequiredFlags(nil, nil)
-			if cc.wantErrSubstr == "" {
-				assert.NoError(t, err)
-				return
-			}
-			assert.ErrorContains(t, err, cc.wantErrSubstr)
-		})
-	}
-}
-
 // The checks host and config edit share, with host's wording.
 func Test_hostValueChecks(t *testing.T) {
 	require.NoError(t, validateJoinTimeout(0))
@@ -85,11 +40,6 @@ func Test_hostValueChecks(t *testing.T) {
 	require.NoError(t, validateReadOnlyForwarding(true, false))
 	require.NoError(t, validateReadOnlyForwarding(false, true))
 	require.ErrorContains(t, validateReadOnlyForwarding(true, true), "--read-only and --allow-local-tcp-forwarding cannot be used together")
-
-	require.NoError(t, validateDetachAccept(false, false))
-	require.NoError(t, validateDetachAccept(false, true))
-	require.NoError(t, validateDetachAccept(true, true))
-	require.EqualError(t, validateDetachAccept(true, false), "--detach requires --accept: a session nobody is watching cannot be confirmed interactively")
 
 	command, err := parseForceCommand("tmux attach -t 'pair programming'")
 	require.NoError(t, err)
@@ -177,11 +127,12 @@ func TestSSHServerWithoutAPortIs22(t *testing.T) {
 	require.Equal(t, "ssh://", flagServer, "a refused address is left as given")
 }
 
-// Test_validateShareRequiredFlags_detachNeedsAcceptAndOutputNeedsDetach pins
-// the three combinations that cannot work: a background session nobody can
-// confirm, an output format for a foreground run that has none, and a format
-// this does not speak.
-func Test_validateShareRequiredFlags_detachNeedsAcceptAndOutputNeedsDetach(t *testing.T) {
+// Test_validateShareRequiredFlags_outputNeedsDetach pins the two
+// combinations that cannot work: an output format for a foreground run that
+// has none, and a format this does not speak. A background session nobody
+// confirmed is the terminal check's to refuse, in the parent, since the
+// daemon makes these checks too and has no terminal.
+func Test_validateShareRequiredFlags_outputNeedsDetach(t *testing.T) {
 	origServer, origDetach, origAccept, origOutput := flagServer, flagDetach, flagAccept, flagHostOutput
 	t.Cleanup(func() {
 		flagServer, flagDetach, flagAccept, flagHostOutput = origServer, origDetach, origAccept, origOutput
@@ -196,7 +147,7 @@ func Test_validateShareRequiredFlags_detachNeedsAcceptAndOutputNeedsDetach(t *te
 
 	reset()
 	flagDetach = true
-	require.ErrorContains(t, validateShareRequiredFlags(cmd, nil), "--detach requires --accept")
+	require.NoError(t, validateShareRequiredFlags(cmd, nil))
 
 	reset()
 	flagHostOutput = "json"
@@ -878,11 +829,11 @@ func Test_guardedSpawn_RefusesInsideATestBinary(t *testing.T) {
 func runHostInProcess(t *testing.T, argv ...string) error {
 	t.Helper()
 
-	origKeys, origRunning, origSupplied := flagAuthorizedKeys, runningCmd, suppliedFlags
+	origKeys, origRunning, origSupplied, origCommandLine := flagAuthorizedKeys, runningCmd, suppliedFlags, commandLineFlags
 	// Registered before the daemon cleanup, so its readers have joined before
 	// the incoming flag destination and command metadata are restored.
 	t.Cleanup(func() {
-		flagAuthorizedKeys, runningCmd, suppliedFlags = origKeys, origRunning, origSupplied
+		flagAuthorizedKeys, runningCmd, suppliedFlags, commandLineFlags = origKeys, origRunning, origSupplied, origCommandLine
 	})
 
 	var command []string
@@ -1480,21 +1431,28 @@ func TestHostGuestCommandOptions(t *testing.T) {
 		})
 	}
 	cmd := hostCmd()
-	require.NoError(t, cmd.ParseFlags([]string{"--login-command=tool 'a b'", "--accept-exec", "--no-exec"}))
+	require.NoError(t, cmd.ParseFlags([]string{"--login-command=tool 'a b'", "--allow-exec"}))
 	opts, err := parseHostOptions([]string{"sh"})
 	require.NoError(t, err)
 	require.Equal(t, []string{"tool", "a b"}, opts.loginCommand)
-	require.True(t, flagAcceptExec)
+	require.True(t, flagAllowExec)
+	require.NoError(t, hostCmd().ParseFlags([]string{"--no-exec"}))
 	require.True(t, flagNoExec)
 	hostCmd()
 }
 
 func TestForwardingFlags(t *testing.T) {
-	cmd := hostCmd()
 	defer hostCmd()
-	require.NoError(t, cmd.ParseFlags([]string{"--allow-loopback-tcp-forwarding", "--no-forwarding", "--accept"}))
-	require.True(t, flagAllowLoopbackTCPForwarding)
+	for args, want := range map[string]forwardingGrant{
+		"--allow-forwarding=loopback": forwardLoopback,
+		"--allow-forwarding any":      forwardAny,
+	} {
+		require.NoError(t, hostCmd().ParseFlags(strings.Fields(args)))
+		require.Equal(t, want, flagAllowForwarding, args)
+	}
+	require.NoError(t, hostCmd().ParseFlags([]string{"--no-forwarding"}))
 	require.True(t, flagNoForwarding)
+	require.Empty(t, flagAllowForwarding, "building the command resets it")
 }
 
 // Parse guide examples without invoking RunE, resolving GitHub keys, starting
@@ -1503,9 +1461,10 @@ func TestDocumentedGuestToolOptionsParseOffline(t *testing.T) {
 	defer hostCmd()
 	for _, args := range [][]string{
 		{},
-		{"--detach", "--name", "home", "--accept", "--authorized-user", "github:YOUR_GITHUB_USER", "--login-command", "env -u HERDR_ENV herdr", "--accept-exec", "--allow-loopback-tcp-forwarding"},
+		{"--detach", "--name", "home", "--accept", "--authorized-user", "github:YOUR_GITHUB_USER", "--login-command", "env -u HERDR_ENV herdr", "--allow-exec", "--allow-forwarding=loopback"},
 		{"--force-command", "tmux attach -t pair-programming", "--", "tmux", "new", "-t", "pair-programming"},
-		{"--allow-loopback-tcp-forwarding"},
+		{"--allow-forwarding=loopback"},
+		{"--allow-forwarding=any"},
 		{"--allow-local-tcp-forwarding"},
 		{"--login-command", "env -u HERDR_ENV herdr", "--no-exec", "--no-forwarding"},
 	} {

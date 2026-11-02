@@ -115,6 +115,83 @@ func TestDetachedHostPrintsJSONAndCanBeAttachedAndStopped(t *testing.T) {
 	require.NoError(t, h.waitForText(client, "Connection to", 20*time.Second), "the guest's ssh ends with the session")
 }
 
+// Without --accept, --detach asks its start question on the terminal it was
+// started from, as upterm host does, and goes to the background only on a
+// yes; a no starts nothing, and exits 0 as declining does. With -o json the
+// question comes first, then the JSON.
+func TestDetachedHostAsksItsStartQuestionOnATerminal(t *testing.T) {
+	h := newTestHarness(t, 200)
+	for _, tc := range []struct {
+		answer, output string
+		started        bool
+	}{
+		{answer: "n"},
+		{answer: "y", started: true},
+		{answer: "y", output: " -o json", started: true},
+	} {
+		name := fmt.Sprintf("e2e-ask-%s%d", tc.answer, time.Now().UnixNano()%1_000_000)
+		h.stopOnCleanup(name)
+		// The marker names the run, so a wait can't match an earlier one.
+		marker := "ASK_STATUS_" + name
+		hostCmd := fmt.Sprintf("clear; upterm host --detach%s --skip-host-key-check --server %s --private-key %s --name %s -- bash --rcfile %s --noprofile; echo %s=$?",
+			tc.output, h.serverURL, h.keyFile, name, h.rcFile, marker)
+		require.NoError(t, h.host.SendLine(h.ctx, hostCmd))
+		require.NoError(t, h.waitForText(h.host, "Start the session? [y/n]", 30*time.Second), "%s asks first", name)
+		require.NoError(t, h.host.SendKeys(h.ctx, tc.answer))
+		require.NoError(t, h.waitForText(h.host, marker+"=0", 30*time.Second), "%s exits 0", name)
+
+		out, err := h.runCLI(20*time.Second, "session", "info", name, "-o", "json")
+		require.NoError(t, err, "%s", out)
+		if tc.started {
+			require.Contains(t, string(out), `"status": "ready"`, name)
+			require.Contains(t, string(out), `"startConfirmed": true`, "%s was asked, not --accept", name)
+		} else {
+			require.Contains(t, string(out), `"status": "ended"`, name)
+			require.Contains(t, string(out), `"reason": "startup_abandoned"`, name)
+		}
+	}
+}
+
+// --allow-local-tcp-forwarding is said to be deprecated once, by the process
+// that was given it. The detached daemon reads the same argv and says
+// nothing of it: its stderr is the session's log. The flag still grants
+// forwards to anywhere.
+func TestDetachedHostSaysTheOldForwardingFlagIsDeprecatedOnce(t *testing.T) {
+	const notice = "upterm: --allow-local-tcp-forwarding is deprecated; use --allow-forwarding=any"
+	h := newTestHarness(t, 200)
+	name := fmt.Sprintf("e2e-dep-%d", time.Now().UnixNano()%1_000_000)
+	h.stopOnCleanup(name)
+
+	// stderr goes to a file, which the pane's height doesn't cut short; the
+	// question needs no terminal with --accept.
+	stderrFile := filepath.Join(h.tmpDir, "deprecated.stderr")
+	marker := "DEP_STATUS_" + name
+	hostCmd := fmt.Sprintf("clear; upterm host --detach --accept --allow-local-tcp-forwarding --skip-host-key-check --server %s --private-key %s --name %s -- bash --rcfile %s --noprofile 2>%s; echo %s=$?",
+		h.serverURL, h.keyFile, name, h.rcFile, stderrFile, marker)
+	require.NoError(t, h.host.SendLine(h.ctx, hostCmd))
+	require.NoError(t, h.waitForText(h.host, marker+"=0", 30*time.Second))
+
+	said, err := os.ReadFile(stderrFile)
+	require.NoError(t, err)
+	require.Equal(t, 1, strings.Count(string(said), notice+"\n"), "%s", said)
+	require.True(t, strings.HasPrefix(string(said), notice+"\n"), "%s", said)
+
+	out, err := h.runCLI(20*time.Second, "session", "info", name, "-o", "json")
+	require.NoError(t, err, "%s", out)
+	var info struct {
+		Status        string `json:"status"`
+		LogPath       string `json:"logPath"`
+		TCPForwarding string `json:"tcpForwarding"`
+	}
+	require.NoError(t, json.Unmarshal(out, &info), "%s", out)
+	require.Equal(t, "ready", info.Status)
+	require.Equal(t, "all", info.TCPForwarding, "the old name still grants forwards to anywhere")
+	require.NotEmpty(t, info.LogPath)
+	log, err := os.ReadFile(info.LogPath)
+	require.NoError(t, err)
+	require.NotContains(t, string(log), notice, "the daemon said it too")
+}
+
 // A stop reaches every terminal attached to the session, not only the one
 // that started it. Both the host's own terminal and an `upterm attach` see
 // the stop: the daemon tells each attached terminal the session was stopped

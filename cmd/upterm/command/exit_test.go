@@ -42,9 +42,9 @@ func runCLICmd(t *testing.T, args ...string) (stdout, stderr string, code int, c
 	// The real binary exits with the parsed flags and command metadata.
 	// Restore the incoming values when this fixture ends, so direct readers
 	// in later tests do not inherit its output format or address policy.
-	origOutput, origRunning, origSupplied := flagOutput, runningCmd, suppliedFlags
+	origOutput, origRunning, origSupplied, origCommandLine := flagOutput, runningCmd, suppliedFlags, commandLineFlags
 	t.Cleanup(func() {
-		flagOutput, runningCmd, suppliedFlags = origOutput, origRunning, origSupplied
+		flagOutput, runningCmd, suppliedFlags, commandLineFlags = origOutput, origRunning, origSupplied, origCommandLine
 	})
 
 	stdinR, stdinW, err := os.Pipe()

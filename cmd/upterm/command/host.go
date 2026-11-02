@@ -93,32 +93,33 @@ func (e UserInterruptedError) Unwrap() error {
 }
 
 var (
-	flagServer                     string
-	flagForceCommand               string
-	flagLoginCommand               string
-	flagAcceptExec, flagNoExec     bool
-	flagPrivateKeys                []string
-	flagKnownHostsFilename         string
-	flagAuthorizedKeys             string
-	flagAuthorizedUsers            []string
-	flagCodebergUsers              []string
-	flagGitHubUsers                []string
-	flagGitLabUsers                []string
-	flagSourceHutUsers             []string
-	flagReadOnly                   bool
-	flagAccept                     bool
-	flagSkipHostKeyCheck           bool
-	flagProxy                      string
-	flagNoSFTP                     bool
-	flagAllowLocalTCPForwarding    bool
-	flagAllowLoopbackTCPForwarding bool
-	flagNoForwarding               bool
-	flagPtySize                    string
-	flagTerm                       string
-	flagName                       string
-	flagDetach                     bool
-	flagHostOutput                 string
-	flagJoinTimeout                time.Duration
+	flagServer                  string
+	flagForceCommand            string
+	flagLoginCommand            string
+	flagAllowExec, flagNoExec   bool
+	flagPrivateKeys             []string
+	flagKnownHostsFilename      string
+	flagAuthorizedKeys          string
+	flagAuthorizedUsers         []string
+	flagCodebergUsers           []string
+	flagGitHubUsers             []string
+	flagGitLabUsers             []string
+	flagSourceHutUsers          []string
+	flagReadOnly                bool
+	flagAccept                  bool
+	flagSkipHostKeyCheck        bool
+	flagProxy                   string
+	flagAllowSFTP, flagNoSFTP   bool
+	flagAllowForwarding         forwardingGrant
+	flagAllowLocalTCPForwarding bool
+	flagNoForwarding            bool
+	flagFullAccess              bool
+	flagPtySize                 string
+	flagTerm                    string
+	flagName                    string
+	flagDetach                  bool
+	flagHostOutput              string
+	flagJoinTimeout             time.Duration
 	// flagHostEscapeChar carries its flag's default here as well as in the
 	// registration below, so parseEscapeChar has a value to accept when the
 	// var is read without hostCmd having run — which is every unit test that
@@ -126,13 +127,31 @@ var (
 	flagHostEscapeChar = "~"
 )
 
-// How a guest's file transfers are approved, as host's help says it in its
-// description and at --accept, --read-only and --no-sftp. Approval grants a
-// path tuple on this connection, or SFTP for the guest until the session ends.
+// forwardingGrant is --allow-forwarding's value: the forwards guests may open
+// without approval. Empty grants none.
+type forwardingGrant string
+
 const (
-	transferApprovalHelp = "file transfers need your approval in the primary host terminal, which can allow the displayed paths on this connection, or SFTP for this guest until the host session ends"
-	transferDeniedHelp   = "without a primary terminal with approval escapes enabled, ungranted transfers are denied; attach with escapes enabled or use --accept"
+	// forwardLoopback is forwards to this machine's literal loopback
+	// addresses, 127.0.0.0/8 and ::1.
+	forwardLoopback forwardingGrant = "loopback"
+	// forwardAny is forwards to anything this machine can reach.
+	forwardAny forwardingGrant = "any"
 )
+
+func (g *forwardingGrant) Set(s string) error {
+	switch v := forwardingGrant(s); v {
+	case forwardLoopback, forwardAny:
+		*g = v
+		return nil
+	}
+	return errors.New("must be loopback or any")
+}
+
+func (g *forwardingGrant) String() string { return string(*g) }
+
+// Type is the placeholder --help shows for the value.
+func (g *forwardingGrant) Type() string { return "loopback|any" }
 
 func hostCmd() *cobra.Command {
 	cmd := &cobra.Command{
@@ -143,8 +162,9 @@ through a relay, so that guests can join it from their own terminals with
 upterm join or plain ssh.
 
 upterm prints the session, with the commands guests join it with, and asks
-before starting it; --accept starts it without asking. The relay is
---server, and upterm authenticates to it with the first of these it has:
+before starting it; --accept starts it without asking, plus --allow-sftp. The
+relay is --server, and upterm authenticates to it with the first of these it
+has:
   1. The SSH agent's keys, when an agent is running and holds any
   2. Otherwise, the private key files that load: ~/.ssh/id_{ed25519,ed25519_sk,ecdsa,ecdsa_sk,dsa,rsa}
   3. Otherwise, a generated key
@@ -156,17 +176,20 @@ Who can join: anyone with the session's connect string, unless
 --authorized-keys (an authorized_keys file) or --authorized-user names the
 keys a guest must have.
 
-What guests may do: type into the session, or only watch it with
---read-only; transfer files with sftp or scp, with your access (downloads
-only with --read-only, none with --no-sftp); and forward TCP ports (ssh -L)
-to literal loopback destinations after approval or with
---allow-loopback-tcp-forwarding, or to anything this machine can reach with
---allow-local-tcp-forwarding. --no-forwarding and --read-only deny forwarding.
-Guest shell requests share the hosted terminal by default. --login-command runs a
-host-chosen program instead. Explicit exec needs approval or --accept-exec; stdin
-can contain further code. --read-only and --no-exec deny explicit exec.
-
-Unless --accept, a guest's ` + transferApprovalHelp + `; ` + transferDeniedHelp + `.
+What guests can do: type into the session, or only watch it with
+--read-only. A guest's plain ssh shares this terminal, or runs the program
+--login-command names instead. Anything more needs a grant:
+  commands     ssh SESSION CMD, VS Code, herdr --remote, run as you
+               (--allow-exec, --no-exec)
+  files        scp and sftp, with your access (--allow-sftp, --no-sftp)
+  forwarding   ssh -L 8080:127.0.0.1:8080, to this machine's loopback
+               addresses (--allow-forwarding=loopback, --no-forwarding)
+--allow-X lets guests do X without asking, --no-X never lets them, and with
+neither, upterm asks in your terminal. --full-access allows all three, for
+the keys --authorized-user or --authorized-keys names. Forwards anywhere else
+are refused unless --allow-forwarding=any, which lets guests reach anything
+this machine can, without asking. --read-only also turns off commands,
+uploads and forwarding.
 
 The session runs in a process of its own, and this terminal is attached to
 it. NAME is the session's name, which upterm prints (--name chooses it).
@@ -174,7 +197,8 @@ it. NAME is the session's name, which upterm prints (--name chooses it).
 ` + attachedKeysHelp + `
 
 With --detach nothing is attached: the session starts in the background, and
-upterm prints how to reach it.
+upterm prints how to reach it. It still asks before starting it, on this
+terminal; with no terminal to ask in, --detach needs --accept.
 
 Exit status: the command's own status when it exits; 1 when upterm fails, or
 the session is stopped or ends by a signal (whatever the command returns
@@ -203,7 +227,7 @@ reports the command's status.`,
   upterm host --force-command 'tmux attach -t pair-programming' -- tmux new -t pair-programming
 
   # Let guests forward TCP ports (ssh -L) to what this machine can reach:
-  upterm host --allow-local-tcp-forwarding
+  upterm host --allow-forwarding=any
 
   # Host on another relay, over a WebSocket:
   upterm host --server wss://relay.example.com
@@ -212,7 +236,16 @@ reports the command's status.`,
   upterm host --detach --accept --authorized-user github:alice
 
   # The same, as JSON for a script:
-  upterm host --detach --accept --authorized-user github:alice -o json`,
+  upterm host --detach --accept --authorized-user github:alice -o json
+
+  # A door to this machine for alice's keys alone, in the background: plain
+  # ssh opens Herdr, and alice can also run commands, transfer files and
+  # forward to this machine's loopback ports:
+  upterm host --detach --name home --full-access --authorized-user github:alice --login-command herdr
+
+  # On a CI runner, with nobody there to ask: a session alice can open in
+  # VS Code (Remote-SSH), which runs its server and forwards to its port:
+  upterm host --detach --accept --authorized-user github:alice --allow-exec --allow-forwarding=loopback`,
 		PreRunE: validateShareRequiredFlags,
 		RunE:    shareRunE,
 	}
@@ -220,7 +253,7 @@ reports the command's status.`,
 	cmd.PersistentFlags().StringVarP(&flagServer, "server", "", "ssh://uptermd.upterm.dev:22", "Relay to host the session on: ssh://HOST[:PORT], ws://HOST[:PORT] or wss://HOST[:PORT]. Without a port, ssh uses 22, ws 80 and wss 443.")
 	cmd.PersistentFlags().StringVarP(&flagForceCommand, "force-command", "f", "", "Run this host-chosen command for guest shell and exec requests, with a private PTY when requested and pipes otherwise. --no-exec and --read-only still deny explicit exec. Mutually exclusive with --login-command.")
 	cmd.PersistentFlags().StringVar(&flagLoginCommand, "login-command", "", "Run this host-chosen command for guest shell requests, without exec approval. Mutually exclusive with --force-command; explicit guest exec still needs approval.")
-	cmd.PersistentFlags().BoolVar(&flagAcceptExec, "accept-exec", false, "Let guests execute private commands without approval. Command stdin can contain further code; this grants execution trust.")
+	cmd.PersistentFlags().BoolVar(&flagAllowExec, "allow-exec", false, "Let guests run commands (ssh SESSION CMD, VS Code, herdr --remote) without approval. Each runs as you, and its stdin can carry further code.")
 	cmd.PersistentFlags().BoolVar(&flagNoExec, "no-exec", false, "Deny explicit guest exec requests, including forced exec. Host-chosen login and forced shell commands still run.")
 
 	cmd.PersistentFlags().StringSliceVarP(&flagPrivateKeys, "private-key", "i", defaultPrivateKeys(), "Identity files to authenticate to the relay with. "+identitiesOnlyHelp+" By default it offers the agent's keys alone when the agent holds any, and otherwise the listed files that load, or a generated key when none do.")
@@ -234,27 +267,41 @@ reports the command's status.`,
 	registerAuthUserFlag(cmd.PersistentFlags(), &flagGitHubUsers, "github-user", "Authorize specified GitHub users by allowing their public keys to connect. Configure GitHub CLI environment variables as needed; see https://cli.github.com/manual/gh_help_environment for details.")
 	registerAuthUserFlag(cmd.PersistentFlags(), &flagGitLabUsers, "gitlab-user", "Authorize specified GitLab users by allowing their public keys to connect.")
 	registerAuthUserFlag(cmd.PersistentFlags(), &flagSourceHutUsers, "srht-user", "Authorize specified SourceHut users by allowing their public keys to connect.")
-	cmd.PersistentFlags().BoolVar(&flagAccept, "accept", false, "Start the session without asking, and let guests transfer files without your approval. Without it, a guest's "+transferApprovalHelp+"; "+transferDeniedHelp+".")
-	cmd.PersistentFlags().BoolVarP(&flagReadOnly, "read-only", "r", false, "Let guests only watch: they can't type into the session, and can only download files. Unless --accept, a guest's "+transferApprovalHelp+"; "+transferDeniedHelp+". Can't be used with --allow-local-tcp-forwarding.")
+	cmd.PersistentFlags().BoolVar(&flagAccept, "accept", false, "Start the session without asking, plus --allow-sftp.")
+	cmd.PersistentFlags().BoolVarP(&flagReadOnly, "read-only", "r", false, "Let guests only watch: they can't type into the session, run commands or forward ports, and can only download files.")
 	cmd.PersistentFlags().BoolVar(&flagHideClientIP, "hide-client-ip", false, "Hide guests' IP addresses from upterm's output, and from forced commands' SSH_CONNECTION and SSH_CLIENT. "+hideClientIPDefaultHelp)
 	cmd.PersistentFlags().BoolVar(&flagSkipHostKeyCheck, "skip-host-key-check", false, skipHostKeyCheckHelp)
 	cmd.PersistentFlags().StringVar(&flagProxy, "proxy", "", proxyHelp)
-	cmd.PersistentFlags().BoolVar(&flagNoSFTP, "no-sftp", false, "Turn off file transfer (sftp and scp) for guests. Without it, guests transfer files with your access (downloads only with --read-only), and unless --accept, a guest's "+transferApprovalHelp+"; "+transferDeniedHelp+".")
-	cmd.PersistentFlags().BoolVar(&flagAllowLocalTCPForwarding, "allow-local-tcp-forwarding", false, "Let guests forward TCP ports (ssh -L) through the session, to whatever this machine can reach. Can't be used with --read-only.")
-	cmd.PersistentFlags().BoolVar(&flagAllowLoopbackTCPForwarding, "allow-loopback-tcp-forwarding", false, "Let guests forward TCP ports to literal 127.0.0.0/8 or ::1 destinations without approval.")
+	cmd.PersistentFlags().BoolVar(&flagAllowSFTP, "allow-sftp", false, "Let guests transfer files (scp, sftp) without approval, with your access; downloads only with --read-only.")
+	cmd.PersistentFlags().BoolVar(&flagNoSFTP, "no-sftp", false, "Turn off file transfer (sftp and scp) for guests.")
+	// Var keeps whatever the variable holds, so it is reset here as the
+	// other registrations reset theirs.
+	flagAllowForwarding = ""
+	cmd.PersistentFlags().Var(&flagAllowForwarding, "allow-forwarding", "Let guests forward ports (ssh -L) without approval: loopback, to this machine's literal 127.0.0.0/8 and ::1 addresses; any, to anything this machine can reach.")
+	_ = cmd.RegisterFlagCompletionFunc("allow-forwarding", completeValues(string(forwardLoopback), string(forwardAny)))
+	cmd.PersistentFlags().BoolVar(&flagAllowLocalTCPForwarding, "allow-local-tcp-forwarding", false, "--allow-forwarding=any, by its earlier name.")
 	cmd.PersistentFlags().BoolVar(&flagNoForwarding, "no-forwarding", false, "Deny guest TCP forwarding, including pregranted and approved destinations.")
+	cmd.PersistentFlags().BoolVar(&flagFullAccess, "full-access", false, "Let authorized guests do what an SSH login to your account can, without asking: run commands (ssh SESSION CMD, VS Code, herdr --remote), transfer files (scp, sftp), and forward ports to this machine's loopback addresses (ssh -L 8080:127.0.0.1:8080). Requires --authorized-user or --authorized-keys.")
 	cmd.PersistentFlags().StringVar(&flagPtySize, "pty-size", "", "Pin the session's terminal size as COLSxROWS (e.g. 132x43); resize requests are then ignored. Defaults to the attached terminal's size, or 80x24 when there is none.")
 	cmd.PersistentFlags().StringVar(&flagTerm, "term", "", "Set TERM for the hosted command. Defaults to the inherited TERM, or "+defaultTerm+" when TERM is unset or "+dumbTerm+".")
 	cmd.PersistentFlags().StringVar(&flagName, "name", "", "Name the session, for upterm attach and the session commands to find it by. Defaults to the command's name and four hex digits, e.g. bash-1f3a.")
 	cmd.PersistentFlags().DurationVar(&flagJoinTimeout, "join-timeout", 0, "End the session if no guest has joined within this long (e.g. 10m). 0 waits forever. A guest who joins disarms it permanently, so a guest who joins and then leaves does not re-arm it. Change it later with 'upterm session set NAME --join-timeout'.")
-	cmd.PersistentFlags().BoolVar(&flagDetach, "detach", false, "Start the session in the background and exit once it is running. Requires --accept. Attach a terminal later with 'upterm attach NAME'; stop it with 'upterm session stop NAME'.")
+	cmd.PersistentFlags().BoolVar(&flagDetach, "detach", false, "Start the session in the background and exit once it is running. On a terminal, upterm asks before starting it, as it does without --detach; with no terminal to ask in, pass --accept. Attach a terminal later with 'upterm attach NAME'; stop it with 'upterm session stop NAME'.")
 	cmd.PersistentFlags().StringVarP(&flagHostOutput, "output", "o", "", "With --detach, print the started session as JSON: a superset of the fields 'upterm session info NAME -o json' reports at launch, with sshCommand and joinCommand present even when its status says guests can't join.")
 	_ = cmd.RegisterFlagCompletionFunc("output", completeValues("json"))
 	cmd.PersistentFlags().StringVar(&flagHostEscapeChar, "escape-char", "~", escapeCharHelp)
 
 	// One run's choices, not standing configuration. --join-timeout stays
 	// bound to env and config: CI sets it there.
-	perRun(cmd.PersistentFlags(), "name", "detach", "output", "login-command", "accept-exec", "no-exec", "allow-loopback-tcp-forwarding", "no-forwarding")
+	perRun(cmd.PersistentFlags(), "name", "detach", "output", "login-command", "allow-exec", "allow-sftp", "no-exec", "allow-forwarding", "no-forwarding", "full-access")
+
+	// --allow-forwarding=any's released name, kept working, and as the config
+	// key it was, for the scripts and files that say it. Hidden, and said to
+	// be deprecated by validateShareRequiredFlags, only where the command line
+	// gives it: pflag's MarkDeprecated would say so for the config key too,
+	// which has no other spelling, since --allow-forwarding is the command
+	// line's only.
+	_ = cmd.PersistentFlags().MarkHidden("allow-local-tcp-forwarding")
 
 	// The provider list comes from host.ProviderList so --help, the generated
 	// docs and the parser's own error messages cannot disagree about which
@@ -263,6 +310,23 @@ reports the command's status.`,
 		"Let a user join with the public keys a code-hosting service lists for them, fetched through --proxy when it is set. Repeatable. "+
 			"Providers: "+host.ProviderList()+". "+
 			"Examples: github:alice, github:bob@ghe.example.com, gitea:carol@git.example.com, https://git.example.com/dave")
+
+	// The help lists the flags by what they decide; the rest are under the
+	// last heading.
+	const (
+		whoCanJoin = "Who can join"
+		guestsDo   = "What guests can do"
+		background = "Running in the background"
+		relay      = "Relay"
+		other      = "Other flags"
+	)
+	groupFlags(cmd, whoCanJoin, guestsDo, background, relay, other)
+	flags := cmd.PersistentFlags()
+	flagGroup(flags, whoCanJoin, "authorized-keys", "authorized-user")
+	flagGroup(flags, guestsDo, "allow-exec", "allow-sftp", "allow-forwarding", "full-access",
+		"no-exec", "no-sftp", "no-forwarding", "read-only", "login-command", "force-command")
+	flagGroup(flags, background, "detach", "accept", "name", "output", "join-timeout")
+	flagGroup(flags, relay, "server", "proxy", "private-key", "known-hosts", "skip-host-key-check")
 
 	// Superseded by --authorized-user. Kept working and hidden rather than
 	// deprecated: action-upterm wraps these flags and users pin it at @v1, so a
@@ -409,10 +473,10 @@ func validateSessionNameFlag(name string) error {
 	return sessiondir.CheckSocketPath(utils.UptermRuntimeDir(), name)
 }
 
-// validateJoinTimeout, validateReadOnlyForwarding, validateDetachAccept and
-// validateServer are the checks host makes on its flags' values before it
-// runs. config edit calls them on the values the config file sets, so a file
-// it accepts is one host accepts.
+// validateJoinTimeout, validateReadOnlyForwarding and validateServer are the
+// checks host makes on its flags' values before it runs. config edit calls
+// them on the values the config file sets, so a file it accepts is one host
+// accepts.
 func validateJoinTimeout(d time.Duration) error {
 	if d < 0 {
 		return errors.New("--join-timeout cannot be negative; use 0 to wait forever")
@@ -427,11 +491,102 @@ func validateReadOnlyForwarding(readOnly, forwarding bool) error {
 	return nil
 }
 
-func validateDetachAccept(detach, accept bool) error {
-	if detach && !accept {
-		return errors.New("--detach requires --accept: a session nobody is watching cannot be confirmed interactively")
+// grantConflict is a guest grant and a denial of the same thing, which wins.
+type grantConflict struct {
+	grant, denial   string // the flags' names
+	granted, denied bool
+	what            string // what the denial denies
+}
+
+func grantConflicts() []grantConflict {
+	forwards := flagAllowForwarding != ""
+	return []grantConflict{
+		{"allow-exec", "no-exec", flagAllowExec, flagNoExec, "guest commands"},
+		{"allow-exec", "read-only", flagAllowExec, flagReadOnly, "guest commands"},
+		{"allow-sftp", "no-sftp", flagAllowSFTP, flagNoSFTP, "file transfers"},
+		{"allow-forwarding", "no-forwarding", forwards, flagNoForwarding, "port forwarding"},
+		{"allow-forwarding", "read-only", forwards, flagReadOnly, "port forwarding"},
+		{"allow-local-tcp-forwarding", "no-forwarding", flagAllowLocalTCPForwarding, flagNoForwarding, "port forwarding"},
+		{"allow-local-tcp-forwarding", "read-only", flagAllowLocalTCPForwarding, flagReadOnly, "port forwarding"},
+		{"full-access", "no-exec", flagFullAccess, flagNoExec, "guest commands"},
+		{"full-access", "no-sftp", flagFullAccess, flagNoSFTP, "file transfers"},
+		{"full-access", "no-forwarding", flagFullAccess, flagNoForwarding, "port forwarding"},
+		{"full-access", "read-only", flagFullAccess, flagReadOnly, "guest commands"},
 	}
-	return nil
+}
+
+// validateGrants checks each guest grant against a denial of the same thing.
+// Both on the command line, the command contradicts itself: an error. With
+// one from the environment or the config file, which origin says, the denial
+// wins and the session starts, with a warning naming where that side came
+// from; but --full-access asks for all of what it grants, so a denial of any
+// of it refuses the run wherever it came from. With neither on the command
+// line the file contradicts itself, which is the error config edit reports
+// for it: only read-only and allow-local-tcp-forwarding are both keys.
+//
+// --full-access is a shell as you, so it also needs an allowlist.
+//
+// allow-local-tcp-forwarding from the environment or the config file lets
+// guests forward anywhere, which a command line asking for loopback forwards
+// alone doesn't narrow; that is a warning too.
+func validateGrants(origin func(name string) string) (errs []error, warnings []string) {
+	if flagFullAccess && !authorizationRequested() {
+		errs = append(errs, errors.New("--full-access needs --authorized-user or --authorized-keys: without one, anyone with the session ID would get a shell as you"))
+	}
+	for _, c := range grantConflicts() {
+		if !c.granted || !c.denied {
+			continue
+		}
+		grantFrom, denialFrom := origin(c.grant), origin(c.denial)
+		grant, denial := grantSide(c.grant, grantFrom), grantSide(c.denial, denialFrom)
+		switch {
+		case grantFrom == "" && (denialFrom == "" || c.grant == "full-access"):
+			errs = append(errs, fmt.Errorf("%s and %s contradict each other; pick one", grant, denial))
+		case grantFrom == "" || denialFrom == "":
+			warnings = append(warnings, fmt.Sprintf("upterm: %s has no effect: %s denies %s", grant, denial, c.what))
+		}
+	}
+	if origin("read-only") != "" && origin("allow-local-tcp-forwarding") != "" {
+		if err := validateReadOnlyForwarding(flagReadOnly, flagAllowLocalTCPForwarding); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	// Nothing to say where forwarding is off anyway, where the command line
+	// asks for forwards anywhere itself, or where it gives
+	// allow-local-tcp-forwarding a value of its own.
+	if from := origin("allow-local-tcp-forwarding"); from != "" && flagAllowLocalTCPForwarding && !flagNoForwarding && !flagReadOnly {
+		widens := grantSide("allow-local-tcp-forwarding", from) + " lets guests forward to any destination"
+		switch {
+		case flagAllowForwarding == forwardLoopback:
+			warnings = append(warnings, "upterm: --allow-forwarding=loopback has no effect: "+widens)
+		case flagFullAccess && flagAllowForwarding == "":
+			warnings = append(warnings, "upterm: --full-access doesn't keep forwarding to loopback addresses: "+widens)
+		}
+	}
+	return errs, warnings
+}
+
+// grantSide is one side of a grant conflict as upterm says it: the flag, or
+// the key or variable with where its value came from.
+func grantSide(name, from string) string {
+	if from == "" {
+		return "--" + name
+	}
+	return name + " (from " + from + ")"
+}
+
+// flagOrigin is where this run's value of the flag name came from: "" for
+// the command line, else the environment variable or the config file that
+// set it, the variable when both did, as it is the one that wins. A flag
+// nothing set reads as the command line's: it holds its default.
+func flagOrigin(name string) string {
+	if commandLineFlags[name] || !suppliedFlags[name] {
+		return ""
+	}
+	if os.Getenv(envVarName(name)) != "" {
+		return envVarName(name)
+	}
+	return utils.UptermConfigFilePath()
 }
 
 // validateServer checks a server address: ssh, ws or wss, and a host for ssh.
@@ -489,17 +644,31 @@ func validateShareRequiredFlags(c *cobra.Command, args []string) error {
 		result = multierror.Append(result, err)
 	}
 
-	if err := validateReadOnlyForwarding(flagReadOnly, flagAllowLocalTCPForwarding); err != nil {
+	grantErrs, warnings := validateGrants(flagOrigin)
+	for _, err := range grantErrs {
 		result = multierror.Append(result, err)
+	}
+	// Only where it was typed, and only as the grant: its key and variable,
+	// and =false, which turns their grant off, have no other spelling.
+	if commandLineFlags["allow-local-tcp-forwarding"] && flagAllowLocalTCPForwarding {
+		warnings = append([]string{"upterm: --allow-local-tcp-forwarding is deprecated; use --allow-forwarding=any"}, warnings...)
+	}
+	// The parent's only: the daemon makes the same checks on the same argv,
+	// env and config, and its stderr is the log.
+	if !isDaemonProcess() {
+		stderr := io.Writer(os.Stderr)
+		if c != nil {
+			stderr = c.ErrOrStderr()
+		}
+		for _, line := range warnings {
+			_, _ = fmt.Fprintln(stderr, line)
+		}
 	}
 
 	if err := validateSessionNameFlag(flagName); err != nil {
 		result = multierror.Append(result, err)
 	}
 
-	if err := validateDetachAccept(flagDetach, flagAccept); err != nil {
-		result = multierror.Append(result, err)
-	}
 	if flagHostOutput != "" && !flagDetach {
 		result = multierror.Append(result, fmt.Errorf("--output requires --detach"))
 	}
@@ -533,12 +702,19 @@ func validateShareRequiredFlags(c *cobra.Command, args []string) error {
 // `upterm host </dev/null` through to claim its name, establish the reverse
 // tunnel and start the prompt before finding there was nothing to read the
 // answer from. With --accept there is no prompt and nothing to check.
-func confirmationTerminalError(accept bool, stdin, stdout *os.File) error {
+//
+// --detach asks too, here, before it goes to the background: going there
+// is no answer to the question. Without a terminal it needs --accept, which
+// grants file transfers as well, and the refusal says so.
+func confirmationTerminalError(accept, detach bool, stdin, stdout *os.File) error {
 	if accept {
 		return nil
 	}
 	if term.IsTerminal(int(stdin.Fd())) && term.IsTerminal(int(stdout.Fd())) {
 		return nil
+	}
+	if detach {
+		return errors.New("--detach needs --accept when there is no terminal to ask in (it also lets guests transfer files without asking)")
 	}
 	return errors.New("upterm host needs a terminal to ask before starting; pass --accept to start without asking")
 }
@@ -686,7 +862,7 @@ func shareRunE(c *cobra.Command, args []string) error {
 
 	// Refuse before anything is claimed or connected: a session that reaches
 	// the prompt and cannot be answered is an orphan holding a name.
-	if err := confirmationTerminalError(flagAccept, os.Stdin, os.Stdout); err != nil {
+	if err := confirmationTerminalError(flagAccept, flagDetach, os.Stdin, os.Stdout); err != nil {
 		_, _ = fmt.Fprintln(os.Stderr, "upterm: "+err.Error())
 		return SilentError{Err: err}
 	}
@@ -735,8 +911,10 @@ func guardedSpawn(so spawnOptions) (net.Conn, *os.Process, error) {
 // child, this process is its operator's terminal.
 func runHostParent(c *cobra.Command, logger *slog.Logger, opts hostOptions) error {
 	display := displaySession
-	if flagDetach && flagHostOutput == "json" {
-		// stdout is the JSON; the banner would be noise in it.
+	if flagDetach && flagHostOutput == "json" && flagAccept {
+		// stdout is the JSON, and nobody is asked: the banner would be noise
+		// in it. Without --accept the banner is what the question is about,
+		// and the JSON follows the answer.
 		display = func(context.Context, *api.GetSessionResponse, string) error { return nil }
 	}
 	var (

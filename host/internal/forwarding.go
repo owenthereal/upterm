@@ -219,7 +219,7 @@ func forwardRefusal(err error) string {
 	}
 	switch {
 	case errors.Is(err, consent.ErrUnavailable):
-		return "upterm: port forwarding denied; nothing on the host can approve it now. The host can attach its terminal or run with --allow-loopback-tcp-forwarding."
+		return "upterm: port forwarding denied; nothing on the host can approve it now. The host can attach its terminal or run with --allow-forwarding=loopback."
 	case errors.Is(err, context.DeadlineExceeded), errors.Is(err, consent.ErrTimeout):
 		return "upterm: port forwarding denied; the request timed out before it was approved."
 	case errors.Is(err, context.Canceled), errors.Is(err, consent.ErrCanceled):

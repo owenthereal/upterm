@@ -44,6 +44,8 @@ A flag's value comes from the first of these that sets it:
 These flags take values only from the command line:
   --output on host, session info, session current, session list and version
   --name and --detach on host
+  --login-command, --allow-exec, --allow-sftp, --allow-forwarding,
+    --full-access, --no-exec and --no-forwarding on host
   --join-timeout on session set
   --wait on join
 Host's --join-timeout still reads env and config.`, configPath),
@@ -507,14 +509,27 @@ func exampleConfig() string {
 # When enabled, clients can view but not interact with the session.
 # read-only: false
 
-# Allow clients to use SSH local TCP forwarding (ssh -L) (default: false)
-# When enabled, clients can reach TCP destinations visible to the host.
+# Let guests forward ports (ssh -L) to anything this machine can reach,
+# without approval (default: false). A run's --allow-forwarding=loopback or
+# --full-access doesn't narrow it; --no-forwarding turns it off. This key
+# still works; the flag of the same name is deprecated in favor of
+# --allow-forwarding=any.
 # Cannot be combined with read-only.
 # allow-local-tcp-forwarding: false
 
-# Auto-accept clients without confirmation (default: false)
-# WARNING: Only use this in trusted environments.
+# Start sessions without asking, and let guests transfer files (scp, sftp)
+# without approval, as --allow-sftp does (default: false)
 # accept: false
+
+# The rest of what guests may do is each run's own choice, so it isn't a key
+# here: a value for one is ignored.
+# --login-command     set on the command line
+# --allow-exec        set on the command line
+# --allow-sftp        set on the command line
+# --allow-forwarding  set on the command line
+# --full-access       set on the command line
+# --no-exec           set on the command line
+# --no-forwarding     set on the command line
 
 # Hide guests' IP addresses from upterm's output (default: hidden in CI only; false shows them there too)
 # hide-client-ip: true

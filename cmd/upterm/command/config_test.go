@@ -409,6 +409,46 @@ func TestTheExampleConfigSaysWhatHideClientIPDoes(t *testing.T) {
 	require.NotContains(t, exampleConfig(), "# hide-client-ip: false")
 }
 
+// The example config's accept entry says what --accept does: it starts a
+// session without asking, and grants file transfers.
+func TestTheExampleConfigSaysWhatAcceptDoes(t *testing.T) {
+	require.Contains(t, exampleConfig(), "# Start sessions without asking, and let guests transfer files (scp, sftp)\n"+
+		"# without approval, as --allow-sftp does (default: false)\n# accept: false\n")
+	require.NotContains(t, exampleConfig(), "Auto-accept")
+}
+
+// The example config's allow-local-tcp-forwarding entry says what the key
+// grants, that a run asking for loopback forwards alone doesn't narrow it,
+// that the key still works, and that the flag of the same name is
+// deprecated.
+func TestTheExampleConfigSaysTheOldForwardingFlagIsDeprecated(t *testing.T) {
+	require.Contains(t, exampleConfig(), "# Let guests forward ports (ssh -L) to anything this machine can reach,\n"+
+		"# without approval (default: false). A run's --allow-forwarding=loopback or\n"+
+		"# --full-access doesn't narrow it; --no-forwarding turns it off. This key\n"+
+		"# still works; the flag of the same name is deprecated in favor of\n"+
+		"# --allow-forwarding=any.\n"+
+		"# Cannot be combined with read-only.\n"+
+		"# allow-local-tcp-forwarding: false\n")
+}
+
+// The guest settings the file can't hold are in the example all the same,
+// each saying where it is set, so whoever looks for one here learns why it
+// isn't a key.
+func TestTheExampleConfigNamesTheGuestSettingsTheCommandLineSets(t *testing.T) {
+	// The rest of host's per-run flags are about the run, not its guests.
+	notGuests := map[string]bool{"name": true, "detach": true, "output": true}
+	var perRun []string
+	hostCmd().PersistentFlags().VisitAll(func(f *pflag.Flag) {
+		if hasAnnotation(f, annotationPerRun) && !notGuests[f.Name] {
+			perRun = append(perRun, f.Name)
+		}
+	})
+	require.NotEmpty(t, perRun)
+	for _, name := range perRun {
+		require.Regexp(t, "(?m)^# --"+name+" +set on the command line$", exampleConfig(), name)
+	}
+}
+
 func TestConfigEditIgnoresMappingsForUnboundKeys(t *testing.T) {
 	for _, mapping := range []string{"{nested: invalid}", "{}"} {
 		t.Run(mapping, func(t *testing.T) {
@@ -445,7 +485,7 @@ func TestConfigEditMappingsDoNotBypassBoundKeyValidation(t *testing.T) {
 }
 
 func TestGuestCommandConfigIsPerRun(t *testing.T) {
-	for _, key := range []string{"login-command", "accept-exec", "no-exec"} {
+	for _, key := range []string{"login-command", "allow-exec", "allow-sftp", "no-exec"} {
 		t.Run(key, func(t *testing.T) {
 			restoreFlags(t)
 			path := writeConfig(t, key+": [invalid]\n")
@@ -455,7 +495,7 @@ func TestGuestCommandConfigIsPerRun(t *testing.T) {
 }
 
 func TestForwardingConfigIsPerRun(t *testing.T) {
-	for _, key := range []string{"allow-loopback-tcp-forwarding", "no-forwarding"} {
+	for _, key := range []string{"allow-forwarding", "no-forwarding"} {
 		t.Run(key, func(t *testing.T) {
 			restoreFlags(t)
 			path := writeConfig(t, key+": [invalid]\n")
