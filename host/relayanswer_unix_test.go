@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"log/slog"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -15,7 +16,7 @@ import (
 	"github.com/owenthereal/upterm/internal/testhelpers/fakerelay"
 	"github.com/owenthereal/upterm/routing"
 	"github.com/owenthereal/upterm/server"
-	"github.com/rs/xid"
+	"github.com/owenthereal/upterm/utils"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/crypto/ssh"
 	"google.golang.org/protobuf/proto"
@@ -110,7 +111,7 @@ func (r answeredRun) parsedRecord(t *testing.T) sessiondir.Record {
 // record.
 func TestRunRefusesARelayAnswerWithCharactersUptermWontPutInACommand(t *testing.T) {
 	const refused = "the relay's answer has an SSH user or session ID upterm won't put in a command; not starting the session"
-	valid := xid.New().String()
+	valid := utils.GenerateSessionID()
 	for _, bad := range unsafeAnswerValues {
 		for _, at := range []struct {
 			name string
@@ -134,14 +135,15 @@ func TestRunRefusesARelayAnswerWithCharactersUptermWontPutInACommand(t *testing.
 	}
 }
 
-// An answer upterm will put in a command is taken. Relays answer with an xid,
-// as the session ID and the user a relay that routes by ID gives; with an
-// embedded relay's ID:base64url(node), its '=' padding included; and, older
-// relays, with an empty user, from which the CLI builds ID:base64url(node).
-// No relay answers with the rest of the punctuation the check allows, which
-// is taken all the same.
+// An answer upterm will put in a command is taken. Relays answer with a
+// session ID of 20 letters and digits, random or derived from the host's key,
+// which a relay that routes by ID gives as the user too; with an embedded
+// relay's ID:base64url(node), its '=' padding included; and, older relays,
+// with an empty user, from which the CLI builds ID:base64url(node). No relay
+// answers with the rest of the punctuation the check allows, which is taken
+// all the same.
 func TestRunTakesAnAnswerUptermWillPutInACommand(t *testing.T) {
-	id := xid.New().String()
+	id := utils.GenerateSessionID()
 	const node = "127.0.0.1:2222"
 	embedded := routing.NewEncodeDecoder(routing.ModeEmbedded).Encode(id, node)
 	require.Contains(t, embedded, "=", "the node's base64url is padded")
@@ -149,7 +151,7 @@ func TestRunTakesAnAnswerUptermWillPutInACommand(t *testing.T) {
 		name string
 		resp *server.CreateSessionResponse
 	}{
-		{"an xid", &server.CreateSessionResponse{SessionID: id, NodeAddr: node, SshUser: id}},
+		{"a random session ID, as the user too", &server.CreateSessionResponse{SessionID: id, NodeAddr: node, SshUser: id}},
 		{"an embedded relay's ID:base64url(node)", &server.CreateSessionResponse{SessionID: id, NodeAddr: node, SshUser: embedded}},
 		{"the rest of the allowed punctuation", &server.CreateSessionResponse{SessionID: "a1.b_c+d-e", NodeAddr: node, SshUser: "a1.b_c+d-e"}},
 		{"an empty SSH user with a valid ID", &server.CreateSessionResponse{SessionID: id, NodeAddr: node}},
@@ -169,18 +171,36 @@ func TestRunTakesAnAnswerUptermWillPutInACommand(t *testing.T) {
 // choosing, and Run's error carries them to the host's terminal. They arrive
 // as plain text: an escape sequence in them, such as an OSC 52 write to the
 // clipboard, would be the terminal's to act on, and the host's next paste
-// would run what the relay chose.
+// would run what the relay chose. And they arrive cut to 255 bytes, the
+// ellipsis that says so among them, since a relay can send far more.
 func TestRunShowsARelaysRefusalAsPlainText(t *testing.T) {
-	run := runAgainst(t, func(*server.CreateSessionRequest) (bool, []byte) {
-		return false, []byte("the relay says no\x1b]52;c;ZWNobyBoaQ==\x07\nand more")
+	t.Run("an escape sequence and a newline", func(t *testing.T) {
+		run := runAgainst(t, func(*server.CreateSessionRequest) (bool, []byte) {
+			return false, []byte("the relay says no\x1b]52;c;ZWNobyBoaQ==\x07\nand more")
+		})
+		require.Error(t, run.err)
+		require.Nil(t, run.created, "the session was reported")
+		text := run.err.Error()
+		for _, c := range []struct{ name, char string }{{"an ESC", "\x1b"}, {"a BEL", "\x07"}, {"a newline", "\n"}} {
+			require.NotContains(t, text, c.char, "the error carries %s from the relay", c.name)
+		}
+		for _, visible := range []string{"could not initialize session: the relay says no", "]52;c;ZWNobyBoaQ==", "and more"} {
+			require.Contains(t, text, visible, "the error lost the relay's visible text")
+		}
 	})
-	require.Error(t, run.err)
-	require.Nil(t, run.created, "the session was reported")
-	text := run.err.Error()
-	for _, c := range []struct{ name, char string }{{"an ESC", "\x1b"}, {"a BEL", "\x07"}, {"a newline", "\n"}} {
-		require.NotContains(t, text, c.char, "the error carries %s from the relay", c.name)
-	}
-	for _, visible := range []string{"could not initialize session: the relay says no", "]52;c;ZWNobyBoaQ==", "and more"} {
-		require.Contains(t, text, visible, "the error lost the relay's visible text")
-	}
+
+	t.Run("more than 255 bytes", func(t *testing.T) {
+		const bound = 255
+		body := strings.Repeat("the relay won't take this session. ", 10)
+		require.Greater(t, len(body), bound)
+		run := runAgainst(t, func(*server.CreateSessionRequest) (bool, []byte) {
+			return false, []byte(body)
+		})
+		require.Error(t, run.err)
+		require.Nil(t, run.created, "the session was reported")
+		_, shown, ok := strings.Cut(run.err.Error(), "could not initialize session: ")
+		require.True(t, ok, "the error doesn't give the relay's refusal: %v", run.err)
+		require.Len(t, shown, bound, "the relay's part of the error isn't cut to %d bytes", bound)
+		require.Equal(t, body[:bound-len("…")]+"…", shown)
+	})
 }
