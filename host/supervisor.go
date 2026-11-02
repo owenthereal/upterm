@@ -220,8 +220,8 @@ func (s *supervisor) reconnect(ctx context.Context, sched *schedule, deadline ti
 			// the relay chose it.
 			t.Close()
 			t = nil
-			err = notCommandSafeError("the relay re-registered the session with characters upterm won't put in a command (in its SSH user or session ID)")
-			s.logger.Error("the relay answered a reconnect with characters upterm won't put in a command", "generation", generation, "error", err)
+			err = notCommandSafeError("the relay re-registered the session with an SSH user or session ID upterm won't put in a command")
+			s.logger.Error("the relay answered a reconnect with an SSH user or session ID upterm won't put in a command", "generation", generation, "error", err)
 		}
 		if err == nil && resp.SessionID != s.sessionID {
 			// No guest knows this ID: the relay can't find the session

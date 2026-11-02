@@ -102,7 +102,7 @@ func (r answeredRun) parsedRecord(t *testing.T) sessiondir.Record {
 // never repeats the value. Each value is marked "evil", so that a repetition
 // shows in any escaping.
 func TestRunRefusesARelayAnswerWithCharactersUptermWontPutInACommand(t *testing.T) {
-	const refused = "the relay's answer has characters upterm won't put in a command (in its SSH user or session ID); not starting the session"
+	const refused = "the relay's answer has an SSH user or session ID upterm won't put in a command; not starting the session"
 	valid := xid.New().String()
 	for _, bad := range []struct{ name, value string }{
 		{"a newline", "evil\nid"},

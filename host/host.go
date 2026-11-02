@@ -853,7 +853,7 @@ func (c *Host) Run(ctx context.Context) (runErr error) {
 	// Before any of the answer is logged, routed, stored or reported. The
 	// error never repeats what the relay sent: the relay chose it.
 	if !commandSafe(sessResp) {
-		err := errors.New("the relay's answer has characters upterm won't put in a command (in its SSH user or session ID); not starting the session")
+		err := errors.New("the relay's answer has an SSH user or session ID upterm won't put in a command; not starting the session")
 		logger.Error("Refused the relay's answer", "error", err)
 		return err
 	}

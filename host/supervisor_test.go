@@ -1039,7 +1039,7 @@ func (h attemptLogHandler) WithGroup(name string) slog.Handler {
 // the value is repeated nowhere, the session-ID check's error included: the
 // relay chose it.
 func TestSupervisorRefusesARegistrationWithCharactersUptermWontPutInACommand(t *testing.T) {
-	const refused = "the relay re-registered the session with characters upterm won't put in a command (in its SSH user or session ID)"
+	const refused = "the relay re-registered the session with an SSH user or session ID upterm won't put in a command"
 	for _, tc := range []struct {
 		name               string
 		sessionID, sshUser string
