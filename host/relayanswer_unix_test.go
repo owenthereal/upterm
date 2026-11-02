@@ -115,6 +115,7 @@ func TestRunRefusesARelayAnswerWithCharactersUptermWontPutInACommand(t *testing.
 		{"a leading dash", "-oProxyCommand=evil"},
 		{"a percent sign", "evil%id"},
 		{"a non-ASCII letter", "evilé"},
+		{"a tilde a shell expands", "x=~:evil"},
 	} {
 		for _, at := range []struct {
 			name string
@@ -154,7 +155,7 @@ func TestRunTakesTheAnswersRealRelaysGive(t *testing.T) {
 	}{
 		{"an xid", &server.CreateSessionResponse{SessionID: id, NodeAddr: node, SshUser: id}},
 		{"an embedded relay's ID:base64url(node)", &server.CreateSessionResponse{SessionID: id, NodeAddr: node, SshUser: embedded}},
-		{"the rest of the allowed punctuation", &server.CreateSessionResponse{SessionID: "a1.b_c~d+e-f", NodeAddr: node, SshUser: "a1.b_c~d+e-f"}},
+		{"the rest of the allowed punctuation", &server.CreateSessionResponse{SessionID: "a1.b_c+d-e", NodeAddr: node, SshUser: "a1.b_c+d-e"}},
 		{"an empty SSH user with a valid ID", &server.CreateSessionResponse{SessionID: id, NodeAddr: node}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

@@ -454,11 +454,14 @@ func closed(ch <-chan struct{}) bool {
 // commandSafeRe is what the relay's session ID, and its SSH user when it
 // sends one, must be for upterm to put them in a command: a letter or digit
 // first, so that ssh, scp and sftp can't read the word as an option, then
-// letters, digits and "._~+=:-" and nothing else, so no whitespace, quote
-// mark, '$', '`', ';', '%' or anything outside ASCII. What real relays answer
-// fits: their session IDs, and an embedded relay's ID:base64url(node) with its
-// '=' padding.
-var commandSafeRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._~+=:-]*$`)
+// letters, digits and "._+=:-" and nothing else. So no whitespace, quote
+// mark, '$', '`', ';', '%' or anything outside ASCII, and no '~': in an
+// unquoted argument such as x=~:y@host, as the ssh, scp and sftp lines would
+// write that user, bash, and zsh with MAGIC_EQUAL_SUBST, expand it to a home
+// directory after the '=' and after the ':'. What real relays answer fits:
+// their session IDs, and an embedded relay's ID:base64url(node) with its '='
+// padding.
+var commandSafeRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._+=:-]*$`)
 
 // commandSafe reports whether upterm will put the relay's answer into the
 // commands people paste into a shell: the banner's ssh, scp, sftp and upterm
