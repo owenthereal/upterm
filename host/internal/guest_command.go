@@ -81,7 +81,7 @@ func (h *sessionHandler) checkExecPermission(ctx context.Context, arrived time.T
 		return nil
 	}
 	if h.permissionChecker == nil {
-		return fmt.Errorf("%w: exec needs approval in the primary host terminal or --accept-exec", consent.ErrUnavailable)
+		return fmt.Errorf("%w: exec needs approval in the primary host terminal or --allow-exec", consent.ErrUnavailable)
 	}
 	permissionCtx, cancel := context.WithDeadline(ctx, arrived.Add(consent.PermissionTimeout))
 	defer cancel()
@@ -155,7 +155,7 @@ func execDenialNotice(err error) string {
 	case errors.Is(err, errGuestExecDisabled):
 		return "upterm: guest exec is disabled for this session.\r\n"
 	case errors.Is(err, consent.ErrUnavailable):
-		return "upterm: guest exec denied; nothing on the host can approve it now. The host can attach its terminal or run with --accept-exec.\r\n"
+		return "upterm: guest exec denied; nothing on the host can approve it now. The host can attach its terminal or run with --allow-exec.\r\n"
 	case errors.Is(err, context.DeadlineExceeded), errors.Is(err, consent.ErrTimeout):
 		return "upterm: guest exec denied; the request timed out before it was approved.\r\n"
 	case errors.Is(err, context.Canceled), errors.Is(err, consent.ErrCanceled):

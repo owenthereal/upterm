@@ -765,7 +765,7 @@ func forwardingAuditRecords(t *testing.T, data string) []map[string]any {
 // What a refused guest is told: the session's own rule, or why approval
 // didn't happen in its terms, never the internal error behind it.
 const (
-	forwardUnavailableRefusal = "upterm: port forwarding denied; nothing on the host can approve it now. The host can attach its terminal or run with --allow-loopback-tcp-forwarding."
+	forwardUnavailableRefusal = "upterm: port forwarding denied; nothing on the host can approve it now. The host can attach its terminal or run with --allow-forwarding=loopback."
 	forwardDeniedRefusal      = "upterm: the host denied this port forward."
 	forwardTimeoutRefusal     = "upterm: port forwarding denied; the request timed out before it was approved."
 	forwardCanceledRefusal    = "upterm: port forwarding request canceled."
