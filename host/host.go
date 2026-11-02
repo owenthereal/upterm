@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -450,6 +451,26 @@ func closed(ch <-chan struct{}) bool {
 	}
 }
 
+// commandSafeRe is what the relay's session ID, and its SSH user when it
+// sends one, must be for upterm to put them in a command: a letter or digit
+// first, so that ssh, scp and sftp can't read the word as an option, then
+// letters, digits and "._~+=:-" and nothing else, so no whitespace, quote
+// mark, '$', '`', ';', '%' or anything outside ASCII. What real relays answer
+// fits: their session IDs, and an embedded relay's ID:base64url(node) with its
+// '=' padding.
+var commandSafeRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._~+=:-]*$`)
+
+// commandSafe reports whether upterm will put the relay's answer into the
+// commands people paste into a shell: the banner's ssh, scp, sftp and upterm
+// join lines, and the JSON that carries the ssh and join lines. They are
+// built from the session ID and the SSH user, and the relay chooses both. An
+// empty user is how an older relay answers; the CLI then builds
+// ID:base64url(node), which stays inside the same characters.
+func commandSafe(resp *server.CreateSessionResponse) bool {
+	return commandSafeRe.MatchString(resp.SessionID) &&
+		(resp.SshUser == "" || commandSafeRe.MatchString(resp.SshUser))
+}
+
 // guestJoinLatch publishes the first guest join into the record. A
 // successful publication is attempted once; a failed publication is retried
 // on a later guest, carrying the first join's time, which disarm returns.
@@ -824,6 +845,13 @@ func (c *Host) Run(ctx context.Context) (runErr error) {
 		// Log the error before returning to ensure it's captured in logs
 		// This is especially important when running in detached/background mode
 		logger.Error("Failed to establish reverse tunnel", "error", err)
+		return err
+	}
+	// Before any of the answer is logged, routed, stored or reported. The
+	// error never repeats what the relay sent: the relay chose it.
+	if !commandSafe(sessResp) {
+		err := errors.New("the relay's answer has characters upterm won't put in a command (in its SSH user or session ID); not starting the session")
+		logger.Error("Refused the relay's answer", "error", err)
 		return err
 	}
 	state.setReconnect(rt.ReconnectSupported())
