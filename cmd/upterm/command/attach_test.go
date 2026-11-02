@@ -63,7 +63,7 @@ func TestAttachTargetSaysWhetherTheSessionIsADoor(t *testing.T) {
 		{"login-command", shell, []string{"herdr"}, nil, true},
 		{"forced-command", shell, nil, []string{"herdr"}, true},
 		{"no-guest-command", shell, nil, nil, false},
-		{"a-hosted-command-of-its-own", []string{"htop"}, []string{"herdr"}, nil, false},
+		{"own-command", []string{"htop"}, []string{"herdr"}, nil, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			d := claimSession(t, tc.name)
