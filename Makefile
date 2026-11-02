@@ -79,9 +79,11 @@ TEST_FLAGS = -timeout=600s $(TEST_COVER) -count=1 -race $(TEST_FORMAT) $(GO_TEST
 # first, and the rest follow in go list order.
 TEST_SLOW_PKGS = ./host/internal/replay ./host/internal ./server ./host
 # Deferred, and used only in recipes, so go list runs only when a test target
-# does (make -n included) and other targets never run it. An empty list would
-# make go test run on the root package alone and pass, so it is an error.
-TEST_PKGS = $(or $(shell { go list $(TEST_SLOW_PKGS); go list ./... | grep -v /e2e; } | awk '!seen[$$0]++'),$(error no packages to test: go list, grep or awk failed or printed nothing))
+# does (make -n included) and other targets never run it. Each step's exit
+# status is checked, and a failure or an empty list is an error: either would
+# otherwise let go test pass on a partial list or the root package alone.
+TEST_PKGS = $(call check_test_pkgs,$(shell s=$$(go list $(TEST_SLOW_PKGS)) && a=$$(go list ./...) && f=$$(printf '%s\n' "$$s" "$$a" | grep -v /e2e) && p=$$(printf '%s\n' "$$f" | awk '!seen[$$0]++') && [ -n "$$p" ] && printf '%s\n' "$$p" || echo test-pkgs-failed))
+check_test_pkgs = $(if $(filter test-pkgs-failed,$(1)),$(error no packages to test: go list, grep or awk failed or printed nothing),$(or $(1),$(error no packages to test: the package listing printed nothing)))
 TEST_OTHER_PKGS = $(filter-out github.com/owenthereal/upterm/ftests,$(TEST_PKGS))
 
 # The ftests tests that test-ftests-split runs and test-ftests-rest skips.
