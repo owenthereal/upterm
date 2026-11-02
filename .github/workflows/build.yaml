@@ -7,6 +7,9 @@ on:
 permissions:
   contents: write
   packages: write
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 env:
   # Renders go test -json output for the job log: each output line prefixed
   # with its package (or, for build output, its import path), and every line
