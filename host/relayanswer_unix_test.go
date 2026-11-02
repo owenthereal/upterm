@@ -38,6 +38,19 @@ type answeredRun struct {
 // not the answer was taken.
 func runAnswered(t *testing.T, resp *server.CreateSessionResponse) answeredRun {
 	t.Helper()
+	return runAgainst(t, func(*server.CreateSessionRequest) (bool, []byte) {
+		b, err := proto.Marshal(resp)
+		if err != nil {
+			return false, []byte(err.Error())
+		}
+		return true, b
+	})
+}
+
+// runAgainst runs a Host against a relay that replies to its registration as
+// answer does, and declines any session Run reports.
+func runAgainst(t *testing.T, answer func(*server.CreateSessionRequest) (ok bool, body []byte)) answeredRun {
+	t.Helper()
 	// Short, for the unix sockets a claimed name's directory holds.
 	root, err := os.MkdirTemp("/tmp", "up-answer-")
 	require.NoError(t, err)
@@ -47,13 +60,7 @@ func runAnswered(t *testing.T, resp *server.CreateSessionResponse) answeredRun {
 
 	relayKey, err := NewHostKey()
 	require.NoError(t, err)
-	relay := fakerelay.Start(t, relayKey, func(*server.CreateSessionRequest) (bool, []byte) {
-		b, err := proto.Marshal(resp)
-		if err != nil {
-			return false, []byte(err.Error())
-		}
-		return true, b
-	})
+	relay := fakerelay.Start(t, relayKey, answer)
 	identity, err := NewHostKey()
 	require.NoError(t, err)
 
@@ -155,5 +162,25 @@ func TestRunTakesAnAnswerUptermWillPutInACommand(t *testing.T) {
 			require.Equal(t, tc.resp.SshUser, run.created.GetSshUser())
 			require.Equal(t, tc.resp.SessionID, run.parsedRecord(t).SessionID)
 		})
+	}
+}
+
+// A relay that refuses the registration says why in words of its own
+// choosing, and Run's error carries them to the host's terminal. They arrive
+// as plain text: an escape sequence in them, such as an OSC 52 write to the
+// clipboard, would be the terminal's to act on, and the host's next paste
+// would run what the relay chose.
+func TestRunShowsARelaysRefusalAsPlainText(t *testing.T) {
+	run := runAgainst(t, func(*server.CreateSessionRequest) (bool, []byte) {
+		return false, []byte("the relay says no\x1b]52;c;ZWNobyBoaQ==\x07\nand more")
+	})
+	require.Error(t, run.err)
+	require.Nil(t, run.created, "the session was reported")
+	text := run.err.Error()
+	for _, c := range []struct{ name, char string }{{"an ESC", "\x1b"}, {"a BEL", "\x07"}, {"a newline", "\n"}} {
+		require.NotContains(t, text, c.char, "the error carries %s from the relay", c.name)
+	}
+	for _, visible := range []string{"could not initialize session: the relay says no", "]52;c;ZWNobyBoaQ==", "and more"} {
+		require.Contains(t, text, visible, "the error lost the relay's visible text")
 	}
 }
