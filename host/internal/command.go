@@ -149,6 +149,12 @@ type command struct {
 	// Set by the caller after construction, not a newCommand parameter.
 	pacer *guestPacer
 
+	// output is what the output copy writes through, recording when it last
+	// wrote. A field rather than Run's own, so that it is there before Run
+	// is: the host door reads it too, for when the command last said
+	// anything (see sessionHandler.output).
+	output activityWriter
+
 	eventEmitter *emitter.Emitter
 	logger       *slog.Logger
 
@@ -297,7 +303,8 @@ func (c *command) Run() error {
 		// primary, the pacer holding each write until the earliest guest has
 		// caught up.
 		ctx, cancel := context.WithCancel(c.ctx)
-		output := &activityWriter{Writer: c.copyTarget()}
+		c.output.Writer = c.copyTarget()
+		output := &c.output
 		done := make(chan struct{})
 		g.Add(func() error {
 			// Runs last, by LIFO. The copy has returned, so the producer has

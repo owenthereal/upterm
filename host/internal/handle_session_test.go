@@ -5,6 +5,7 @@ import (
 	"context"
 	"io"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"testing/synctest"
@@ -13,8 +14,10 @@ import (
 	gssh "charm.land/ssh"
 	"github.com/olebedev/emitter"
 	uio "github.com/owenthereal/upterm/io"
+	"github.com/owenthereal/upterm/upterm"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.uber.org/goleak"
 )
 
 // A read-only guest that is not draining must not block its own handler. The
@@ -607,4 +610,266 @@ func TestTheDoorForgetsEachAdmissionOnceItsHandlerHasTakenIt(t *testing.T) {
 	h.sharedGuests.mu.Unlock()
 	assert.Zero(t, kept, "the door holds admissions its handlers have taken")
 	assert.True(t, h.sharedGuests.wait(0), "a handler that ended is still registered")
+}
+
+// hostDoorNotice is the line the host door's client in the tests below asks to
+// be shown, as upterm attach asks on a door.
+const hostDoorNotice = "upterm: this is home's door; 'exit' closes it"
+
+// noticeClient is a client of the host door that asks to be shown
+// hostDoorNotice, as HandleSession sees one when driven directly: what
+// fakeGuestSession stands in for, and what the host door asks of a client
+// besides -- its key, its environment, its signals. What it is shown is
+// recorded, and a test ends its connection, its input and its session.
+type noticeClient struct {
+	gssh.Session
+
+	ctx   noticeContext
+	key   gssh.PublicKey
+	winCh chan gssh.Window
+	shown recordingWriter
+
+	input     chan struct{}
+	inputOnce sync.Once
+
+	// leave ends the client's connection, and end the session it is a
+	// client of. done closes once its handler has returned.
+	leave, end context.CancelFunc
+	done       chan struct{}
+}
+
+// Read waits for the client's input to end. Until then the handler's input
+// actor, which is what ends its group as a client goes, stays up.
+func (c *noticeClient) Read([]byte) (int, error) { <-c.input; return 0, io.EOF }
+
+func (c *noticeClient) Write(p []byte) (int, error) { return c.shown.Write(p) }
+func (c *noticeClient) Signals(chan<- gssh.Signal)  {}
+func (c *noticeClient) Close() error                { return nil }
+func (c *noticeClient) Exit(int) error              { return nil }
+func (c *noticeClient) Context() gssh.Context       { return c.ctx }
+func (c *noticeClient) PublicKey() gssh.PublicKey   { return c.key }
+func (c *noticeClient) Environ() []string {
+	return []string{upterm.AttachInteractiveEnvVar + "=1", upterm.AttachNoticeEnvVar + "=" + hostDoorNotice}
+}
+func (c *noticeClient) Pty() (gssh.Pty, <-chan gssh.Window, bool) {
+	return gssh.Pty{Term: "xterm", Window: gssh.Window{Width: 80, Height: 24}}, c.winCh, true
+}
+func (c *noticeClient) SendRequest(string, bool, []byte) (bool, error) { return true, nil }
+
+func (c *noticeClient) closeInput() { c.inputOnce.Do(func() { close(c.input) }) }
+
+// notices is how many times the client has been shown the notice.
+func (c *noticeClient) notices() int {
+	return strings.Count(string(c.shown.bytes()), hostDoorNotice)
+}
+
+// noticeContext is a client's connection as its session's context: the
+// session ID HandleSession asks for, and otherwise conn, which ends as the
+// connection does.
+type noticeContext struct {
+	gssh.Context
+	conn      context.Context
+	sessionID string
+}
+
+func (c noticeContext) Done() <-chan struct{} { return c.conn.Done() }
+func (c noticeContext) Err() error            { return c.conn.Err() }
+func (c noticeContext) ClientVersion() string { return "test" }
+func (c noticeContext) Value(key any) any {
+	if key == gssh.ContextKeySessionID {
+		return c.sessionID
+	}
+	return c.conn.Value(key)
+}
+
+// answeringPTY is a command's pty whose command answers the door's redraw
+// nudge by calling answer, as a full-screen program repaints on SIGWINCH.
+type answeringPTY struct {
+	*exitedPTY
+	answer func()
+}
+
+func (p *answeringPTY) Redraw() error {
+	p.answer()
+	return p.exitedPTY.Redraw()
+}
+
+// serveNoticeClient starts a host-door handler with timing for a
+// noticeClient, which the handler elects primary, so that what it is sent
+// reaches it as it is written. The command answers the attach's redraw nudge
+// by calling answer with what its output reaches the fan-out through; a nil
+// answer is a command that doesn't repaint.
+func serveNoticeClient(t *testing.T, timing serverTiming, answer func(command io.Writer)) *noticeClient {
+	t.Helper()
+	writers := uio.NewMultiWriter(uio.DefaultReplayBytes)
+	// The shared command's output copy, as its Run writes through it: what
+	// the handler hears the command say.
+	output := &activityWriter{Writer: writers}
+	conn, leave := context.WithCancel(context.Background())
+	session, end := context.WithCancel(context.Background())
+	c := &noticeClient{
+		ctx:   noticeContext{conn: conn, sessionID: t.Name()},
+		key:   testSigners(t)[0].PublicKey(),
+		winCh: make(chan gssh.Window),
+		input: make(chan struct{}),
+		leave: leave,
+		end:   end,
+		done:  make(chan struct{}),
+	}
+	h := &sessionHandler{
+		kind: kindHost,
+		ptmx: &answeringPTY{exitedPTY: &exitedPTY{}, answer: func() {
+			if answer != nil {
+				answer(output)
+			}
+		}},
+		writers:           writers,
+		output:            output,
+		eventEmmiter:      emitter.New(1),
+		terminals:         newTerminalWindows(discardLogger()),
+		hostClients:       &hostClients{logger: discardLogger()},
+		keepAliveDuration: time.Hour,
+		ctx:               session,
+		logger:            discardLogger(),
+		timing:            timing,
+	}
+	go func() { defer close(c.done); h.HandleSession(c) }()
+	t.Cleanup(func() {
+		c.closeInput()
+		leave()
+		end()
+		select {
+		case <-c.done:
+		case <-time.After(10 * time.Second):
+			t.Error("the client's handler did not return")
+		}
+	})
+	return c
+}
+
+// A command that answers the nudge in more than one write has repainted once
+// its writes stop: the notice waits until noticeQuiet has passed since the
+// last of them, and comes after it.
+func TestHostDoorShowsTheNoticeOnceTheRepaintHasStopped(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		const quiet = 150 * time.Millisecond
+		// Each within quiet of the one before, as a program drawing its screen
+		// in pieces writes them.
+		pieces := []string{"\x1b[H\x1b[2J", "FIRST", "LAST"}
+		const gap = quiet / 2
+		c := serveNoticeClient(t, serverTiming{noticeQuiet: quiet, noticeCap: time.Hour}, func(command io.Writer) {
+			go func() {
+				for _, p := range pieces {
+					time.Sleep(gap)
+					_, _ = io.WriteString(command, p)
+				}
+			}()
+		})
+		last := time.Duration(len(pieces)) * gap
+		time.Sleep(last + quiet - time.Nanosecond)
+		synctest.Wait()
+		require.Zero(t, c.notices(), "the notice before the repaint had been quiet for %s", quiet)
+		time.Sleep(quiet)
+		synctest.Wait()
+		got := string(c.shown.bytes())
+		require.Equal(t, 1, c.notices(), "shown %q", got)
+		require.Less(t, strings.Index(got, "LAST"), strings.Index(got, hostDoorNotice), "the notice ahead of the repaint's last write")
+	})
+}
+
+// A command that doesn't answer the nudge, as bash at its prompt doesn't, has
+// the notice written once noticeCap has passed since the nudge, and only then.
+func TestHostDoorShowsTheNoticeAtItsCapWhenNothingRepaints(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		const limit = 300 * time.Millisecond
+		c := serveNoticeClient(t, serverTiming{noticeCap: limit}, nil)
+		time.Sleep(limit - time.Nanosecond)
+		synctest.Wait()
+		require.Zero(t, c.notices(), "the notice before its cap")
+		time.Sleep(time.Nanosecond)
+		synctest.Wait()
+		require.Equal(t, 1, c.notices(), "the notice at its cap")
+		// And never again, however long the client stays, nor as it goes.
+		time.Sleep(time.Hour)
+		c.closeInput()
+		synctest.Wait()
+		select {
+		case <-c.done:
+		default:
+			t.Fatal("the client's handler did not return once its input ended")
+		}
+		require.Equal(t, 1, c.notices(), "the notice more than once")
+	})
+}
+
+// A client that has gone by the time its notice is due is written nothing,
+// whichever way it goes, and its going waits for none of the notice's timers,
+// nor does the session's end.
+func TestHostDoorShowsNoNoticeToAClientThatHasGone(t *testing.T) {
+	// Its connection ends first. Its handler goes on until its input ends,
+	// which a write parked in the pty can hold off for a long time, and the
+	// notice falls due meanwhile.
+	t.Run("connection", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			const limit = 300 * time.Millisecond
+			c := serveNoticeClient(t, serverTiming{noticeCap: limit}, nil)
+			time.Sleep(limit / 2)
+			c.leave()
+			time.Sleep(limit)
+			synctest.Wait()
+			select {
+			case <-c.done:
+				t.Fatal("the handler returned before the client's input ended, so the notice never fell due while it ran")
+			default:
+			}
+			require.Zero(t, c.notices(), "a notice for a client whose connection had ended")
+			c.closeInput()
+			synctest.Wait()
+			select {
+			case <-c.done:
+			default:
+				t.Fatal("the client's handler did not return once its input ended")
+			}
+			require.Zero(t, c.notices(), "a notice for a client that had gone")
+		})
+	})
+	// The session ends first. The client's handler returns at once, not when
+	// its notice would have been due.
+	t.Run("session", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			c := serveNoticeClient(t, serverTiming{noticeCap: time.Hour}, nil)
+			synctest.Wait()
+			c.end()
+			synctest.Wait()
+			select {
+			case <-c.done:
+			default:
+				t.Fatal("the session's end waited for the client's notice")
+			}
+			require.Zero(t, c.notices(), "a notice for a client of a session that had ended")
+		})
+	})
+	// Its input ends first, and so does its handler, leaving nothing behind
+	// that would write the notice later or wait for it. On the real clock, so
+	// that whatever is left waiting is still there to be found.
+	t.Run("input", func(t *testing.T) {
+		running := goleak.IgnoreCurrent()
+		nudged := make(chan struct{})
+		c := serveNoticeClient(t, serverTiming{noticeCap: time.Hour}, func(io.Writer) { close(nudged) })
+		select {
+		case <-nudged:
+		case <-time.After(10 * time.Second):
+			t.Fatal("the client was never attached")
+		}
+		c.closeInput()
+		select {
+		case <-c.done:
+		case <-time.After(10 * time.Second):
+			t.Fatal("the client's handler did not return once its input ended")
+		}
+		// Its connection is still open, as one can be once a session on it
+		// has ended, so nothing waiting on the connection has been let go.
+		goleak.VerifyNone(t, running)
+		require.Zero(t, c.notices(), "a notice for a client whose input had ended")
+	})
 }

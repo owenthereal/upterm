@@ -8,6 +8,7 @@ type serverTiming struct {
 	pacingStall, primaryStall, promoteFlush time.Duration
 	outputIdle, outputDrain                 time.Duration
 	hangup, forceCommandStop                time.Duration
+	noticeQuiet, noticeCap                  time.Duration
 }
 
 func (v serverTiming) orDefault() serverTiming {
@@ -31,6 +32,12 @@ func (v serverTiming) orDefault() serverTiming {
 	}
 	if v.forceCommandStop <= 0 {
 		v.forceCommandStop = forceCommandStopGrace
+	}
+	if v.noticeQuiet <= 0 {
+		v.noticeQuiet = attachNoticeQuiet
+	}
+	if v.noticeCap <= 0 {
+		v.noticeCap = attachNoticeCap
 	}
 	return v
 }

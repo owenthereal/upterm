@@ -19,6 +19,7 @@ func TestServerTimingDefaults(t *testing.T) {
 		pacingStall: 5 * time.Second, primaryStall: 5 * time.Second,
 		promoteFlush: time.Second, outputIdle: 100 * time.Millisecond,
 		outputDrain: time.Second, hangup: time.Second, forceCommandStop: time.Second,
+		noticeQuiet: 150 * time.Millisecond, noticeCap: time.Second,
 	}
 	require.Equal(t, want, (serverTiming{}).orDefault())
 	for _, tc := range []struct {
@@ -32,6 +33,8 @@ func TestServerTimingDefaults(t *testing.T) {
 		{"outputDrain", func(v *serverTiming, d time.Duration) { v.outputDrain = d }},
 		{"hangup", func(v *serverTiming, d time.Duration) { v.hangup = d }},
 		{"forceCommandStop", func(v *serverTiming, d time.Duration) { v.forceCommandStop = d }},
+		{"noticeQuiet", func(v *serverTiming, d time.Duration) { v.noticeQuiet = d }},
+		{"noticeCap", func(v *serverTiming, d time.Duration) { v.noticeCap = d }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			negative := want

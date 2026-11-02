@@ -362,6 +362,7 @@ func (s *Server) ServeWithContext(ctx context.Context, guest, host net.Listener)
 		eventEmmiter:      s.EventEmitter,
 		terminals:         newTerminalWindows(s.Logger),
 		writers:           writers,
+		output:            &cmd.output,
 		pacer:             pacer,
 		keepAliveDuration: s.KeepAliveDuration,
 		ctx:               sessCtx,
@@ -1025,6 +1026,12 @@ type sessionHandler struct {
 	// do.
 	terminals *terminalWindows
 	writers   *uio.MultiWriter
+	// output is the shared command's output copy, whose last write is the
+	// last thing the command said: what a notice a client of the host door
+	// asked for waits on, to be written after the repaint that client's
+	// attach asks for rather than under it (see showNotice). Nil in a test's
+	// handler, whose command never says anything.
+	output *activityWriter
 	// pacer is what a guest's sink registers with as it attaches, so that
 	// with no primary the earliest guest paces the command. Host clients and
 	// viewers never register. Nil attaches guests straight to writers.
@@ -1441,14 +1448,11 @@ func (h *sessionHandler) HandleSession(sess gssh.Session) {
 			guestOutput = sink
 		}
 
-		// The line a client of the host door asked to be shown, as upterm
-		// attach asks on a door: behind the replay its sink was handed,
-		// which would scroll away a line it wrote before attaching.
-		if h.kind == kindHost {
-			if notice := attachNotice(sess); notice != "" {
-				_, _ = io.WriteString(guestOutput, "\r\n"+notice+"\r\n")
-			}
-		}
+		// What the command has said so far, taken before the gate below can
+		// start it and the nudge after that can make it repaint: a notice
+		// this client asked for waits out what it says next (see
+		// showNotice).
+		spoke := h.lastOutput()
 
 		// Attached, in the sense the gate is defined by: the subscription is
 		// installed, so nothing the command writes from here on can be missed.
@@ -1468,6 +1472,16 @@ func (h *sessionHandler) HandleSession(sess gssh.Session) {
 		if ptmx != nil {
 			if err := ptmx.Redraw(); err != nil {
 				h.logger.Debug("redraw nudge skipped", "session-id", sessionID, "error", err)
+			}
+		}
+
+		// The line a client of the host door asked to be shown, as upterm
+		// attach asks on a door: behind the replay its sink was handed, which
+		// would scroll away a line it wrote before attaching, and behind the
+		// repaint the nudge above asks for, which would draw over it.
+		if h.kind == kindHost {
+			if notice := attachNotice(sess); notice != "" {
+				h.showNotice(&g, sess, guestOutput, notice, spoke)
 			}
 		}
 	}
@@ -1789,6 +1803,19 @@ func isInteractive(sess gssh.Session) bool {
 	return slices.Contains(sess.Environ(), upterm.AttachInteractiveEnvVar+"=1")
 }
 
+const (
+	// attachNoticeQuiet is how long the command has to have said nothing,
+	// once it has answered the redraw nudge an attach sends, before the
+	// attach's notice is written: long enough for a repaint drawn in pieces
+	// to be over, and short enough not to keep anyone waiting.
+	attachNoticeQuiet = 150 * time.Millisecond
+	// attachNoticeCap is how long after the nudge the notice is written
+	// however the command answers: a command that doesn't repaint on one, as
+	// bash at its prompt doesn't, says nothing to wait out, and one that never
+	// stops talking never goes quiet.
+	attachNoticeCap = time.Second
+)
+
 // attachNotice is the line a client asked by upterm.AttachNoticeEnvVar to be
 // shown once attached, bounded and as text alone, or "" for none.
 func attachNotice(sess gssh.Session) string {
@@ -1798,6 +1825,75 @@ func attachNotice(sess gssh.Session) string {
 		}
 	}
 	return ""
+}
+
+// showNotice has g write the notice a client of the host door asked for to
+// out, that client's own sink, once the repaint its attach asked the command
+// for is over: written ahead of it, the notice is drawn over at once, by a
+// full-screen program or by a shell such as zsh redrawing its prompt. Over,
+// as far as the host can tell, is the command having said something since
+// spoke, what it had said before the nudge, and then nothing for
+// noticeQuiet. A command that doesn't answer, as bash at its prompt doesn't,
+// has the notice written noticeCap after the nudge, and so does one that
+// never stops.
+//
+// One of the client's actors, so that the handler's teardown, which closes
+// out, comes only once it has returned, and so that it goes with the rest of
+// the group: a client that has gone by the time its notice is due is written
+// nothing, and neither its going nor the session's end waits for the
+// notice's timers.
+func (h *sessionHandler) showNotice(g *run.Group, sess gssh.Session, out io.Writer, notice string, spoke int64) {
+	ctx, cancel := context.WithCancel(h.ctx)
+	g.Add(func() error {
+		if h.repainted(ctx, sess.Context(), spoke) {
+			_, _ = io.WriteString(out, "\r\n"+notice+"\r\n")
+		}
+		// Returning would end the group, and the client's session with it.
+		<-ctx.Done()
+		return ctx.Err()
+	}, func(error) {
+		cancel()
+	})
+}
+
+// repainted waits for the repaint showNotice waits out, and reports whether
+// the client is still there to be shown what comes after it: not once ctx is
+// done, and not once client, the client's connection, has ended, which can
+// leave its handler running until its input does.
+func (h *sessionHandler) repainted(ctx, client context.Context, spoke int64) bool {
+	timing := h.timing.orDefault()
+	limit := time.NewTimer(timing.noticeCap)
+	defer limit.Stop()
+	// Polled, as waitIdle polls the same record: the copy keeps it with one
+	// atomic store a write, and waking a waiter from there would cost every
+	// write something for the sake of one wait an attach.
+	tick := time.NewTicker(timing.noticeQuiet / 4)
+	defer tick.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return false
+		case <-client.Done():
+			return false
+		case <-limit.C:
+			return ctx.Err() == nil && client.Err() == nil
+		case <-tick.C:
+			last := h.lastOutput()
+			if last != spoke && time.Since(time.Unix(0, last)) >= timing.noticeQuiet {
+				return ctx.Err() == nil && client.Err() == nil
+			}
+		}
+	}
+}
+
+// lastOutput is when the shared command last said anything, in Unix
+// nanoseconds, as its output copy records it: 0 if it never has, and for a
+// handler with no copy to ask, a test's.
+func (h *sessionHandler) lastOutput() int64 {
+	if h.output == nil {
+		return 0
+	}
+	return h.output.last.Load()
 }
 
 func emitClientJoinEvent(eventEmmiter *emitter.Emitter, sessionID string, auth *server.AuthRequest, pk ssh.PublicKey) {
