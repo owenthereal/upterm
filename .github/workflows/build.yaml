@@ -37,10 +37,31 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: Set up Go
+        id: setup-go
         uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
           check-latest: true
+          cache: false
+      - name: Locate Go caches
+        id: go-env
+        shell: bash
+        run: |
+          echo "gocache=$(go env GOCACHE)" >> "$GITHUB_OUTPUT"
+          echo "gomodcache=$(go env GOMODCACHE)" >> "$GITHUB_OUTPUT"
+      # Restores the newest entry master saved. A pull request's sha is its
+      # merge commit, so only a restore key matches there.
+      - name: Restore Go caches
+        id: go-cache
+        uses: actions/cache/restore@v6
+        with:
+          path: |
+            ${{ steps.go-env.outputs.gocache }}
+            ${{ steps.go-env.outputs.gomodcache }}
+          key: go-race-${{ runner.os }}-${{ runner.arch }}-go${{ steps.setup-go.outputs.go-version }}-${{ hashFiles('go.sum') }}-${{ github.sha }}
+          restore-keys: |
+            go-race-${{ runner.os }}-${{ runner.arch }}-go${{ steps.setup-go.outputs.go-version }}-${{ hashFiles('go.sum') }}-
+            go-race-${{ runner.os }}-${{ runner.arch }}-go${{ steps.setup-go.outputs.go-version }}-
       - name: Compile
         if: matrix.shard == 'others'
         run: make install
@@ -66,6 +87,20 @@ jobs:
             exit 1
           fi
           echo "No test skipped for want of Consul."
+      # Builds ftests' race test binary too, so the one entry this job saves
+      # holds every test build on this OS.
+      - name: Build ftests for the cache
+        if: always() && matrix.shard == 'others' && github.event_name == 'push' && github.ref == 'refs/heads/master'
+        shell: bash
+        run: go test -race -count=1 -run '^$' ./ftests
+      - name: Save Go caches
+        if: always() && matrix.shard == 'others' && github.event_name == 'push' && github.ref == 'refs/heads/master' && steps.go-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: |
+            ${{ steps.go-env.outputs.gocache }}
+            ${{ steps.go-env.outputs.gomodcache }}
+          key: go-race-${{ runner.os }}-${{ runner.arch }}-go${{ steps.setup-go.outputs.go-version }}-${{ hashFiles('go.sum') }}-${{ github.sha }}
 
   test-macos:
     name: Test (macOS, ${{ matrix.shard }})
@@ -77,10 +112,31 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: Set up Go
+        id: setup-go
         uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
           check-latest: true
+          cache: false
+      - name: Locate Go caches
+        id: go-env
+        shell: bash
+        run: |
+          echo "gocache=$(go env GOCACHE)" >> "$GITHUB_OUTPUT"
+          echo "gomodcache=$(go env GOMODCACHE)" >> "$GITHUB_OUTPUT"
+      # Restores the newest entry master saved. A pull request's sha is its
+      # merge commit, so only a restore key matches there.
+      - name: Restore Go caches
+        id: go-cache
+        uses: actions/cache/restore@v6
+        with:
+          path: |
+            ${{ steps.go-env.outputs.gocache }}
+            ${{ steps.go-env.outputs.gomodcache }}
+          key: go-race-${{ runner.os }}-${{ runner.arch }}-go${{ steps.setup-go.outputs.go-version }}-${{ hashFiles('go.sum') }}-${{ github.sha }}
+          restore-keys: |
+            go-race-${{ runner.os }}-${{ runner.arch }}-go${{ steps.setup-go.outputs.go-version }}-${{ hashFiles('go.sum') }}-
+            go-race-${{ runner.os }}-${{ runner.arch }}-go${{ steps.setup-go.outputs.go-version }}-
       - name: Compile
         if: matrix.shard == 'others'
         run: make install
@@ -89,6 +145,20 @@ jobs:
         run: make test-${{ matrix.shard }} TEST_COVER= TEST_FORMAT=-json 2>&1 | tee test.json | jq -R -j --unbuffered "$GO_TEST_LOG_JQ"
         env:
           BASH_SILENCE_DEPRECATION_WARNING: 1
+      # Builds ftests' race test binary too, so the one entry this job saves
+      # holds every test build on this OS.
+      - name: Build ftests for the cache
+        if: always() && matrix.shard == 'others' && github.event_name == 'push' && github.ref == 'refs/heads/master'
+        shell: bash
+        run: go test -race -count=1 -run '^$' ./ftests
+      - name: Save Go caches
+        if: always() && matrix.shard == 'others' && github.event_name == 'push' && github.ref == 'refs/heads/master' && steps.go-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: |
+            ${{ steps.go-env.outputs.gocache }}
+            ${{ steps.go-env.outputs.gomodcache }}
+          key: go-race-${{ runner.os }}-${{ runner.arch }}-go${{ steps.setup-go.outputs.go-version }}-${{ hashFiles('go.sum') }}-${{ github.sha }}
 
   test-windows:
     name: Test (Windows, ${{ matrix.shard }})
@@ -100,16 +170,51 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: Set up Go
+        id: setup-go
         uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
           check-latest: true
+          cache: false
+      - name: Locate Go caches
+        id: go-env
+        shell: bash
+        run: |
+          echo "gocache=$(go env GOCACHE)" >> "$GITHUB_OUTPUT"
+          echo "gomodcache=$(go env GOMODCACHE)" >> "$GITHUB_OUTPUT"
+      # Restores the newest entry master saved. A pull request's sha is its
+      # merge commit, so only a restore key matches there.
+      - name: Restore Go caches
+        id: go-cache
+        uses: actions/cache/restore@v6
+        with:
+          path: |
+            ${{ steps.go-env.outputs.gocache }}
+            ${{ steps.go-env.outputs.gomodcache }}
+          key: go-race-${{ runner.os }}-${{ runner.arch }}-go${{ steps.setup-go.outputs.go-version }}-${{ hashFiles('go.sum') }}-${{ github.sha }}
+          restore-keys: |
+            go-race-${{ runner.os }}-${{ runner.arch }}-go${{ steps.setup-go.outputs.go-version }}-${{ hashFiles('go.sum') }}-
+            go-race-${{ runner.os }}-${{ runner.arch }}-go${{ steps.setup-go.outputs.go-version }}-
       - name: Compile
         if: matrix.shard == 'others'
         run: make install
       - name: Test
         shell: bash
         run: make test-${{ matrix.shard }} TEST_COVER= TEST_FORMAT=-json 2>&1 | tee test.json | jq -R -j --unbuffered "$GO_TEST_LOG_JQ"
+      # Builds ftests' race test binary too, so the one entry this job saves
+      # holds every test build on this OS.
+      - name: Build ftests for the cache
+        if: always() && matrix.shard == 'others' && github.event_name == 'push' && github.ref == 'refs/heads/master'
+        shell: bash
+        run: go test -race -count=1 -run '^$' ./ftests
+      - name: Save Go caches
+        if: always() && matrix.shard == 'others' && github.event_name == 'push' && github.ref == 'refs/heads/master' && steps.go-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: |
+            ${{ steps.go-env.outputs.gocache }}
+            ${{ steps.go-env.outputs.gomodcache }}
+          key: go-race-${{ runner.os }}-${{ runner.arch }}-go${{ steps.setup-go.outputs.go-version }}-${{ hashFiles('go.sum') }}-${{ github.sha }}
 
   vet:
     name: Vet
@@ -187,6 +292,7 @@ jobs:
     with:
       snapshot: true
       docker_repo: ghcr.io/owenthereal/upterm/uptermd
+      go-cache: true
     secrets: inherit
 
   gate:
@@ -210,3 +316,27 @@ jobs:
             echo "::error::Not every job succeeded."
             exit 1
           fi
+
+  # Each master push saves new go-race and go-cross entries. This deletes the
+  # ones they supersede: within a group of kind, OS, architecture and Go
+  # version, every entry but the newest. Go version is in the group because
+  # master runs overlap, and a run on an older Go version can finish last.
+  cache-prune:
+    name: Prune superseded build caches
+    runs-on: ubuntu-latest
+    if: always() && github.event_name == 'push' && github.ref == 'refs/heads/master'
+    needs: [test-ubuntu, test-macos, test-windows, build-and-release]
+    permissions:
+      actions: write
+    steps:
+      - name: Delete superseded caches
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          SUPERSEDED_JQ: |-
+            [ .[] | select(.key | test("^go-(race|cross)-")) ]
+            | group_by(.key | split("-")[0:5] | join("-"))
+            | map(sort_by(.createdAt) | .[:-1][])
+            | .[].id
+        run: gh cache list --ref refs/heads/master --key go- --limit 100 --json id,key,createdAt | jq -r "$SUPERSEDED_JQ" | xargs -r -n1 gh cache delete
