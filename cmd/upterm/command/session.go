@@ -307,7 +307,7 @@ type currentInfo struct {
 	// report its status doesn't say whether its can. SSHConfig is the Host
 	// block for ~/.ssh/config, under the session's name, or its ID when the
 	// daemon doesn't give one, and is left out when sshConfigFor won't write
-	// that name or the relay's SSH user.
+	// that name, the relay's SSH user or the relay's address.
 	SSHCommand  string `json:"sshCommand,omitempty"`
 	JoinCommand string `json:"joinCommand,omitempty"`
 	SSHConfig   string `json:"sshConfig,omitempty"`
@@ -1247,8 +1247,8 @@ type sessionInfo struct {
 	JoinCommand  string `json:"joinCommand,omitempty"`
 	// SSHConfig is the Host block for ~/.ssh/config that reaches the
 	// session under its name, as `session ssh-config` prints it. Present with
-	// the connect strings, unless the relay's SSH user is one sshConfigFor
-	// won't write.
+	// the connect strings, unless the relay's SSH user or its address is one
+	// sshConfigFor won't write.
 	SSHConfig string `json:"sshConfig,omitempty"`
 	// Host is the relay the session was started against, as the daemon
 	// reports it (`session current` prints the same value under the same
@@ -2267,18 +2267,23 @@ func sshUser(sess *api.GetSessionResponse) string {
 	return routing.NewEncodeDecoder(routing.ModeEmbedded).Encode(sess.GetSessionId(), sess.GetNodeAddr())
 }
 
-// proxyCommand is the ssh ProxyCommand that carries a guest's connection to
-// the ws or wss relay u as user, through upterm proxy, which reads the user
-// from the URL: the session ID, and the node after a colon where the relay
-// routes by one. SSH expands percent tokens before executing ProxyCommand in a
-// shell, so the URL's '%' is doubled, and it is quoted for that shell.
-func proxyCommand(u url.URL, user string) string {
+// proxyURL is the URL upterm proxy dials to carry a guest's connection to the
+// ws or wss relay u as user. upterm proxy reads the user from it: the session
+// ID, and the node after a colon where the relay routes by one.
+func proxyURL(u url.URL, user string) string {
 	if name, node, ok := strings.Cut(user, ":"); ok {
 		u.User = url.UserPassword(name, node)
 	} else {
 		u.User = url.User(user)
 	}
-	return "upterm proxy " + quoteShellArg(strings.ReplaceAll(u.String(), "%", "%%"))
+	return u.String()
+}
+
+// proxyCommand is the ssh line's ProxyCommand, which runs upterm proxy with
+// proxyURL. SSH expands percent tokens before executing ProxyCommand in a
+// shell, so the URL's '%' is doubled, and it is quoted for that shell.
+func proxyCommand(u url.URL, user string) string {
+	return "upterm proxy " + quoteShellArg(strings.ReplaceAll(proxyURL(u, user), "%", "%%"))
 }
 
 // guestPermissions is what guests may do, as the daemon reports it, or nil when

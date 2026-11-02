@@ -104,12 +104,14 @@ func sshConfigRunE(ctx context.Context, arg, alias string) error {
 		alias = r.Name
 	}
 	text, err := sshConfigText(live, alias)
-	if errors.Is(err, errUnwritableUser) {
-		// The session as it was asked for, and not the user, which is the
-		// relay's to choose.
+	// The session as it was asked for, and neither the user, which is the
+	// relay's to choose, nor the relay's address.
+	switch {
+	case errors.Is(err, errUnwritableUser):
 		return fmt.Errorf("the relay gave session %s an SSH user that upterm won't write into an ssh config", arg)
-	}
-	if err != nil {
+	case errors.Is(err, errUnwritableRelay):
+		return fmt.Errorf("the relay address for session %s has characters that upterm won't write into an ssh config", arg)
+	case err != nil:
 		return err
 	}
 	_, err = io.WriteString(os.Stdout, text)
@@ -152,11 +154,20 @@ func sshConfigText(sess *api.GetSessionResponse, alias string) (string, error) {
 // quotes the '='.
 var sshUserRe = regexp.MustCompile(`^[A-Za-z0-9._~+=:-]+$`)
 
-// errUnwritableUser and errUnwritableAlias are why sshConfigFor wrote no
-// block. Neither repeats the value it refused.
+// proxyURLRe is what the URL in a Host block's ProxyCommand may be: no '%',
+// which ssh would read as a token, and only characters that stay as they are
+// inside double quotes, both in a POSIX shell and in the Windows argument
+// parsing Windows OpenSSH starts a ProxyCommand with, where a single quote is
+// any other character. That leaves out '$', '`', '\', '!', both quote marks
+// and whitespace, among everything else.
+var proxyURLRe = regexp.MustCompile(`^[A-Za-z0-9._~+=:@/\[\]-]+$`)
+
+// errUnwritableUser, errUnwritableAlias and errUnwritableRelay are why
+// sshConfigFor wrote no block. None repeats the value it refused.
 var (
 	errUnwritableUser  = errors.New("the relay gave the session an SSH user that upterm won't write into an ssh config")
 	errUnwritableAlias = errors.New("the name the session would have in an ssh config isn't one upterm writes there")
+	errUnwritableRelay = errors.New("the session's relay address has characters that upterm won't write into an ssh config")
 )
 
 // sshConfigFor is the Host block of ~/.ssh/config that reaches the session
@@ -170,7 +181,10 @@ var (
 // The user is the relay's, and so is the alias when a daemon that gives no
 // name has its session named by its ID. A block is written only when
 // sshUserRe takes the user and aliasRe the alias, so that neither can add
-// lines of its own to the config it is pasted into, or make ssh refuse it.
+// lines of its own to the config it is pasted into, or make ssh refuse it,
+// and for a ws or wss relay only when proxyURLRe takes the URL its
+// ProxyCommand hands upterm proxy, so that the URL arrives as it is, on
+// Windows as elsewhere.
 func sshConfigFor(sess *api.GetSessionResponse, alias string) (string, error) {
 	u, scheme, _, port, err := parseURL(sess.GetHost())
 	if err != nil {
@@ -186,6 +200,13 @@ func sshConfigFor(sess *api.GetSessionResponse, alias string) (string, error) {
 	if !sshUserRe.MatchString(user) {
 		return "", errUnwritableUser
 	}
+	var target string
+	if scheme != "ssh" {
+		target = proxyURL(*u, user)
+		if !proxyURLRe.MatchString(target) {
+			return "", errUnwritableRelay
+		}
+	}
 	lines := []string{
 		"Host " + alias,
 		// ssh expands percent tokens in HostName, so an address's zone keeps
@@ -197,7 +218,10 @@ func sshConfigFor(sess *api.GetSessionResponse, alias string) (string, error) {
 		lines = append(lines, "  Port "+port)
 	}
 	if scheme != "ssh" {
-		lines = append(lines, "  ProxyCommand "+proxyCommand(*u, user))
+		// Double quotes, which quote on Windows too, where a single quote is
+		// any other character. proxyURLRe left nothing in them to expand, a
+		// '%' included, so none is doubled.
+		lines = append(lines, `  ProxyCommand upterm proxy "`+target+`"`)
 	}
 	return strings.Join(lines, "\n"), nil
 }
