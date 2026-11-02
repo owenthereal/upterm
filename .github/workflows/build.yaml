@@ -268,7 +268,7 @@ jobs:
         if: always()
         continue-on-error: true
         shell: pwsh
-        run: Stop-Process -Id (Get-Content "$env:RUNNER_TEMP\load-sampler.pid")
+        run: Stop-Process -Id (Get-Content "$env:RUNNER_TEMP\load-sampler.pid") -PassThru | Wait-Process -Timeout 10
       - name: Upload load samples
         if: always()
         uses: actions/upload-artifact@v7

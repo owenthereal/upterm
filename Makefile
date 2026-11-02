@@ -64,8 +64,9 @@ GO_TEST_FLAGS ?= ""
 TEST_COVER ?= -coverprofile=c.out -covermode=atomic
 TEST_FORMAT ?= -v
 # The bound is a guard against a hung test, not a performance budget. ftests is
-# what sets it: on the Consul job it runs both suites in one binary, and a
-# go test -timeout bounds that binary as a whole. On master's CI (655960a) the
+# what sets it: a local make test runs both suites in one binary (CI's Ubuntu
+# jobs split them), and a go test -timeout bounds that binary as a whole. On
+# master's CI (655960a) the
 # ftests package took 221.5s on the Ubuntu + Consul job, and 144s on macOS and
 # 137s on Windows, which run without Consul. That was before the scenarios of
 # a host redialling its relay were added; with them, this branch's CI took
@@ -78,8 +79,9 @@ TEST_FLAGS = -timeout=600s $(TEST_COVER) -count=1 -race $(TEST_FORMAT) $(GO_TEST
 # first, and the rest follow in go list order.
 TEST_SLOW_PKGS = ./host/internal/replay ./host/internal ./server ./host
 # Deferred, and used only in recipes, so go list runs only when a test target
-# does (make -n included) and other targets never run it.
-TEST_PKGS = $(shell { go list $(TEST_SLOW_PKGS); go list ./... | grep -v /e2e; } | awk '!seen[$$0]++')
+# does (make -n included) and other targets never run it. An empty list would
+# make go test run on the root package alone and pass, so it is an error.
+TEST_PKGS = $(or $(shell { go list $(TEST_SLOW_PKGS); go list ./... | grep -v /e2e; } | awk '!seen[$$0]++'),$(error no packages to test: go list, grep or awk failed or printed nothing))
 TEST_OTHER_PKGS = $(filter-out github.com/owenthereal/upterm/ftests,$(TEST_PKGS))
 
 # The ftests tests that test-ftests-split runs and test-ftests-rest skips.
