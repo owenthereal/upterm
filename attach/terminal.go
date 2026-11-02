@@ -134,6 +134,12 @@ type Terminal struct {
 	// would land inside the session's own escape sequence.
 	Status func(ctx context.Context) []string
 
+	// Notice is a line, without its line ending, that this terminal asks the
+	// session to show it once the screen it attaches to is drawn: below it,
+	// where a line written before attaching would be scrolled away by the
+	// replay. Only the attach socket shows it. Empty asks for none.
+	Notice string
+
 	Logger *slog.Logger
 
 	// limits bounds this terminal's waits and its input backlog, and the zero
@@ -303,6 +309,11 @@ func (t *Terminal) Run(ctx context.Context, client *ssh.Client, setupBy time.Tim
 		if err := sess.Setenv(upterm.AttachInteractiveEnvVar, "1"); err != nil {
 			return Result{}, fmt.Errorf("setenv %s: %w", upterm.AttachInteractiveEnvVar, err)
 		}
+	}
+	if t.Notice != "" {
+		// Asked for, not relied on: a session that doesn't show it is still
+		// one to attach to.
+		_ = sess.Setenv(upterm.AttachNoticeEnvVar, t.Notice)
 	}
 	// Always a pipe, even with no Stdin: leaving Session.Stdin nil makes
 	// x/crypto copy from an empty reader and send EOF at once, which ends a

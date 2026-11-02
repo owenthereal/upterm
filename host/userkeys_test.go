@@ -310,6 +310,25 @@ func Test_Fetcher_commentIsTheResolvedIdentity(t *testing.T) {
 	assert.Equal(t, ref.Display(), aks[0].Comment)
 }
 
+// The keys a reference resolved to carry who they belong to, for the approval
+// review to name a guest by; a raw URL's name no one.
+func Test_Fetcher_namesWhoTheKeysBelongTo(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(testPublicKey))
+	}))
+	defer server.Close()
+
+	host := strings.TrimPrefix(server.URL, "https://")
+	ref, err := ParseUserRef("gitea:alice@" + host)
+	require.NoError(t, err)
+	f := &Fetcher{Logger: testLogger(), Transport: tlsPool(t, server)}
+	aks, err := f.AuthorizedKeys(t.Context(), []UserRef{ref, rawRef(t, server, "/bob")})
+	require.NoError(t, err)
+	require.Len(t, aks, 2)
+	assert.Equal(t, "alice (gitea:alice@"+host+")", aks[0].guest)
+	assert.Empty(t, aks[1].guest)
+}
+
 func Test_Fetcher_reportsEveryFailureAtOnce(t *testing.T) {
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound)

@@ -47,7 +47,7 @@ On the machine running Herdr:
 ```console
 upterm host --detach --name home --accept \
   --authorized-user github:YOUR_GITHUB_USER \
-  --login-command 'env -u HERDR_ENV herdr' \
+  --login-command herdr \
   --allow-exec \
   --allow-forwarding=loopback
 ```
@@ -68,11 +68,10 @@ network containment: an exec-authorized guest can open sockets as your account.
   (a phone), that's Herdr's mobile layout. Clients on the same tab share its
   panes, sized for whichever client last interacted with the tab, so the agent
   repaints when you switch from laptop to phone.
-- **`env -u HERDR_ENV`:** Herdr refuses to start "nested" when it sees
-  `HERDR_ENV`, which every Herdr pane sets and the door passes on. It matters
-  only if you start the door from a Herdr pane; elsewhere it does nothing.
+- **Started from a Herdr pane:** the door keeps that pane's `HERDR_ENV` from
+  guest commands, so Herdr's guard against starting nested doesn't trip.
 - **A named Herdr session:** bare `herdr` attaches to the default session. For
-  another, make the command `env -u HERDR_ENV herdr session attach NAME`.
+  another, make the command `herdr session attach NAME`.
 - **Copy:** copying inside Herdr goes to the guest's clipboard over OSC 52
   (upterm sets `SSH_TTY`, so Herdr leaves the home machine's clipboard alone).
   The guest's terminal has to allow OSC 52 writes.
@@ -150,8 +149,7 @@ paths retain their home-directory base.
 
 Run `herdr --remote` from an ordinary terminal, outside a Herdr pane: the
 pane's `HERDR_ENV` trips the nested guard, and its `HERDR_SESSION` can select
-a remote session you didn't mean. The login command above clears `HERDR_ENV`
-for plain SSH clients.
+a remote session you didn't mean.
 
 If a tool fails, check `ssh -v home`, the key allowlist, the session ID and the
 host's PATH. After restarting the door, update `User` under `Host home` and

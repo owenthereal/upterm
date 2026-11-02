@@ -318,6 +318,21 @@ func (r UserRef) Display() string {
 	return r.Provider + ":" + r.User + "@" + r.ResolveHost()
 }
 
+// guest is how the approval review names a guest whose key this reference
+// resolved to: the user, then the reference without the provider's own host,
+// "alice (github:alice)". With any other host, GH_HOST's included, the host is
+// named, as Display names it. A raw URL names no user, so it is "".
+func (r UserRef) guest() string {
+	if r.URL != "" {
+		return ""
+	}
+	ref := r.Provider + ":" + r.User
+	if host := r.ResolveHost(); host != providers[r.Provider].defaultHost {
+		ref += "@" + host
+	}
+	return r.User + " (" + ref + ")"
+}
+
 // githubAPIPrefix mirrors go-gh's unexported restPrefix, which is not simply
 // "github.com or /api/v3": GitHub Enterprise Cloud at *.ghe.com is not
 // "enterprise" by go-gh's definition, so its API lives at

@@ -4,12 +4,51 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/owenthereal/upterm/utils"
 	"golang.org/x/crypto/ssh"
 )
 
 type AuthorizedKey struct {
 	PublicKeys []ssh.PublicKey
 	Comment    string
+
+	// guest is who the keys belong to, as the approval review names a guest
+	// with one: an --authorized-user's user and reference (UserRef.guest).
+	// Empty for keys from a file or a raw URL, which name no one.
+	guest string
+}
+
+// guestLabels names, by fingerprint, the guest each key in aks belongs to,
+// for the approval review to say who is asking: the user an --authorized-user
+// named, "alice (github:alice)", or else, for an entry that names no one,
+// such as an authorized_keys file, which can hold several guests' keys, the
+// key and where it came from, "a guest with key SHA256:… from
+// /home/alice/.ssh/authorized_keys". A key on more than one entry is named by
+// the first that names someone.
+func guestLabels(aks []*AuthorizedKey) map[string]string {
+	labels := make(map[string]string)
+	for _, named := range []bool{true, false} {
+		for _, ak := range aks {
+			if (ak.guest != "") != named {
+				continue
+			}
+			for _, key := range ak.PublicKeys {
+				fingerprint := utils.FingerprintSHA256(key)
+				if labels[fingerprint] != "" {
+					continue
+				}
+				label := ak.guest
+				if label == "" {
+					label = "a guest with key " + fingerprint
+					if ak.Comment != "" {
+						label += " from " + ak.Comment
+					}
+				}
+				labels[fingerprint] = label
+			}
+		}
+	}
+	return labels
 }
 
 func AuthorizedKeysFromFile(file string) (*AuthorizedKey, error) {

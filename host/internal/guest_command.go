@@ -5,15 +5,18 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"os"
 	"os/exec"
 	"strconv"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	gssh "charm.land/ssh"
 	"github.com/owenthereal/upterm/host/consent"
+	uio "github.com/owenthereal/upterm/io"
 	"github.com/owenthereal/upterm/server"
 	"github.com/owenthereal/upterm/utils"
 )
@@ -153,7 +156,7 @@ func execLogText(text string) string {
 func execDenialNotice(err error) string {
 	switch {
 	case errors.Is(err, errGuestExecDisabled):
-		return "upterm: guest exec is disabled for this session.\r\n"
+		return "upterm: this session doesn't run commands a guest names (the host turned them off). Plain 'ssh' without a command opens the session.\r\n"
 	case errors.Is(err, consent.ErrUnavailable):
 		return "upterm: guest exec denied; nothing on the host can approve it now. The host can attach its terminal or run with --allow-exec.\r\n"
 	case errors.Is(err, context.DeadlineExceeded), errors.Is(err, consent.ErrTimeout):
@@ -170,6 +173,71 @@ func execDenialNotice(err error) string {
 		return "upterm: the host denied this command.\r\n"
 	}
 	return "upterm: guest exec denied.\r\n"
+}
+
+// startFailureNotice is what a guest is told when the command selection chose
+// couldn't start, with code, 127 or 126, the status that says why: which
+// command it was, why it couldn't start, and the host's log, which has the
+// error itself. None of the error is passed on.
+func (h *sessionHandler) startFailureNotice(selection guestCommandSelection, code int, err *guestProcessStartError) string {
+	what, program := "the host's login command", guestText(selection.Argv[0])
+	switch {
+	case selection.NeedsExecConsent:
+		// A command the guest asked for runs through the host's shell, so
+		// the shell is what couldn't start.
+		what, program = "your command", "the host's shell, "+program+","
+	case len(h.forceCommand) > 0:
+		what = "the host's forced command"
+	}
+	notice := "upterm: " + what + " couldn't start: " + startFailureReason(program, code, err) + "."
+	if h.logPath != "" {
+		notice += " The host's log is " + uio.PlainText(utils.ShortenHomePath(h.logPath)) + "."
+	}
+	return notice + "\r\n"
+}
+
+// startFailureReason is why program couldn't start, for a start that failed
+// with err and code: one of a few fixed reasons. A start that found no such
+// file says only that, and the missing file can be the directory the command
+// starts in, a file the program needs, such as the interpreter a script
+// names, or the program itself. So the host looks, as it reports the failure:
+// at the directory first, since a command whose directory is gone never
+// reaches its program, then at the program. A reason is given only when the
+// look bears it out; otherwise the program was not found.
+func startFailureReason(program string, code int, err *guestProcessStartError) string {
+	switch {
+	case code != 127:
+		return program + " couldn't be executed"
+	case errors.Is(err, exec.ErrNotFound):
+		return program + " was not found on the session's PATH"
+	}
+	if err.dir != "" {
+		if _, statErr := os.Stat(err.dir); errors.Is(statErr, fs.ErrNotExist) {
+			return "the directory it starts in no longer exists"
+		}
+	}
+	if _, statErr := os.Stat(err.program()); statErr == nil {
+		return program + " needs a file that is missing, such as its interpreter"
+	}
+	return program + " was not found"
+}
+
+// maxGuestText bounds a name echoed to a guest: a hostname is at most 253
+// bytes, and a guest can send far more.
+const maxGuestText = 255
+
+// guestText is s as a guest is told it: cut to maxGuestText bytes, the
+// ellipsis that says so among them, at a character, and plain, so nothing in
+// it can act on the guest's terminal.
+func guestText(s string) string {
+	if len(s) > maxGuestText {
+		cut := maxGuestText - len("…")
+		for cut > 0 && !utf8.RuneStart(s[cut]) {
+			cut--
+		}
+		s = s[:cut] + "…"
+	}
+	return uio.PlainText(s)
 }
 
 // exitUnstarted ends a private command the session's end got to before it
@@ -305,7 +373,7 @@ func (h *sessionHandler) handlePrivateCommand(sess gssh.Session, selection guest
 		exitBeforeStart()
 		return
 	}
-	env := withoutSSHSessionVars(append(os.Environ(), h.commandEnv...))
+	env := withoutHostSessionVars(append(os.Environ(), h.commandEnv...))
 	env = append(env, guestConnectionEnv(auth, h.hideClientIP)...)
 	if selection.ForcedExec {
 		env = append(env, "SSH_ORIGINAL_COMMAND="+selection.RawCommand)
@@ -362,9 +430,7 @@ func (h *sessionHandler) handlePrivateCommand(sess gssh.Session, selection guest
 			if errors.Is(err, exec.ErrNotFound) || errors.Is(err, os.ErrNotExist) {
 				code = 127
 			}
-		}
-		if code == 126 || code == 127 {
-			guestCommandDiagnostic(sess, "upterm: this session's command couldn't start; the host's log has why.\r\n")
+			guestCommandDiagnostic(sess, h.startFailureNotice(selection, code, startErr))
 		}
 	}
 	kind, _, _, _ := h.endingCause()

@@ -315,7 +315,7 @@ func newDaemonAnswer(launch string) *api.GetSessionResponse {
 		FileTransfer:                 proto.String("all"),
 		FileTransferApprovalRequired: proto.Bool(true),
 		LocalForwarding:              proto.Bool(false),
-		LoginCommand:                 []string{"env", "-u", "HERDR_ENV", "herdr"},
+		LoginCommand:                 []string{"herdr", "session", "attach", "work"},
 		GuestShell:                   proto.String("login"),
 		Execution:                    proto.String("granted"),
 		TcpForwarding:                proto.String("loopback"),

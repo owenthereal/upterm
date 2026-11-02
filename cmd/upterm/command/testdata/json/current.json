@@ -20,7 +20,7 @@
   "joinStateSource": "daemon",
   "launchId": "LAUNCH",
   "localForwarding": false,
-  "loginCommand": "env -u HERDR_ENV herdr",
+  "loginCommand": "herdr session attach work",
   "name": "build",
   "readOnly": false,
   "reconnect": "supported",

@@ -14,6 +14,8 @@ const (
 	ApprovalStateRequest    = "approval-state-v1@upterm"
 	ApprovalAnswerRequest   = "approval-answer-v1@upterm"
 	MaxApprovalPayload      = 128 * 1024
+	// MaxApprovalGuest bounds ApprovalRequest.Guest, in bytes.
+	MaxApprovalGuest = 1024
 )
 
 // Subjects are byte slices so JSON preserves arbitrary SSH command/path bytes.
@@ -21,6 +23,12 @@ type ApprovalRequest struct {
 	ID, Capability, Operation, Fingerprint string
 	Subjects                               [][]byte
 	DeadlineUnixMilli                      int64
+	// Guest is who the host's own allowlist says holds Fingerprint's key,
+	// "alice (github:alice)", and empty when the key is on none. Unlisted
+	// says the session has no allowlist: anyone with its ID can join. Both
+	// come from the host's configuration, never from the guest.
+	Guest    string `json:",omitempty"`
+	Unlisted bool   `json:",omitempty"`
 }
 type ApprovalState struct {
 	Revision uint64
@@ -47,7 +55,7 @@ func approvalText(s string, max int, required bool) bool {
 	return (!required || s != "") && len(s) <= max && utf8.ValidString(s)
 }
 func (r ApprovalRequest) validate() error {
-	if !approvalText(r.ID, 128, true) || !approvalText(r.Fingerprint, 256, false) || r.DeadlineUnixMilli <= 0 {
+	if !approvalText(r.ID, 128, true) || !approvalText(r.Fingerprint, 256, false) || !approvalText(r.Guest, MaxApprovalGuest, false) || r.DeadlineUnixMilli <= 0 {
 		return errors.New("invalid approval identity/deadline")
 	}
 	capability, count := "", 1

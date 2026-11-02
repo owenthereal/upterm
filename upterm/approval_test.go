@@ -65,3 +65,38 @@ func TestApprovalProtocol(t *testing.T) {
 		require.Error(t, err)
 	}
 }
+
+// Who is asking travels with the request: the host's own allowlist label for
+// the guest's key, or that the session has no allowlist at all. Both are left
+// out of the payload when unset, as they are by a daemon that sends neither.
+func TestApprovalGuest(t *testing.T) {
+	state := ApprovalState{Revision: 1, Pending: 1, Current: &ApprovalRequest{ID: "1", Capability: "exec", Operation: "exec", Fingerprint: "SHA256:key", Subjects: [][]byte{[]byte("bash")}, DeadlineUnixMilli: 1}}
+	payload, err := EncodeApprovalState(state)
+	require.NoError(t, err)
+	require.NotContains(t, string(payload), "Guest")
+	require.NotContains(t, string(payload), "Unlisted")
+	got, err := DecodeApprovalState(payload)
+	require.NoError(t, err)
+	require.Empty(t, got.Current.Guest)
+	require.False(t, got.Current.Unlisted)
+
+	for _, current := range []ApprovalRequest{
+		{Guest: "alice (github:alice)"},
+		{Guest: strings.Repeat("é", MaxApprovalGuest/2)},
+		{Unlisted: true},
+	} {
+		request := *state.Current
+		request.Guest, request.Unlisted = current.Guest, current.Unlisted
+		payload, err := EncodeApprovalState(ApprovalState{Revision: 1, Pending: 1, Current: &request})
+		require.NoError(t, err)
+		got, err := DecodeApprovalState(payload)
+		require.NoError(t, err)
+		require.Equal(t, request, *got.Current)
+	}
+	for _, guest := range []string{strings.Repeat("a", MaxApprovalGuest+1), "\xff"} {
+		request := *state.Current
+		request.Guest = guest
+		_, err := EncodeApprovalState(ApprovalState{Revision: 1, Pending: 1, Current: &request})
+		require.Error(t, err)
+	}
+}

@@ -141,8 +141,7 @@ func TestSFTPConsentSSH(t *testing.T) {
 				require.ErrorIs(t, err, os.ErrPermission)
 				code, message := sftpMkdirStatus(t, guest, path)
 				require.Equal(t, uint32(sftp.ErrSSHFxPermissionDenied), code)
-				require.Contains(t, message, "primary host terminal")
-				require.Contains(t, message, "--accept")
+				require.Equal(t, "permission denied: SFTP needs approval in the primary host terminal; the host can attach with approval escapes enabled or use --allow-sftp", message)
 				_, err = os.Stat(path)
 				require.True(t, os.IsNotExist(err))
 			})
@@ -264,7 +263,7 @@ func TestSFTPConsentSSH(t *testing.T) {
 func TestSFTPConsentQueuedBehindReview(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		clients := &hostClients{primary: &hostClient{id: "primary"}}
-		b := newApprovalBroker(clients, discardLogger())
+		b := newApprovalBroker(clients, nil, false, discardLogger())
 		owner := &approvalTransport{ctx: &approvalTestContext{baseContext: t.Context(), id: "primary"}, registered: true, session: true, eligible: true, wake: make(chan struct{}, 1), done: make(chan struct{})}
 		b.transports[owner] = struct{}{}
 		type queuedRequest struct {

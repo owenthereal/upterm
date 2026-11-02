@@ -354,3 +354,25 @@ func Test_ProviderList_namesEveryProvider(t *testing.T) {
 		"github, gitlab, codeberg, srht (host optional), gitea, forgejo (host required)",
 		listed)
 }
+
+// A guest whose key a reference resolved to is named by its user and the
+// reference, with the provider's own host left out: the host it was fetched
+// from otherwise, GH_HOST's included. A raw URL names no user.
+func Test_UserRef_guest(t *testing.T) {
+	for _, tc := range []struct{ githubHost, ref, want string }{
+		{"github.com", "github:alice", "alice (github:alice)"},
+		{"github.com", "github:alice@github.com", "alice (github:alice)"},
+		{"ghe.corp.com", "github:alice", "alice (github:alice@ghe.corp.com)"},
+		{"github.com", "gitlab:bob", "bob (gitlab:bob)"},
+		{"github.com", "srht:~carol", "carol (srht:carol)"},
+		{"github.com", "gitea:dave@git.example.com:3000", "dave (gitea:dave@git.example.com:3000)"},
+		{"github.com", "https://keys.example.com/erin", ""},
+	} {
+		t.Run(tc.ref, func(t *testing.T) {
+			pinGitHubHost(t, tc.githubHost)
+			ref, err := ParseUserRef(tc.ref)
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, ref.guest())
+		})
+	}
+}

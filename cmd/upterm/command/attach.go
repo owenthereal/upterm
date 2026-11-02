@@ -5,9 +5,11 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 
+	"github.com/google/shlex"
 	"github.com/owenthereal/upterm/attach"
 	"github.com/owenthereal/upterm/host/sessiondir"
 	uptermctx "github.com/owenthereal/upterm/internal/context"
@@ -53,9 +55,11 @@ const attachedKeysHelp = `Keys, at the start of a line (--escape-char changes th
         and 'upterm session stop NAME' ends it
   ~?    show the session's status and keys, in this terminal only; the
         program may need its own redraw afterwards
-  ~a    review pending guest permissions in the primary local terminal; type
-        d CODE, c CODE or g CODE then Enter using the displayed confirmation
-        (deny, connection + complete tuple, or guest + capability for this host)
+  ~a    review a guest's request, in the primary local terminal, and answer
+        with the confirmation it shows as CODE: y CODE Enter allows it on its
+        connection; a CODE Enter allows that guest every request of its kind
+        (commands, files or forwards) until the session ends; n CODE Enter
+        denies it; Esc decides later, and the request still expires.
   ~^Z   suspend this terminal (Unix); fg resumes it
   ~~    send a ~; ~~a sends literal ~a
 
@@ -64,7 +68,6 @@ Through an outer ssh connection, ssh's own ~ escapes come first: type ~~.,
 
 With --escape-char none or without a capable primary local terminal,
 interactive approval is unavailable; requests without a grant are denied.
-Escape leaves review without answering; pending requests still expire.
 
 On Unix you can also suspend with ~^Z, run 'upterm session info NAME', and
 return with fg. A session that keeps producing output while this terminal
@@ -157,6 +160,29 @@ func resolveAttachName(ctx context.Context, explicit string) (resolved, error) {
 type target struct {
 	Socket, Status, LaunchID, AdminSocket string
 	Keys                                  []ssh.PublicKey
+	// Door is the session being a door: see doorNotice.
+	Door bool
+}
+
+// doorNotice is what attach says on a door: a session that gives guests a
+// login or forced command of the host's, kept open by the default shell,
+// which is where this terminal types. The keys are this terminal's own, where
+// it has any.
+func doorNotice(name string, escape byte) string {
+	notice := "upterm: this is " + name + "'s door; 'exit' closes it for every guest."
+	if escape != 0 {
+		e := string(escape)
+		notice += " " + e + ". detaches; " + e + "a reviews requests."
+	}
+	return notice
+}
+
+// isDoor reports whether rec is a door's: its guests get a login or forced
+// command of the host's, and its hosted command is the shell upterm host runs
+// without one, as this process would choose it.
+func isDoor(rec *sessiondir.Record) bool {
+	shell, err := shlex.Split(getDefaultShell())
+	return err == nil && len(shell) > 0 && (len(rec.LoginCommand) > 0 || len(rec.ForceCommand) > 0) && slices.Equal(rec.Command, shell)
 }
 
 // attachTarget resolves a session to the one to attach to. Starting, ready,
@@ -182,7 +208,7 @@ func attachTarget(ctx context.Context, r resolved) (target, error) {
 	if !held {
 		return target{}, errors.New(refusalLine(name, endedFromRecord(rec)))
 	}
-	t := target{Status: rec.Status, LaunchID: rec.LaunchID, AdminSocket: rec.AdminSocket}
+	t := target{Status: rec.Status, LaunchID: rec.LaunchID, AdminSocket: rec.AdminSocket, Door: isDoor(rec)}
 	noAttachSupport := fmt.Errorf("session %q was started by an upterm without attach support; restart it to attach", name)
 	if rec.AttachSocket == "" {
 		return t, noAttachSupport
@@ -283,7 +309,11 @@ func attachRunE(c *cobra.Command, args []string) error {
 	defer cancel()
 	lt := classifyTerminal(os.Stdin, os.Stdout, tty.Owned, resolveTerm("", os.Getenv("TERM")))
 	src := attachStatusSource(r, t)
-	res, err := attachLocalTerminal(ctx, t.Socket, t.Keys, lt, escape, src, os.Stdin, os.Stdout, logger.Logger)
+	notice := ""
+	if t.Door {
+		notice = doorNotice(name, escape)
+	}
+	res, err := attachLocalTerminalWith(ctx, t.Socket, t.Keys, lt, escape, src, notice, os.Stdin, os.Stdout, tty.Owned, logger.Logger)
 	if err != nil {
 		return ExitCodeError{Code: exitAttachFailed, Err: attachFailure(name, t.Status, err)}
 	}

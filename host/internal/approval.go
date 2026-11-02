@@ -5,8 +5,10 @@ import (
 	"errors"
 	"log/slog"
 	"net"
+	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	gssh "charm.land/ssh"
 	"github.com/owenthereal/upterm/host/consent"
@@ -40,8 +42,12 @@ type approvalOutcome struct {
 	err      error
 }
 type approvalBroker struct {
-	mu         sync.Mutex
-	clients    *hostClients
+	mu      sync.Mutex
+	clients *hostClients
+	// guests names, by fingerprint, the guest each allowlisted key belongs
+	// to; open says there is no allowlist.
+	guests     map[string]string
+	open       bool
 	logger     *slog.Logger
 	closed     bool
 	revision   uint64
@@ -52,8 +58,8 @@ type approvalBroker struct {
 
 var _ consent.Prompter = (*approvalBroker)(nil)
 
-func newApprovalBroker(clients *hostClients, logger *slog.Logger) *approvalBroker {
-	b := &approvalBroker{clients: clients, logger: logger, transports: make(map[*approvalTransport]struct{})}
+func newApprovalBroker(clients *hostClients, guests map[string]string, open bool, logger *slog.Logger) *approvalBroker {
+	b := &approvalBroker{clients: clients, guests: guests, open: open, logger: logger, transports: make(map[*approvalTransport]struct{})}
 	clients.onApprovalPrimaryChanged = b.primaryChanged
 	return b
 }
@@ -150,7 +156,8 @@ func (b *approvalBroker) handleRequest(ctx gssh.Context, req *ssh.Request) (bool
 	return false, nil
 }
 func (b *approvalBroker) Prompt(ctx context.Context, prompt consent.Prompt) (consent.Decision, error) {
-	request := upterm.ApprovalRequest{ID: prompt.ID, Capability: string(prompt.Operation.Capability()), Operation: string(prompt.Operation), Fingerprint: prompt.Client.Fingerprint, DeadlineUnixMilli: prompt.Deadline.UnixMilli()}
+	request := upterm.ApprovalRequest{ID: prompt.ID, Capability: string(prompt.Operation.Capability()), Operation: string(prompt.Operation), Fingerprint: prompt.Client.Fingerprint, DeadlineUnixMilli: prompt.Deadline.UnixMilli(),
+		Guest: approvalGuest(b.guests[prompt.Client.Fingerprint]), Unlisted: b.open}
 	for _, subject := range prompt.Subjects {
 		request.Subjects = append(request.Subjects, []byte(subject))
 	}
@@ -216,6 +223,21 @@ func (b *approvalBroker) Prompt(ctx context.Context, prompt consent.Prompt) (con
 	}
 	b.mu.Unlock()
 	return result.decision, result.err
+}
+
+// approvalGuest is a guest's label as a review can carry it: UTF-8, and cut
+// to the protocol's bound at a character, so that no label the host gave a
+// key ever costs its guest the review.
+func approvalGuest(label string) string {
+	label = strings.ToValidUTF8(label, "\ufffd")
+	if len(label) > upterm.MaxApprovalGuest {
+		cut := upterm.MaxApprovalGuest - len("…")
+		for cut > 0 && !utf8.RuneStart(label[cut]) {
+			cut--
+		}
+		label = label[:cut] + "…"
+	}
+	return label
 }
 func (b *approvalBroker) finishLocked(pending *approvalPending, decision consent.Decision, err error) {
 	for i, p := range b.pending {

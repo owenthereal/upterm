@@ -29,14 +29,17 @@ const defaultLocalClientDrainTimeout = 5 * time.Second
 // ~? reports on; its keys are filled in here, from escape and whether this
 // terminal can be suspended.
 func attachLocalTerminal(ctx context.Context, socket string, keys []ssh.PublicKey, lt localTerminal, escape byte, src statusSource, stdin, stdout *os.File, logger *slog.Logger) (attach.Result, error) {
-	return attachLocalTerminalWith(ctx, socket, keys, lt, escape, src, stdin, stdout, tty.Owned, logger)
+	return attachLocalTerminalWith(ctx, socket, keys, lt, escape, src, "", stdin, stdout, tty.Owned, logger)
 }
 
 // attachLocalTerminalWith is attachLocalTerminal with the foreground-ownership
 // predicate injected, for the reason withRawTerminal takes one: job control
 // cannot be staged in-process, so a test that needs raw mode to be restored
-// has no way to be the foreground of the pty pair it opened.
-func attachLocalTerminalWith(ctx context.Context, socket string, keys []ssh.PublicKey, lt localTerminal, escape byte, src statusSource, stdin, stdout *os.File, owned func(*os.File) bool, logger *slog.Logger) (attach.Result, error) {
+// has no way to be the foreground of the pty pair it opened. It also takes
+// notice, the line the session is asked to show once attached (see
+// attach.Terminal.Notice), which only a terminal in raw mode asks for: it is
+// said to someone typing into the session.
+func attachLocalTerminalWith(ctx context.Context, socket string, keys []ssh.PublicKey, lt localTerminal, escape byte, src statusSource, notice string, stdin, stdout *os.File, owned func(*os.File) bool, logger *slog.Logger) (attach.Result, error) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
@@ -70,6 +73,7 @@ func attachLocalTerminalWith(ctx context.Context, socket string, keys []ssh.Publ
 	src.Escape, src.Suspend = escape, client.Suspend != nil
 	client.Status = terminalStatus(src, logger)
 	client.Approvals = true
+	client.Notice = notice
 	return client.Run(ctx)
 }
 

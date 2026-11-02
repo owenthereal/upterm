@@ -1868,6 +1868,30 @@ func TestClientDeclaresInteractivityOnlyWithPtyAndStdin(t *testing.T) {
 	}
 }
 
+// A client with a notice asks the door to show it once attached; one without
+// asks nothing.
+func TestClientAsksTheDoorToShowItsNotice(t *testing.T) {
+	envs := make(chan []string, 2)
+	door := serveDoor(t, func(s gssh.Session) {
+		envs <- s.Environ()
+		_ = s.Exit(0)
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
+	defer cancel()
+	for _, notice := range []string{"upterm: this is home's door; 'exit' closes it for every guest.", ""} {
+		_, err := (&Client{Socket: door.socket, HostKeys: door.pin(), Stdout: io.Discard, Notice: notice}).Run(ctx)
+		require.NoError(t, err)
+		env := <-envs
+		asked := slices.IndexFunc(env, func(kv string) bool { return strings.HasPrefix(kv, upterm.AttachNoticeEnvVar+"=") })
+		if notice == "" {
+			require.Equal(t, -1, asked, "env: %v", env)
+			continue
+		}
+		require.GreaterOrEqual(t, asked, 0, "env: %v", env)
+		require.Equal(t, upterm.AttachNoticeEnvVar+"="+notice, env[asked])
+	}
+}
+
 func TestClientCannotAttachToANonexistentSocket(t *testing.T) {
 	_, key, err := ed25519.GenerateKey(rand.Reader)
 	require.NoError(t, err)
@@ -2421,7 +2445,7 @@ func TestApprovalRegistrationAndSessionEnd(t *testing.T) {
 				waitFor(t, func() bool { return strings.Contains(sink.String(), "pending") }, "notification missing")
 				_, err := pw.Write([]byte("~a"))
 				require.NoError(t, err)
-				waitFor(t, func() bool { return strings.Contains(sink.String(), "upterm: d ") }, "review missing")
+				waitFor(t, func() bool { return strings.Contains(sink.String(), approvalTestReviewShown) }, "review missing")
 			}
 			close(finish)
 			res := awaitResult(t, done)

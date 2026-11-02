@@ -25,6 +25,7 @@ var ExecTestCases = []FtestCase{
 	testExecIndependentExitStatuses,
 	testExecSeveralChannelsAndCancellation,
 	testExecLoginVersusExplicit,
+	testExecStartFailureNamesTheHostsLog,
 	testExecRawQuotingCwdEnv,
 	testExecConcurrentForwardSFTP,
 	testExecForegroundDisconnectAndHostStop,
@@ -145,6 +146,20 @@ func testExecLoginVersusExplicit(t *testing.T, hostURL, node, joinURL string) {
 	got, _, status := relayExec(t, c, guestToolCommand(t, "explicit"), nil)
 	require.Equal(t, 0, status)
 	require.Equal(t, "explicit exec", string(got))
+}
+
+// A guest whose command can't start is told, through the relay, which command
+// it was and where the host's log is.
+func testExecStartFailureNamesTheHostsLog(t *testing.T, hostURL, node, joinURL string) {
+	h := execFixture(t)
+	h.ForceCommand = []string{"/nonexistent-upterm-ftest-command"}
+	h.LogPath = "/var/log/upterm-ftest.log"
+	c := connectRelayGuest(t, shareHost(t, h, hostURL, node), joinURL)
+	out, stderr, status := relayExec(t, c, "ignored", nil)
+	require.Equal(t, 127, status)
+	require.Empty(t, out)
+	require.True(t, strings.HasPrefix(string(stderr), "upterm: the host's forced command couldn't start: /nonexistent-upterm-ftest-command was not found"), "%q", stderr)
+	require.True(t, strings.HasSuffix(string(stderr), " The host's log is /var/log/upterm-ftest.log.\r\n"), "%q", stderr)
 }
 
 func testExecConcurrentForwardSFTP(t *testing.T, hostURL, node, joinURL string) {

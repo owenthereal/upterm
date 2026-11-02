@@ -759,6 +759,7 @@ type Host struct {
 	SFTPDisabled               bool // Disable SFTP subsystem
 	SFTPAutoAccept             bool // Explicit SFTP pregrant; zero keeps protected operations denied
 	HideClientIP               bool
+	LogPath                    string
 	// Reconnect paces the tunnel's liveness and its redials; a field left
 	// zero takes host.ReconnectTiming's default.
 	Reconnect host.ReconnectTiming
@@ -890,6 +891,7 @@ func (c *Host) Share(url string) error {
 		SFTPDisabled:               c.SFTPDisabled,
 		AutoAccept:                 c.SFTPAutoAccept,
 		HideClientIP:               c.HideClientIP,
+		LogPath:                    c.LogPath,
 		AttachSocketFile:           attachSocket,
 		AwaitInitialClient:         true,
 		AttachListeningCallback:    func(s string) { attachReady <- s },

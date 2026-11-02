@@ -336,7 +336,7 @@ command text shown for approval. On Unix the raw command runs through
 Guest commands use the host's launch directory and inherited environment;
 guest environment requests are ignored.
 
-`--login-command 'env -u HERDR_ENV herdr'` opens that host-selected command
+`--login-command herdr` opens that host-selected command
 for shell requests, without exec approval. Explicit guest commands still use
 the exec policy. `--force-command COMMAND` instead replaces shell and exec
 commands; it runs with a private PTY when requested and pipes otherwise.
@@ -349,11 +349,13 @@ commands remain available, with read-only input suppressed.
 
 Ungranted exec, literal loopback forwarding and file operations without
 `--accept` request approval at the **primary local host terminal**. Type `~a`
-at the start of a line to review the oldest pending request. Follow its fresh
-confirmation code: `c CODE` allows this connection, capability and complete
-subject tuple; `g CODE` allows this authenticated guest key and capability
-until the host session ends, across reconnects. An exec grant never grants
-SFTP or forwarding. Escape leaves a request pending. Requests expire 60 seconds
+at the start of a line to review the oldest pending request. The review names
+the guest by the `--authorized-user` or `--authorized-keys` entry its key is
+on, or else by the key. Answer with its fresh confirmation code: `y CODE` then
+Enter allows this request on its connection; `a CODE` then Enter allows that
+guest key the same kind of request until the host session ends, across
+reconnects; `n CODE` then Enter denies it. An exec grant never grants SFTP or
+forwarding. Esc leaves a request pending. Requests expire 60 seconds
 after arrival at the host permission boundary, including queueing and review;
 earlier protocol buffering is outside that deadline.
 
@@ -413,6 +415,13 @@ For example:
 ```console
 upterm host --allow-forwarding=loopback
 ssh -L 5555:127.0.0.1:8080 SESSION_SSH_USER@uptermd.upterm.dev
+```
+
+A refused forward shows up only once something connects to the local port,
+as OpenSSH's own line in the guest's terminal, such as:
+
+```text
+channel 3: open failed: administratively prohibited: upterm: forwarding to localhost:8080 refused: upterm forwards only to literal loopback addresses; use 127.0.0.1:8080 or [::1]:8080
 ```
 
 After the first successful forward, the guest appears in session info and join/leave notifications until its SSH connection closes, even between forwarding channels. It is listed as `jump`, followed by where its forwards go, such as `→ 127.0.0.1:8080`: each distinct destination once, up to 16, then how many more forwards it opened, to anywhere else (`(+N more forwards)`). `--hide-client-ip`, and CI, hide the destinations along with the address. Multiple forwards on that connection share one entry; terminal and SFTP sessions retain their own entries. Forwarding alone does not set `firstGuestJoinedAt` or satisfy `--join-timeout`: an accepted terminal or SFTP session must join before that deadline. An idle `ssh -N` connection or a failed forward does not appear.

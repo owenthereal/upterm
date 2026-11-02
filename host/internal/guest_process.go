@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -18,10 +19,25 @@ import (
 	uio "github.com/owenthereal/upterm/io"
 )
 
-type guestProcessStartError struct{ err error }
+// guestProcessStartError is a guest command that couldn't start. path and dir
+// are the program and the directory the start was to run it in, as exec had
+// them, for telling which file a start that found no such file was missing.
+type guestProcessStartError struct {
+	err       error
+	path, dir string
+}
 
 func (e *guestProcessStartError) Error() string { return fmt.Sprintf("start guest command: %v", e.err) }
 func (e *guestProcessStartError) Unwrap() error { return e.err }
+
+// program is the file the start ran: path, and for a relative one, under dir,
+// where the command looks for it once it has changed to dir.
+func (e *guestProcessStartError) program() string {
+	if e.dir == "" || filepath.IsAbs(e.path) {
+		return e.path
+	}
+	return filepath.Join(e.dir, e.path)
+}
 
 type guestProcessSpec struct {
 	Argv, Env []string // Env is complete; nil means empty, not inherited.
@@ -71,7 +87,7 @@ func (h *sessionHandler) runGuestProcess(ctx context.Context, sess gssh.Session,
 		terminal = pipes
 	}
 	if err != nil {
-		return 1, &guestProcessStartError{err: err}
+		return 1, &guestProcessStartError{err: err, path: cmd.Path, dir: cmd.Dir}
 	}
 	if spec.onStarted != nil {
 		spec.onStarted()

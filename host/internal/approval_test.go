@@ -3,19 +3,26 @@
 package internal
 
 import (
+	"bytes"
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
 	"io"
 	"net"
 	"strconv"
+	"strings"
 	"testing"
 	"testing/synctest"
 	"time"
 
 	gssh "charm.land/ssh"
+	"github.com/owenthereal/upterm/attach"
 	"github.com/owenthereal/upterm/host/consent"
+	"github.com/owenthereal/upterm/server"
 	"github.com/owenthereal/upterm/upterm"
+	"github.com/owenthereal/upterm/utils"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/crypto/ssh"
 )
@@ -260,7 +267,7 @@ func TestApprovalQueue(t *testing.T) {
 		synctest.Test(t, func(t *testing.T) {
 			// A pure broker state machine: transport I/O is deliberately absent.
 			clients := &hostClients{primary: &hostClient{id: "primary"}}
-			broker := newApprovalBroker(clients, nil)
+			broker := newApprovalBroker(clients, nil, false, nil)
 			owner := &approvalTransport{ctx: &approvalTestContext{baseContext: context.Background(), id: "primary"}, registered: true, session: true, eligible: true, wake: make(chan struct{}, 1), done: make(chan struct{})}
 			owner.ctx.(*approvalTestContext).baseContext = context.WithValue(context.Background(), approvalLocalKey{}, owner)
 			broker.transports[owner] = struct{}{}
@@ -280,7 +287,7 @@ func TestApprovalQueue(t *testing.T) {
 	t.Run("bounded queue coalesces snapshots", func(t *testing.T) {
 		synctest.Test(t, func(t *testing.T) {
 			clients := &hostClients{primary: &hostClient{id: "primary"}}
-			broker := newApprovalBroker(clients, nil)
+			broker := newApprovalBroker(clients, nil, false, nil)
 			owner := &approvalTransport{ctx: &approvalTestContext{baseContext: context.Background(), id: "primary"}, registered: true, session: true, eligible: true, wake: make(chan struct{}, 1), done: make(chan struct{})}
 			broker.transports[owner] = struct{}{}
 			ctx, cancel := context.WithCancel(context.Background())
@@ -325,6 +332,192 @@ func TestApprovalQueue(t *testing.T) {
 		approvalState(t, a, "", 0)
 	})
 }
+
+// The review is told who is asking from the host's own configuration: the
+// allowlist's label for the guest's key, and whether there is an allowlist
+// at all. A label too long for the protocol, or not UTF-8, is cut or mended
+// rather than costing the guest its review.
+func TestApprovalNamesTheGuest(t *testing.T) {
+	long := strings.Repeat("a", 2*upterm.MaxApprovalGuest)
+	for _, tc := range []struct {
+		name     string
+		guests   map[string]string
+		open     bool
+		guest    string
+		unlisted bool
+	}{
+		{name: "on the allowlist", guests: map[string]string{"SHA256:guest": "alice (github:alice)"}, guest: "alice (github:alice)"},
+		{name: "no allowlist", open: true, unlisted: true},
+		{name: "a key it has no label for", guests: map[string]string{"SHA256:other": "bob (github:bob)"}},
+		{name: "long label", guests: map[string]string{"SHA256:guest": long}, guest: long[:upterm.MaxApprovalGuest-len("…")] + "…"},
+		{name: "not UTF-8", guests: map[string]string{"SHA256:guest": "alice\xff"}, guest: "alice\ufffd"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				clients := &hostClients{primary: &hostClient{id: "primary"}}
+				broker := newApprovalBroker(clients, tc.guests, tc.open, nil)
+				owner := &approvalTransport{ctx: &approvalTestContext{baseContext: context.Background(), id: "primary"}, registered: true, session: true, eligible: true, wake: make(chan struct{}, 1), done: make(chan struct{})}
+				broker.transports[owner] = struct{}{}
+				ctx, cancel := context.WithCancel(context.Background())
+				defer cancel()
+				result := approvalStart(broker, ctx, "named")
+				synctest.Wait()
+				snapshot, err := upterm.DecodeApprovalState(owner.snapshot)
+				require.NoError(t, err)
+				require.Equal(t, "named", snapshot.Current.ID)
+				require.Equal(t, "SHA256:guest", snapshot.Current.Fingerprint)
+				require.Equal(t, tc.guest, snapshot.Current.Guest)
+				require.Equal(t, tc.unlisted, snapshot.Current.Unlisted)
+				cancel()
+				require.ErrorIs(t, approvalResultRead(t, result).err, consent.ErrCanceled)
+			})
+		})
+	}
+}
+
+// A guest on the allowlist is named in the primary terminal's review by the
+// label the host gave its key, and the host's answer decides as before.
+func TestApprovalReviewNamesAnAllowlistedGuest(t *testing.T) {
+	_, private, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+	key, err := ssh.NewSignerFromKey(private)
+	require.NoError(t, err)
+	fingerprint := utils.FingerprintSHA256(key.PublicKey())
+	h := startHost(t, &Server{
+		TerminalConsent: true, Command: []string{"sh", "-c", "printf READY; exec sleep 60"},
+		AuthorizedKeys: []ssh.PublicKey{key.PublicKey()}, GuestLabels: map[string]string{fingerprint: "alice (github:alice)"},
+	})
+	a := approvalConnect(t, h, true, true, true, true)
+	approvalPrimary(t, h, a.id)
+
+	// What the relay mints for the guest's own key.
+	cert, err := (&server.UserCertSigner{SessionID: t.Name(), User: "guest", AuthRequest: &server.AuthRequest{AuthorizedKey: ssh.MarshalAuthorizedKey(key.PublicKey())}}).SignCert(h.relaySigner)
+	require.NoError(t, err)
+	raw, err := net.DialTimeout("tcp", h.addr, harnessTimeout)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = raw.Close() })
+	require.NoError(t, raw.SetDeadline(time.Now().Add(harnessTimeout)))
+	conn, chans, reqs, err := ssh.NewClientConn(raw, h.addr, &ssh.ClientConfig{User: "guest", Auth: []ssh.AuthMethod{ssh.PublicKeys(cert)}, HostKeyCallback: ssh.FixedHostKey(h.hostKey)})
+	require.NoError(t, err)
+	client := ssh.NewClient(conn, chans, reqs)
+	t.Cleanup(func() { _ = client.Close() })
+	sess := execSession(t, client, false)
+	var stderr bytes.Buffer
+	sess.Stderr = &stderr
+	done := make(chan error, 1)
+	go func() { done <- sess.Run("true") }()
+
+	var state upterm.ApprovalState
+	for state.Current == nil {
+		select {
+		case state = <-a.states:
+		case <-time.After(harnessTimeout):
+			t.Fatal("no review reached the primary terminal")
+		}
+	}
+	require.Equal(t, "alice (github:alice)", state.Current.Guest)
+	require.False(t, state.Current.Unlisted)
+	require.Equal(t, fingerprint, state.Current.Fingerprint)
+	require.True(t, approvalAnswer(t, a, state.Current.ID, "deny"))
+	select {
+	case err := <-done:
+		requireExitStatus(t, err, 1)
+	case <-time.After(harnessTimeout):
+		t.Fatal("the denied command never ended")
+	}
+	require.Equal(t, execDeniedNotice, stderr.String())
+}
+
+// A guest of a session with no allowlist is named in the primary terminal's
+// review by its key alone, and the review is told the session has none, so
+// it says anyone with the session ID can join. The host's answer decides as
+// before.
+func TestApprovalReviewSaysAnyoneCanJoinASessionWithNoAllowlist(t *testing.T) {
+	t.Run("the request", func(t *testing.T) {
+		h := approvalHost(t)
+		a := approvalConnect(t, h, true, true, true, true)
+		approvalPrimary(t, h, a.id)
+		sess := execSession(t, h.guestClient(t), false)
+		var stderr bytes.Buffer
+		sess.Stderr = &stderr
+		done := make(chan error, 1)
+		go func() { done <- sess.Run("true") }()
+
+		var state upterm.ApprovalState
+		for state.Current == nil {
+			select {
+			case state = <-a.states:
+			case <-time.After(harnessTimeout):
+				t.Fatal("no review reached the primary terminal")
+			}
+		}
+		require.True(t, state.Current.Unlisted)
+		require.Empty(t, state.Current.Guest)
+		// The harness's guest holds the key its relay signs with.
+		require.Equal(t, utils.FingerprintSHA256(h.relaySigner.PublicKey()), state.Current.Fingerprint)
+		require.True(t, approvalAnswer(t, a, state.Current.ID, "deny"))
+		select {
+		case err := <-done:
+			requireExitStatus(t, err, 1)
+		case <-time.After(harnessTimeout):
+			t.Fatal("the denied command never ended")
+		}
+		require.Equal(t, execDeniedNotice, stderr.String())
+	})
+	t.Run("the review", func(t *testing.T) {
+		h := approvalHost(t)
+		screen, keys := attachReviewTerminal(t, h)
+		guest := h.guestClient(t)
+		sess := execSession(t, guest, false)
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			_ = sess.Run("true")
+		}()
+
+		screen.await(t, "upterm: 1 permission request(s) pending; ~a reviews the oldest.")
+		_, err := io.WriteString(keys, "~a")
+		require.NoError(t, err)
+		screen.await(t, "\r\nupterm: a guest with key "+utils.FingerprintSHA256(h.relaySigner.PublicKey())+
+			" (anyone with the session ID can join) wants to run a command on this machine: \"true\"\x1b[K\r\n")
+		// Leaving ends the request; nothing is left to answer.
+		require.NoError(t, guest.Close())
+		select {
+		case <-done:
+		case <-time.After(harnessTimeout):
+			t.Fatal("the guest's request outlived its connection")
+		}
+	})
+}
+
+// attachReviewTerminal attaches upterm attach's own client to h's host door,
+// as the session's primary terminal, and returns what it draws and where to
+// type: the review a host is shown, drawn by the client that draws it.
+func attachReviewTerminal(t *testing.T, h *hostHarness) (*sessionLog, io.Writer) {
+	t.Helper()
+	typed, keys := io.Pipe()
+	screen := newSessionLog()
+	client := &attach.Client{Socket: h.attachSocket, HostKeys: []ssh.PublicKey{h.hostKey}, Stdin: typed, Stdout: screen,
+		Pty: &attach.Pty{Term: "xterm"}, Escape: '~', Approvals: true, Logger: discardLogger()}
+	ctx, cancel := context.WithCancel(context.Background())
+	ended := make(chan struct{})
+	go func() {
+		defer close(ended)
+		_, _ = client.Run(ctx)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		_ = keys.Close()
+		select {
+		case <-ended:
+		case <-time.After(harnessTimeout):
+			t.Error("the attach client did not end")
+		}
+	})
+	require.Eventually(t, func() bool { return h.srv.hostClients.primaryID() != "" }, harnessTimeout, time.Millisecond, "the attach client never became the primary terminal")
+	return screen, keys
+}
+
 func TestApprovalLoss(t *testing.T) {
 	h := approvalHost(t)
 	a := approvalConnect(t, h, true, true, true, true)

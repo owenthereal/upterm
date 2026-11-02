@@ -152,7 +152,7 @@ func TestGuestProcessPipes(t *testing.T) {
 
 	t.Run("complete environment and cwd", func(t *testing.T) {
 		for _, hide := range []bool{false, true} {
-			env := append(withoutSSHSessionVars([]string{"PATH=/usr/bin:/bin", "VALUE=first", "VALUE=last", "SSH_TTY=stale", "SSH_CLIENT=stale"}), guestConnectionEnv(&server.AuthRequest{RemoteAddr: "203.0.113.7:1234", LocalAddr: "198.51.100.1:22"}, hide)...)
+			env := append(withoutHostSessionVars([]string{"PATH=/usr/bin:/bin", "VALUE=first", "VALUE=last", "SSH_TTY=stale", "SSH_CLIENT=stale"}), guestConnectionEnv(&server.AuthRequest{RemoteAddr: "203.0.113.7:1234", LocalAddr: "198.51.100.1:22"}, hide)...)
 			env = append(env, "SSH_ORIGINAL_COMMAND=raw original", "SSH_TTY=must disappear")
 			spec := guestShell(`printf '%s|%s|%s|%s|%s' "$VALUE" "${SSH_TTY-unset}" "${SSH_CLIENT-unset}" "$SSH_ORIGINAL_COMMAND" "$PWD"`)
 			spec.Env = env

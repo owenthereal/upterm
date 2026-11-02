@@ -51,6 +51,9 @@ type Client struct {
 	// Status is the Terminal's: see Terminal.Status.
 	Status func(ctx context.Context) []string
 
+	// Notice is the Terminal's: see Terminal.Notice.
+	Notice string
+
 	// dial reaches the socket; nil is a unix dial. Tests hand over a
 	// connection they can block, to stand in for a daemon that has stopped
 	// reading its socket.
@@ -164,6 +167,7 @@ func (c *Client) Run(ctx context.Context) (Result, error) {
 		Approvals: approvals,
 		Suspend:   c.Suspend,
 		Status:    c.Status,
+		Notice:    c.Notice,
 		// Interactive: this client displays on a terminal and forwards its
 		// keystrokes.
 		DeclareInteractive: c.Pty != nil && c.Stdin != nil,

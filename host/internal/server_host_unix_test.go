@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"sync"
 	"syscall"
 	"testing"
@@ -21,6 +22,7 @@ import (
 	gssh "charm.land/ssh"
 	"github.com/olebedev/emitter"
 	"github.com/owenthereal/upterm/host/api"
+	"github.com/owenthereal/upterm/internal/termsize"
 	uio "github.com/owenthereal/upterm/io"
 	"github.com/owenthereal/upterm/upterm"
 	"github.com/stretchr/testify/require"
@@ -384,6 +386,98 @@ func TestHostDoorReportsHostKind(t *testing.T) {
 	case <-time.After(harnessTimeout):
 		t.Fatal("no client-joined event for the host client")
 	}
+}
+
+// A client of the host door can ask, as upterm attach does on a door, to be
+// shown a line of its own below the screen it attaches to: written after the
+// replay, which would scroll a line printed before attaching out of sight,
+// and as text alone. A guest's asking shows it nothing.
+func TestHostDoorShowsTheNoticeItsClientAsksFor(t *testing.T) {
+	h := startHost(t, &Server{Command: readsALine("READY", 0)})
+	// The command's first output is in the session's history before the
+	// client with the notice attaches, so its replay carries it.
+	_, viewer, _ := h.connectHost(t, nil)
+	readUntil(t, viewer, "READY")
+
+	sess, err := h.dialHost(t).NewSession()
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = sess.Close() })
+	require.NoError(t, sess.RequestPty("xterm", 24, 80, ssh.TerminalModes{}))
+	require.NoError(t, sess.Setenv(upterm.AttachInteractiveEnvVar, "1"))
+	require.NoError(t, sess.Setenv(upterm.AttachNoticeEnvVar, "upterm: this is home's door;\x1b[2J 'exit' closes it"))
+	// Held open, as attach holds it: a closed input would end this client.
+	_, err = sess.StdinPipe()
+	require.NoError(t, err)
+	out, err := sess.StdoutPipe()
+	require.NoError(t, err)
+	require.NoError(t, sess.Shell())
+	got := readUntil(t, out, "'exit' closes it\r\n")
+	require.Contains(t, got, "\r\nupterm: this is home's door;?[2J 'exit' closes it\r\n")
+	require.Less(t, strings.Index(got, "READY"), strings.Index(got, "upterm: this is home's door"), "below the screen the replay draws")
+
+	guest, err := h.guestClient(t).NewSession()
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = guest.Close() })
+	require.NoError(t, guest.RequestPty("xterm", 24, 80, ssh.TerminalModes{}))
+	_ = guest.Setenv(upterm.AttachNoticeEnvVar, "upterm: a guest's notice")
+	guestIn, err := guest.StdinPipe()
+	require.NoError(t, err)
+	guestOut, err := guest.StdoutPipe()
+	require.NoError(t, err)
+	require.NoError(t, guest.Shell())
+	readUntil(t, guestOut, "READY")
+	_, err = io.WriteString(guestIn, "typed\n")
+	require.NoError(t, err)
+	require.NotContains(t, readUntil(t, guestOut, "got:typed"), "a guest's notice")
+}
+
+// The notice is written after the repaint its client's attach asks the
+// command for, not ahead of it, where the repaint draws over it at once: a
+// full-screen program redraws on that nudge, and so does a shell such as zsh,
+// redrawing its prompt. This command clears the screen and redraws on every
+// SIGWINCH.
+func TestHostDoorShowsTheNoticeAfterTheRepaintItsAttachAsksFor(t *testing.T) {
+	const notice = "upterm: this is home's door; 'exit' closes it"
+	const repaint = "\x1b[H\x1b[2JREPAINTED"
+	ready := filepath.Join(t.TempDir(), "ready")
+	started := make(chan struct{})
+	h := startHost(t, &Server{
+		// However long the repaint takes, it is waited for: this is about
+		// the order, and the cap is for a command that doesn't repaint.
+		timing: serverTiming{noticeCap: time.Hour},
+		// A shell runs a trap between foreground commands, hence the short
+		// sleeps; ready says the trap is set.
+		Command:          []string{"sh", "-c", `trap 'printf "\033[H\033[2JREPAINTED"' WINCH; : > "$1"; while :; do sleep 0.05; done`, "sh", ready},
+		OnCommandStarted: func() { close(started) },
+	})
+	// The nudge reaches the command once its pty is published, and is
+	// answered once its trap is set.
+	select {
+	case <-started:
+	case <-time.After(harnessTimeout):
+		t.Fatal("the command never started")
+	}
+	require.Eventually(t, func() bool {
+		_, err := os.Stat(ready)
+		return err == nil
+	}, harnessTimeout, time.Millisecond, "the command never set its trap")
+
+	sess, err := h.dialHost(t).NewSession()
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = sess.Close() })
+	// The size the command opened at, with no terminal attached to give it
+	// one: a resize would be a SIGWINCH of its own, and the attach's nudge is
+	// to be the only one.
+	require.NoError(t, sess.RequestPty("xterm", termsize.Default.Rows, termsize.Default.Cols, ssh.TerminalModes{}))
+	require.NoError(t, sess.Setenv(upterm.AttachInteractiveEnvVar, "1"))
+	require.NoError(t, sess.Setenv(upterm.AttachNoticeEnvVar, notice))
+	_, err = sess.StdinPipe()
+	require.NoError(t, err)
+	out, err := sess.StdoutPipe()
+	require.NoError(t, err)
+	require.NoError(t, sess.Shell())
+	got := readUntil(t, out, "\r\n"+notice+"\r\n")
+	require.Contains(t, got[:strings.Index(got, "\r\n"+notice)], repaint, "the notice came ahead of the repaint, which draws over it")
 }
 
 func TestHostDoorIgnoresReadOnly(t *testing.T) {

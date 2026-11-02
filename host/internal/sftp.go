@@ -20,7 +20,7 @@ import (
 	"github.com/pkg/sftp"
 )
 
-const sftpApprovalHint = "SFTP needs approval in the primary host terminal; the host can attach with approval escapes enabled or use --accept"
+const sftpApprovalHint = "SFTP needs approval in the primary host terminal; the host can attach with approval escapes enabled or use --allow-sftp"
 
 // A boundary ID names one protected operation, independently of the Manager's
 // coalesced review IDs. Process-wide sequencing also separates concurrent
