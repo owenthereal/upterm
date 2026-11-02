@@ -7,7 +7,7 @@ reach from anywhere, without opening a port. Herdr keeps the agents, so losing
 the door costs a rejoin, not the work.
 
 Use an upterm build whose `upterm host --help` lists `--login-command`,
-`--accept-exec` and `--allow-loopback-tcp-forwarding`, and Herdr 0.9.0 or
+`--allow-exec` and `--allow-forwarding`, and Herdr 0.9.0 or
 later, with the machine at home on macOS or Linux.
 
 For ordinary terminal sharing, start `upterm host` and share its join command.
@@ -48,12 +48,12 @@ On the machine running Herdr:
 upterm host --detach --name home --accept \
   --authorized-user github:YOUR_GITHUB_USER \
   --login-command herdr \
-  --accept-exec \
-  --allow-loopback-tcp-forwarding
+  --allow-exec \
+  --allow-forwarding=loopback
 ```
 
 `--login-command` selects what plain `ssh home` opens. Explicit commands from
-Herdr remote mode and VS Code run separately, with `--accept-exec` granting
+Herdr remote mode and VS Code run separately, with `--allow-exec` granting
 execution trust: a guest can send further code over stdin. `--accept` grants
 SFTP and skips the startup prompt; it grants neither exec nor forwarding.
 Herdr alone needs no forwarding grant. The literal loopback grant above lets

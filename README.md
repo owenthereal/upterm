@@ -329,7 +329,7 @@ session `disconnected`, as before.
 ### Private guest commands and terminal approval
 
 Ordinary `upterm host` shares one terminal. A guest's explicit SSH command
-runs privately after execution approval; use `--accept-exec` to grant that
+runs privately after execution approval; use `--allow-exec` to grant that
 trust for the run. This permits further code and input on stdin, not just the
 command text shown for approval. On Unix the raw command runs through
 `$SHELL -c` (or `/bin/sh`); Windows uses pwsh, Windows PowerShell or cmd.exe.
@@ -366,9 +366,9 @@ disables review and passes all input through. A custom escape character
 replaces `~`; type it twice at line start to send a literal one (`~~a` sends
 `~a`). These escapes are local to the host attachment.
 
-`--login-command`, `--accept-exec`, `--allow-loopback-tcp-forwarding`,
-`--no-exec` and `--no-forwarding` are per-run CLI options, not environment or
-config settings. Restart the session to change them.
+`--login-command`, `--allow-exec`, `--allow-sftp`, `--allow-forwarding`,
+`--full-access`, `--no-exec` and `--no-forwarding` are per-run CLI options,
+not environment or config settings. Restart the session to change them.
 
 `session info`, `session current` and detached JSON report `loginCommand`,
 `guestShell` (`shared`, `login`, `forced`), `execution` (`off`, `approval`,
@@ -404,16 +404,16 @@ scp -P PORT ./local/file.txt USER@HOST:/path/to/destination/
 
 Clients can use standard SSH local forwarding through a hosted session.
 Without a grant, only literal 127.0.0.0/8 and ::1 destinations can request
-terminal approval. `--allow-loopback-tcp-forwarding` grants that tier for the
+terminal approval. `--allow-forwarding=loopback` grants that tier for the
 run; hostnames (including `localhost`), mapped IPv6 and zoned addresses do not
-qualify. The existing `--allow-local-tcp-forwarding` grants any destination the
-host can reach. `--no-forwarding` and `--read-only` deny all forwarding before
-grants or approval. `--accept` grants no forwarding.
+qualify. `--allow-forwarding=any` grants any destination the host can reach.
+`--no-forwarding` and `--read-only` deny all forwarding before grants or
+approval. `--accept` grants no forwarding.
 
 For example:
 
 ```console
-upterm host --allow-loopback-tcp-forwarding
+upterm host --allow-forwarding=loopback
 ssh -L 5555:127.0.0.1:8080 SESSION_SSH_USER@uptermd.upterm.dev
 ```
 
@@ -430,7 +430,7 @@ After the first successful forward, the guest appears in session info and join/l
 
 An explicit SSH command (`ssh -t … CMD`) no longer joins the shared terminal
 with `CMD` ignored: it runs `CMD` privately, after approval or with
-`--accept-exec`, and `--accept` doesn't grant it, so a detached `--accept`
+`--allow-exec`, and `--accept` doesn't grant it, so a detached `--accept`
 session denies it. Use plain `ssh` or `upterm join` to join the shared
 terminal.
 
