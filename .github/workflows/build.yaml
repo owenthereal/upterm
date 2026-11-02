@@ -7,14 +7,33 @@ on:
 permissions:
   contents: write
   packages: write
+env:
+  # Renders go test -json output for the job log: each output line prefixed
+  # with its package (or, for build output, its import path), and every line
+  # that isn't JSON passed through unchanged.
+  GO_TEST_LOG_JQ: |-
+    (try fromjson catch null) as $e
+    | if ($e | type) != "object" then . + "\n"
+      elif $e.Output then (($e.Package // $e.ImportPath // "") | ltrimstr("github.com/owenthereal/upterm/")) + ": " + $e.Output
+      else empty end
 jobs:
-  build:
-    name: Compile
-    runs-on: ${{ matrix.os }}
+  test-ubuntu:
+    name: Test (Ubuntu + Consul, ${{ matrix.shard }})
+    runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-latest, ubuntu-latest, windows-latest]
+        shard: [ftests-split, ftests-rest, others]
+    services:
+      consul:
+        image: consul:1.15
+        ports:
+          - 8500:8500
+        options: >-
+          --health-cmd "consul members"
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 15
     steps:
       - uses: actions/checkout@v7
       - name: Set up Go
@@ -23,35 +42,38 @@ jobs:
           go-version-file: go.mod
           check-latest: true
       - name: Compile
+        if: matrix.shard == 'others'
         run: make install
-  test-macos:
-    name: Test (macOS)
-    runs-on: macos-latest
-    steps:
-      - uses: actions/checkout@v7
-      - name: Set up Go
-        uses: actions/setup-go@v7
-        with:
-          go-version-file: go.mod
-          check-latest: true
       - name: Test
-        run: make test
+        shell: bash
+        run: make test-${{ matrix.shard }} TEST_COVER= TEST_FORMAT=-json 2>&1 | tee test.json | jq -R -j --unbuffered "$GO_TEST_LOG_JQ"
         env:
           BASH_SILENCE_DEPRECATION_WARNING: 1
+      - name: Check that Consul tests ran
+        shell: bash
+        run: |
+          status=0
+          matches=$(grep -n 'Consul not available' test.json) || status=$?
+          if [ "$status" -gt 1 ]; then
+            exit "$status"
+          fi
+          if [ "$status" -eq 0 ]; then
+            msg="Tests skipped because Consul was not available:"$'\n'"$matches"
+            msg=${msg//'%'/%25}
+            msg=${msg//$'\r'/%0D}
+            msg=${msg//$'\n'/%0A}
+            echo "::error::$msg"
+            exit 1
+          fi
+          echo "No test skipped for want of Consul."
 
-  test-ubuntu:
-    name: Test (Ubuntu + Consul)
-    runs-on: ubuntu-latest
-    services:
-      consul:
-        image: consul:1.15
-        ports:
-          - 8500:8500
-        options: >-
-          --health-cmd "consul members"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
+  test-macos:
+    name: Test (macOS, ${{ matrix.shard }})
+    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [ftests, others]
     steps:
       - uses: actions/checkout@v7
       - name: Set up Go
@@ -59,14 +81,22 @@ jobs:
         with:
           go-version-file: go.mod
           check-latest: true
+      - name: Compile
+        if: matrix.shard == 'others'
+        run: make install
       - name: Test
-        run: make test
+        shell: bash
+        run: make test-${{ matrix.shard }} TEST_COVER= TEST_FORMAT=-json 2>&1 | tee test.json | jq -R -j --unbuffered "$GO_TEST_LOG_JQ"
         env:
           BASH_SILENCE_DEPRECATION_WARNING: 1
 
   test-windows:
-    name: Test (Windows)
+    name: Test (Windows, ${{ matrix.shard }})
     runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [ftests, others]
     steps:
       - uses: actions/checkout@v7
       - name: Set up Go
@@ -74,8 +104,13 @@ jobs:
         with:
           go-version-file: go.mod
           check-latest: true
+      - name: Compile
+        if: matrix.shard == 'others'
+        run: make install
       - name: Test
-        run: make test
+        shell: bash
+        run: make test-${{ matrix.shard }} TEST_COVER= TEST_FORMAT=-json 2>&1 | tee test.json | jq -R -j --unbuffered "$GO_TEST_LOG_JQ"
+
   vet:
     name: Vet
     runs-on: ubuntu-latest
@@ -124,7 +159,7 @@ jobs:
               echo "uptermd is ready"
               break
             fi
-            if [ $i -eq 30 ]; then
+            if [ "$i" -eq 30 ]; then
               echo "uptermd failed to start"
               cat /tmp/uptermd/uptermd.log
               exit 1
@@ -153,3 +188,25 @@ jobs:
       snapshot: true
       docker_repo: ghcr.io/owenthereal/upterm/uptermd
     secrets: inherit
+
+  gate:
+    name: CI gate
+    runs-on: ubuntu-latest
+    if: always()
+    needs:
+      - test-ubuntu
+      - test-macos
+      - test-windows
+      - vet
+      - test-e2e
+      - build-and-release
+    steps:
+      - name: Check every job succeeded
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          jq -r 'to_entries[] | "\(.key): \(.value.result)"' <<<"$NEEDS"
+          if ! jq -e 'all(.[]; .result == "success")' <<<"$NEEDS" >/dev/null; then
+            echo "::error::Not every job succeeded."
+            exit 1
+          fi
