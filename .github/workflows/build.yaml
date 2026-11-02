@@ -7,41 +7,26 @@ on:
 permissions:
   contents: write
   packages: write
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+env:
+  # Renders go test -json output for the job log: each output line prefixed
+  # with its package (or, for build output, its import path), and every line
+  # that isn't JSON passed through unchanged.
+  GO_TEST_LOG_JQ: |-
+    (try fromjson catch null) as $e
+    | if ($e | type) != "object" then . + "\n"
+      elif $e.Output then (($e.Package // $e.ImportPath // "") | ltrimstr("github.com/owenthereal/upterm/")) + ": " + $e.Output
+      else empty end
 jobs:
-  build:
-    name: Compile
-    runs-on: ${{ matrix.os }}
+  test-ubuntu:
+    name: Test (Ubuntu + Consul, ${{ matrix.shard }})
+    runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-latest, ubuntu-latest, windows-latest]
-    steps:
-      - uses: actions/checkout@v7
-      - name: Set up Go
-        uses: actions/setup-go@v7
-        with:
-          go-version-file: go.mod
-          check-latest: true
-      - name: Compile
-        run: make install
-  test-macos:
-    name: Test (macOS)
-    runs-on: macos-latest
-    steps:
-      - uses: actions/checkout@v7
-      - name: Set up Go
-        uses: actions/setup-go@v7
-        with:
-          go-version-file: go.mod
-          check-latest: true
-      - name: Test
-        run: make test
-        env:
-          BASH_SILENCE_DEPRECATION_WARNING: 1
-
-  test-ubuntu:
-    name: Test (Ubuntu + Consul)
-    runs-on: ubuntu-latest
+        shard: [ftests-split, ftests-rest, others]
     services:
       consul:
         image: consul:1.15
@@ -49,33 +34,266 @@ jobs:
           - 8500:8500
         options: >-
           --health-cmd "consul members"
-          --health-interval 10s
+          --health-interval 2s
           --health-timeout 5s
-          --health-retries 5
+          --health-retries 15
     steps:
       - uses: actions/checkout@v7
       - name: Set up Go
+        id: setup-go
         uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
           check-latest: true
+          cache: false
+      - name: Locate Go caches
+        id: go-env
+        shell: bash
+        run: |
+          echo "gocache=$(go env GOCACHE)" >> "$GITHUB_OUTPUT"
+          echo "gomodcache=$(go env GOMODCACHE)" >> "$GITHUB_OUTPUT"
+      # Restores the newest entry master saved. A pull request's sha is its
+      # merge commit, so only a restore key matches there.
+      - name: Restore Go caches
+        id: go-cache
+        uses: actions/cache/restore@v6
+        with:
+          path: |
+            ${{ steps.go-env.outputs.gocache }}
+            ${{ steps.go-env.outputs.gomodcache }}
+          key: go-race-${{ runner.os }}-${{ runner.arch }}-go${{ steps.setup-go.outputs.go-version }}-${{ hashFiles('go.sum') }}-${{ github.sha }}
+          restore-keys: |
+            go-race-${{ runner.os }}-${{ runner.arch }}-go${{ steps.setup-go.outputs.go-version }}-${{ hashFiles('go.sum') }}-
+            go-race-${{ runner.os }}-${{ runner.arch }}-go${{ steps.setup-go.outputs.go-version }}-
+      - name: Compile
+        if: matrix.shard == 'others'
+        run: make install
+      # Records CPU and memory use once a second while the tests run, with a
+      # timestamp on every sample, to size how many tests a runner can run in
+      # parallel. The sampler runs in the background until a later step stops
+      # it, and neither step can fail the job.
+      - name: Start load sampler
+        continue-on-error: true
+        shell: bash
+        run: |
+          nohup vmstat -n -t 1 > load.txt 2>&1 < /dev/null &
+          echo $! > "$RUNNER_TEMP/load-sampler.pid"
       - name: Test
-        run: make test
+        shell: bash
+        run: make test-${{ matrix.shard }} TEST_COVER= TEST_FORMAT=-json 2>&1 | tee test.json | jq -R -j --unbuffered "$GO_TEST_LOG_JQ"
         env:
           BASH_SILENCE_DEPRECATION_WARNING: 1
+      - name: Check that Consul tests ran
+        shell: bash
+        run: |
+          status=0
+          matches=$(grep -n 'Consul not available' test.json) || status=$?
+          if [ "$status" -gt 1 ]; then
+            exit "$status"
+          fi
+          if [ "$status" -eq 0 ]; then
+            msg="Tests skipped because Consul was not available:"$'\n'"$matches"
+            msg=${msg//'%'/%25}
+            msg=${msg//$'\r'/%0D}
+            msg=${msg//$'\n'/%0A}
+            echo "::error::$msg"
+            exit 1
+          fi
+          echo "No test skipped for want of Consul."
+      - name: Stop load sampler
+        if: always()
+        continue-on-error: true
+        shell: bash
+        run: kill "$(cat "$RUNNER_TEMP/load-sampler.pid")"
+      - name: Upload load samples
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ci-load-${{ runner.os }}-${{ matrix.shard }}-attempt${{ github.run_attempt }}
+          path: |
+            load.txt
+            test.json
+          retention-days: 30
+          if-no-files-found: warn
+      # Builds ftests' race test binary too, so the one entry this job saves
+      # holds every test build on this OS.
+      - name: Build ftests for the cache
+        if: always() && matrix.shard == 'others' && github.event_name == 'push' && github.ref == 'refs/heads/master'
+        shell: bash
+        run: go test -race -count=1 -run '^$' ./ftests
+      - name: Save Go caches
+        if: always() && matrix.shard == 'others' && github.event_name == 'push' && github.ref == 'refs/heads/master' && steps.go-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: |
+            ${{ steps.go-env.outputs.gocache }}
+            ${{ steps.go-env.outputs.gomodcache }}
+          key: go-race-${{ runner.os }}-${{ runner.arch }}-go${{ steps.setup-go.outputs.go-version }}-${{ hashFiles('go.sum') }}-${{ github.sha }}
 
-  test-windows:
-    name: Test (Windows)
-    runs-on: windows-latest
+  test-macos:
+    name: Test (macOS, ${{ matrix.shard }})
+    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [ftests, others]
     steps:
       - uses: actions/checkout@v7
       - name: Set up Go
+        id: setup-go
         uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
           check-latest: true
+          cache: false
+      - name: Locate Go caches
+        id: go-env
+        shell: bash
+        run: |
+          echo "gocache=$(go env GOCACHE)" >> "$GITHUB_OUTPUT"
+          echo "gomodcache=$(go env GOMODCACHE)" >> "$GITHUB_OUTPUT"
+      # Restores the newest entry master saved. A pull request's sha is its
+      # merge commit, so only a restore key matches there.
+      - name: Restore Go caches
+        id: go-cache
+        uses: actions/cache/restore@v6
+        with:
+          path: |
+            ${{ steps.go-env.outputs.gocache }}
+            ${{ steps.go-env.outputs.gomodcache }}
+          key: go-race-${{ runner.os }}-${{ runner.arch }}-go${{ steps.setup-go.outputs.go-version }}-${{ hashFiles('go.sum') }}-${{ github.sha }}
+          restore-keys: |
+            go-race-${{ runner.os }}-${{ runner.arch }}-go${{ steps.setup-go.outputs.go-version }}-${{ hashFiles('go.sum') }}-
+            go-race-${{ runner.os }}-${{ runner.arch }}-go${{ steps.setup-go.outputs.go-version }}-
+      - name: Compile
+        if: matrix.shard == 'others'
+        run: make install
+      # Records CPU and memory use once a second while the tests run, with a
+      # timestamp on every sample, to size how many tests a runner can run in
+      # parallel. The sampler runs in the background until a later step stops
+      # it, and neither step can fail the job.
+      - name: Start load sampler
+        continue-on-error: true
+        shell: bash
+        run: |
+          nohup top -l 0 -s 1 -n 0 > load.txt 2>&1 < /dev/null &
+          echo $! > "$RUNNER_TEMP/load-sampler.pid"
       - name: Test
-        run: make test
+        shell: bash
+        run: make test-${{ matrix.shard }} TEST_COVER= TEST_FORMAT=-json 2>&1 | tee test.json | jq -R -j --unbuffered "$GO_TEST_LOG_JQ"
+        env:
+          BASH_SILENCE_DEPRECATION_WARNING: 1
+      - name: Stop load sampler
+        if: always()
+        continue-on-error: true
+        shell: bash
+        run: kill "$(cat "$RUNNER_TEMP/load-sampler.pid")"
+      - name: Upload load samples
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ci-load-${{ runner.os }}-${{ matrix.shard }}-attempt${{ github.run_attempt }}
+          path: |
+            load.txt
+            test.json
+          retention-days: 30
+          if-no-files-found: warn
+      # Builds ftests' race test binary too, so the one entry this job saves
+      # holds every test build on this OS.
+      - name: Build ftests for the cache
+        if: always() && matrix.shard == 'others' && github.event_name == 'push' && github.ref == 'refs/heads/master'
+        shell: bash
+        run: go test -race -count=1 -run '^$' ./ftests
+      - name: Save Go caches
+        if: always() && matrix.shard == 'others' && github.event_name == 'push' && github.ref == 'refs/heads/master' && steps.go-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: |
+            ${{ steps.go-env.outputs.gocache }}
+            ${{ steps.go-env.outputs.gomodcache }}
+          key: go-race-${{ runner.os }}-${{ runner.arch }}-go${{ steps.setup-go.outputs.go-version }}-${{ hashFiles('go.sum') }}-${{ github.sha }}
+
+  test-windows:
+    name: Test (Windows, ${{ matrix.shard }})
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [ftests, others]
+    steps:
+      - uses: actions/checkout@v7
+      - name: Set up Go
+        id: setup-go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          check-latest: true
+          cache: false
+      - name: Locate Go caches
+        id: go-env
+        shell: bash
+        run: |
+          echo "gocache=$(go env GOCACHE)" >> "$GITHUB_OUTPUT"
+          echo "gomodcache=$(go env GOMODCACHE)" >> "$GITHUB_OUTPUT"
+      # Restores the newest entry master saved. A pull request's sha is its
+      # merge commit, so only a restore key matches there.
+      - name: Restore Go caches
+        id: go-cache
+        uses: actions/cache/restore@v6
+        with:
+          path: |
+            ${{ steps.go-env.outputs.gocache }}
+            ${{ steps.go-env.outputs.gomodcache }}
+          key: go-race-${{ runner.os }}-${{ runner.arch }}-go${{ steps.setup-go.outputs.go-version }}-${{ hashFiles('go.sum') }}-${{ github.sha }}
+          restore-keys: |
+            go-race-${{ runner.os }}-${{ runner.arch }}-go${{ steps.setup-go.outputs.go-version }}-${{ hashFiles('go.sum') }}-
+            go-race-${{ runner.os }}-${{ runner.arch }}-go${{ steps.setup-go.outputs.go-version }}-
+      - name: Compile
+        if: matrix.shard == 'others'
+        run: make install
+      # Records CPU and memory use once a second while the tests run, with a
+      # timestamp on every sample, to size how many tests a runner can run in
+      # parallel. The sampler runs in its own hidden window until a later step
+      # stops it, and neither step can fail the job.
+      - name: Start load sampler
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $sampler = Start-Process -FilePath typeperf -ArgumentList '"\Processor(_Total)\% Processor Time" "\Memory\Available MBytes" -si 1 -y -o load.csv' -WindowStyle Hidden -PassThru
+          Set-Content -Path "$env:RUNNER_TEMP\load-sampler.pid" -Value $sampler.Id
+      - name: Test
+        shell: bash
+        run: make test-${{ matrix.shard }} TEST_COVER= TEST_FORMAT=-json 2>&1 | tee test.json | jq -R -j --unbuffered "$GO_TEST_LOG_JQ"
+      - name: Stop load sampler
+        if: always()
+        continue-on-error: true
+        shell: pwsh
+        run: Stop-Process -Id (Get-Content "$env:RUNNER_TEMP\load-sampler.pid") -PassThru | Wait-Process -Timeout 10
+      - name: Upload load samples
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ci-load-${{ runner.os }}-${{ matrix.shard }}-attempt${{ github.run_attempt }}
+          path: |
+            load.csv
+            test.json
+          retention-days: 30
+          if-no-files-found: warn
+      # Builds ftests' race test binary too, so the one entry this job saves
+      # holds every test build on this OS.
+      - name: Build ftests for the cache
+        if: always() && matrix.shard == 'others' && github.event_name == 'push' && github.ref == 'refs/heads/master'
+        shell: bash
+        run: go test -race -count=1 -run '^$' ./ftests
+      - name: Save Go caches
+        if: always() && matrix.shard == 'others' && github.event_name == 'push' && github.ref == 'refs/heads/master' && steps.go-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: |
+            ${{ steps.go-env.outputs.gocache }}
+            ${{ steps.go-env.outputs.gomodcache }}
+          key: go-race-${{ runner.os }}-${{ runner.arch }}-go${{ steps.setup-go.outputs.go-version }}-${{ hashFiles('go.sum') }}-${{ github.sha }}
+
   vet:
     name: Vet
     runs-on: ubuntu-latest
@@ -124,7 +342,7 @@ jobs:
               echo "uptermd is ready"
               break
             fi
-            if [ $i -eq 30 ]; then
+            if [ "$i" -eq 30 ]; then
               echo "uptermd failed to start"
               cat /tmp/uptermd/uptermd.log
               exit 1
@@ -152,4 +370,51 @@ jobs:
     with:
       snapshot: true
       docker_repo: ghcr.io/owenthereal/upterm/uptermd
+      go-cache: true
     secrets: inherit
+
+  gate:
+    name: CI gate
+    runs-on: ubuntu-latest
+    if: always()
+    needs:
+      - test-ubuntu
+      - test-macos
+      - test-windows
+      - vet
+      - test-e2e
+      - build-and-release
+    steps:
+      - name: Check every job succeeded
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          jq -r 'to_entries[] | "\(.key): \(.value.result)"' <<<"$NEEDS"
+          if ! jq -e 'all(.[]; .result == "success")' <<<"$NEEDS" >/dev/null; then
+            echo "::error::Not every job succeeded."
+            exit 1
+          fi
+
+  # Each master push saves new go-race and go-cross entries. This deletes the
+  # ones they supersede: within a group of kind, OS, architecture and Go
+  # version, every entry but the newest. Go version is in the group because
+  # master runs overlap, and a run on an older Go version can finish last.
+  cache-prune:
+    name: Prune superseded build caches
+    runs-on: ubuntu-latest
+    if: always() && github.event_name == 'push' && github.ref == 'refs/heads/master'
+    needs: [test-ubuntu, test-macos, test-windows, build-and-release]
+    permissions:
+      actions: write
+    steps:
+      - name: Delete superseded caches
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          SUPERSEDED_JQ: |-
+            [ .[] | select(.key | test("^go-(race|cross)-")) ]
+            | group_by(.key | split("-")[0:5] | join("-"))
+            | map(sort_by(.createdAt) | .[:-1][])
+            | .[].id
+        run: gh cache list --ref refs/heads/master --key go- --limit 100 --json id,key,createdAt | jq -r "$SUPERSEDED_JQ" | xargs -r -n1 gh cache delete
