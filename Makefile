@@ -59,6 +59,10 @@ docker_build:
 	docker buildx build -t $(REPO):$(TAG) -f Dockerfile.uptermd $(DOCKER_BUILD_FLAGS) .
 
 GO_TEST_FLAGS ?= ""
+# Set TEST_COVER= to turn coverage off, and TEST_FORMAT=-json for go test's
+# JSON event stream in place of -v.
+TEST_COVER ?= -coverprofile=c.out -covermode=atomic
+TEST_FORMAT ?= -v
 # The bound is a guard against a hung test, not a performance budget. ftests is
 # what sets it: on the Consul job it runs both suites in one binary, and a
 # go test -timeout bounds that binary as a whole. On master's CI (655960a) the
@@ -67,9 +71,39 @@ GO_TEST_FLAGS ?= ""
 # a host redialling its relay were added; with them, this branch's CI took
 # 250.5s on the Ubuntu + Consul job (160s on macOS, 133s on Windows), which
 # leaves the old 300s with less headroom than runner-to-runner variance.
+TEST_FLAGS = -timeout=600s $(TEST_COVER) -count=1 -race $(TEST_FORMAT) $(GO_TEST_FLAGS)
+
+# go test starts packages in the order it is given, a few at a time, so a slow
+# package listed late starts late and finishes last. The slow packages go
+# first, and the rest follow in go list order.
+TEST_SLOW_PKGS = ./host/internal/replay ./host/internal ./server ./host
+# Deferred, and used only in recipes, so go list runs only when a test target
+# does (make -n included) and other targets never run it.
+TEST_PKGS = $(shell { go list $(TEST_SLOW_PKGS); go list ./... | grep -v /e2e; } | awk '!seen[$$0]++')
+TEST_OTHER_PKGS = $(filter-out github.com/owenthereal/upterm/ftests,$(TEST_PKGS))
+
+# The ftests tests that test-ftests-split runs and test-ftests-rest skips.
+FTESTS_SPLIT = ^(TestConsul|TestHopKeyRotationPhases)$$
+
 .PHONY: test
 test:
-	go test $$(go list ./... | grep -v /e2e) -timeout=600s -coverprofile=c.out -covermode=atomic -count=1 -race -v $(GO_TEST_FLAGS)
+	go test $(TEST_PKGS) $(TEST_FLAGS)
+
+.PHONY: test-others
+test-others:
+	go test $(TEST_OTHER_PKGS) $(TEST_FLAGS)
+
+.PHONY: test-ftests
+test-ftests:
+	go test ./ftests $(TEST_FLAGS)
+
+.PHONY: test-ftests-split
+test-ftests-split:
+	go test ./ftests -run '$(FTESTS_SPLIT)' $(TEST_FLAGS)
+
+.PHONY: test-ftests-rest
+test-ftests-rest:
+	go test ./ftests -skip '$(FTESTS_SPLIT)' $(TEST_FLAGS)
 
 # E2E tests require tmux and UPTERM_E2E_SERVER env var
 # Example: UPTERM_E2E_SERVER=ssh://uptermd.upterm.dev:22 make test-e2e
