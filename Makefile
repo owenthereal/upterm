@@ -63,15 +63,15 @@ GO_TEST_FLAGS ?= ""
 # JSON event stream in place of -v.
 TEST_COVER ?= -coverprofile=c.out -covermode=atomic
 TEST_FORMAT ?= -v
-# The bound is a guard against a hung test, not a performance budget. ftests is
-# what sets it: a local make test runs both suites in one binary (CI's Ubuntu
-# jobs split them), and a go test -timeout bounds that binary as a whole. On
-# master's CI (655960a) the
-# ftests package took 221.5s on the Ubuntu + Consul job, and 144s on macOS and
-# 137s on Windows, which run without Consul. That was before the scenarios of
-# a host redialling its relay were added; with them, this branch's CI took
-# 250.5s on the Ubuntu + Consul job (160s on macOS, 133s on Windows), which
-# leaves the old 300s with less headroom than runner-to-runner variance.
+# The bound is a guard against a hung test, not a performance budget. ftests
+# is what sets it: a local make test runs both suites in one binary (CI's
+# Ubuntu jobs split them), and a go test -timeout bounds that binary as a
+# whole. On master's CI (655960a) the ftests package took 221.5s on the
+# Ubuntu + Consul job, and 144s on macOS and 137s on Windows, which run
+# without Consul. That was before the scenarios of a host redialling its
+# relay were added; with them, this branch's CI took 250.5s on the Ubuntu +
+# Consul job (160s on macOS, 133s on Windows), which leaves the old 300s
+# with less headroom than runner-to-runner variance.
 TEST_FLAGS = -timeout=600s $(TEST_COVER) -count=1 -race $(TEST_FORMAT) $(GO_TEST_FLAGS)
 
 # go test starts packages in the order it is given, a few at a time, so a slow
