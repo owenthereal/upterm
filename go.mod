@@ -59,7 +59,7 @@ require (
 	github.com/owenthereal/x/ansi v0.0.0-20261015013042-3e706d88bf76
 	github.com/owenthereal/x/vt v0.0.0-20261018030619-09045b97ea03
 	github.com/pires/go-proxyproto v0.15.0
-	github.com/pkg/sftp v1.13.11
+	github.com/pkg/sftp v1.13.12
 	github.com/samber/slog-multi v1.8.0
 	github.com/spf13/pflag v1.0.10
 	github.com/spf13/viper v1.21.0
