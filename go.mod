@@ -3,7 +3,7 @@
 
 module github.com/owenthereal/upterm
 
-go 1.26.7
+go 1.26.9
 
 require (
 	github.com/VividCortex/gohistogram v1.0.0 // indirect
@@ -58,7 +58,7 @@ require (
 	github.com/owenthereal/tmux v0.0.0-20260110065009-80f16deab60d
 	github.com/owenthereal/x/ansi v0.0.0-20261015013042-3e706d88bf76
 	github.com/owenthereal/x/vt v0.0.0-20261018030619-09045b97ea03
-	github.com/pires/go-proxyproto v0.15.0
+	github.com/pires/go-proxyproto v0.16.0
 	github.com/pkg/sftp v1.13.12
 	github.com/samber/slog-multi v1.9.0
 	github.com/spf13/pflag v1.0.10
@@ -143,7 +143,7 @@ require (
 	go.uber.org/goleak v1.3.0
 	go.yaml.in/yaml/v3 v3.0.5 // indirect
 	golang.org/x/exp v0.0.0-20260218203240-3dfff04db8fa // indirect
-	golang.org/x/net v0.60.0 // indirect
+	golang.org/x/net v0.61.0 // indirect
 	golang.org/x/sync v0.24.0 // indirect
 	golang.org/x/text v0.43.0 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260817212433-ac3dfec99bb1 // indirect
