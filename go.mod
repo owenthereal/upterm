@@ -47,10 +47,10 @@ require (
 	github.com/avast/retry-go/v4 v4.7.0
 	github.com/charmbracelet/bubbletea v1.3.10
 	github.com/charmbracelet/lipgloss v1.1.1-0.20250404203927-76690c660834
-	github.com/charmbracelet/ultraviolet v0.0.0-20260303162955-0b88c25f3fff
+	github.com/charmbracelet/ultraviolet v0.0.0-20260811164956-006e29f97886
 	github.com/charmbracelet/x/ansi v0.11.9
 	github.com/charmbracelet/x/conpty v0.2.0
-	github.com/cli/go-gh/v2 v2.16.2
+	github.com/cli/go-gh/v2 v2.17.0
 	github.com/google/go-github/v48 v48.2.0
 	github.com/hashicorp/go-version v1.9.0
 	github.com/muesli/reflow v0.3.0
@@ -77,7 +77,7 @@ require (
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/bradfitz/iter v0.0.0-20191230175014-e8f45d346db8 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
-	github.com/charmbracelet/colorprofile v0.4.2 // indirect
+	github.com/charmbracelet/colorprofile v0.4.3 // indirect
 	github.com/charmbracelet/x/cellbuf v0.0.15 // indirect
 	github.com/charmbracelet/x/exp/ordered v0.1.0 // indirect
 	github.com/charmbracelet/x/term v0.2.2 // indirect
@@ -138,7 +138,7 @@ require (
 	github.com/spf13/cast v1.10.0 // indirect
 	github.com/subosito/gotenv v1.6.0 // indirect
 	github.com/tadvi/systray v0.0.0-20190226123456-11a2b8fa57af // indirect
-	github.com/thlib/go-timezone-local v0.0.8 // indirect
+	github.com/thlib/go-timezone-local v0.0.9 // indirect
 	github.com/xo/terminfo v0.0.0-20220910002029-abceb7e1c41e // indirect
 	go.uber.org/goleak v1.3.0
 	go.yaml.in/yaml/v3 v3.0.5 // indirect
