@@ -2224,16 +2224,21 @@ func buildSessionDetail(sess *api.GetSessionResponse) (tui.SessionDetail, error)
 	var sftpCmd, scpUpload, scpDownload string
 	sftpEnabled := !sess.SftpDisabled && scheme == "ssh"
 	if sftpEnabled {
-		// SFTP command (similar to SSH)
-		if port != "" && port != "22" {
-			sftpCmd = fmt.Sprintf("sftp -P %s %s@%s", port, user, host)
-			scpUpload = fmt.Sprintf("scp -P %s <local> %s@%s:<remote>", port, user, host)
-			scpDownload = fmt.Sprintf("scp -P %s %s@%s:<remote> <local>", port, user, host)
-		} else {
-			sftpCmd = fmt.Sprintf("sftp %s@%s", user, host)
-			scpUpload = fmt.Sprintf("scp <local> %s@%s:<remote>", user, host)
-			scpDownload = fmt.Sprintf("scp %s@%s:<remote> <local>", user, host)
+		// sftp and scp read an operand as [user@]host[:path] and look for the
+		// ':' before the '@', so a user that holds one, as embedded routing's
+		// ID:node does, would make the session ID the host they dial. Such a
+		// user goes in -o User= and the operand names the host alone. ssh
+		// splits at the last '@', so its line keeps the user in place.
+		opts, dest := "", user+"@"+host
+		if strings.Contains(user, ":") {
+			opts, dest = "-o User="+user+" ", host
 		}
+		if port != "" && port != "22" {
+			opts = "-P " + port + " " + opts
+		}
+		sftpCmd = "sftp " + opts + dest
+		scpUpload = "scp " + opts + "<local> " + dest + ":<remote>"
+		scpDownload = "scp " + opts + dest + ":<remote> <local>"
 	}
 
 	return tui.SessionDetail{

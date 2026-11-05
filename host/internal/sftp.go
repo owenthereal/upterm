@@ -107,9 +107,13 @@ func (h *sessionHandler) HandleSFTP(sess gssh.Session) {
 	if err := server.Serve(); err != nil {
 		if err != io.EOF {
 			h.logger.Error("sftp server error", "error", err)
+			_ = sess.Exit(1)
 		}
 	}
-	_ = server.Close()
+	// Not server.Close: the server's connection is the session, and closing it
+	// here would close the channel before charm, as this returns, sends the
+	// success status and then closes it. Serve already closes open handles;
+	// an incomplete exchange above sends its failure status instead.
 
 	h.logger.Info("SFTP session ended")
 }

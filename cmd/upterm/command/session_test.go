@@ -307,6 +307,38 @@ func TestBuildSessionDetailCommandsKeepEveryPort(t *testing.T) {
 	}
 }
 
+// sftp and scp read an operand as [user@]host[:path] and look for the ':'
+// before the '@', so the user embedded routing gives every guest, ID:node,
+// printed as user@host makes the session ID the host they dial. The user goes
+// in -o User= and the operand names the host alone. ssh splits at the last '@',
+// so its line keeps the user where it is.
+func TestBuildSessionDetailTransferCommandsCarryAUserWithAColonAsAnOption(t *testing.T) {
+	type commands struct{ ssh, sftp, scpUpload, scpDownload string }
+	for _, tc := range []struct {
+		server string
+		want   commands
+	}{
+		{"ssh://example.com:2222", commands{
+			ssh:         "ssh sid:bm9kZQ==@example.com -p 2222",
+			sftp:        "sftp -P 2222 -o User=sid:bm9kZQ== example.com",
+			scpUpload:   "scp -P 2222 -o User=sid:bm9kZQ== <local> example.com:<remote>",
+			scpDownload: "scp -P 2222 -o User=sid:bm9kZQ== example.com:<remote> <local>",
+		}},
+		{"ssh://example.com", commands{
+			ssh:         "ssh sid:bm9kZQ==@example.com",
+			sftp:        "sftp -o User=sid:bm9kZQ== example.com",
+			scpUpload:   "scp -o User=sid:bm9kZQ== <local> example.com:<remote>",
+			scpDownload: "scp -o User=sid:bm9kZQ== example.com:<remote> <local>",
+		}},
+	} {
+		t.Run(tc.server, func(t *testing.T) {
+			d, err := buildSessionDetail(&api.GetSessionResponse{SessionId: "sid", Host: tc.server, SshUser: "sid:bm9kZQ=="})
+			require.NoError(t, err)
+			require.Equal(t, tc.want, commands{d.SSHCommand, d.SFTPCommand, d.SCPUpload, d.SCPDownload})
+		})
+	}
+}
+
 // Anyone with the session ID can join exactly when there is no allowlist, and
 // the view says so whether or not the host was asked about the start. Open
 // stays as the narrower fact the JSON reports.

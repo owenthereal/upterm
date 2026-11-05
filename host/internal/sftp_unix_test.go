@@ -83,6 +83,76 @@ func TestSFTPConsentGuestKey(t *testing.T) {
 	require.Equal(t, utils.FingerprintSHA256(guestKey), checker.lastFor.Fingerprint)
 }
 
+// An SFTP session its client finishes ends with an exit status, as OpenSSH's
+// sftp-server's does. scp runs ssh -s sftp and takes ssh's exit status for its
+// own, so a channel that closes without one ("Exit status -1") fails a
+// transfer that has already succeeded.
+func TestSFTPSessionEndsWithAnExitStatus(t *testing.T) {
+	testSFTPExitStatus(t, false, 0)
+}
+
+// An open transfer when the client sends EOF is incomplete, even if no
+// packet is truncated. Serve closes its handle and reports unexpected EOF;
+// the guest must receive failure rather than a successful exit status.
+func TestSFTPIncompleteSessionEndsWithFailure(t *testing.T) {
+	testSFTPExitStatus(t, true, 1)
+}
+
+func testSFTPExitStatus(t *testing.T, leaveFileOpen bool, wantStatus uint32) {
+	t.Helper()
+	h := startHost(t, &Server{Command: readsALine("READY", 0), SFTPAutoAccept: leaveFileOpen})
+	// A raw channel rather than an ssh.Session, whose Wait refuses a session
+	// started by a subsystem request: the test reads what the host sends.
+	channel, requests, err := h.guestClient(t).OpenChannel("session", nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = channel.Close() })
+	ok, err := channel.SendRequest("subsystem", true, ssh.Marshal(struct{ Name string }{"sftp"}))
+	require.NoError(t, err)
+	require.True(t, ok, "the host refused the sftp subsystem")
+	client, err := sftp.NewClientPipe(channel, eofOnClose{channel})
+	require.NoError(t, err, "the sftp handshake failed")
+	if leaveFileOpen {
+		path := filepath.Join(t.TempDir(), "incomplete.txt")
+		require.NoError(t, os.WriteFile(path, []byte("unfinished transfer"), 0600))
+		// Deliberately leave the protocol handle open. The server owns its
+		// cleanup when EOF interrupts the exchange.
+		_, err := client.Open(path)
+		require.NoError(t, err)
+	}
+	// The client is done: it sends EOF, and the channel stays open for the
+	// host to say how the session ended before it closes it.
+	require.NoError(t, client.Close())
+
+	statuses := make(chan []uint32, 1)
+	go func() {
+		var got []uint32
+		for req := range requests { // until the host closes the channel
+			if req.Type == "exit-status" {
+				var status struct{ Status uint32 }
+				if ssh.Unmarshal(req.Payload, &status) == nil {
+					got = append(got, status.Status)
+				}
+			}
+			if req.WantReply {
+				_ = req.Reply(false, nil)
+			}
+		}
+		statuses <- got
+	}()
+	select {
+	case got := <-statuses:
+		require.Equal(t, []uint32{wantStatus}, got, "the sftp session must send exactly one exit status before channel close")
+	case <-time.After(harnessTimeout):
+		t.Fatal("the host did not close the sftp session's channel after its client finished")
+	}
+}
+
+// eofOnClose ends only the writing half of a channel when closed, as a client
+// that has finished sending does.
+type eofOnClose struct{ ssh.Channel }
+
+func (c eofOnClose) Close() error { return c.CloseWrite() }
+
 func TestSFTPConsentSSH(t *testing.T) {
 	t.Run("terminal connection grant survives sftp channel close", func(t *testing.T) {
 		h := approvalHost(t)
@@ -359,6 +429,9 @@ func TestSFTPConsentEndedBySessionEnd(t *testing.T) {
 				served := make(chan struct{})
 				go func() {
 					defer close(served)
+					// This fixture calls the handler directly, so it owns the
+					// channel close the SSH subsystem wrapper normally performs.
+					defer func() { _ = channel.Close() }()
 					h.HandleSFTP(&rawSession{Session: channel, channel: channel, closed: closed})
 				}()
 				client, err := sftp.NewClientPipe(clientIn, clientOut)

@@ -487,14 +487,14 @@ only when forwards to anything are allowed.
 
 ### File Transfer (SFTP/SCP)
 
-Clients can transfer files using standard `scp` or `sftp` commands. The connection details are shown when running `upterm session current`:
+Clients can transfer files using standard `scp` or `sftp` commands. Run the commands shown under `➤ SFTP:` and `➤ SCP:` in `upterm session current`. A self-hosted relay may put a `:` in the session user, so pass it with `-o User=` to keep `scp` and `sftp` from treating the session ID as a host name:
 
 ```console
 # Download a file from host
-scp SESSION_USER@uptermd.upterm.dev:/path/to/file.txt ./local/
+scp -o User=SESSION_USER uptermd.upterm.dev:/path/to/file.txt ./local/
 
 # Upload a file to host
-scp ./local/file.txt SESSION_USER@uptermd.upterm.dev:/path/to/destination/
+scp -o User=SESSION_USER ./local/file.txt uptermd.upterm.dev:/path/to/destination/
 ```
 
 With the block `upterm session ssh-config NAME` prints in `~/.ssh/config`, `scp NAME:/path/to/file.txt ./local/` works the same.
