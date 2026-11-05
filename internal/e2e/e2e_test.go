@@ -271,6 +271,30 @@ func (h *testHarness) waitForReady(name string) {
 	}, 30*time.Second, 100*time.Millisecond, "session %s never became ready", name)
 }
 
+// printedLines are the lines the host printed under ➤ label: (Join, SSH,
+// SFTP, SCP), the commands a guest is told to run. The host's last banner
+// wins.
+func (h *testHarness) printedLines(label string) []string {
+	h.t.Helper()
+	output, err := h.captureWithHistory(h.host)
+	require.NoError(h.t, err)
+	var lines []string
+	in := false
+	for line := range strings.SplitSeq(ansiEscapeRe.ReplaceAllString(output, ""), "\n") {
+		trimmed := strings.TrimSpace(line)
+		switch {
+		case trimmed == "➤ "+label+":":
+			in, lines = true, nil
+		case in && trimmed != "" && trimmed != line:
+			lines = append(lines, trimmed) // the block's indented commands
+		default:
+			in = false
+		}
+	}
+	require.NotEmpty(h.t, lines, "the host printed no ➤ %s: line:\n%s", label, output)
+	return lines
+}
+
 // writeFile writes content to a file in the test's temp directory.
 func (h *testHarness) writeFile(name, content string, perm os.FileMode) string {
 	h.t.Helper()
