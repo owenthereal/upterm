@@ -21,24 +21,32 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
-var errDuration = errors.New("duration")
+const finalDrainLimit = 10 * time.Second
+const retryQueueLimit = 5 * time.Second
 
 type runState struct {
-	canary        *guest
-	clientsMu     sync.RWMutex
-	telemetryMu   sync.Mutex
-	lastTelemetry map[string]time.Time
-	cfg           Config
-	guard         *guard
-	rec           *recorder
-	ctx           context.Context
-	cancel        context.CancelCauseFunc
-	hosts         []*hostRun
-	guests        []*guest
-	proxies       []*tunnelProxy
-	workers       sync.WaitGroup
-	helper        string
-	dir           string
+	hostReadyTimeout  time.Duration
+	guestReadyTimeout time.Duration
+	canary            *guest
+	clientsMu         sync.RWMutex
+	telemetryMu       sync.Mutex
+	lastTelemetry     map[string]time.Time
+	cfg               Config
+	guard             *guard
+	rec               *recorder
+	ctx               context.Context
+	cancel            context.CancelCauseFunc
+	hosts             []*hostRun
+	guests            []*guest
+	proxies           []*tunnelProxy
+	workers           sync.WaitGroup
+	activeWorkers     sync.WaitGroup
+	helper            string
+	dir               string
+}
+type tunnelObservation struct {
+	event host.TunnelEvent
+	at    time.Time
 }
 type hostRun struct {
 	repair  sync.Mutex
@@ -49,7 +57,7 @@ type hostRun struct {
 	done    chan error
 	mu      sync.Mutex
 	initial *api.GetSessionResponse
-	tunnel  chan host.TunnelEvent
+	tunnel  chan tunnelObservation
 }
 
 func (h *hostRun) session(ctx context.Context) (*api.GetSessionResponse, error) {
@@ -105,9 +113,16 @@ func (r *runState) sendKind(q *guest, w io.Writer, stream, seq int, kind string)
 		}
 		q.pending[key] = now
 		q.mu.Unlock()
+	} else if kind == "R" {
+		q.mu.Lock()
+		if q.challenges == nil {
+			q.challenges = map[string]time.Time{}
+		}
+		q.challenges[fmt.Sprintf("%d:%d:%d", stream, seq, now.UnixNano())] = now
+		q.mu.Unlock()
 	}
 	n, err := w.Write(frame(kind, stream, seq, now, 128))
-	if n == 128 && err == nil {
+	if n == 128 {
 		r.rec.mu.Lock()
 		if kind == "I" {
 			r.rec.summary.InputFrames++
@@ -117,6 +132,14 @@ func (r *runState) sendKind(q *guest, w io.Writer, stream, seq int, kind string)
 		r.rec.mu.Unlock()
 	}
 	r.actual(int64(n))
+	if n != 128 && err == nil {
+		err = io.ErrShortWrite
+	}
+	if kind == "I" && n != 128 {
+		q.mu.Lock()
+		delete(q.pending, key)
+		q.mu.Unlock()
+	}
 	return err
 }
 func (r *runState) startHost(index int, t Target, identity ssh.Signer) error {
@@ -136,7 +159,7 @@ func (r *runState) startHost(index int, t Target, identity ssh.Signer) error {
 		return err
 	}
 	ready := make(chan string, 1)
-	h := &hostRun{id: index, socket: filepath.Join(dir, "admin.sock"), proxy: proxy, done: make(chan error, 1), tunnel: make(chan host.TunnelEvent, 16)}
+	h := &hostRun{id: index, socket: filepath.Join(dir, "admin.sock"), proxy: proxy, done: make(chan error, 1), tunnel: make(chan tunnelObservation, 16)}
 	if identity == nil {
 		identity, err = makeSigner()
 		if err != nil {
@@ -147,7 +170,16 @@ func (r *runState) startHost(index int, t Target, identity ssh.Signer) error {
 	if err != nil {
 		return err
 	}
-	h.h = &host.Host{KeepAliveDuration: 50 * time.Second, Host: u.String(), Command: []string{r.helper, "helper", strconv.Itoa(index), strconv.FormatBool(r.cfg.Active)}, CommandDir: dir, Signers: []ssh.Signer{identity}, IdentitiesOnly: true, HostKey: key, HostKeyCallback: pinnedKey(t), ProxyURL: proxy.url, AdminSocketFile: h.socket, AutoAccept: true, SFTPAutoAccept: true, ForwardingDisabled: true, ExecDisabled: true, Logger: slog.New(slog.NewTextHandler(io.Discard, nil)), StopGrace: time.Second,
+	timeout := r.hostReadyTimeout
+	if timeout == 0 {
+		timeout = 12 * time.Second
+	}
+	proxy.serviceTimeout = timeout
+	proxy.failure = r.fail
+	proxy.queueEvent = func(wait time.Duration, limited bool) {
+		r.rec.event("admission_queue", map[string]any{"role": "host", "host": index, "retry": true, "queue_ms": float64(wait) / float64(time.Millisecond), "generator_limited": limited})
+	}
+	h.h = &host.Host{Reconnect: host.ReconnectTiming{AttemptDeadline: 30*time.Second + retryQueueLimit}, KeepAliveDuration: 50 * time.Second, Host: u.String(), Command: []string{r.helper, "helper", strconv.Itoa(index), strconv.FormatBool(r.cfg.Active)}, CommandDir: dir, Signers: []ssh.Signer{identity}, IdentitiesOnly: true, HostKey: key, HostKeyCallback: pinnedKey(t), ProxyURL: proxy.url, AdminSocketFile: h.socket, AutoAccept: true, SFTPAutoAccept: true, ForwardingDisabled: true, ExecDisabled: true, Logger: slog.New(slog.NewTextHandler(io.Discard, nil)), StopGrace: time.Second,
 		SessionCreatedCallback: func(ctx context.Context, s *api.GetSessionResponse) error {
 			if err := r.guard.session(ctx, s); err != nil {
 				return err
@@ -158,21 +190,35 @@ func (r *runState) startHost(index int, t Target, identity ssh.Signer) error {
 			return nil
 		},
 		SessionReadyCallback: func(status string) {
+			proxy.ready()
 			select {
 			case ready <- status:
 			default:
 			}
 		},
 		TunnelCallback: func(e host.TunnelEvent) {
+			if e.Up {
+				proxy.ready()
+			}
 			r.rec.event("host_tunnel", map[string]any{"host": index, "up": e.Up, "can_reconnect": e.CanReconnect, "route_changed": e.RouteChanged})
 			select {
-			case h.tunnel <- e:
+			case h.tunnel <- tunnelObservation{event: e, at: time.Now()}:
 			default:
 				r.fail(errors.New("host tunnel event overflow"))
 			}
 		},
 	}
 	r.hosts[index] = h
+	queuedAt := time.Now()
+	permit, err := r.guard.permit(r.ctx)
+	if err != nil {
+		h.done <- err
+		return err
+	}
+	proxy.mu.Lock()
+	proxy.permit = permit
+	proxy.mu.Unlock()
+	r.rec.event("admission_queue", map[string]any{"role": "host", "host": index, "queue_ms": float64(time.Since(queuedAt)) / float64(time.Millisecond)})
 	began := time.Now()
 	go func() {
 		err := h.h.Run(r.ctx)
@@ -181,7 +227,17 @@ func (r *runState) startHost(index int, t Target, identity ssh.Signer) error {
 			r.fail(fmt.Errorf("host %d stopped: %v", index, err))
 		}
 	}()
-	timer := time.NewTimer(12 * time.Second)
+	// The dial permit is consumed before the dependency starts waiting on
+	// remote registration. Key generation and intentional pacing are excluded.
+	select {
+	case began = <-proxy.dialStarted:
+	case err := <-h.done:
+		h.done <- err
+		return fmt.Errorf("host startup: %w", err)
+	case <-r.ctx.Done():
+		return context.Cause(r.ctx)
+	}
+	timer := time.NewTimer(timeout)
 	defer timer.Stop()
 	select {
 	case status := <-ready:
@@ -202,7 +258,7 @@ func (r *runState) startHost(index int, t Target, identity ssh.Signer) error {
 	h.mu.Lock()
 	s := h.initial
 	h.mu.Unlock()
-	r.rec.event("host_ready", map[string]any{"host": index, "transport": u.Scheme, "node": s.NodeAddr, "session_id": s.SessionId, "ready_ms": float64(time.Since(began)) / float64(time.Millisecond)})
+	r.rec.event("host_ready", map[string]any{"host": index, "transport": u.Scheme, "node": s.NodeAddr, "session_id": s.SessionId, "ready_ms": float64(time.Since(began)) / float64(time.Millisecond), "queue_ms": float64(permit.queued) / float64(time.Millisecond)})
 	return nil
 }
 func (r *runState) admit(identity ssh.Signer) error {
@@ -244,7 +300,7 @@ func (r *runState) admit(identity ssh.Signer) error {
 		r.rec.summary.EstablishedGuests++
 		r.rec.summary.EstablishedChannels += len(q.channels)
 		r.rec.mu.Unlock()
-		r.rec.event("admission", map[string]any{"role": "guest", "guest": q.id, "ready_ms": float64(time.Since(began)) / float64(time.Millisecond)})
+		r.rec.event("admission", map[string]any{"role": "guest", "guest": q.id, "ready_ms": float64(time.Since(began)-q.queueElapsed) / float64(time.Millisecond), "queue_ms": float64(q.queueElapsed) / float64(time.Millisecond)})
 		return nil
 	}); err != nil {
 		return err
@@ -256,6 +312,7 @@ func (r *runState) admit(identity ssh.Signer) error {
 }
 func (r *runState) cleanup() error {
 	r.cancel(context.Canceled)
+	r.activeWorkers.Wait()
 	r.workers.Wait()
 	for _, q := range r.guests {
 		q.setExpected(true)
@@ -311,7 +368,8 @@ func (r *runState) telemetry() {
 				return r.guard.connect(ctx, target, addr)
 			}}
 			defer tr.CloseIdleConnections()
-			clients[t.MachineID] = &http.Client{Transport: tr, Timeout: 3 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return errors.New("telemetry redirect refused") }}
+			tr.ResponseHeaderTimeout = 3 * time.Second
+			clients[t.MachineID] = &http.Client{Transport: tr, CheckRedirect: func(*http.Request, []*http.Request) error { return errors.New("telemetry redirect refused") }}
 			r.telemetryMu.Lock()
 			r.lastTelemetry[t.MachineID] = time.Now()
 			r.telemetryMu.Unlock()
@@ -327,8 +385,10 @@ func (r *runState) telemetry() {
 				}
 				resp, err := clients[t.MachineID].Do(req)
 				if err == nil {
+					bodyTimer := time.AfterFunc(3*time.Second, func() { _ = resp.Body.Close() })
 					body, e := io.ReadAll(io.LimitReader(resp.Body, (1<<20)+1))
 					_ = resp.Body.Close()
+					bodyTimer.Stop()
 					if e == nil && resp.StatusCode == 200 && len(body) <= 1<<20 {
 						r.telemetryMu.Lock()
 						r.lastTelemetry[t.MachineID] = time.Now()
@@ -454,25 +514,18 @@ func Run(ctx context.Context, c Config, out io.Writer) (result Summary, err erro
 	rec.mu.Lock()
 	rec.summary.SetupSeconds = steadyStarted.Sub(started).Seconds()
 	rec.mu.Unlock()
-	steady := time.AfterFunc(time.Duration(c.DurationSeconds)*time.Second, func() { r.fail(errDuration) })
+	steady := time.NewTimer(time.Duration(c.DurationSeconds) * time.Second)
 	defer steady.Stop()
 	defer func() {
 		rec.mu.Lock()
-		rec.summary.SteadySeconds = time.Since(steadyStarted).Seconds()
+		rec.summary.SteadySeconds = min(time.Since(steadyStarted).Seconds(), float64(c.DurationSeconds))
 		rec.mu.Unlock()
 	}()
 	rec.event("steady_start", map[string]any{"duration_seconds": c.DurationSeconds})
 	if c.idleHostOnly() {
 		r.canaries()
 	}
-	if c.Active {
-		for _, q := range r.guests {
-			if e := q.active(r); e != nil {
-				r.fail(e)
-				break
-			}
-		}
-	}
+	r.activeWorkload(steadyStarted, &r.activeWorkers)
 	if c.TransferConcurrency > 0 {
 		r.workers.Add(1)
 		go func() {
@@ -491,46 +544,54 @@ func Run(ctx context.Context, c Config, out io.Writer) (result Summary, err erro
 			}
 		}()
 	}
-	tick := time.NewTicker(time.Second)
-	defer tick.Stop()
 	for {
 		select {
 		case <-runctx.Done():
-			cause := context.Cause(runctx)
+			err = context.Cause(runctx)
 			rec.mu.Lock()
-			rec.summary.StopReason = cause.Error()
-			err = cause
-			if errors.Is(cause, errDuration) {
-				err = nil
-				if c.TransferConcurrency > 0 && rec.summary.Transfers != c.TransferConcurrency {
-					err = errors.New("incomplete_transfers")
-				}
-				if c.ChurnPercent > 0 && !rec.summary.ChurnCompleted {
-					err = errors.New("incomplete_churn")
-				}
-				if c.Active && rec.summary.ActiveFrames+rec.summary.PausedActiveFrames != int64(c.Hosts*c.GuestsPerHost*c.DurationSeconds) {
-					err = errors.New("offered_workload_incomplete")
-				}
-				if err != nil {
-					rec.summary.StopReason = err.Error()
-				}
-			} else if errors.Is(cause, context.DeadlineExceeded) && ctx.Err() == nil {
+			rec.summary.StopReason = err.Error()
+			if errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil {
 				rec.summary.StopReason = "manifest_expired"
 			}
 			rec.mu.Unlock()
 			return result, err
-		case <-tick.C:
-			if c.Active && time.Since(steadyStarted) < time.Duration(c.DurationSeconds)*time.Second {
-				for _, q := range r.guests {
-					if e := q.active(r); e != nil {
-						r.fail(e)
-						break
-					}
-				}
+		case <-steady.C:
+			rec.event("steady_end", map[string]any{"duration_seconds": c.DurationSeconds})
+			drainStarted := time.Now()
+			// This independent bound also closes transports beneath a blocked final
+			// input/barrier write. Manifest expiry and all safety watches stay active.
+			drain := time.AfterFunc(finalDrainLimit, func() { r.fail(errors.New("terminal_delivery_timeout")) })
+			r.activeWorkers.Wait()
+			if runctx.Err() == nil {
+				err = r.completeDelivery()
 			}
+			drain.Stop()
+			if runctx.Err() != nil {
+				err = context.Cause(runctx)
+			}
+			rec.mu.Lock()
+			rec.summary.DrainSeconds = time.Since(drainStarted).Seconds()
+			if err == nil && c.TransferConcurrency > 0 && rec.summary.Transfers != c.TransferConcurrency {
+				err = errors.New("incomplete_transfers")
+			}
+			if err == nil && c.ChurnPercent > 0 && !rec.summary.ChurnCompleted {
+				err = errors.New("incomplete_churn")
+			}
+			if err == nil && c.Active && rec.summary.ActiveFrames+rec.summary.PausedActiveFrames != int64(c.Hosts*c.GuestsPerHost*c.DurationSeconds) {
+				err = errors.New("offered_workload_incomplete")
+			}
+			rec.summary.StopReason = "duration"
+			rec.summary.DeliveryComplete = err == nil
+			if err != nil {
+				rec.summary.StopReason = err.Error()
+			}
+			rec.mu.Unlock()
+			rec.event("delivery_complete", map[string]any{"complete": err == nil, "drain_seconds": time.Since(drainStarted).Seconds()})
+			return result, err
 		}
 	}
 }
+
 func safeConfig(c Config) any {
 	copy := c
 	copy.Manifest = Manifest{}

@@ -141,34 +141,21 @@ func (r *runState) churn() error {
 	before := canary.acks
 	canary.mu.Unlock()
 	start := time.Now().Add(time.Second)
-	var wg sync.WaitGroup
-	results := make(chan error, len(actions))
-	for _, a := range actions {
-		if err := pause(r.ctx, time.Until(start.Add(a.offset))); err != nil {
-			wg.Wait()
-			return err
+	if err := executeCuts(r.ctx, actions, start, func(a churnAction, planned time.Time) (func() error, error) {
+		repair, err := r.cutAction(a, planned)
+		if err != nil {
+			r.fail(err)
+			return nil, err
 		}
-		wg.Add(1)
-		go func(action churnAction) {
-			defer wg.Done()
-			var err error
-			if action.host {
-				err = r.cutHost(r.hosts[action.index])
-			} else {
-				err = r.cutGuest(r.guests[action.index])
-			}
+		return func() error {
+			err := repair()
 			if err != nil {
 				r.fail(err)
 			}
-			results <- err
-		}(a)
-	}
-	wg.Wait()
-	close(results)
-	for err := range results {
-		if err != nil {
 			return err
-		}
+		}, nil
+	}); err != nil {
+		return err
 	}
 	if !r.cfg.Active {
 		if err := canary.active(r); err != nil {
@@ -193,59 +180,151 @@ func (r *runState) churn() error {
 func (r *runState) restoreGuest(q *guest, began time.Time) error {
 	q.close()
 	q.mu.Lock()
+	interrupted := len(q.pending)
 	q.pending = map[string]time.Time{}
 	q.generation++
+	disruption := q.disruption
+	q.activeOffered = false
+	if !q.disruptedAt.IsZero() {
+		began = q.disruptedAt
+	}
 	q.mu.Unlock()
+	r.rec.mu.Lock()
+	r.rec.summary.InterruptedReplies += interrupted
+	r.rec.mu.Unlock()
+	var queue time.Duration
 	var last error
 	for tries := 0; tries < 3; tries++ {
 		last = q.connect(r.ctx, r)
+		queue += q.queueElapsed
+		q.mu.Lock()
+		superseded := disruption != q.disruption
+		q.mu.Unlock()
+		if superseded {
+			q.close()
+			return nil
+		} // a later actual host cut owns repair.
 		if last == nil {
 			q.setExpected(false)
 			r.rec.mu.Lock()
 			r.rec.summary.Reconnects++
 			r.rec.mu.Unlock()
-			r.rec.event("guest_restored", map[string]any{"guest": q.id, "host": q.host.id, "generation": q.generation, "restoration_ms": float64(time.Since(began)) / float64(time.Millisecond), "same_identity": true})
+			r.rec.event("guest_restored", map[string]any{"guest": q.id, "host": q.host.id, "generation": q.generation, "restoration_ms": float64(time.Since(began)) / float64(time.Millisecond), "same_identity": true, "queue_ms": float64(queue) / float64(time.Millisecond), "service_ms": float64(time.Since(began)-queue) / float64(time.Millisecond)})
 			return nil
 		}
+		r.rec.event("guest_restore_attempt_failed", map[string]any{"guest": q.id, "host": q.host.id, "attempt": tries + 1, "error": last.Error()})
 		q.close()
+		q.mu.Lock()
+		interrupted := len(q.pending)
+		q.pending = map[string]time.Time{}
+		q.challenges = map[string]time.Time{}
+		q.mu.Unlock()
+		r.rec.mu.Lock()
+		r.rec.summary.InterruptedReplies += interrupted
+		r.rec.mu.Unlock()
 		if err := pause(r.ctx, time.Second); err != nil {
 			return err
 		}
 	}
 	return fmt.Errorf("guest restoration failed: %w", last)
 }
-func (r *runState) cutGuest(q *guest) error {
-	q.host.repair.Lock()
-	defer q.host.repair.Unlock()
-	q.setExpected(true)
+
+// Cutting is synchronous and never takes the repair/connection-operation
+// locks. Repairs may serialize, while every actual transport cut keeps its
+// independently planned time. Guest selections run before host selections:
+// an overlap therefore cuts a real guest transport before its host is cut.
+func (r *runState) cutAction(a churnAction, planned time.Time) (func() error, error) {
 	began := time.Now()
-	r.rec.event("transport_cut", map[string]any{"role": "guest", "guest": q.id, "host": q.host.id})
-	q.ops.Lock()
-	if q.raw != nil {
-		_ = q.raw.Close()
+	if a.host {
+		h := r.hosts[a.index]
+		overlaps := 0
+		var newlyDisrupted []*guest
+		for _, q := range r.guests {
+			if q.host != h {
+				continue
+			}
+			q.mu.Lock()
+			if q.expected {
+				overlaps++
+			}
+			if !q.expected {
+				newlyDisrupted = append(newlyDisrupted, q)
+			}
+			q.expected = true
+			q.disruption++
+			q.mu.Unlock()
+		}
+		n, actual := h.proxy.cut()
+		began = actual
+		if n != 1 {
+			return nil, fmt.Errorf("host cut requires one live transport, got %d", n)
+		}
+		for _, q := range newlyDisrupted {
+			q.mu.Lock()
+			q.disruptedAt = actual
+			q.mu.Unlock()
+		}
+		for _, q := range r.guests {
+			if q.host != h {
+				continue
+			}
+			q.mu.Lock()
+			if q.raw != nil {
+				_ = q.raw.Close()
+			}
+			q.transportLive = false
+			q.mu.Unlock()
+		}
+		r.rec.mu.Lock()
+		r.rec.summary.ActualHostCuts++
+		r.rec.mu.Unlock()
+		r.rec.event("transport_cut", map[string]any{"role": "host", "host": h.id, "planned_at": planned.UTC(), "actual_at": began.UTC(), "schedule_delay_ms": float64(began.Sub(planned)) / float64(time.Millisecond), "actual_transports": n, "already_disrupted_guests": overlaps})
+		queued := h.proxy.queued()
+		return func() error { h.repair.Lock(); defer h.repair.Unlock(); return r.repairHost(h, began, queued) }, nil
 	}
-	q.ops.Unlock()
-	return r.restoreGuest(q, began)
+	q := r.guests[a.index]
+	q.mu.Lock()
+	if q.expected || !q.transportLive || q.raw == nil {
+		q.mu.Unlock()
+		return nil, fmt.Errorf("guest %d already disrupted before its planned cut", q.id)
+	}
+	q.expected = true
+	q.disruption++
+	q.transportLive = false
+	err := q.raw.Close()
+	began = time.Now()
+	q.disruptedAt = began
+	q.mu.Unlock()
+	if err != nil {
+		return nil, fmt.Errorf("guest %d transport was already closed: %w", q.id, err)
+	}
+	r.rec.mu.Lock()
+	r.rec.summary.ActualGuestCuts++
+	r.rec.mu.Unlock()
+	r.rec.event("transport_cut", map[string]any{"role": "guest", "guest": q.id, "host": q.host.id, "planned_at": planned.UTC(), "actual_at": began.UTC(), "schedule_delay_ms": float64(began.Sub(planned)) / float64(time.Millisecond), "actual_transports": 1})
+	return func() error { q.host.repair.Lock(); defer q.host.repair.Unlock(); return r.restoreGuest(q, began) }, nil
 }
-func (r *runState) cutHost(h *hostRun) error {
-	h.repair.Lock()
-	defer h.repair.Unlock()
+func (r *runState) cutGuest(q *guest) error {
+	repair, err := r.cutAction(churnAction{index: q.id}, time.Now())
+	if err != nil {
+		return err
+	}
+	return repair()
+}
+func (r *runState) repairHost(h *hostRun, began time.Time, queuedAtCut time.Duration) error {
 	var guests []*guest
 	for _, q := range r.guests {
 		if q.host == h {
-			q.setExpected(true)
 			guests = append(guests, q)
 		}
 	}
-	began := time.Now()
-	r.rec.event("transport_cut", map[string]any{"role": "host", "host": h.id})
-	h.proxy.cut()
 	ctx, cancel := context.WithTimeout(r.ctx, 15*time.Second)
 	defer cancel()
 	down := false
 	for {
 		select {
-		case e := <-h.tunnel:
+		case observation := <-h.tunnel:
+			e := observation.event
 			if !e.Up {
 				down = true
 				if !e.CanReconnect {
@@ -263,7 +342,7 @@ func (r *runState) cutHost(h *hostRun) error {
 				r.rec.mu.Lock()
 				r.rec.summary.Reconnects++
 				r.rec.mu.Unlock()
-				r.rec.event("host_restored", map[string]any{"host": h.id, "session_id": s.SessionId, "restoration_ms": float64(time.Since(began)) / float64(time.Millisecond), "same_host_run": true})
+				r.rec.event("host_restored", map[string]any{"host": h.id, "session_id": s.SessionId, "restoration_ms": float64(observation.at.Sub(began)) / float64(time.Millisecond), "usable_at": observation.at.UTC(), "same_host_run": true, "queue_ms": float64(h.proxy.queued()-queuedAtCut) / float64(time.Millisecond), "service_ms": float64(observation.at.Sub(began)-(h.proxy.queued()-queuedAtCut)) / float64(time.Millisecond)})
 				for _, q := range guests {
 					if err = r.restoreGuest(q, began); err != nil {
 						return err
@@ -278,6 +357,9 @@ func (r *runState) cutHost(h *hostRun) error {
 }
 
 func pause(ctx context.Context, d time.Duration) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	timer := time.NewTimer(d)
 	defer timer.Stop()
 	select {
@@ -298,11 +380,11 @@ func churnSchedule(hosts, guests, percent int) []churnAction {
 	hn := hosts * percent / 100
 	gn := hosts * guests * percent / 100
 	var actions []churnAction
-	for i := 0; i < hn; i++ {
-		actions = append(actions, churnAction{host: true, index: i * hosts / hn})
-	}
 	for i := 0; i < gn; i++ {
 		actions = append(actions, churnAction{index: i * hosts * guests / gn})
+	}
+	for i := 0; i < hn; i++ {
+		actions = append(actions, churnAction{host: true, index: i * hosts / hn})
 	}
 	for i := range actions {
 		if len(actions) > 1 {
@@ -310,4 +392,37 @@ func churnSchedule(hosts, guests, percent int) []churnAction {
 		}
 	}
 	return actions
+}
+
+// The cut callback must only sever transports and return deferred repair work.
+// This seam lets tests deliberately stall repairs while timing real cuts.
+func executeCuts(ctx context.Context, actions []churnAction, start time.Time, cut func(churnAction, time.Time) (func() error, error)) error {
+	var wg sync.WaitGroup
+	results := make(chan error, len(actions))
+	var cutErr error
+	for _, a := range actions {
+		planned := start.Add(a.offset)
+		if err := pause(ctx, time.Until(planned)); err != nil {
+			cutErr = err
+			break
+		}
+		repair, err := cut(a, planned)
+		if err != nil {
+			cutErr = err
+			break
+		}
+		wg.Add(1)
+		go func() { defer wg.Done(); results <- repair() }()
+	}
+	wg.Wait()
+	close(results)
+	if cutErr != nil {
+		return cutErr
+	}
+	for err := range results {
+		if err != nil {
+			return err
+		}
+	}
+	return nil
 }

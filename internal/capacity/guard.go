@@ -23,12 +23,13 @@ type guard struct {
 	dial   func(context.Context, string, string) (net.Conn, error)
 	mu     sync.Mutex
 	next   time.Time
+	gate   chan struct{}
 	active int
 	peak   int
 }
 
 func newGuard(c Config) *guard {
-	return &guard{cfg: c, lookup: net.DefaultResolver.LookupIPAddr, dial: (&net.Dialer{Timeout: 10 * time.Second}).DialContext}
+	return &guard{gate: make(chan struct{}, 1), cfg: c, lookup: net.DefaultResolver.LookupIPAddr, dial: (&net.Dialer{Timeout: 10 * time.Second}).DialContext}
 }
 func (g *guard) resolved(ctx context.Context, t Target, addr string) (string, error) {
 	h, p, err := net.SplitHostPort(addr)
@@ -54,24 +55,43 @@ func (g *guard) resolved(ctx context.Context, t Target, addr string) (string, er
 	}
 	return net.JoinHostPort(ips[0].IP.String(), p), nil
 }
-func (g *guard) admit(ctx context.Context) error {
-	g.mu.Lock()
-	when := g.next
-	if when.Before(time.Now()) {
-		when = time.Now()
-	}
-	g.next = when.Add(time.Second / time.Duration(g.cfg.AdmissionsPerSecond))
-	g.mu.Unlock()
-	timer := time.NewTimer(time.Until(when))
-	defer timer.Stop()
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-timer.C:
-		return nil
+
+// A permit holds the one dial gate until an actual external dial starts.
+// Waiting for it is generator pacing, outside initial service deadlines.
+type dialPermit struct {
+	g      *guard
+	once   sync.Once
+	queued time.Duration
+}
+
+func (p *dialPermit) release() {
+	if p != nil {
+		p.once.Do(func() { <-p.g.gate })
 	}
 }
+func (g *guard) permit(ctx context.Context) (*dialPermit, error) {
+	began := time.Now()
+	select {
+	case g.gate <- struct{}{}:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	p := &dialPermit{g: g}
+	g.mu.Lock()
+	when := g.next
+	g.mu.Unlock()
+	if err := pause(ctx, time.Until(when)); err != nil {
+		p.release()
+		return nil, err
+	}
+	p.queued = time.Since(began)
+	return p, nil
+}
 func (g *guard) connect(ctx context.Context, t Target, addr string) (net.Conn, error) {
+	return g.connectPermit(ctx, t, addr, nil)
+}
+func (g *guard) connectPermit(ctx context.Context, t Target, addr string, permit *dialPermit) (net.Conn, error) {
+	defer func() { permit.release() }()
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -89,8 +109,11 @@ func (g *guard) connect(ctx context.Context, t Target, addr string) (net.Conn, e
 	if err != nil {
 		return nil, err
 	}
-	if err = g.admit(ctx); err != nil {
-		return nil, err
+	if permit == nil {
+		permit, err = g.permit(ctx)
+		if err != nil {
+			return nil, err
+		}
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -108,7 +131,15 @@ func (g *guard) connect(ctx context.Context, t Target, addr string) (net.Conn, e
 		g.peak = g.active
 	}
 	g.mu.Unlock()
-	conn, err := g.dial(ctx, "tcp", pinned)
+	// Update pacing at the actual dial, so delayed/cancelled reservations
+	// cannot bunch later external handshakes together.
+	g.mu.Lock()
+	g.next = time.Now().Add(time.Second / time.Duration(g.cfg.AdmissionsPerSecond))
+	g.mu.Unlock()
+	permit.release()
+	dialctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	conn, err := g.dial(dialctx, "tcp", pinned)
 	if err != nil {
 		g.mu.Lock()
 		g.active--
@@ -183,17 +214,25 @@ func pinnedKey(t Target) ssh.HostKeyCallback {
 // DNS pinning and admission limiter as guests. It also owns the actual sockets
 // severed during host churn; no host or session is replaced.
 type tunnelProxy struct {
-	g        *guard
-	t        Target
-	ctx      context.Context
-	server   *http.Server
-	listener net.Listener
-	url      *url.URL
-	mu       sync.Mutex
-	conns    map[net.Conn]bool
-	closing  bool
-	workers  sync.WaitGroup
-	done     chan struct{}
+	g              *guard
+	t              Target
+	ctx            context.Context
+	server         *http.Server
+	listener       net.Listener
+	url            *url.URL
+	mu             sync.Mutex
+	conns          map[net.Conn]bool
+	closing        bool
+	workers        sync.WaitGroup
+	done           chan struct{}
+	permit         *dialPermit
+	dialStarted    chan time.Time
+	readyTimer     *time.Timer
+	serviceTimeout time.Duration
+	queueLimit     time.Duration
+	queueTime      time.Duration
+	failure        func(error)
+	queueEvent     func(time.Duration, bool)
 }
 
 func newTunnelProxy(ctx context.Context, g *guard, t Target) (*tunnelProxy, error) {
@@ -201,20 +240,20 @@ func newTunnelProxy(ctx context.Context, g *guard, t Target) (*tunnelProxy, erro
 	if err != nil {
 		return nil, err
 	}
-	p := &tunnelProxy{g: g, t: t, ctx: ctx, listener: ln, conns: map[net.Conn]bool{}, done: make(chan struct{})}
+	p := &tunnelProxy{g: g, t: t, ctx: ctx, listener: ln, conns: map[net.Conn]bool{}, done: make(chan struct{}), dialStarted: make(chan time.Time, 1), queueLimit: 5 * time.Second}
 	p.url = &url.URL{Scheme: "http", Host: ln.Addr().String()}
 	p.server = &http.Server{Handler: p, ReadHeaderTimeout: 5 * time.Second}
 	go func() { defer close(p.done); _ = p.server.Serve(ln) }()
 	return p, nil
 }
-func (p *tunnelProxy) track(c net.Conn) bool {
+func (p *tunnelProxy) track(c net.Conn, external bool) bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.closing {
 		_ = c.Close()
 		return false
 	}
-	p.conns[c] = true
+	p.conns[c] = external
 	return true
 }
 func (p *tunnelProxy) untrack(c net.Conn) {
@@ -223,16 +262,49 @@ func (p *tunnelProxy) untrack(c net.Conn) {
 	delete(p.conns, c)
 	p.mu.Unlock()
 }
-func (p *tunnelProxy) cut() {
+func (p *tunnelProxy) cut() (int, time.Time) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	n := 0
+	var actual time.Time
+	// Sever the external socket first. Closing the loopback side first could
+	// race its copier and turn the external close into an uncounted no-op.
+	for c, external := range p.conns {
+		if !external {
+			continue
+		}
+		if err := c.Close(); err == nil {
+			n++
+			actual = time.Now()
+		}
+		delete(p.conns, c)
+	}
 	for c := range p.conns {
 		_ = c.Close()
+		delete(p.conns, c)
+	}
+	return n, actual
+}
+func (p *tunnelProxy) ready() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.readyTimer != nil {
+		p.readyTimer.Stop()
+		p.readyTimer = nil
+	}
+	if p.serviceTimeout > 0 {
+		p.serviceTimeout = 30 * time.Second
 	}
 }
+func (p *tunnelProxy) queued() time.Duration { p.mu.Lock(); defer p.mu.Unlock(); return p.queueTime }
 func (p *tunnelProxy) close() {
 	p.mu.Lock()
 	p.closing = true
+	if p.readyTimer != nil {
+		p.readyTimer.Stop()
+	}
+	p.permit.release()
+	p.permit = nil
 	for c := range p.conns {
 		_ = c.Close()
 	}
@@ -254,14 +326,54 @@ func (p *tunnelProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "CONNECT required", 405)
 		return
 	}
-	ctx, cancel := context.WithTimeout(p.ctx, 10*time.Second)
-	defer cancel()
-	upstream, err := p.g.connect(ctx, p.t, r.Host)
+	p.mu.Lock()
+	permit := p.permit
+	p.permit = nil
+	p.mu.Unlock()
+	if permit == nil {
+		// Released retry/WS dial clocks include CONNECT. Keep that queue bounded,
+		// classify saturation as generator-limited, and give retry service its
+		// normal 30 seconds after this at-most-five-second pacing allowance.
+		queuedAt := time.Now()
+		queuectx, cancel := context.WithTimeout(p.ctx, p.queueLimit)
+		var err error
+		permit, err = p.g.permit(queuectx)
+		cancel()
+		if p.queueEvent != nil {
+			p.queueEvent(time.Since(queuedAt), err != nil)
+		}
+		if err != nil {
+			if p.ctx.Err() == nil && p.failure != nil {
+				p.failure(errors.New("generator_admission_backlog"))
+			}
+			http.Error(w, "generator admission backlog", 503)
+			return
+		}
+	}
+	defer permit.release()
+	p.mu.Lock()
+	p.queueTime += permit.queued
+	p.mu.Unlock()
+	began := time.Now()
+	select {
+	case p.dialStarted <- began:
+	default:
+	}
+	upstream, err := p.g.connectPermit(p.ctx, p.t, r.Host, permit)
 	if err != nil {
 		http.Error(w, "destination refused", 403)
 		return
 	}
-	if !p.track(upstream) {
+	p.mu.Lock()
+	if p.serviceTimeout > 0 {
+		p.readyTimer = time.AfterFunc(p.serviceTimeout-time.Since(began), func() { _ = upstream.Close() })
+	}
+	serviceTimer := p.readyTimer
+	p.mu.Unlock()
+	if serviceTimer != nil {
+		defer serviceTimer.Stop()
+	}
+	if !p.track(upstream, true) {
 		return
 	}
 	defer p.untrack(upstream)
@@ -269,7 +381,7 @@ func (p *tunnelProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		return
 	}
-	if !p.track(downstream) {
+	if !p.track(downstream, false) {
 		return
 	}
 	defer p.untrack(downstream)
@@ -285,4 +397,12 @@ func (p *tunnelProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	_ = downstream.Close()
 	_ = upstream.Close()
 	<-copied
+}
+
+func (p *tunnelProxy) takePermit() *dialPermit {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	permit := p.permit
+	p.permit = nil
+	return permit
 }

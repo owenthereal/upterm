@@ -164,9 +164,9 @@ func (c Config) Validate(now time.Time) error {
 		return errors.New("churn needs survivor hosts/guests and at least 25 seconds")
 	}
 	fanout := int64(1 + c.GuestsPerHost*c.ChannelsPerGuest)
-	probes := int64(c.Hosts*c.GuestsPerHost*c.ChannelsPerGuest) * 256 * fanout
+	probes := int64(c.Hosts*c.GuestsPerHost*c.ChannelsPerGuest) * 512 * fanout
 	if c.idleHostOnly() {
-		probes += int64(1+(c.DurationSeconds-1)/30) * 512
+		probes += int64(1+(c.DurationSeconds-1)/30) * 768
 	}
 	active := int64(0)
 	if c.Active {
@@ -246,7 +246,7 @@ func (c Config) hostOutputReservation() int64 {
 	fanout := int64(1 + c.GuestsPerHost*c.ChannelsPerGuest)
 	// Startup has an independent, enforced ramp+30s deadline. Teardown can
 	// produce one final tick, reserved here before any helper is started.
-	seconds := int64(c.DurationSeconds + 42 + c.Hosts*(1+c.GuestsPerHost)/c.AdmissionsPerSecond)
+	seconds := int64(c.DurationSeconds + 52 + c.Hosts*(1+c.GuestsPerHost)/c.AdmissionsPerSecond)
 	output := int64(10) // helper-ready marker
 	if c.Active {
 		output += (seconds/10 + 1) * 1024

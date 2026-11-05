@@ -2,6 +2,8 @@ package capacity
 
 import (
 	"bytes"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -44,5 +46,16 @@ func TestRealTransportChurnRestoresOriginalSessions(t *testing.T) {
 	}
 	if s.EstablishedHosts != 2 || s.EstablishedGuests != 4 {
 		t.Fatalf("reconnect was counted as new admission: %+v", s)
+	}
+	if !s.DeliveryComplete || s.ActualHostCuts != 1 || s.ActualGuestCuts != 2 {
+		t.Fatalf("actual churn delivery/cuts incomplete: %+v", s)
+	}
+	if s.InputFrames != int64(s.RTTCount+s.CanaryRTTCount+s.InterruptedReplies) {
+		t.Fatalf("churn completion accounting lost or duplicated replies: %+v", s)
+	}
+	if dir := os.Getenv("CAPACITY_EVIDENCE_DIR"); dir != "" {
+		if err := os.WriteFile(filepath.Join(dir, "churn-events.jsonl"), out.Bytes(), 0600); err != nil {
+			t.Fatal(err)
+		}
 	}
 }

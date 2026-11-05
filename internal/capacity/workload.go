@@ -28,12 +28,15 @@ type observation struct {
 }
 
 func parseFrame(line string) (observation, bool) {
-	i := strings.Index(line, "CAP ")
+	// Reconstruction can end mid-row, placing old screen text before the
+	// first fresh frame on this scan line. Only the final complete tag can be
+	// that live frame; timestamp-bound challenges/barriers reject stale replay.
+	i := strings.LastIndex(line, "CAP ")
 	if i < 0 {
 		return observation{}, false
 	}
 	fields := strings.Fields(line[i:])
-	if len(fields) != 6 || (fields[1] != "I" && fields[1] != "H" && fields[1] != "R" && fields[1] != "A") {
+	if len(fields) != 6 || (fields[1] != "I" && fields[1] != "H" && fields[1] != "R" && fields[1] != "A" && fields[1] != "Q" && fields[1] != "F" && fields[1] != "B") {
 		return observation{}, false
 	}
 	id, e1 := strconv.Atoi(fields[2])
@@ -49,6 +52,9 @@ func parseFrame(line string) (observation, bool) {
 // input frames and, in active mode, emits exactly 1 KiB every ten seconds.
 // It never starts a shell or interprets received text as a command.
 func Helper(ctx context.Context, in io.Reader, out io.Writer, hostID int, active bool) error {
+	return helper(ctx, in, out, hostID, active, 10*time.Second)
+}
+func helper(ctx context.Context, in io.Reader, out io.Writer, hostID int, active bool, outputInterval time.Duration) error {
 	if f, ok := in.(*os.File); ok && term.IsTerminal(int(f.Fd())) {
 		state, err := term.MakeRaw(int(f.Fd()))
 		if err != nil {
@@ -66,19 +72,30 @@ func Helper(ctx context.Context, in io.Reader, out io.Writer, hostID int, active
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		for {
-			b := make([]byte, 128)
-			_, err := io.ReadFull(in, b)
-			if err != nil {
-				failed <- err
-				return
+		scanner := bufio.NewScanner(in)
+		scanner.Buffer(make([]byte, 4096), 1<<20)
+		for scanner.Scan() {
+			line := scanner.Text()
+			i := strings.LastIndex(line, "CAP ")
+			if i < 0 || len(line)-i != 127 {
+				continue
 			}
+			o, ok := parseFrame(line[i:])
+			if !ok || (o.kind != "I" && o.kind != "R" && o.kind != "Q" && o.kind != "F") {
+				continue
+			}
+			b := []byte(line[i:] + "\n")
 			select {
 			case received <- b:
 			case <-ctx.Done():
 				return
 			}
 		}
+		err := scanner.Err()
+		if err == nil {
+			err = io.EOF
+		}
+		failed <- err
 	}()
 	defer func() {
 		cancel()
@@ -87,9 +104,23 @@ func Helper(ctx context.Context, in io.Reader, out io.Writer, hostID int, active
 		}
 		<-done
 	}()
-	tick := time.NewTicker(10 * time.Second)
+	started := time.Now()
+	tick := time.NewTicker(outputInterval)
 	defer tick.Stop()
 	seq := 0
+	quiesced := false
+	emitDue := func(now time.Time) error {
+		if active && !quiesced {
+			due := int(now.Sub(started) / outputInterval)
+			for seq < due {
+				if _, err := out.Write(frame("H", hostID, seq, now, 1024)); err != nil {
+					return err
+				}
+				seq++
+			}
+		}
+		return nil
+	}
 	for {
 		select {
 		case <-ctx.Done():
@@ -100,6 +131,18 @@ func Helper(ctx context.Context, in io.Reader, out io.Writer, hostID int, active
 			}
 			return err
 		case b := <-received:
+			if o, ok := parseFrame(string(b)); ok && (o.kind == "Q" || o.kind == "F") {
+				if err := emitDue(time.Now()); err != nil {
+					return err
+				}
+				if o.kind == "F" {
+					quiesced = true
+				}
+				if _, err := out.Write(frame("B", o.id, seq, o.sent, 128)); err != nil {
+					return err
+				}
+				continue
+			}
 			if len(b) > 4 && b[4] == 'R' {
 				b[4] = 'A'
 			}
@@ -107,11 +150,8 @@ func Helper(ctx context.Context, in io.Reader, out io.Writer, hostID int, active
 				return err
 			}
 		case now := <-tick.C:
-			if active {
-				if _, err := out.Write(frame("H", hostID, seq, now, 1024)); err != nil {
-					return err
-				}
-				seq++
+			if err := emitDue(now); err != nil {
+				return err
 			}
 		}
 	}

@@ -41,7 +41,7 @@ func (r *runState) hostCanary(sample int) error {
 	r.rec.mu.Unlock()
 	began := time.Now()
 	err = q.connect(r.ctx, r)
-	readyElapsed := time.Since(began)
+	readyElapsed := time.Since(began) - q.queueElapsed
 	q.setExpected(true)
 	q.close()
 	if err != nil {
@@ -54,7 +54,7 @@ func (r *runState) hostCanary(sample int) error {
 		r.rec.summary.CanaryReadyMillis = ms
 	}
 	r.rec.mu.Unlock()
-	r.rec.event("host_only_canary", map[string]any{"sample": sample, "host": q.host.id, "transport": u.Scheme, "ready_ms": ms, "transient_guest": true, "channels": 1})
+	r.rec.event("host_only_canary", map[string]any{"sample": sample, "host": q.host.id, "transport": u.Scheme, "ready_ms": ms, "queue_ms": float64(q.queueElapsed) / float64(time.Millisecond), "transient_guest": true, "channels": 1})
 	return nil
 }
 func (r *runState) canaries() {

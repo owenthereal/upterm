@@ -108,7 +108,13 @@ slot, 20 new external
 connections/second, 24 hours of authorization and 50 GiB of application payload.
 Up to twenty admission workers overlap readiness; every external connection
 and retry passes the same global limiter, including `Host`'s own reconnect
-attempts. Admission workers are joined before steady observation or cleanup.
+attempts. Initial hosts reserve a dial slot before `Host.Run`; guests reserve
+before their ten-second service attempt, including WS CONNECT/upgrade. Queue
+waiting is generator pacing, excluded from `ready_ms`, and reported separately
+as `queue_ms` on admission/readiness events. A slow chosen ramp cannot consume
+a client's service deadline. A permit remains exclusive until the actual dial
+starts, so delayed reservations and cancelled waiters cannot bunch dials.
+Admission workers are joined before steady observation or cleanup.
 The process rejects nonempty uppercase or lowercase `HTTP_PROXY`, `HTTPS_PROXY`
 and `ALL_PROXY`. Its private loopback CONNECT doors enforce destination/IP
 allowlists and own the host sockets used for cuts. `local_only: true` is a
@@ -120,7 +126,13 @@ ready. Setup has a separate `(H + G) / rate + 30 seconds` deadline; manifest
 expiry and parent cancellation bound both. Summary `setup_seconds`,
 `steady_seconds` and total `duration_seconds` preserve the distinction. A
 five-minute hold therefore remains five minutes after admission. Host keepalive
-uses the released client's 50-second interval and normal reconnect timings.
+uses the released client's 50-second interval and normal reconnect backoff.
+Released host redial budgets include CONNECT waiting: their normal 30-second
+service budget gets an explicit allowance of at most five seconds for generator
+pacing. The CONNECT door enforces the original 30-second service bound after
+dispatch. The released WS dial/upgrade path remains in use. A retry queue that
+cannot dispatch within five seconds stops as `generator_admission_backlog`;
+this is invalid generator-limited evidence, never a relay capacity ceiling.
 
 ## Offered data and measurement
 
@@ -133,18 +145,52 @@ ten seconds from helper startup. Idle helpers emit only their startup marker
 and readiness challenge/probe responses. A request tagged `R` receives a
 helper-generated `A` response, so a PTY kernel echo cannot prove readiness.
 This also works after the original startup marker leaves terminal history.
+The authenticated `R` challenge may repeat every 100 ms within the same
+original ten-second service attempt until a matching live `A` is seen.
+`readiness_challenge_retry` events and summary `readiness_challenge_retries`
+expose every additional attempt; all requests reserve payload before writing.
+Ready/recovery latency includes this work. These retries establish the live
+boundary and never retry or waive a steady `I`/`H` delivery failure. Challenges,
+barriers and own input replies match their original timestamps, so replayed
+responses cannot acknowledge or remeasure a request. The helper resynchronizes
+its bounded line frames if a cut truncates a preceding input.
 All receivers drain output, track sequence gaps
 and reordering, and fail if a requested response remains outstanding for more
-than ten seconds. Initial terminal replay is excluded until a channel's fresh
-probe response establishes the live measurement boundary. Planned reconnects
+than ten seconds. Initial terminal replay is excluded by a fresh helper `Q`/`B` barrier before
+its live probe. The barrier reports the helper's emitted host-output sequence
+count and establishes each channel's live measurement boundary. Every new
+transport clears old barriers so replay cannot activate its live reader. Planned reconnects
 reset tracking only for the affected source generation; survivor generations
 retain gap/reordering checks.
+
+Steady input has an independent schedule per guest. Expected restoration
+pauses only that guest; it does not hold up healthy survivors. A missed
+one-second interval fails as `generator_cadence_late`; it is never caught up by
+sending active input after the offered interval. At steady end,
+new input stops and a separate drain of at most ten seconds retains transports,
+telemetry, watchdog and manifest bounds. It first requires every outstanding
+own reply, then sends `F`/`B` barriers on every channel. `F` quiesces helper
+output; `B` reports its final emitted output count. Every receiver must have
+the final active input sequence from every live source and the final host
+output sequence. Missing suffixes fail even when no later frame exposes a gap.
+Late completed replies retain their original RTT timestamps and enter the RTT
+reservoir. After successful completion and cleanup, `input_frames` equals
+`rtt_count + canary_rtt_count + interrupted_replies`: each complete input write
+is either acknowledged once or explicitly interrupted by a planned cut.
+Readiness `I` probes and accepted inputs during churn are included. `R`, `Q`,
+and `F` requests count in `handshake_frames`; their `A`/`B` replies do not create
+input RTT samples. Idle host-only canaries contribute one `input_frames` and
+one `canary_rtt_count` per successful canary, with zero normal `rtt_count`. A successful summary requires `delivery_complete: true`, keeps
+`stop_reason: "duration"`, and adds `drain_seconds`; `steady_seconds` continues
+to report only the configured offered interval. Inputs interrupted by an
+intentional cut are counted explicitly in `interrupted_replies`; the restored
+generation must prove delivery again.
 
 Each 128-byte input/echo and 1,024-byte host frame contains a 44-byte ASCII
 header (`CAP`, role, eight-digit source and sequence, nineteen-digit Unix
 nanoseconds), padding, and one final LF. The 45 framing bytes are included in
 those fixed sizes. Readiness challenge and response frames are also 128 bytes; `handshake_frames`
-records their requests separately from `input_frames`. The helper startup
+records readiness and barrier requests separately from `input_frames`. The helper startup
 marker is ten bytes. SSH, TLS,
 WebSocket, TCP, terminal reconstruction and relay forwarding overhead are not
 measured as application framing. RTT uses the originating guest's echoed tag;
@@ -177,9 +223,22 @@ at phase expiry are a failure.
 guests per host and 25 steady seconds. Counts are floored; use enough hosts for
 the requested percentage to select a host. Selected host and guest transports
 are cut over a ten-second schedule starting one second into steady load.
+Selected guests are cut before selected hosts so an overlapping selection
+always severs a real guest transport. Actual cutting takes no repair lock;
+repairs may serialize independently. `transport_cut` records `planned_at`,
+`actual_at`, `schedule_delay_ms`, `actual_transports`, and for host cuts
+`already_disrupted_guests`. Already-disrupted guest transports cause failure,
+not an extra claimed cut. Summary `actual_host_cuts` and `actual_guest_cuts`
+must equal the requested floored counts.
 Host restoration uses the original `Host.Run`, host key and session ID;
 guests reuse their identities and transport kinds. Reconnect events and
-latency are separate from first admissions. A survivor on an unaffected host
+latency are separate from first admissions. Restoration `restoration_ms` is
+actual cut-to-usable wall time, including generator pacing and repair waits;
+the approved recovery objective continues to use this total. Additive
+`queue_ms` separates admission pacing and `service_ms` reports the remaining
+elapsed recovery path, including normal retry/backoff and repair waiting.
+An overlapping later host cut supersedes guest repair without resetting that
+guest's original outage start. A survivor on an unaffected host
 keeps its transport and must continue responding. Intentional input pauses are
 reported as `paused_active_frames`. Idle churn explicitly probes its survivor.
 Churn incomplete at phase expiry is a failure. Combining transfers and churn
