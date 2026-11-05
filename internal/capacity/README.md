@@ -89,8 +89,13 @@ Phase:
 
 `host_public`/`entry_public` select the optional public URLs; otherwise the
 private URLs are used. Both public URLs must be present when selected. Transport
-percentages assign the first `floor(role_count * percentage / 100)` clients to
-WS/WSS, the rest to SSH. JSONL records each role, actual node and transport.
+percentages assign exactly `floor(role_count * percentage / 100)` clients of
+each role to WS/WSS, the rest to SSH. Hosts select WS/WSS from the beginning of
+host order; guests select from the end of guest order (grouped by host), without
+changing IDs or host association. Thus a 50/50 workload with an even host count
+includes SSH hosts with WS guests and WS hosts with SSH guests. All-SSH and
+all-WS phases cover same-transport pairs. JSONL records each role, actual node
+and transport.
 Idle phases with zero guests per host reserve one extra external connection for
 a transient one-channel guest canary at readiness and every 30 seconds. Canary
 hosts are sampled round-robin; canary counts, maximum ready latency and RTT

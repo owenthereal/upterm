@@ -271,7 +271,9 @@ func (r *runState) admit(identity ssh.Signer) error {
 	for _, h := range r.hosts {
 		for j := 0; j < r.cfg.GuestsPerHost; j++ {
 			id := len(r.guests)
-			u, err := transport(et, r.cfg.GuestWSPercent, id, r.cfg.Hosts*r.cfg.GuestsPerHost, r.cfg.EntryPublic)
+			total := r.cfg.Hosts * r.cfg.GuestsPerHost
+			// Select guests from the opposite end so a 50/50 mix crosses host transports.
+			u, err := transport(et, r.cfg.GuestWSPercent, total-1-id, total, r.cfg.EntryPublic)
 			if err != nil {
 				return err
 			}
