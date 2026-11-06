@@ -49,11 +49,11 @@ func guestHandshake(ctx context.Context, raw net.Conn, addr string, cfg *ssh.Cli
 	return ssh.NewClient(conn, chans, reqs), nil
 }
 func openGuest(ctx context.Context, g *guard, t Target, u *url.URL, s *api.GetSessionResponse, identity ssh.Signer, proxy *tunnelProxy) (*ssh.Client, net.Conn, error) {
-	if err := g.session(ctx, s); err != nil {
+	check, err := g.guestKey(ctx, t, u.Scheme, s)
+	if err != nil {
 		return nil, nil, err
 	}
 	var raw net.Conn
-	var err error
 	if u.Scheme == "ssh" {
 		raw, err = g.connectPermit(ctx, t, u.Host, proxy.takePermit())
 	} else {
@@ -64,7 +64,7 @@ func openGuest(ctx context.Context, g *guard, t Target, u *url.URL, s *api.GetSe
 	if err != nil {
 		return nil, nil, err
 	}
-	cfg := &ssh.ClientConfig{User: s.SshUser, Auth: []ssh.AuthMethod{ssh.PublicKeys(identity)}, ClientVersion: upterm.ClientSSHClientVersion, HostKeyCallback: pinnedKey(t)}
+	cfg := &ssh.ClientConfig{User: s.SshUser, Auth: []ssh.AuthMethod{ssh.PublicKeys(identity)}, ClientVersion: upterm.ClientSSHClientVersion, HostKeyCallback: check}
 	client, err := guestHandshake(ctx, raw, u.Host, cfg)
 	return client, raw, err
 }

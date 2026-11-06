@@ -178,6 +178,29 @@ func (g *guard) session(ctx context.Context, s *api.GetSessionResponse) error {
 	}
 	return errors.New("session node outside manifest")
 }
+
+func (g *guard) guestKey(ctx context.Context, entry Target, transport string, s *api.GetSessionResponse) (ssh.HostKeyCallback, error) {
+	if err := g.session(ctx, s); err != nil {
+		return nil, err
+	}
+	// SSH terminates at the entry. Embedded-mode WebSocket routing also goes
+	// through the entry's SSH proxy. Consul-mode WebSocket routing instead
+	// pipes SSH to the session's node, whose certificate the guest receives.
+	// Its plain SSH user distinguishes it from the validated embedded route.
+	if transport != "ssh" && s.SshUser == s.SessionId {
+		for _, origin := range g.cfg.Manifest.Targets {
+			if origin.MachineID != entry.MachineID && contains(origin.NodeAddresses, s.NodeAddr) {
+				check := pinnedKey(origin)
+				node := s.NodeAddr
+				return func(_ string, remote net.Addr, key ssh.PublicKey) error {
+					return check(node, remote, key)
+				}, nil
+			}
+		}
+	}
+	return pinnedKey(entry), nil
+}
+
 func pinnedKey(t Target) ssh.HostKeyCallback {
 	var pins []ssh.PublicKey
 	for _, s := range t.HostKeys {
