@@ -224,8 +224,8 @@ requires the owned directory to be absent before return. JSONL contains actual
 upload/download bytes, digest and verification outcome. Transfers incomplete
 at phase expiry are a failure.
 
-`churn_percent` can be zero, ten or fifty. It requires at least two hosts, two
-guests per host and 25 steady seconds. Counts are floored; use enough hosts for
+`churn_percent` can be zero, ten or fifty. It requires at least two hosts, one
+guest per host and 25 steady seconds. Counts are floored; use enough hosts for
 the requested percentage to select a host. Selected host and guest transports
 are cut over a ten-second schedule starting one second into steady load.
 Selected guests are cut before selected hosts so an overlapping selection

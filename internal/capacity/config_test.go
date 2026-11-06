@@ -95,3 +95,48 @@ func TestDecodeRequiresBothExplicitInputs(t *testing.T) {
 		}
 	}
 }
+
+// Balanced reconnect phases must use the candidate's original 1:1 load.
+func TestBalancedChurnValidation(t *testing.T) {
+	clearProxies(t)
+	for _, tc := range []struct {
+		name           string
+		hosts, percent int
+	}{
+		{"ten-percent", 10, 10}, {"fifty-percent", 2, 50},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := validConfig(t)
+			c.Hosts, c.GuestsPerHost, c.ChurnPercent = tc.hosts, 1, tc.percent
+			c.DurationSeconds = 25
+			if err := c.Validate(time.Now()); err != nil {
+				t.Fatalf("balanced churn refused: %v", err)
+			}
+		})
+	}
+	for _, tc := range []struct {
+		name   string
+		change func(*Config)
+	}{
+		{"zero guests", func(c *Config) { c.GuestsPerHost = 0 }},
+		{"no survivor host", func(c *Config) { c.Hosts = 1 }},
+		{"zero selected hosts", func(c *Config) { c.Hosts = 9; c.ChurnPercent = 10 }},
+		{"short duration", func(c *Config) { c.DurationSeconds = 24 }},
+		{"excess duration", func(c *Config) { c.DurationSeconds = 86401 }},
+		{"manifest deadline", func(c *Config) { c.Manifest.ExpiresAt = time.Now().Add(24 * time.Second) }},
+		{"zero rate", func(c *Config) { c.AdmissionsPerSecond = 0 }},
+		{"excess rate", func(c *Config) { c.AdmissionsPerSecond = 21 }},
+		{"external connections", func(c *Config) { c.Hosts = 500 }},
+		{"insufficient payload", func(c *Config) { c.PayloadBudgetBytes = 1 }},
+		{"excess payload", func(c *Config) { c.PayloadBudgetBytes = MaxPayload + 1 }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := validConfig(t)
+			c.Hosts, c.GuestsPerHost, c.ChurnPercent, c.DurationSeconds = 2, 1, 50, 25
+			tc.change(&c)
+			if err := c.Validate(time.Now()); err == nil {
+				t.Fatal("out-of-bounds balanced churn accepted")
+			}
+		})
+	}
+}

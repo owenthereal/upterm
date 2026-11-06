@@ -160,7 +160,7 @@ func (c Config) Validate(now time.Time) error {
 	if c.ChurnPercent != 0 && c.ChurnPercent != 10 && c.ChurnPercent != 50 {
 		return errors.New("churn must be zero, ten or fifty percent")
 	}
-	if c.ChurnPercent > 0 && (c.Hosts < 2 || c.GuestsPerHost < 2 || c.DurationSeconds < 25 || c.Hosts*c.ChurnPercent/100 < 1) {
+	if c.ChurnPercent > 0 && (c.Hosts < 2 || c.GuestsPerHost < 1 || c.DurationSeconds < 25 || c.Hosts*c.ChurnPercent/100 < 1) {
 		return errors.New("churn needs survivor hosts/guests and at least 25 seconds")
 	}
 	fanout := int64(1 + c.GuestsPerHost*c.ChannelsPerGuest)
