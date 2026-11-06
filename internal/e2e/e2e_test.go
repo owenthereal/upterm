@@ -1,3 +1,17 @@
+// Package e2e drives the real upterm CLI, ssh guests and tmux end to end.
+//
+// The environment sets it up:
+//
+//   - UPTERM_E2E_SERVER is the relay most tests host on. It is required.
+//   - UPTERM_E2E_RELAY_BINARY names the uptermd that tests starting a relay of
+//     their own run. It must be an absolute path or a command name found on
+//     PATH; a relative path resolves against the package directory go test
+//     runs in. Unset, they build one from this module.
+//   - UPTERM_E2E_RELAY_ARGS are extra arguments for that relay, split on
+//     whitespace with no quoting. They come before the harness's own
+//     --ssh-addr and --private-key, and may not set either. The relay's
+//     binary and whole argument list are logged verbatim, so they must not
+//     carry secrets.
 package e2e
 
 import (
