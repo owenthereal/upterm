@@ -212,6 +212,9 @@ func (q *guest) connect(ctx context.Context, r *runState) error {
 		if err != nil {
 			return err
 		}
+		if r.cfg.terminalIO != nil {
+			in, out = r.cfg.terminalIO(q.id, ch, q.generation, in, out)
+		}
 		session.Stderr = io.Discard
 		if err = session.Shell(); err != nil {
 			return err

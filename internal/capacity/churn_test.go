@@ -34,6 +34,7 @@ func TestRealTransportChurnRestoresOriginalSessions(t *testing.T) {
 	c.PayloadBudgetBytes = 4 << 20
 	c.HostWSPercent = 50
 	c.GuestWSPercent = 50
+	captureChurnTerminals(t, &c)
 	var out bytes.Buffer
 	s, err := Run(t.Context(), c, &out)
 	if err != nil {

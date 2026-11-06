@@ -58,6 +58,8 @@ type Config struct {
 	TransferConcurrency int      `json:"transfer_concurrency"`
 	ChurnPercent        int      `json:"churn_percent"`
 	WatchdogFile        string   `json:"watchdog_file"`
+	// terminalIO observes a local test's raw PTY traffic before frame parsing.
+	terminalIO func(guest, channel, generation int, in io.WriteCloser, out io.Reader) (io.WriteCloser, io.Reader)
 }
 
 const MaxPayload = int64(50 << 30)
