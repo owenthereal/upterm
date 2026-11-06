@@ -39,10 +39,19 @@ type SFTPSession struct {
 	logger            *slog.Logger
 	ctx               context.Context
 	autoAccept        bool
+	root              *os.Root
 }
 
 // HandleSFTP handles SFTP subsystem requests
 func (h *sessionHandler) HandleSFTP(sess gssh.Session) {
+	if h.sftpRoot != nil {
+		finished, ok := h.sftpWorkers.admit(sess)
+		if !ok {
+			_ = sess.Exit(1)
+			return
+		}
+		defer finished()
+	}
 	sessionID := sess.Context().Value(gssh.ContextKeySessionID).(string)
 
 	// Get client info for terminal approval. The fingerprint is the guest's
@@ -80,6 +89,7 @@ func (h *sessionHandler) HandleSFTP(sess gssh.Session) {
 		permissionChecker: h.permissionChecker,
 		clientInfo:        clientInfo,
 		logger:            h.logger,
+		root:              h.sftpRoot,
 	}
 
 	handlers := sftp.Handlers{
@@ -89,10 +99,18 @@ func (h *sessionHandler) HandleSFTP(sess gssh.Session) {
 		FileList: &sftpFileLister{session: sftpSession, logger: h.logger},
 	}
 
-	// Get user's home directory for SFTP start directory
-	userHome, err := os.UserHomeDir()
+	// Rooted sessions resolve relative requests under their declared root;
+	// ordinary sessions retain the user's home as their starting directory.
+	var userHome string
+	var err error
+	if h.sftpRoot != nil {
+		userHome, err = filepath.Abs(h.sftpRoot.Name())
+		handlers.FileList = &rootedSFTPFileLister{sftpFileLister{session: sftpSession, logger: h.logger}}
+	} else {
+		userHome, err = os.UserHomeDir()
+	}
 	if err != nil {
-		h.logger.Error("failed to get user home directory", "error", err)
+		h.logger.Error("failed to get SFTP start directory", "error", err)
 		_ = sess.Exit(1)
 		return
 	}
@@ -249,6 +267,9 @@ func sftpOperationError(ctx context.Context, r *sftp.Request, s *SFTPSession) er
 // paths already resolve to the home directory, so "notes.txt" covers what
 // "~/notes.txt" was reaching for.
 func (s *SFTPSession) resolvePath(reqPath string) (string, error) {
+	if s.root != nil {
+		return rootedSFTPPath(s.root, reqPath)
+	}
 	if runtime.GOOS == "windows" {
 		reqPath = undoubleDriveLetter(reqPath)
 	}
@@ -343,6 +364,9 @@ func (h *sftpFileReader) Fileread(r *sftp.Request) (io.ReaderAt, error) {
 	if err := sftpOperationError(ctx, r, h.session); err != nil {
 		return nil, err
 	}
+	if h.session.root != nil {
+		return h.session.root.Open(path)
+	}
 	return os.Open(path)
 }
 
@@ -401,6 +425,9 @@ func (h *sftpFileWriter) Filewrite(r *sftp.Request) (io.WriterAt, error) {
 	if err := sftpOperationError(ctx, r, h.session); err != nil {
 		return nil, err
 	}
+	if h.session.root != nil {
+		return h.session.root.OpenFile(path, osFlags, 0600)
+	}
 	return os.OpenFile(path, osFlags, 0644)
 }
 
@@ -411,6 +438,9 @@ type sftpFileCmder struct {
 }
 
 func (h *sftpFileCmder) Filecmd(r *sftp.Request) error {
+	if h.session.root != nil && r.Method != "Remove" {
+		return sftp.ErrSSHFxOpUnsupported
+	}
 	arrived := time.Now()
 	requestID := nextSFTPRequestID()
 	ctx, cancel := h.session.operationContext(r.Context())
@@ -467,6 +497,9 @@ func (h *sftpFileCmder) Filecmd(r *sftp.Request) error {
 	// Execute the operation
 	switch r.Method {
 	case "Remove":
+		if h.session.root != nil {
+			return h.session.root.Remove(path)
+		}
 		return os.Remove(path)
 	case "Mkdir":
 		return os.Mkdir(path, 0755)
@@ -559,6 +592,9 @@ type sftpFileLister struct {
 }
 
 func (h *sftpFileLister) Filelist(r *sftp.Request) (sftp.ListerAt, error) {
+	if h.session.root != nil {
+		return h.rootedList(r)
+	}
 	path, err := h.session.resolvePath(r.Filepath)
 	if err != nil {
 		return nil, sftp.ErrSSHFxPermissionDenied

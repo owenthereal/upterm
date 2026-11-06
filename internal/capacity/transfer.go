@@ -55,7 +55,7 @@ func (r *runState) transfer(index int, expected string) (err error) {
 		return err
 	}
 	defer func() { _ = c.Close() }()
-	path := filepath.ToSlash(filepath.Join(filepath.Dir(q.host.socket), fmt.Sprintf("transfer-%d.bin", index)))
+	path := filepath.ToSlash(filepath.Join(q.host.h.CommandDir, fmt.Sprintf("transfer-%d.bin", index)))
 	defer func() { _ = c.Remove(path) }()
 	began := time.Now()
 	var uploaded, downloaded int64

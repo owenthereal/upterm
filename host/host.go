@@ -325,6 +325,14 @@ type Host struct {
 
 	// SFTP configuration
 	SFTPDisabled bool // Disable SFTP subsystem entirely (--no-sftp)
+	// SFTPRoot confines SFTP content and metadata to this directory handle.
+	// Nil preserves the ordinary filesystem/consent behavior. The caller owns
+	// the root and must keep it open until Run has returned AND WaitSFTP succeeds.
+	// Rooted hosts are single-use. Configure this before Run; do not change it.
+	SFTPRoot    *os.Root
+	sftpMu      sync.Mutex
+	sftpRunDone chan struct{}
+	sftpServer  *internal.Server
 	// PermissionChecker supplies custom consent policy. Nil denies ungranted operations.
 	PermissionChecker consent.PermissionChecker
 	// TerminalConsent selects consent on the primary local terminal; mutually exclusive with PermissionChecker.
@@ -600,13 +608,56 @@ func (c *Host) claimTimeout() time.Duration {
 	return ClaimTimeout
 }
 
+// WaitSFTP certifies that a rooted host has returned from Run, closed SFTP
+// admission, and joined every rooted request worker and open handle. Concurrent
+// waits are safe. Before Run it returns an error; failed startup with no server
+// is already quiescent. Nil-root hosts have nothing to wait for.
+//
+// On timeout the caller must retain the root and its directory and may wait
+// again. Cancellation cannot force a custom permission checker or blocked OS
+// filesystem call to return, so Run returning alone is not this guarantee.
+func (c *Host) WaitSFTP(ctx context.Context) error {
+	if c.SFTPRoot == nil {
+		return nil
+	}
+	c.sftpMu.Lock()
+	done := c.sftpRunDone
+	c.sftpMu.Unlock()
+	if done == nil {
+		return errors.New("rooted host has not run")
+	}
+	select {
+	case <-done:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	c.sftpMu.Lock()
+	server := c.sftpServer
+	c.sftpMu.Unlock()
+	if server == nil {
+		return nil
+	}
+	return server.WaitSFTP(ctx)
+}
+
 // Run hosts one session and returns when it ends.
 //
-// It may be called again afterwards: everything Run claims, it gives back
-// before returning, including the two fields it fills in on the Host itself.
-// A caller that supplied AdminSocketFile keeps it across runs, since managing
-// the path is what supplying it means.
+// Without SFTPRoot it may be called again afterwards: everything Run claims,
+// it gives back before returning, including the two fields it fills in on the
+// Host itself. A caller that supplied AdminSocketFile keeps it across runs,
+// since managing the path is what supplying it means. Rooted hosts are single-
+// use and require WaitSFTP before the caller closes their root.
 func (c *Host) Run(ctx context.Context) (runErr error) {
+	if c.SFTPRoot != nil {
+		c.sftpMu.Lock()
+		if c.sftpRunDone != nil {
+			c.sftpMu.Unlock()
+			return errors.New("a host with SFTPRoot cannot be reused")
+		}
+		c.sftpRunDone = make(chan struct{})
+		c.sftpMu.Unlock()
+		defer close(c.sftpRunDone)
+	}
 	// An empty command is no command, as the guest door reads one.
 	if len(c.LoginCommand) > 0 && len(c.ForceCommand) > 0 {
 		return errors.New("LoginCommand and ForceCommand are mutually exclusive")
@@ -1246,6 +1297,7 @@ func (c *Host) Run(ctx context.Context) (runErr error) {
 			InitialClientTimeout:       c.InitialClientTimeout,
 			StopGrace:                  c.StopGrace,
 			SFTPDisabled:               c.SFTPDisabled,
+			SFTPRoot:                   c.SFTPRoot,
 			PermissionChecker:          c.PermissionChecker,
 			TerminalConsent:            c.TerminalConsent,
 			SFTPAutoAccept:             c.AutoAccept || c.SFTPAutoAccept,
@@ -1262,6 +1314,11 @@ func (c *Host) Run(ctx context.Context) (runErr error) {
 			OnGuestServerStopped: func(err error) {
 				logger.Warn("reverse tunnel stopped serving guests; command continues", "error", err)
 			},
+		}
+		if c.SFTPRoot != nil {
+			c.sftpMu.Lock()
+			c.sftpServer = &sshServer
+			c.sftpMu.Unlock()
 		}
 		g.Add(func() error {
 			return sshServer.ServeWithContext(ctx, guestDoor, attachLn)

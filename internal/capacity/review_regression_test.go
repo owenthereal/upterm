@@ -362,6 +362,7 @@ func TestRetryBacklogIsGeneratorLimitedBeforeServiceStarts(t *testing.T) {
 
 func TestRealDeliveryEvidence(t *testing.T) {
 	c := localRelay(t)
+	captureChurnTerminals(t, &c)
 	c.DurationSeconds = 1
 	c.GuestWSPercent = 100
 	c.GuestsPerHost = 2

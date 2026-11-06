@@ -73,6 +73,9 @@ func runFaultHelper(config faultHelperConfig, in *os.File, out io.Writer) error 
 		}
 		defer func() { _ = term.Restore(int(in.Fd()), state) }()
 	}
+	if config.Mode == "geometry" {
+		return runGeometryHelper(config.Replay, in, out)
+	}
 	if _, err := io.WriteString(out, config.Replay); err != nil {
 		return err
 	}

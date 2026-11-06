@@ -141,8 +141,10 @@ this is invalid generator-limited evidence, never a relay capacity ceiling.
 
 ## Offered data and measurement
 
-The hosted command is this binary's own `helper` subcommand. It sets its PTY to
-raw mode, answers a distinct 128-byte readiness challenge, echoes deterministic
+The hosted command is this binary's own `helper` subcommand. The host creates
+and pins its PTY at 2048 columns by 100 rows, matching guest requests and
+preventing later joins/resizes from repainting old Windows terminal output.
+The helper sets raw mode, answers a distinct 128-byte readiness challenge, echoes deterministic
 data and never interprets
 input as commands. Active guests send exactly 128 bytes once per second,
 beginning at steady observation start. Active helpers emit a 1 KiB frame every
@@ -222,9 +224,17 @@ runtime. These byte figures are per phase; the operator must also enforce the
 approved aggregate budget across attempts.
 
 `transfer_concurrency` can be zero, four or eight. Each transfer concurrently
-uploads one deterministic 16 MiB file into its host's temporary directory,
+uploads one deterministic 16 MiB file into its host's private transfer directory,
 then downloads it and verifies both length and SHA-256. Source/download data
 are streamed with bounded memory; at most eight temporary 16 MiB files exist.
+Zero-transfer phases disable SFTP entirely. Transfer-enabled hosts confine all
+content and metadata access through a caller-owned `os.Root`, separate from
+admin sockets and other control files. Only open/create, remove, stat and list
+are supported; links, rename, mkdir/rmdir, readlink, attribute changes and
+other operations are refused. Remove can also remove an empty in-root directory.
+This protects against path traversal and symlink replacement, not privileged
+mount/device changes or hostile preexisting hardlinks. Transfer roots start
+empty and the helper executes no remote commands.
 Files and host directories are removed during teardown; `cleanup_complete`
 requires the owned directory to be absent before return. JSONL contains actual
 upload/download bytes, digest and verification outcome. Transfers incomplete
@@ -282,8 +292,11 @@ future-dated heartbeats stop the run. A coordinator can `touch` the heartbeat
 at least every five seconds while continued authorization holds, or create
 `STOP` when an OOM, pressure, cost or other limit is reached. SIGINT/SIGTERM
 also cancel gracefully. All transports are closed, owned goroutines and host
-processes are joined, and temporary directories are removed before the final
-summary. The generator requires no Fly API credential.
+processes are joined, and temporary directories are removed before a successful
+cleanup report. Rooted SFTP admission closes and request workers/handles must
+join before their root closes. If the bounded join fails, cleanup reports an
+error and retains the root and directories; it never deletes beneath an active
+worker. The generator requires no Fly API credential.
 
 Library callers use `Run(ctx, Config, io.Writer) (Summary, error)`. Supply the
 parsed manifest in `Config.Manifest`. `HelperExecutable` defaults to the running

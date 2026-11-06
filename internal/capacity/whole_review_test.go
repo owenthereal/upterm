@@ -188,6 +188,8 @@ func TestRunGuestAuthorizationAcrossTransports(t *testing.T) {
 			c := localRelay(t)
 			c.Active = false
 			c.Hosts = 2
+			c.TransferConcurrency = 4
+			c.PayloadBudgetBytes = 256 << 20
 			c.GuestWSPercent = ws
 			r := admittedRun(t, c)
 			runKey := r.guests[0].identity.PublicKey().Marshal()

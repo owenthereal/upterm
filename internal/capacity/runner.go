@@ -18,6 +18,7 @@ import (
 
 	"github.com/owenthereal/upterm/host"
 	"github.com/owenthereal/upterm/host/api"
+	"github.com/owenthereal/upterm/internal/termsize"
 	"golang.org/x/crypto/ssh"
 )
 
@@ -61,6 +62,7 @@ type hostRun struct {
 	established bool
 	expectedCut bool
 	tunnel      chan tunnelObservation
+	started     bool
 }
 
 func (r *runState) hostTunnel(h *hostRun, e host.TunnelEvent) {
@@ -206,7 +208,19 @@ func (r *runState) startHost(index int, t Target, identity ssh.Signer) error {
 	proxy.queueEvent = func(wait time.Duration, limited bool) {
 		r.rec.event("admission_queue", map[string]any{"role": "host", "host": index, "retry": true, "queue_ms": float64(wait) / float64(time.Millisecond), "generator_limited": limited})
 	}
-	h.h = &host.Host{Reconnect: host.ReconnectTiming{AttemptDeadline: 30*time.Second + retryQueueLimit}, KeepAliveDuration: 50 * time.Second, Host: u.String(), Command: []string{r.helper, "helper", strconv.Itoa(index), strconv.FormatBool(r.cfg.Active)}, CommandDir: dir, Signers: []ssh.Signer{identity}, IdentitiesOnly: true, HostKey: key, HostKeyCallback: pinnedKey(t), ProxyURL: proxy.url, AdminSocketFile: h.socket, AutoAccept: true, SFTPAutoAccept: true, ForwardingDisabled: true, ExecDisabled: true, Logger: slog.New(slog.NewTextHandler(io.Discard, nil)), StopGrace: time.Second,
+	commandDir := dir
+	var root *os.Root
+	if r.cfg.TransferConcurrency > 0 {
+		commandDir = filepath.Join(dir, "transfers")
+		if err := os.Mkdir(commandDir, 0700); err != nil {
+			return err
+		}
+		root, err = os.OpenRoot(commandDir)
+		if err != nil {
+			return err
+		}
+	}
+	h.h = &host.Host{Reconnect: host.ReconnectTiming{AttemptDeadline: 30*time.Second + retryQueueLimit}, KeepAliveDuration: 50 * time.Second, Host: u.String(), Command: []string{r.helper, "helper", strconv.Itoa(index), strconv.FormatBool(r.cfg.Active)}, CommandDir: commandDir, Signers: []ssh.Signer{identity}, IdentitiesOnly: true, HostKey: key, HostKeyCallback: pinnedKey(t), ProxyURL: proxy.url, AdminSocketFile: h.socket, AutoAccept: true, SFTPAutoAccept: true, SFTPDisabled: root == nil, SFTPRoot: root, ForwardingDisabled: true, ExecDisabled: true, Logger: slog.New(slog.NewTextHandler(io.Discard, nil)), StopGrace: time.Second, PtySize: termsize.Size{Cols: 2048, Rows: 100}, PinPtySize: true,
 		AuthorizedKeys: []*host.AuthorizedKey{{PublicKeys: []ssh.PublicKey{r.guestIdentity.PublicKey()}}},
 		SessionCreatedCallback: func(ctx context.Context, s *api.GetSessionResponse) error {
 			if err := r.guard.session(ctx, s); err != nil {
@@ -243,6 +257,7 @@ func (r *runState) startHost(index int, t Target, identity ssh.Signer) error {
 	proxy.mu.Unlock()
 	r.rec.event("admission_queue", map[string]any{"role": "host", "host": index, "queue_ms": float64(time.Since(queuedAt)) / float64(time.Millisecond)})
 	var began time.Time
+	h.started = true
 	go func() {
 		err := h.h.Run(r.ctx)
 		h.done <- err
@@ -349,11 +364,29 @@ func (r *runState) cleanup() error {
 	for _, p := range r.proxies {
 		p.close()
 	}
+	var rootErr error
 	for _, h := range r.hosts {
 		if h != nil {
 			hostErr := <-h.done
 			_ = hostErr // Exit errors were classified before this cancellation/join.
+			if h.h.SFTPRoot != nil {
+				if h.started {
+					ctx, cancel := context.WithTimeout(context.Background(), finalDrainLimit)
+					err := h.h.WaitSFTP(ctx)
+					cancel()
+					if err != nil {
+						rootErr = errors.Join(rootErr, fmt.Errorf("host %d SFTP workers did not join; retained transfer root and directory: %w", h.id, err))
+						continue
+					}
+				}
+				rootErr = errors.Join(rootErr, h.h.SFTPRoot.Close())
+			}
 		}
+	}
+	// A timed-out filesystem/permission worker may still reference the root.
+	// Never let the parent RemoveAll bypass that failed lifetime proof.
+	if rootErr != nil {
+		return rootErr
 	}
 	if err := os.RemoveAll(r.dir); err != nil {
 		return err
