@@ -19,12 +19,26 @@ import (
 	"github.com/spf13/viper"
 )
 
+// configCmd is upterm config. Its help lists the flags of the whole tree
+// that take values only from the command line, so Root sets its Long, with
+// configLong, once the tree is built.
 func configCmd() *cobra.Command {
-	configPath := utils.UptermConfigFilePath()
 	cmd := &cobra.Command{
 		Use:   "config",
 		Short: "Manage upterm configuration",
-		Long: fmt.Sprintf(`Manage upterm's config file: YAML, with flags' names as its keys, e.g.
+	}
+
+	cmd.AddCommand(configPathCmd())
+	cmd.AddCommand(configViewCmd())
+	cmd.AddCommand(configEditCmd())
+
+	return cmd
+}
+
+// configLong is upterm config's help, with perRun, perRunHelp's lines, as its
+// list of the flags that take values only from the command line.
+func configLong(perRun string) string {
+	return fmt.Sprintf(`Manage upterm's config file: YAML, with flags' names as its keys, e.g.
 hide-client-ip: true.
 
 Config file: %s
@@ -42,20 +56,7 @@ A flag's value comes from the first of these that sets it:
   4. The flag's default
 
 These flags take values only from the command line:
-  --output on host, session info, session current, session list and version
-  --name and --detach on host
-  --login-command, --allow-exec, --allow-sftp, --allow-forwarding,
-    --full-access, --no-exec and --no-forwarding on host
-  --join-timeout on session set
-  --wait on join
-Host's --join-timeout still reads env and config.`, configPath),
-	}
-
-	cmd.AddCommand(configPathCmd())
-	cmd.AddCommand(configViewCmd())
-	cmd.AddCommand(configEditCmd())
-
-	return cmd
+%sHost's --join-timeout still reads env and config.`, utils.UptermConfigFilePath(), perRun)
 }
 
 func configPathCmd() *cobra.Command {
@@ -158,6 +159,17 @@ func configViewRunE(c *cobra.Command, args []string) error {
 	}
 
 	fmt.Print(string(content))
+
+	// A file view can't read is printed all the same, and edit says what is
+	// wrong with it.
+	v, _ := configViper()
+	v.SetConfigFile(configPath)
+	if err := v.ReadInConfig(); err != nil {
+		return nil
+	}
+	if names, err := extensionEntries(v); err == nil && len(names) > 0 {
+		_, _ = fmt.Fprintf(c.ErrOrStderr(), "upterm: config.yaml holds settings for extensions this build doesn't have: %s\n", strings.Join(names, ", "))
+	}
 	return nil
 }
 
@@ -263,6 +275,36 @@ func defaultEditor() string {
 // fixConfig is what each problem with the config file ends on.
 const fixConfig = "run upterm config edit to fix it"
 
+// extensionsKey is the top-level config key that holds the settings of
+// extensions, each under its name. No flag reads it, and a build reads only
+// the entries of the extensions it has, so a file can carry settings for
+// extensions another build has.
+const extensionsKey = "extensions"
+
+// extensionEntries is the names of the entries the extensions key holds,
+// sorted; none when the file has no such key. Its value must map each name to
+// a mapping of settings, whatever those hold; any other value is an error.
+func extensionEntries(v *viper.Viper) (names []string, err error) {
+	// InConfig misses a key with no value, which AllKeys still lists.
+	if !v.InConfig(extensionsKey) && !slices.Contains(v.AllKeys(), extensionsKey) {
+		return nil, nil
+	}
+	entries, ok := v.Get(extensionsKey).(map[string]any)
+	if !ok {
+		return nil, errExtensionsShape
+	}
+	for name, settings := range entries {
+		if _, ok := settings.(map[string]any); !ok {
+			return nil, errExtensionsShape
+		}
+		names = append(names, name)
+	}
+	slices.Sort(names)
+	return names, nil
+}
+
+var errExtensionsShape = errors.New(extensionsKey + ": must map each extension's name to its settings")
+
 // configProblem is one thing wrong with a config file: the key it is about,
 // which orders the problems, and what is wrong with it.
 type configProblem struct {
@@ -318,8 +360,14 @@ func checkConfigFile(root *cobra.Command, path string) ([]error, []deprecation) 
 		failed[key] = true
 	}
 
-	keys := configKeysForCommand(v, root, literalKeys)
+	// The extensions key's value is no flag's; only its shape is checked.
+	keys := slices.DeleteFunc(configKeysForCommand(v, root, literalKeys), func(key string) bool {
+		return inExtensions(key, literalKeys)
+	})
 	slices.Sort(keys)
+	if _, err := extensionEntries(v); err != nil {
+		problem(extensionsKey, err.Error())
+	}
 	for _, key := range keys {
 		switch {
 		case !known[key]:

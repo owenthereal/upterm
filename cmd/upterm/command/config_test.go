@@ -503,3 +503,161 @@ func TestForwardingConfigIsPerRun(t *testing.T) {
 		})
 	}
 }
+
+// config edit judges only the shape of the extensions mapping: each name maps
+// to a mapping of settings. What an entry holds is for the build that has the
+// extension, so this one accepts anything in it.
+func TestConfigEditChecksOnlyTheExtensionsShape(t *testing.T) {
+	for _, tc := range []struct {
+		body    string
+		refused bool
+	}{
+		{"extensions: [a]\n", true},
+		{"extensions: {other: 3}\n", true},
+		{"extensions: {other: {anything: 1}}\n", false},
+	} {
+		t.Run(tc.body, func(t *testing.T) {
+			restoreFlags(t)
+			setupSessionRoots(t)
+			withConfig(t, tc.body)
+			t.Setenv("VISUAL", "true")
+			path := utils.UptermConfigFilePath()
+			_, stderr, code := runCLI(t, "config", "edit")
+			if !tc.refused {
+				require.Equal(t, 0, code, stderr)
+				require.Empty(t, stderr)
+				return
+			}
+			require.Equal(t, 1, code)
+			require.Equal(t, "upterm: "+path+": extensions: must map each extension's name to its settings; run upterm config edit to fix it\n", stderr)
+		})
+	}
+}
+
+// config view prints the file as it is, and then names, on stderr, the
+// extensions it holds settings for that this build doesn't have.
+func TestConfigViewNamesExtensionsThisBuildLacks(t *testing.T) {
+	for _, tc := range []struct {
+		body, stderr string
+	}{
+		{"server: ssh://relay.example:22\nextensions:\n  other:\n    destination: work\n",
+			"upterm: config.yaml holds settings for extensions this build doesn't have: other\n"},
+		{"extensions:\n  zeta: {}\n  other:\n    destination: work\n",
+			"upterm: config.yaml holds settings for extensions this build doesn't have: other, zeta\n"},
+		{"extensions: {}\n", ""},
+		{"extensions: [a]\n", ""},
+	} {
+		t.Run(tc.body, func(t *testing.T) {
+			setupSessionRoots(t)
+			withConfig(t, tc.body)
+			stdout, stderr, code := runCLI(t, "config", "view")
+			require.Equal(t, 0, code, stderr)
+			require.Equal(t, tc.body, stdout)
+			require.Equal(t, tc.stderr, stderr)
+		})
+	}
+}
+
+// perRunLines is the generated block's lines, each continuation joined to the
+// line it continues.
+func perRunLines(block string) []string {
+	var lines []string
+	for _, line := range strings.Split(strings.TrimSuffix(block, "\n"), "\n") {
+		if strings.HasPrefix(line, "    ") && len(lines) > 0 {
+			lines[len(lines)-1] += " " + strings.TrimSpace(line)
+			continue
+		}
+		lines = append(lines, line)
+	}
+	return lines
+}
+
+func TestPerRunHelpIsGeneratedFromAnnotations(t *testing.T) {
+	t.Run("a fake command", func(t *testing.T) {
+		root := &cobra.Command{Use: "upterm"}
+		leaf := func(name string) *cobra.Command {
+			return &cobra.Command{Use: name, RunE: func(*cobra.Command, []string) error { return nil }}
+		}
+		probe := leaf("probe")
+		probe.Flags().String("zeta", "", "")
+		probe.Flags().String("plain", "", "")
+		probe.Flags().String("alpha", "", "")
+		perRun(probe.Flags(), "zeta")
+		require.NoError(t, probe.Flags().SetAnnotation("alpha", annotationCLIOnly, []string{"true"}))
+		group := &cobra.Command{Use: "group"}
+		inner := leaf("inner")
+		inner.PersistentFlags().Bool("only-now", false, "")
+		perRun(inner.PersistentFlags(), "only-now")
+		group.AddCommand(inner)
+		many := leaf("many")
+		for i := range 12 {
+			name := fmt.Sprintf("choice-number-%02d", i)
+			many.Flags().Bool(name, false, "")
+			perRun(many.Flags(), name)
+		}
+		none := leaf("none")
+		none.Flags().Bool("bound", false, "")
+		root.AddCommand(probe, none, many, group)
+
+		require.Equal(t, "  group inner: --only-now\n"+
+			"  many: --choice-number-00, --choice-number-01, --choice-number-02,\n"+
+			"    --choice-number-03, --choice-number-04, --choice-number-05,\n"+
+			"    --choice-number-06, --choice-number-07, --choice-number-08,\n"+
+			"    --choice-number-09, --choice-number-10, --choice-number-11\n"+
+			"  probe: --zeta, --alpha\n", perRunHelp(root))
+	})
+
+	t.Run("the real commands", func(t *testing.T) {
+		root := Root()
+		const golden = "  host: --login-command, --allow-exec, --no-exec, --allow-sftp,\n" +
+			"    --allow-forwarding, --no-forwarding, --full-access, --name, --detach,\n" +
+			"    --output\n" +
+			"  join: --wait\n" +
+			"  session current: --output\n" +
+			"  session info: --output\n" +
+			"  session list: --output\n" +
+			"  session set: --join-timeout\n" +
+			"  session ssh-config: --alias\n" +
+			"  version: --output\n"
+		block := perRunHelp(root)
+		require.Equal(t, golden, block)
+		for _, line := range strings.Split(block, "\n") {
+			require.LessOrEqual(t, len(line), 80, line)
+		}
+
+		config, _, err := root.Find([]string{"config"})
+		require.NoError(t, err)
+		require.Contains(t, config.Long, "\n\nThese flags take values only from the command line:\n"+golden+
+			"Host's --join-timeout still reads env and config.")
+
+		// Each annotated flag of any command, the root's and the groups'
+		// included, on the line of the command that has it, once; and nothing
+		// else.
+		want := make(map[string]int)
+		var walk func(c *cobra.Command)
+		walk = func(c *cobra.Command) {
+			label := strings.TrimPrefix(c.CommandPath(), root.Name()+" ")
+			for _, fs := range []*pflag.FlagSet{c.PersistentFlags(), c.LocalNonPersistentFlags()} {
+				fs.VisitAll(func(f *pflag.Flag) {
+					if hasAnnotation(f, annotationPerRun) || hasAnnotation(f, annotationCLIOnly) {
+						want[label+": --"+f.Name]++
+					}
+				})
+			}
+			for _, child := range c.Commands() {
+				walk(child)
+			}
+		}
+		walk(root)
+		require.NotEmpty(t, want)
+		got := make(map[string]int)
+		for _, line := range perRunLines(block) {
+			label, flags, ok := strings.Cut(strings.TrimSpace(line), ": ")
+			require.True(t, ok, line)
+			for _, name := range strings.Split(flags, ", ") {
+				got[label+": "+name]++
+			}
+		}
+		require.Equal(t, want, got)
+	})
+}
