@@ -2,6 +2,7 @@ package capacity
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -35,7 +36,7 @@ func parseFrame(line string) (observation, bool) {
 	if i < 0 {
 		return observation{}, false
 	}
-	// Scanner removes LF (and an optional preceding CR). Accept the same
+	// The line reader removes LF (and an optional preceding CR). Accept the same
 	// endings for direct callers without trimming any payload whitespace.
 	payload := strings.TrimSuffix(strings.TrimSuffix(line[i:], "\n"), "\r")
 	fields := strings.Fields(payload)
@@ -56,6 +57,95 @@ func parseFrame(line string) (observation, bool) {
 		return observation{}, false
 	}
 	return observation{fields[1], id, seq, sent}, true
+}
+
+// frameLines preserves ScanLines' raw 1 MiB limit and error/CR semantics,
+// while retaining only the largest canonical payload plus two trailing CRs.
+// Replay prefixes can be arbitrarily long within that raw limit; parseFrame
+// still selects the final CAP tag and verifies every canonical payload byte.
+type frameLines struct {
+	in         io.Reader
+	read       [4096]byte
+	tail       [1025]byte
+	start, end int
+	length     int
+	err        error
+	done       bool
+}
+
+func (s *frameLines) Scan() bool {
+	if s.done {
+		return false
+	}
+	s.length = 0
+	raw := 0
+	for {
+		if s.start < s.end {
+			data := s.read[s.start:s.end]
+			newline := bytes.IndexByte(data, '\n')
+			if newline >= 0 {
+				data = data[:newline]
+			}
+			raw += len(data)
+			s.start += len(data)
+			if len(data) >= len(s.tail) {
+				s.length = copy(s.tail[:], data[len(data)-len(s.tail):])
+			} else {
+				if excess := s.length + len(data) - len(s.tail); excess > 0 {
+					s.length = copy(s.tail[:], s.tail[excess:s.length])
+				}
+				s.length += copy(s.tail[s.length:], data)
+			}
+			if newline >= 0 {
+				s.start++
+				return s.line()
+			}
+		}
+		// ScanLines offers the final unterminated token even when its reader
+		// returned data together with a non-EOF error. Report that error next.
+		if s.err != nil {
+			s.done = true
+			return raw > 0 && s.line()
+		}
+		if raw == 1<<20 {
+			s.err, s.done = bufio.ErrTooLong, true
+			return false
+		}
+		// Never read beyond the old Scanner's remaining raw-line allowance:
+		// exactly-full unterminated input is accepted only with a same-read
+		// error, whereas a newline may occupy the last allowed byte.
+		p := s.read[:min(len(s.read), (1<<20)-raw)]
+		for empty := 0; ; empty++ {
+			n, err := s.in.Read(p)
+			if n < 0 || n > len(p) {
+				s.err = bufio.ErrBadReadCount
+				break
+			}
+			s.start, s.end, s.err = 0, n, err
+			if n > 0 || err != nil {
+				break
+			}
+			if empty == 100 {
+				s.err = io.ErrNoProgress
+				break
+			}
+		}
+	}
+}
+
+func (s *frameLines) line() bool {
+	if s.length > 0 && s.tail[s.length-1] == '\r' {
+		s.length--
+	}
+	return true
+}
+
+func (s *frameLines) Text() string { return string(s.tail[:s.length]) }
+func (s *frameLines) Err() error {
+	if s.err == io.EOF {
+		return nil
+	}
+	return s.err
 }
 
 // Helper is the runner's harmless hosted command. It echoes fixed 128-byte
@@ -82,8 +172,7 @@ func helper(ctx context.Context, in io.Reader, out io.Writer, hostID int, active
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		scanner := bufio.NewScanner(in)
-		scanner.Buffer(make([]byte, 4096), 1<<20)
+		scanner := &frameLines{in: in}
 		for scanner.Scan() {
 			line := scanner.Text()
 			i := strings.LastIndex(line, "CAP ")
@@ -178,8 +267,7 @@ func (s sequenceTracker) observe(o observation) error {
 	return nil
 }
 func scanFrames(in io.Reader, consume func(observation) error, helperReady func(observation)) error {
-	scanner := bufio.NewScanner(in)
-	scanner.Buffer(make([]byte, 4096), 1<<20)
+	scanner := &frameLines{in: in}
 	for scanner.Scan() {
 
 		if o, ok := parseFrame(scanner.Text()); ok {

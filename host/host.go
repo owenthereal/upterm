@@ -96,6 +96,12 @@ type RelayWarning struct {
 	Host string
 }
 
+// SFTPWriteLimits bounds optional rooted uploads by expected filename,
+// per-file extent and lifetime write bytes, and host-wide lifetime write bytes.
+// Each filename has one non-reusable writable instance. Nil keeps the existing
+// rooted behavior; non-nil limits require SFTPRoot.
+type SFTPWriteLimits = internal.SFTPWriteLimits
+
 type Host struct {
 	Host string
 	// KeepAliveDuration paces the guest sshd's keepalive to each guest. The
@@ -329,10 +335,12 @@ type Host struct {
 	// Nil preserves the ordinary filesystem/consent behavior. The caller owns
 	// the root and must keep it open until Run has returned AND WaitSFTP succeeds.
 	// Rooted hosts are single-use. Configure this before Run; do not change it.
-	SFTPRoot    *os.Root
-	sftpMu      sync.Mutex
-	sftpRunDone chan struct{}
-	sftpServer  *internal.Server
+	SFTPRoot *os.Root
+	// SFTPWriteLimits is copied at Run entry; configure it before Run.
+	SFTPWriteLimits *SFTPWriteLimits
+	sftpMu          sync.Mutex
+	sftpRunDone     chan struct{}
+	sftpServer      *internal.Server
 	// PermissionChecker supplies custom consent policy. Nil denies ungranted operations.
 	PermissionChecker consent.PermissionChecker
 	// TerminalConsent selects consent on the primary local terminal; mutually exclusive with PermissionChecker.
@@ -657,6 +665,10 @@ func (c *Host) Run(ctx context.Context) (runErr error) {
 		c.sftpRunDone = make(chan struct{})
 		c.sftpMu.Unlock()
 		defer close(c.sftpRunDone)
+	}
+	sftpWriteLimits, err := internal.CopySFTPWriteLimits(c.SFTPRoot, c.SFTPWriteLimits)
+	if err != nil {
+		return err
 	}
 	// An empty command is no command, as the guest door reads one.
 	if len(c.LoginCommand) > 0 && len(c.ForceCommand) > 0 {
@@ -1298,6 +1310,7 @@ func (c *Host) Run(ctx context.Context) (runErr error) {
 			StopGrace:                  c.StopGrace,
 			SFTPDisabled:               c.SFTPDisabled,
 			SFTPRoot:                   c.SFTPRoot,
+			SFTPWriteLimits:            sftpWriteLimits,
 			PermissionChecker:          c.PermissionChecker,
 			TerminalConsent:            c.TerminalConsent,
 			SFTPAutoAccept:             c.AutoAccept || c.SFTPAutoAccept,

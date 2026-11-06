@@ -133,8 +133,9 @@ type Server struct {
 	// SFTP configuration
 	SFTPDisabled bool // Disable SFTP subsystem entirely
 	// SFTPRoot is caller-owned; WaitSFTP must succeed before it is closed.
-	SFTPRoot    *os.Root
-	sftpWorkers rootedSFTPWorkers
+	SFTPRoot        *os.Root
+	SFTPWriteLimits *SFTPWriteLimits
+	sftpWorkers     rootedSFTPWorkers
 	// PermissionChecker supplies custom consent policy. Nil denies ungranted operations.
 	PermissionChecker consent.PermissionChecker
 	// TerminalConsent selects consent on the primary local terminal; mutually exclusive with PermissionChecker.
@@ -228,6 +229,10 @@ func (s *Server) ServeWithContext(ctx context.Context, guest, host net.Listener)
 		if !rootedSFTPSupported() {
 			return errors.New("rooted SFTP is unsupported on this platform")
 		}
+	}
+	sftpWriteLimits, err := newRootedSFTPWriteLimits(s.SFTPRoot, s.SFTPWriteLimits)
+	if err != nil {
+		return err
 	}
 	if s.TerminalConsent && s.PermissionChecker != nil {
 		return errors.New("TerminalConsent and PermissionChecker are mutually exclusive")
@@ -386,6 +391,7 @@ func (s *Server) ServeWithContext(ctx context.Context, guest, host net.Listener)
 		cmdDone:           cmdDone,
 		commandResult:     cmd.Result,
 		sftpRoot:          s.SFTPRoot,
+		sftpWriteLimits:   sftpWriteLimits,
 
 		onPrivateCommandExit: s.onPrivateCommandExit,
 	}
@@ -1105,6 +1111,7 @@ type sessionHandler struct {
 	permissionChecker consent.PermissionChecker
 	sftpAutoAccept    bool
 	sftpRoot          *os.Root
+	sftpWriteLimits   *rootedSFTPWriteLimits
 	sftpWorkers       *rootedSFTPWorkers
 
 	// subsystems are the guest door's subsystem handlers, by name, so that

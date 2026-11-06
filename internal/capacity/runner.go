@@ -210,7 +210,16 @@ func (r *runState) startHost(index int, t Target, identity ssh.Signer) error {
 	}
 	commandDir := dir
 	var root *os.Root
+	var writeLimits *host.SFTPWriteLimits
 	if r.cfg.TransferConcurrency > 0 {
+		writeLimits = &host.SFTPWriteLimits{Files: make(map[string]int64)}
+		for transfer := 0; transfer < r.cfg.TransferConcurrency; transfer++ {
+			guest := transfer % (r.cfg.Hosts * r.cfg.GuestsPerHost)
+			if guest/r.cfg.GuestsPerHost == index {
+				writeLimits.Files[fmt.Sprintf("transfer-%d.bin", transfer)] = TransferSize
+				writeLimits.TotalBytes += TransferSize
+			}
+		}
 		commandDir = filepath.Join(dir, "transfers")
 		if err := os.Mkdir(commandDir, 0700); err != nil {
 			return err
@@ -221,7 +230,8 @@ func (r *runState) startHost(index int, t Target, identity ssh.Signer) error {
 		}
 	}
 	h.h = &host.Host{Reconnect: host.ReconnectTiming{AttemptDeadline: 30*time.Second + retryQueueLimit}, KeepAliveDuration: 50 * time.Second, Host: u.String(), Command: []string{r.helper, "helper", strconv.Itoa(index), strconv.FormatBool(r.cfg.Active)}, CommandDir: commandDir, Signers: []ssh.Signer{identity}, IdentitiesOnly: true, HostKey: key, HostKeyCallback: pinnedKey(t), ProxyURL: proxy.url, AdminSocketFile: h.socket, AutoAccept: true, SFTPAutoAccept: true, SFTPDisabled: root == nil, SFTPRoot: root, ForwardingDisabled: true, ExecDisabled: true, Logger: slog.New(slog.NewTextHandler(io.Discard, nil)), StopGrace: time.Second, PtySize: termsize.Size{Cols: 2048, Rows: 100}, PinPtySize: true,
-		AuthorizedKeys: []*host.AuthorizedKey{{PublicKeys: []ssh.PublicKey{r.guestIdentity.PublicKey()}}},
+		SFTPWriteLimits: writeLimits,
+		AuthorizedKeys:  []*host.AuthorizedKey{{PublicKeys: []ssh.PublicKey{r.guestIdentity.PublicKey()}}},
 		SessionCreatedCallback: func(ctx context.Context, s *api.GetSessionResponse) error {
 			if err := r.guard.session(ctx, s); err != nil {
 				return err

@@ -40,6 +40,7 @@ type SFTPSession struct {
 	ctx               context.Context
 	autoAccept        bool
 	root              *os.Root
+	writeLimits       *rootedSFTPWriteLimits
 }
 
 // HandleSFTP handles SFTP subsystem requests
@@ -90,6 +91,7 @@ func (h *sessionHandler) HandleSFTP(sess gssh.Session) {
 		clientInfo:        clientInfo,
 		logger:            h.logger,
 		root:              h.sftpRoot,
+		writeLimits:       h.sftpWriteLimits,
 	}
 
 	handlers := sftp.Handlers{
@@ -426,6 +428,12 @@ func (h *sftpFileWriter) Filewrite(r *sftp.Request) (io.WriterAt, error) {
 		return nil, err
 	}
 	if h.session.root != nil {
+		if h.session.writeLimits != nil {
+			if !pflags.Write {
+				return nil, sftp.ErrSSHFxPermissionDenied
+			}
+			return h.session.writeLimits.open(h.session.root, path, osFlags)
+		}
 		return h.session.root.OpenFile(path, osFlags, 0600)
 	}
 	return os.OpenFile(path, osFlags, 0644)

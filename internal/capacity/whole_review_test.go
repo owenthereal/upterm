@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -203,7 +204,7 @@ func TestRunGuestAuthorizationAcrossTransports(t *testing.T) {
 				if err != nil {
 					t.Fatalf("authorized guest SFTP: %v", err)
 				}
-				path := filepath.Join(q.host.h.CommandDir, "authorized-transfer")
+				path := filepath.Join(q.host.h.CommandDir, fmt.Sprintf("transfer-%d.bin", q.id))
 				f, err := client.Create(path)
 				if err != nil {
 					t.Fatal(err)

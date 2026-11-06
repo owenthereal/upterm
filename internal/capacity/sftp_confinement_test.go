@@ -49,7 +49,7 @@ func TestCapacitySFTPCancellationClosesWorkersBeforeRoot(t *testing.T) {
 			client, err := sftp.NewClient(r.guests[0].client)
 			require.NoError(t, err)
 			defer func() { _ = client.Close() }()
-			file, err := client.Create("open-during-cancel")
+			file, err := client.Create("transfer-0.bin")
 			require.NoError(t, err)
 			defer func() { _ = file.Close() }()
 			_, err = file.Write([]byte("pending transfer"))
@@ -114,7 +114,7 @@ func TestCapacitySFTPConfinesContentAndMetadata(t *testing.T) {
 			if err := os.WriteFile(control, payload, 0600); err != nil {
 				t.Fatal(err)
 			}
-			inside := filepath.Join(q.host.h.CommandDir, "allowed")
+			inside := filepath.Join(q.host.h.CommandDir, "transfer-0.bin")
 			f, err := client.Create(inside)
 			if err != nil {
 				t.Fatal(err)
@@ -131,7 +131,7 @@ func TestCapacitySFTPConfinesContentAndMetadata(t *testing.T) {
 			if err := f.Close(); err != nil {
 				t.Fatal(err)
 			}
-			f, err = client.Open("allowed")
+			f, err = client.Open("transfer-0.bin")
 			if err != nil {
 				t.Error(err)
 			} else {
