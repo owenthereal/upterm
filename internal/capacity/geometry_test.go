@@ -87,7 +87,13 @@ func (o *geometryOutput) wait(t *testing.T, marker []byte) {
 		select {
 		case <-o.changed:
 		case <-timer.C:
-			t.Fatal("helper response missing")
+			o.mu.Lock()
+			data := o.data.Bytes()
+			start := max(0, len(data)-4096)
+			diagnostic := fmt.Sprintf("helper response missing: marker=%q output_bytes=%d marker_offset=%d output_tail[%d:]=%q",
+				marker, len(data), bytes.Index(data, marker), start, data[start:])
+			o.mu.Unlock()
+			t.Fatal(diagnostic)
 		}
 	}
 }
