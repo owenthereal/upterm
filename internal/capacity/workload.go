@@ -35,7 +35,10 @@ func parseFrame(line string) (observation, bool) {
 	if i < 0 {
 		return observation{}, false
 	}
-	fields := strings.Fields(line[i:])
+	// Scanner removes LF (and an optional preceding CR). Accept the same
+	// endings for direct callers without trimming any payload whitespace.
+	payload := strings.TrimSuffix(strings.TrimSuffix(line[i:], "\n"), "\r")
+	fields := strings.Fields(payload)
 	if len(fields) != 6 || (fields[1] != "I" && fields[1] != "H" && fields[1] != "R" && fields[1] != "A" && fields[1] != "Q" && fields[1] != "F" && fields[1] != "B") {
 		return observation{}, false
 	}
@@ -45,7 +48,14 @@ func parseFrame(line string) (observation, bool) {
 	if e1 != nil || e2 != nil || e3 != nil {
 		return observation{}, false
 	}
-	return observation{fields[1], id, seq, time.Unix(0, ns)}, true
+	sent := time.Unix(0, ns)
+	// Counting nominal frame bytes is valid only for the entire canonical
+	// header and deterministic padding, not merely six parseable fields.
+	want := frame(fields[1], id, seq, sent, frameLength(fields[1]))
+	if payload != string(want[:len(want)-1]) {
+		return observation{}, false
+	}
+	return observation{fields[1], id, seq, sent}, true
 }
 
 // Helper is the runner's harmless hosted command. It echoes fixed 128-byte
@@ -60,7 +70,7 @@ func helper(ctx context.Context, in io.Reader, out io.Writer, hostID int, active
 		if err != nil {
 			return err
 		}
-		defer term.Restore(int(f.Fd()), state)
+		defer func() { _ = term.Restore(int(f.Fd()), state) }()
 	}
 	if _, err := io.WriteString(out, "CAP READY\n"); err != nil {
 		return err

@@ -11,7 +11,7 @@ import (
 
 func TestSilentHandshakeCancellationClosesTransport(t *testing.T) {
 	client, server := net.Pipe()
-	defer server.Close()
+	defer func() { _ = server.Close() }()
 	ctx, cancel := context.WithCancel(t.Context())
 	finished := make(chan error, 1)
 	go func() {

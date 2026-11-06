@@ -54,7 +54,7 @@ func (r *runState) transfer(index int, expected string) (err error) {
 	if err != nil {
 		return err
 	}
-	defer c.Close()
+	defer func() { _ = c.Close() }()
 	path := filepath.ToSlash(filepath.Join(filepath.Dir(q.host.socket), fmt.Sprintf("transfer-%d.bin", index)))
 	defer func() { _ = c.Remove(path) }()
 	began := time.Now()
@@ -234,7 +234,7 @@ func (r *runState) restoreGuest(q *guest, began time.Time) error {
 // independently planned time. Guest selections run before host selections:
 // an overlap therefore cuts a real guest transport before its host is cut.
 func (r *runState) cutAction(a churnAction, planned time.Time) (func() error, error) {
-	began := time.Now()
+	var began time.Time
 	if a.host {
 		h := r.hosts[a.index]
 		overlaps := 0

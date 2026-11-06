@@ -14,7 +14,12 @@ func TestAdmissionWorkersOverlapReadinessWithinBound(t *testing.T) {
 	release := make(chan struct{})
 	finished := make(chan error, 1)
 	go func() { finished <- r.admissions(40, func(int) error { started <- struct{}{}; <-release; return nil }) }()
-	defer func() { close(release); <-finished }()
+	defer func() {
+		close(release)
+		if err := <-finished; err != nil {
+			t.Error(err)
+		}
+	}()
 	for i := 0; i < 20; i++ {
 		select {
 		case <-started:

@@ -14,7 +14,7 @@ import (
 
 func main() {
 	if err := run(); err != nil {
-		fmt.Fprintln(os.Stderr, err)
+		_, _ = fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
 }
@@ -46,19 +46,19 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	defer m.Close()
+	defer func() { _ = m.Close() }()
 	p, err := os.Open(*phase)
 	if err != nil {
 		return err
 	}
-	defer p.Close()
+	defer func() { _ = p.Close() }()
 	cfg, err := capacity.Decode(m, p)
 	if err != nil {
 		return err
 	}
 	if *validate {
-		fmt.Fprintln(os.Stdout, `{"event":"validated","dialed":false}`)
-		return nil
+		_, err = fmt.Fprintln(os.Stdout, `{"event":"validated","dialed":false}`)
+		return err
 	}
 	_, err = capacity.Run(ctx, cfg, os.Stdout)
 	return err

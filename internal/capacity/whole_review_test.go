@@ -100,10 +100,10 @@ func TestRealIdleHostTransportLossFailsBeforeNextCanary(t *testing.T) {
 }
 
 func TestFaultHelpersDispatchCompleteRepeatedReadinessFrames(t *testing.T) {
-	for _, tc := range []struct{ name, script, input, output string }{
-		{"silent", silentAfterReadinessScript, "RRQII", "AABI-"},
-		{"late", lateFinalReplyScript, "RRQIIF", "AABIIB"},
-		{"retry", retryReadinessScript, "RRRQIIF", "-AABIIB"},
+	for _, tc := range []struct{ name, input, output string }{
+		{"silent", "RRQII", "AABI-"},
+		{"late", "RRQIIF", "AABIIB"},
+		{"retry", "RRRQIIF", "-AABIIB"},
 	} {
 		for _, fragmented := range []bool{false, true} {
 			name := tc.name + "/whole"
@@ -121,7 +121,7 @@ func TestFaultHelpersDispatchCompleteRepeatedReadinessFrames(t *testing.T) {
 				}
 				ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 				defer cancel()
-				cmd := exec.CommandContext(ctx, "/bin/sh", "-c", tc.script)
+				cmd := exec.CommandContext(ctx, faultHelperExecutable(t, tc.name, ""), "helper", "0", "false")
 				var output bytes.Buffer
 				cmd.Stdout = &output
 				cmd.Stderr = &output
@@ -233,10 +233,10 @@ func TestRunGuestAuthorizationAcrossTransports(t *testing.T) {
 			defer cancel()
 			foreign, raw, err := openGuest(ctx, r.guard, q.target, q.endpoint, s, signer(t), q.proxy)
 			if raw != nil {
-				defer raw.Close()
+				defer func() { _ = raw.Close() }()
 			}
 			if err == nil {
-				defer foreign.Close()
+				defer func() { _ = foreign.Close() }()
 				files, sftpErr := sftp.NewClient(foreign)
 				if sftpErr == nil {
 					_ = files.Close()

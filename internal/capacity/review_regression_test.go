@@ -16,51 +16,8 @@ import (
 	"time"
 )
 
-const silentAfterReadinessScript = `inputs=0
-while IFS= read -r line; do
-case "$line" in
-'CAP R '*) printf 'CAP A %s\n' "${line#CAP R }";;
-'CAP Q '*) printf 'CAP B %s\n' "${line#CAP Q }";;
-'CAP I '*)
-  if [ "$inputs" -eq 0 ]; then printf '%s\n' "$line"; fi
-  inputs=$((inputs + 1));;
-esac
-done
-`
-const lateFinalReplyScript = `inputs=0
-while IFS= read -r line; do
-case "$line" in
-'CAP R '*) printf 'CAP A %s\n' "${line#CAP R }";;
-'CAP Q '*) printf 'CAP B %s\n' "${line#CAP Q }";;
-'CAP I '*)
-  if [ "$inputs" -eq 1 ]; then sleep 1.2; fi
-  if [ "$inputs" -le 1 ]; then printf '%s\n' "$line"; fi
-  inputs=$((inputs + 1));;
-'CAP F '*) printf 'CAP B %s\n' "${line#CAP F }";;
-esac
-done
-`
-const retryReadinessScript = `challenges=0
-while IFS= read -r line; do
-case "$line" in
-'CAP R '*)
-  if [ "$challenges" -gt 0 ]; then printf 'CAP A %s\n' "${line#CAP R }"; fi
-  challenges=$((challenges + 1));;
-'CAP Q '*) printf 'CAP B %s\n' "${line#CAP Q }";;
-'CAP F '*) printf 'CAP B %s\n' "${line#CAP F }";;
-'CAP I '*) printf '%s\n' "$line";;
-esac
-done
-`
-
 func TestSilentAfterReadinessFailsDelivery(t *testing.T) {
-	c := localRelay(t)
-	helper := filepath.Join(t.TempDir(), "silent-helper")
-	script := "#!/bin/sh\nstty raw -echo\n" + silentAfterReadinessScript
-	if err := os.WriteFile(helper, []byte(script), 0700); err != nil {
-		t.Fatal(err)
-	}
-	c.HelperExecutable = helper
+	c := faultHelper(t, "silent", "")
 	c.DurationSeconds = 3
 	s, err := Run(t.Context(), c, io.Discard)
 	t.Logf("delivery result: err=%v active=%d rtt=%d stop=%s", err, s.ActiveFrames, s.RTTCount, s.StopReason)
@@ -119,14 +76,19 @@ func TestGuestTransportCutDoesNotWaitForHostRepair(t *testing.T) {
 	ctx, cancel := context.WithCancelCause(t.Context())
 	r := &runState{ctx: ctx, cancel: cancel, cfg: c, rec: newRecorder(io.Discard, c)}
 	raw, peer := net.Pipe()
-	defer peer.Close()
+	defer func() { _ = peer.Close() }()
 	h := &hostRun{}
 	q := &guest{host: h, raw: raw, transportLive: true}
 	r.guests = []*guest{q}
 	h.repair.Lock()
 	finished := make(chan error, 1)
 	go func() { finished <- r.cutGuest(q) }()
-	defer func() { cancel(context.Canceled); h.repair.Unlock(); <-finished }()
+	defer func() {
+		cancel(context.Canceled)
+		h.repair.Unlock()
+		err := <-finished
+		_ = err // Cancellation intentionally stops the queued repair.
+	}()
 	_ = peer.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
 	if _, err := peer.Read(make([]byte, 1)); err == nil {
 		t.Fatal("transport was not cut")
@@ -202,19 +164,8 @@ func pacedAdmissionFixture(t *testing.T, ws int) {
 
 }
 
-func scriptedHelper(t *testing.T, body string) Config {
-	t.Helper()
-	c := localRelay(t)
-	path := filepath.Join(t.TempDir(), "helper")
-	if err := os.WriteFile(path, []byte("#!/bin/sh\nstty raw -echo\n"+body), 0700); err != nil {
-		t.Fatal(err)
-	}
-	c.HelperExecutable = path
-	return c
-}
-
 func TestLateFinalReplyIsDrainedAndMeasured(t *testing.T) {
-	c := scriptedHelper(t, lateFinalReplyScript)
+	c := faultHelper(t, "late", "")
 	c.DurationSeconds = 1
 	s, err := Run(t.Context(), c, io.Discard)
 	if err != nil {
@@ -232,7 +183,7 @@ func TestLateFinalReplyIsDrainedAndMeasured(t *testing.T) {
 func TestMissingHostOutputSuffixFailsDelivery(t *testing.T) {
 	// The barrier advertises one emitted H frame, but that entire suffix is
 	// dropped. Every I frame is echoed, so own-response and gap-only checks pass.
-	c := scriptedHelper(t, "while IFS= read -r line; do\ncase \"$line\" in\n'CAP R '*) printf '%s\\n' \"$line\" | tr R A;;\n'CAP Q '*) printf '%s\\n' \"$line\" | tr Q B;;\n'CAP F '*) printf '%s\\n' \"$line\" | awk '{$2=\"B\";$4=\"00000001\";print}';;\n*) printf '%s\\n' \"$line\";;\nesac\ndone\n")
+	c := faultHelper(t, "missing-host-suffix", "")
 	c.DurationSeconds = 1
 	s, err := Run(t.Context(), c, io.Discard)
 	if err == nil {
@@ -261,14 +212,14 @@ func TestActualCutsKeepScheduleDuringSlowOverlappingRepairs(t *testing.T) {
 	r := &runState{cfg: c, ctx: ctx, cancel: cancel, rec: newRecorder(io.Discard, c)}
 	h := &hostRun{id: 0, proxy: &tunnelProxy{conns: map[net.Conn]bool{}}}
 	hostRaw, hostPeer := net.Pipe()
-	defer hostPeer.Close()
+	defer func() { _ = hostPeer.Close() }()
 	h.proxy.conns[hostRaw] = true
 	r.hosts = []*hostRun{h}
 	var peers []net.Conn
 	for i := 0; i < 2; i++ {
 		raw, peer := net.Pipe()
 		peers = append(peers, peer)
-		defer peer.Close()
+		defer func() { _ = peer.Close() }()
 		r.guests = append(r.guests, &guest{id: i, host: h, raw: raw, transportLive: true})
 	}
 	actions := []churnAction{{index: 0}, {index: 1, offset: 25 * time.Millisecond}, {host: true, index: 0, offset: 50 * time.Millisecond}}
@@ -444,8 +395,8 @@ func TestRealDeliveryEvidence(t *testing.T) {
 func TestHelperFinalBarrierFlushesAndQuiescesHostOutput(t *testing.T) {
 	in, input := io.Pipe()
 	output, out := io.Pipe()
-	defer input.Close()
-	defer output.Close()
+	defer func() { _ = input.Close() }()
+	defer func() { _ = output.Close() }()
 	finished := make(chan error, 1)
 	go func() {
 		err := helper(t.Context(), in, out, 0, true, 20*time.Millisecond)
@@ -529,7 +480,7 @@ func TestReconnectCannotReuseReplayedBaseline(t *testing.T) {
 	// The old transport's baseline can be replayed with an incomplete screen
 	// history. None of it belongs to this connection's delivery interval.
 	replay := string(frame("B", 0, 0, old, 128)) + string(frame("H", 0, 0, old, 1024)) + string(frame("H", 0, 2, old, 1024))
-	c := scriptedHelper(t, "printf '%s' '"+replay+"'\nwhile IFS= read -r line; do\ncase \"$line\" in\n'CAP R '*) printf '%s\\n' \"$line\" | tr R A;;\n'CAP Q '*) printf '%s\\n' \"$line\" | tr Q B;;\n*) printf '%s\\n' \"$line\";;\nesac\ndone\n")
+	c := faultHelper(t, "replay", replay)
 	ctx, cancel := context.WithCancelCause(t.Context())
 	dir, err := os.MkdirTemp("", "cap-replay-")
 	if err != nil {
@@ -600,7 +551,7 @@ func TestHelperResynchronizesAfterCutTruncatesInput(t *testing.T) {
 func TestReadinessChallengeCanRetryWithinSameServiceBudget(t *testing.T) {
 	// A reconstruction can consume/transform the first challenge response.
 	// A repeated authenticated challenge must prove the same live channel.
-	c := scriptedHelper(t, retryReadinessScript)
+	c := faultHelper(t, "retry", "")
 	c.DurationSeconds = 1
 	s, err := Run(t.Context(), c, io.Discard)
 	if err != nil || !s.DeliveryComplete || s.EstablishedGuests != 1 || s.InputFrames != 2 || s.RTTCount != 2 || s.HandshakeFrames < 4 {

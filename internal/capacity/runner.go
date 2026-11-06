@@ -91,7 +91,7 @@ func (h *hostRun) session(ctx context.Context) (*api.GetSessionResponse, error) 
 	if err != nil {
 		return nil, err
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	s, err := api.NewAdminServiceClient(conn).GetSession(ctx, &api.GetSessionRequest{})
 	if err != nil {
 		return nil, err
@@ -132,14 +132,15 @@ func (r *runState) sendKind(q *guest, w io.Writer, stream, seq int, kind string)
 	}
 	now := time.Now()
 	key := fmt.Sprintf("%d:%d", stream, seq)
-	if kind == "I" {
+	switch kind {
+	case "I":
 		q.mu.Lock()
 		if q.pending == nil {
 			q.pending = map[string]time.Time{}
 		}
 		q.pending[key] = now
 		q.mu.Unlock()
-	} else if kind == "R" {
+	case "R":
 		q.mu.Lock()
 		if q.challenges == nil {
 			q.challenges = map[string]time.Time{}
@@ -241,7 +242,7 @@ func (r *runState) startHost(index int, t Target, identity ssh.Signer) error {
 	proxy.permit = permit
 	proxy.mu.Unlock()
 	r.rec.event("admission_queue", map[string]any{"role": "host", "host": index, "queue_ms": float64(time.Since(queuedAt)) / float64(time.Millisecond)})
-	began := time.Now()
+	var began time.Time
 	go func() {
 		err := h.h.Run(r.ctx)
 		h.done <- err
@@ -350,7 +351,8 @@ func (r *runState) cleanup() error {
 	}
 	for _, h := range r.hosts {
 		if h != nil {
-			<-h.done
+			hostErr := <-h.done
+			_ = hostErr // Exit errors were classified before this cancellation/join.
 		}
 	}
 	if err := os.RemoveAll(r.dir); err != nil {

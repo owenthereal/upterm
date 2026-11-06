@@ -107,7 +107,7 @@ func endpoint(raw string, schemes ...string) (*url.URL, error) {
 	if !ok || u.Hostname() == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || u.Opaque != "" || production(u.Hostname()) {
 		return nil, errors.New("unauthorized endpoint")
 	}
-	if u.Path != "" && u.Path != "/" && !(u.Scheme == "http" && u.Path == "/metrics") {
+	if u.Path != "" && u.Path != "/" && (u.Scheme != "http" || u.Path != "/metrics") {
 		return nil, errors.New("unexpected endpoint path")
 	}
 	if u.Port() == "" {

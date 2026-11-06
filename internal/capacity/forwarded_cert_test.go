@@ -245,7 +245,8 @@ func forwardedRelay(t *testing.T, id, ip string, key ssh.Signer, mode routing.Mo
 		cancel()
 		_ = relay.Shutdown()
 		select {
-		case <-done:
+		case err := <-done:
+			_ = err // Shutdown owns the expected serving error.
 		case <-time.After(10 * time.Second):
 			t.Error("forwarded relay leaked")
 		}

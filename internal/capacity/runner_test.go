@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"testing"
 	"time"
@@ -28,6 +29,9 @@ import (
 var helperDir string
 
 func TestMain(m *testing.M) {
+	if len(os.Args) > 1 && os.Args[1] == "helper" {
+		os.Exit(runFaultHelperProcess())
+	}
 	var err error
 	helperDir, err = os.MkdirTemp("", "capacity-test-")
 	if err != nil {
@@ -45,7 +49,11 @@ var helperError error
 func buildHelper(t *testing.T) string {
 	t.Helper()
 	helperOnce.Do(func() {
-		helperBinary = filepath.Join(helperDir, "capacity")
+		name := "capacity"
+		if runtime.GOOS == "windows" {
+			name += ".exe"
+		}
+		helperBinary = filepath.Join(helperDir, name)
 		cmd := exec.Command("go", "build", "-o", helperBinary, "./cmd")
 		if out, err := cmd.CombinedOutput(); err != nil {
 			helperError = fmt.Errorf("helper build: %w: %s", err, out)
@@ -92,7 +100,8 @@ func localRelay(t *testing.T, options ...func(*server.Server)) Config {
 		cancel()
 		_ = relay.Shutdown()
 		select {
-		case <-done:
+		case err := <-done:
+			_ = err // Shutdown owns the expected serving error.
 		case <-time.After(10 * time.Second):
 			t.Error("relay leaked")
 		}
@@ -193,7 +202,7 @@ func TestInvalidLimitsNeverStartHostTransport(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer ln.Close()
+	defer func() { _ = ln.Close() }()
 	calls := make(chan struct{}, 1)
 	done := make(chan struct{})
 	go func() {

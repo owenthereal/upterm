@@ -346,7 +346,7 @@ func (p *tunnelProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	p.mu.Unlock()
 	defer p.workers.Done()
 	if r.Method != http.MethodConnect {
-		http.Error(w, "CONNECT required", 405)
+		http.Error(w, "CONNECT required", http.StatusMethodNotAllowed)
 		return
 	}
 	p.mu.Lock()
@@ -369,7 +369,7 @@ func (p *tunnelProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			if p.ctx.Err() == nil && p.failure != nil {
 				p.failure(errors.New("generator_admission_backlog"))
 			}
-			http.Error(w, "generator admission backlog", 503)
+			http.Error(w, "generator admission backlog", http.StatusServiceUnavailable)
 			return
 		}
 	}
@@ -384,7 +384,7 @@ func (p *tunnelProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	upstream, err := p.g.connectPermit(p.ctx, p.t, r.Host, permit)
 	if err != nil {
-		http.Error(w, "destination refused", 403)
+		http.Error(w, "destination refused", http.StatusForbidden)
 		return
 	}
 	p.mu.Lock()
@@ -415,7 +415,14 @@ func (p *tunnelProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	copied := make(chan struct{})
-	go func() { defer close(copied); _, _ = io.Copy(upstream, rw) }()
+	go func() {
+		defer close(copied)
+		_, _ = io.Copy(upstream, rw)
+		// Either peer can disappear while the other remains silent. Release
+		// both sockets to unblock the opposite copier before joining it.
+		_ = upstream.Close()
+		_ = downstream.Close()
+	}()
 	_, _ = io.Copy(downstream, upstream)
 	_ = downstream.Close()
 	_ = upstream.Close()
