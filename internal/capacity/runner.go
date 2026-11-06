@@ -28,6 +28,7 @@ type runState struct {
 	hostReadyTimeout  time.Duration
 	guestReadyTimeout time.Duration
 	canary            *guest
+	guestIdentity     ssh.Signer
 	clientsMu         sync.RWMutex
 	telemetryMu       sync.Mutex
 	lastTelemetry     map[string]time.Time
@@ -49,15 +50,40 @@ type tunnelObservation struct {
 	at    time.Time
 }
 type hostRun struct {
-	repair  sync.Mutex
-	id      int
-	socket  string
-	proxy   *tunnelProxy
-	h       *host.Host
-	done    chan error
-	mu      sync.Mutex
-	initial *api.GetSessionResponse
-	tunnel  chan tunnelObservation
+	repair      sync.Mutex
+	id          int
+	socket      string
+	proxy       *tunnelProxy
+	h           *host.Host
+	done        chan error
+	mu          sync.Mutex
+	initial     *api.GetSessionResponse
+	established bool
+	expectedCut bool
+	tunnel      chan tunnelObservation
+}
+
+func (r *runState) hostTunnel(h *hostRun, e host.TunnelEvent) {
+	h.mu.Lock()
+	unexpected := !e.Up && h.established && !h.expectedCut
+	if e.Up {
+		// Up means the host's guest door is live again. A later loss is a
+		// separate outage, even while planned guest repairs are still running.
+		h.expectedCut = false
+	}
+	h.mu.Unlock()
+	if unexpected && r.ctx.Err() == nil {
+		r.fail(fmt.Errorf("unexpected host transport loss: host=%d", h.id))
+	}
+	if e.Up {
+		h.proxy.ready()
+	}
+	r.rec.event("host_tunnel", map[string]any{"host": h.id, "up": e.Up, "can_reconnect": e.CanReconnect, "route_changed": e.RouteChanged})
+	select {
+	case h.tunnel <- tunnelObservation{event: e, at: time.Now()}:
+	default:
+		r.fail(errors.New("host tunnel event overflow"))
+	}
 }
 
 func (h *hostRun) session(ctx context.Context) (*api.GetSessionResponse, error) {
@@ -180,6 +206,7 @@ func (r *runState) startHost(index int, t Target, identity ssh.Signer) error {
 		r.rec.event("admission_queue", map[string]any{"role": "host", "host": index, "retry": true, "queue_ms": float64(wait) / float64(time.Millisecond), "generator_limited": limited})
 	}
 	h.h = &host.Host{Reconnect: host.ReconnectTiming{AttemptDeadline: 30*time.Second + retryQueueLimit}, KeepAliveDuration: 50 * time.Second, Host: u.String(), Command: []string{r.helper, "helper", strconv.Itoa(index), strconv.FormatBool(r.cfg.Active)}, CommandDir: dir, Signers: []ssh.Signer{identity}, IdentitiesOnly: true, HostKey: key, HostKeyCallback: pinnedKey(t), ProxyURL: proxy.url, AdminSocketFile: h.socket, AutoAccept: true, SFTPAutoAccept: true, ForwardingDisabled: true, ExecDisabled: true, Logger: slog.New(slog.NewTextHandler(io.Discard, nil)), StopGrace: time.Second,
+		AuthorizedKeys: []*host.AuthorizedKey{{PublicKeys: []ssh.PublicKey{r.guestIdentity.PublicKey()}}},
 		SessionCreatedCallback: func(ctx context.Context, s *api.GetSessionResponse) error {
 			if err := r.guard.session(ctx, s); err != nil {
 				return err
@@ -190,6 +217,9 @@ func (r *runState) startHost(index int, t Target, identity ssh.Signer) error {
 			return nil
 		},
 		SessionReadyCallback: func(status string) {
+			h.mu.Lock()
+			h.established = status == "ready"
+			h.mu.Unlock()
 			proxy.ready()
 			select {
 			case ready <- status:
@@ -197,15 +227,7 @@ func (r *runState) startHost(index int, t Target, identity ssh.Signer) error {
 			}
 		},
 		TunnelCallback: func(e host.TunnelEvent) {
-			if e.Up {
-				proxy.ready()
-			}
-			r.rec.event("host_tunnel", map[string]any{"host": index, "up": e.Up, "can_reconnect": e.CanReconnect, "route_changed": e.RouteChanged})
-			select {
-			case h.tunnel <- tunnelObservation{event: e, at: time.Now()}:
-			default:
-				r.fail(errors.New("host tunnel event overflow"))
-			}
+			r.hostTunnel(h, e)
 		},
 	}
 	r.hosts[index] = h
@@ -262,6 +284,13 @@ func (r *runState) startHost(index int, t Target, identity ssh.Signer) error {
 	return nil
 }
 func (r *runState) admit(identity ssh.Signer) error {
+	// One fresh in-memory guest identity belongs to this run, independent of
+	// host registration, host session and relay keys. Reconnects retain it.
+	var err error
+	r.guestIdentity, err = makeSigner()
+	if err != nil {
+		return err
+	}
 	ht, _ := r.cfg.target(r.cfg.HostTarget)
 	et, _ := r.cfg.target(r.cfg.EntryTarget)
 	r.hosts = make([]*hostRun, r.cfg.Hosts)
@@ -277,16 +306,12 @@ func (r *runState) admit(identity ssh.Signer) error {
 			if err != nil {
 				return err
 			}
-			key, err := makeSigner()
-			if err != nil {
-				return err
-			}
 			proxy, err := newTunnelProxy(r.ctx, r.guard, et)
 			if err != nil {
 				return err
 			}
 			r.proxies = append(r.proxies, proxy)
-			q := &guest{id: id, host: h, target: et, endpoint: u, identity: key, proxy: proxy}
+			q := &guest{id: id, host: h, target: et, endpoint: u, identity: r.guestIdentity, proxy: proxy}
 			r.clientsMu.Lock()
 			r.guests = append(r.guests, q)
 			r.clientsMu.Unlock()

@@ -10,11 +10,7 @@ import (
 func (r *runState) hostCanary(sample int) error {
 	et, _ := r.cfg.target(r.cfg.EntryTarget)
 	if r.canary == nil {
-		identity, err := makeSigner()
-		if err != nil {
-			return err
-		}
-		q := &guest{id: 0, target: et, identity: identity, canary: true, expected: true}
+		q := &guest{id: 0, target: et, identity: r.guestIdentity, canary: true, expected: true}
 		r.clientsMu.Lock()
 		r.guests = append(r.guests, q)
 		r.clientsMu.Unlock()

@@ -254,7 +254,15 @@ func (r *runState) cutAction(a churnAction, planned time.Time) (func() error, er
 			q.disruption++
 			q.mu.Unlock()
 		}
+		// Publish the expected outage before closing any socket. Keep the
+		// callback classification synchronized with the actual-cut result.
+		h.mu.Lock()
+		h.expectedCut = true
 		n, actual := h.proxy.cut()
+		if n != 1 {
+			h.expectedCut = false
+		}
+		h.mu.Unlock()
 		began = actual
 		if n != 1 {
 			return nil, fmt.Errorf("host cut requires one live transport, got %d", n)

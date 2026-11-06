@@ -16,10 +16,47 @@ import (
 	"time"
 )
 
+const silentAfterReadinessScript = `inputs=0
+while IFS= read -r line; do
+case "$line" in
+'CAP R '*) printf 'CAP A %s\n' "${line#CAP R }";;
+'CAP Q '*) printf 'CAP B %s\n' "${line#CAP Q }";;
+'CAP I '*)
+  if [ "$inputs" -eq 0 ]; then printf '%s\n' "$line"; fi
+  inputs=$((inputs + 1));;
+esac
+done
+`
+const lateFinalReplyScript = `inputs=0
+while IFS= read -r line; do
+case "$line" in
+'CAP R '*) printf 'CAP A %s\n' "${line#CAP R }";;
+'CAP Q '*) printf 'CAP B %s\n' "${line#CAP Q }";;
+'CAP I '*)
+  if [ "$inputs" -eq 1 ]; then sleep 1.2; fi
+  if [ "$inputs" -le 1 ]; then printf '%s\n' "$line"; fi
+  inputs=$((inputs + 1));;
+'CAP F '*) printf 'CAP B %s\n' "${line#CAP F }";;
+esac
+done
+`
+const retryReadinessScript = `challenges=0
+while IFS= read -r line; do
+case "$line" in
+'CAP R '*)
+  if [ "$challenges" -gt 0 ]; then printf 'CAP A %s\n' "${line#CAP R }"; fi
+  challenges=$((challenges + 1));;
+'CAP Q '*) printf 'CAP B %s\n' "${line#CAP Q }";;
+'CAP F '*) printf 'CAP B %s\n' "${line#CAP F }";;
+'CAP I '*) printf '%s\n' "$line";;
+esac
+done
+`
+
 func TestSilentAfterReadinessFailsDelivery(t *testing.T) {
 	c := localRelay(t)
 	helper := filepath.Join(t.TempDir(), "silent-helper")
-	script := "#!/bin/sh\nstty raw -echo\ndd bs=128 count=1 2>/dev/null | tr R A\ndd bs=128 count=1 2>/dev/null | tr Q B\ndd bs=128 count=1 2>/dev/null\ncat >/dev/null\n"
+	script := "#!/bin/sh\nstty raw -echo\n" + silentAfterReadinessScript
 	if err := os.WriteFile(helper, []byte(script), 0700); err != nil {
 		t.Fatal(err)
 	}
@@ -122,6 +159,7 @@ func pacedAdmissionFixture(t *testing.T, ws int) {
 		}
 	}()
 	r.hosts = make([]*hostRun, 1)
+	r.guestIdentity = signer(t)
 	r.guard.next = time.Now().Add(450 * time.Millisecond)
 	target := c.Manifest.Targets[0]
 	if err := r.startHost(0, target, nil); err != nil {
@@ -131,16 +169,12 @@ func pacedAdmissionFixture(t *testing.T, ws int) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	key, err := makeSigner()
-	if err != nil {
-		t.Fatal(err)
-	}
 	proxy, err := newTunnelProxy(ctx, r.guard, target)
 	if err != nil {
 		t.Fatal(err)
 	}
 	r.proxies = append(r.proxies, proxy)
-	q := &guest{host: r.hosts[0], target: target, endpoint: u, identity: key, proxy: proxy}
+	q := &guest{host: r.hosts[0], target: target, endpoint: u, identity: r.guestIdentity, proxy: proxy}
 	r.guests = append(r.guests, q)
 	r.guard.mu.Lock()
 	r.guard.next = time.Now().Add(450 * time.Millisecond)
@@ -180,7 +214,7 @@ func scriptedHelper(t *testing.T, body string) Config {
 }
 
 func TestLateFinalReplyIsDrainedAndMeasured(t *testing.T) {
-	c := scriptedHelper(t, "dd bs=128 count=1 2>/dev/null | tr R A\ndd bs=128 count=1 2>/dev/null | tr Q B\ndd bs=128 count=1 2>/dev/null\ndd bs=128 count=1 2>/dev/null | (sleep 1.2; cat)\ndd bs=128 count=1 2>/dev/null | tr F B\ncat >/dev/null\n")
+	c := scriptedHelper(t, lateFinalReplyScript)
 	c.DurationSeconds = 1
 	s, err := Run(t.Context(), c, io.Discard)
 	if err != nil {
@@ -508,6 +542,7 @@ func TestReconnectCannotReuseReplayedBaseline(t *testing.T) {
 		}
 	}()
 	target := c.Manifest.Targets[0]
+	r.guestIdentity = signer(t)
 	if err := r.startHost(0, target, nil); err != nil {
 		t.Fatal(err)
 	}
@@ -520,7 +555,7 @@ func TestReconnectCannotReuseReplayedBaseline(t *testing.T) {
 		t.Fatal(err)
 	}
 	r.proxies = append(r.proxies, proxy)
-	q := &guest{host: r.hosts[0], target: target, endpoint: u, identity: signer(t), proxy: proxy, expected: true, generation: 1, barriers: map[int]*frameBarrier{0: {sent: old, done: make(chan struct{})}}}
+	q := &guest{host: r.hosts[0], target: target, endpoint: u, identity: r.guestIdentity, proxy: proxy, expected: true, generation: 1, barriers: map[int]*frameBarrier{0: {sent: old, done: make(chan struct{})}}}
 	r.guests = append(r.guests, q)
 	if err := q.connect(ctx, r); err != nil {
 		t.Fatalf("replayed old baseline prevented fresh readiness: %v", err)
@@ -565,7 +600,7 @@ func TestHelperResynchronizesAfterCutTruncatesInput(t *testing.T) {
 func TestReadinessChallengeCanRetryWithinSameServiceBudget(t *testing.T) {
 	// A reconstruction can consume/transform the first challenge response.
 	// A repeated authenticated challenge must prove the same live channel.
-	c := scriptedHelper(t, "dd bs=128 count=1 of=/dev/null 2>/dev/null\ndd bs=128 count=1 2>/dev/null | tr R A\ndd bs=128 count=1 2>/dev/null | tr Q B\nwhile IFS= read -r line; do\ncase \"$line\" in\n'CAP F '*) printf '%s\\n' \"$line\" | tr F B;;\n*) printf '%s\\n' \"$line\";;\nesac\ndone\n")
+	c := scriptedHelper(t, retryReadinessScript)
 	c.DurationSeconds = 1
 	s, err := Run(t.Context(), c, io.Discard)
 	if err != nil || !s.DeliveryComplete || s.EstablishedGuests != 1 || s.InputFrames != 2 || s.RTTCount != 2 || s.HandshakeFrames < 4 {
