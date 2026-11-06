@@ -85,6 +85,10 @@ func TestGuestKeyConsulWebSocketFallback(t *testing.T) {
 					corrupt := cert(entryKey, endpoint.principal, nil)
 					corrupt.Signature.Blob[0] ^= 1
 					bad := map[string]ssh.PublicKey{
+						"missing entry principal":          cert(entryKey, endpoint.principal, func(c *ssh.Certificate) { c.ValidPrincipals = nil }),
+						"missing origin principal":         cert(originKey, "127.0.0.1", func(c *ssh.Certificate) { c.ValidPrincipals = nil }),
+						"empty entry principal list":       cert(entryKey, endpoint.principal, func(c *ssh.Certificate) { c.ValidPrincipals = []string{} }),
+						"empty origin principal list":      cert(originKey, "127.0.0.1", func(c *ssh.Certificate) { c.ValidPrincipals = []string{} }),
 						"entry authority third principal":  cert(entryKey, "127.0.0.2", nil),
 						"origin authority third principal": cert(originKey, "127.0.0.2", nil),
 						"third authority entry principal":  cert(thirdKey, endpoint.principal, nil),

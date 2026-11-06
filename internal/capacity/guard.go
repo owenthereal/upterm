@@ -196,8 +196,14 @@ func (g *guard) guestKey(ctx context.Context, entry Target, transport string, s 
 				fallback := pinnedKey(entry)
 				node := s.NodeAddr
 				return func(addr string, remote net.Addr, key ssh.PublicKey) error {
+					// CheckCert treats no principals as valid for every host;
+					// this route requires an explicit origin or entry principal.
+					cert, isCert := key.(*ssh.Certificate)
+					if isCert && len(cert.ValidPrincipals) == 0 {
+						return errors.New("relay certificate has no explicit principal")
+					}
 					err := check(node, remote, key)
-					if _, cert := key.(*ssh.Certificate); err == nil || !cert {
+					if err == nil || !isCert {
 						return err
 					}
 					return fallback(addr, remote, key)
