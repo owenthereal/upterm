@@ -185,15 +185,22 @@ func (g *guard) guestKey(ctx context.Context, entry Target, transport string, s 
 	}
 	// SSH terminates at the entry. Embedded-mode WebSocket routing also goes
 	// through the entry's SSH proxy. Consul-mode WebSocket routing instead
-	// pipes SSH to the session's node, whose certificate the guest receives.
+	// pipes SSH to the session's node, or hands off to the entry's SSH proxy
+	// if that TCP dial fails. Each certificate must match its own authority
+	// and principal; a raw key cannot establish the entry fallback identity.
 	// Its plain SSH user distinguishes it from the validated embedded route.
 	if transport != "ssh" && s.SshUser == s.SessionId {
 		for _, origin := range g.cfg.Manifest.Targets {
 			if origin.MachineID != entry.MachineID && contains(origin.NodeAddresses, s.NodeAddr) {
 				check := pinnedKey(origin)
+				fallback := pinnedKey(entry)
 				node := s.NodeAddr
-				return func(_ string, remote net.Addr, key ssh.PublicKey) error {
-					return check(node, remote, key)
+				return func(addr string, remote net.Addr, key ssh.PublicKey) error {
+					err := check(node, remote, key)
+					if _, cert := key.(*ssh.Certificate); err == nil || !cert {
+						return err
+					}
+					return fallback(addr, remote, key)
 				}, nil
 			}
 		}

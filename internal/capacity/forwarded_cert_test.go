@@ -212,7 +212,7 @@ func TestRealForwardedGuestCertificate(t *testing.T) {
 	}
 }
 
-func forwardedRelay(t *testing.T, id, ip string, key ssh.Signer, mode routing.Mode, registry *url.URL) Target {
+func forwardedRelay(t *testing.T, id, ip string, key ssh.Signer, mode routing.Mode, registry *url.URL, options ...func(*server.Server)) Target {
 	t.Helper()
 	sshln, err := net.Listen("tcp", net.JoinHostPort(ip, "0"))
 	if err != nil {
@@ -238,6 +238,9 @@ func forwardedRelay(t *testing.T, id, ip string, key ssh.Signer, mode routing.Mo
 		t.Fatal(err)
 	}
 	relay := &server.Server{NodeAddr: sshln.Addr().String(), HostSigners: []ssh.Signer{cert}, Signers: []ssh.Signer{key}, NetworkProvider: network, SessionManager: sm, MetricsProvider: provider.NewDiscardProvider(), Logger: logger}
+	for _, option := range options {
+		option(relay)
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() { done <- relay.ServeListeners(ctx, server.Listeners{SSH: sshln, WS: wsln}) }()
@@ -259,7 +262,7 @@ func forwardedRelay(t *testing.T, id, ip string, key ssh.Signer, mode routing.Mo
 	}
 	metrics.Start()
 	t.Cleanup(metrics.Close)
-	return Target{AppID: "test-app", MachineID: id, SSHURL: "ssh://" + sshln.Addr().String(), WSURL: "ws://" + wsln.Addr().String(), NodeAddresses: []string{sshln.Addr().String()}, AllowedIPs: []string{ip}, HostKeys: []string{string(ssh.MarshalAuthorizedKey(key.PublicKey()))}, TelemetryURL: metrics.URL + "/metrics"}
+	return Target{AppID: "test-app", MachineID: id, SSHURL: "ssh://" + sshln.Addr().String(), WSURL: "ws://" + wsln.Addr().String(), NodeAddresses: []string{relay.NodeAddr}, AllowedIPs: []string{ip}, HostKeys: []string{string(ssh.MarshalAuthorizedKey(key.PublicKey()))}, TelemetryURL: metrics.URL + "/metrics"}
 }
 
 // The registry supplies only the local storage protocol needed for a single
