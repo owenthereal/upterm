@@ -221,7 +221,7 @@ func restoreFallbackNode(t *testing.T, node, upstream string) {
 				return
 			}
 			workers.Go(func() {
-				defer down.Close()
+				defer func() { _ = down.Close() }()
 				stopDown := context.AfterFunc(ctx, func() { _ = down.Close() })
 				defer stopDown()
 				up, err := (&net.Dialer{Timeout: time.Second}).DialContext(ctx, "tcp", upstream)
@@ -229,7 +229,7 @@ func restoreFallbackNode(t *testing.T, node, upstream string) {
 					t.Errorf("restored origin dial: %v", err)
 					return
 				}
-				defer up.Close()
+				defer func() { _ = up.Close() }()
 				stopUp := context.AfterFunc(ctx, func() { _ = up.Close() })
 				defer stopUp()
 				done := make(chan struct{})
