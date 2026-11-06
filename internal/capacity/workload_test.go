@@ -27,10 +27,10 @@ func TestFixedFramesAndSequenceGaps(t *testing.T) {
 	}
 }
 func TestIntentionalReconnectResetsOnlyAffectedSource(t *testing.T) {
-	peer := &guest{generation: 1}
+	peer := &guest{generation: 1, inputStart: [4]int{4}}
 	r := &runState{guests: []*guest{peer}}
 	tracker := sequenceTracker{"I:0": 1}
-	epochs := map[string]int{"I:0": 0}
+	epochs := map[string]inputEpoch{"I:0": {generation: 0, floor: 0}}
 	if err := r.observe(tracker, epochs, observation{kind: "I", id: 0, seq: 4}); err != nil {
 		t.Fatalf("intentional reconnect gap was treated as survivor loss: %v", err)
 	}

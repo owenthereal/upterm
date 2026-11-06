@@ -167,6 +167,12 @@ count and establishes each channel's live measurement boundary. Every new
 transport clears old barriers so replay cannot activate its live reader. Planned reconnects
 reset tracking only for the affected source generation; survivor generations
 retain gap/reordering checks.
+At the live boundary, each receiver snapshots every peer stream's input
+allocation counter. Earlier frames may arrive late or be replayed; every
+sequence allocated afterward, including the first, must arrive in order.
+After a source reconnects, its successful restoration publishes the next input
+sequence atomically with clearing the expected outage. Receivers then require
+the complete new range without treating disrupted input or probes as gaps.
 
 Steady input has an independent schedule per guest. Expected restoration
 pauses only that guest; it does not hold up healthy survivors. A missed
@@ -258,6 +264,16 @@ separate one-second watchdog stops the phase once any target has had more than
 Go version, goroutines, heap/runtime memory and, on Linux, `/proc/self/status`
 and `/proc/self/stat` for RSS/CPU analysis. Sampling does not diagnose pressure;
 the coordinator evaluates Fly metrics/OOM and generator pressure externally.
+
+Each run can write at most 512 MiB of encoded JSONL, including escaping and
+newlines. A complete event that would exceed the remaining budget is rejected
+before writing; the run stops with `output_budget`, closes its resources, and
+reports incomplete delivery. Earlier complete events remain available; a final
+summary may not fit. This limit is separate from application payload accounting
+and can end a phase before its configured duration. At observed normal sample
+sizes, two-target metrics and generator samples use about 32 MiB per two hours, leaving headroom
+for admission, churn and summary events. Each metrics response is still bounded
+to 1 MiB before JSON encoding.
 
 Before startup and once per second, an existing `watchdog_file` requests a
 graceful safety stop. If `watchdog_heartbeat_file` is configured, it must exist

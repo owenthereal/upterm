@@ -197,15 +197,22 @@ func (r *runState) restoreGuest(q *guest, began time.Time) error {
 	for tries := 0; tries < 3; tries++ {
 		last = q.connect(r.ctx, r)
 		queue += q.queueElapsed
+		if last == nil && r.cfg.beforeRestoreCommit != nil {
+			r.cfg.beforeRestoreCommit()
+		}
 		q.mu.Lock()
 		superseded := disruption != q.disruption
+		if !superseded && last == nil {
+			q.inputStart = q.probeSeq
+			q.inputStart[0] = q.seq
+			q.expected = false
+		}
 		q.mu.Unlock()
 		if superseded {
 			q.close()
 			return nil
 		} // a later actual host cut owns repair.
 		if last == nil {
-			q.setExpected(false)
 			r.rec.mu.Lock()
 			r.rec.summary.Reconnects++
 			r.rec.mu.Unlock()

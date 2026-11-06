@@ -200,7 +200,40 @@ func scanFrames(in io.Reader, consume func(observation) error, helperReady func(
 	}
 	return io.EOF
 }
-func (r *runState) observe(tracker sequenceTracker, epochs map[string]int, o observation) error {
+
+type inputEpoch struct {
+	generation int
+	floor      int
+}
+
+// A live receiver requires every input allocated after this snapshot. Earlier
+// input can still be in flight or replayed, and is outside its complete range.
+// Snapshot allocation counters, not timestamps from independently queued SSH
+// channels. The steady workload starts only after every initial live barrier.
+func (r *runState) baselineInputs(tracker sequenceTracker, epochs map[string]inputEpoch, hostID int) {
+	r.clientsMu.RLock()
+	defer r.clientsMu.RUnlock()
+	for _, source := range r.guests {
+		if source.host.id != hostID {
+			continue
+		}
+		source.mu.Lock()
+		if !source.expected {
+			for ch := 0; ch < r.cfg.ChannelsPerGuest; ch++ {
+				next := source.probeSeq[ch]
+				if ch == 0 {
+					next = source.seq
+				}
+				key := "I:" + strconv.Itoa(source.id*4+ch)
+				tracker[key] = next - 1
+				epochs[key] = inputEpoch{source.generation, next - 1}
+			}
+		}
+		source.mu.Unlock()
+	}
+}
+
+func (r *runState) observe(tracker sequenceTracker, epochs map[string]inputEpoch, o observation) error {
 	if o.kind == "I" {
 		r.clientsMu.RLock()
 		if o.id < 0 || o.id/4 >= len(r.guests) {
@@ -210,14 +243,21 @@ func (r *runState) observe(tracker sequenceTracker, epochs map[string]int, o obs
 		peer := r.guests[o.id/4]
 		r.clientsMu.RUnlock()
 		peer.mu.Lock()
-		generation, expected := peer.generation, peer.expected
+		generation, expected, first := peer.generation, peer.expected, peer.inputStart[o.id%4]
 		peer.mu.Unlock()
 		key := "I:" + strconv.Itoa(o.id)
-		if old, ok := epochs[key]; expected || !ok || old != generation {
-			delete(tracker, key)
-		}
-		epochs[key] = generation
 		if expected {
+			delete(tracker, key)
+			delete(epochs, key)
+			return nil
+		}
+		epoch, ok := epochs[key]
+		if !ok || epoch.generation != generation {
+			epoch = inputEpoch{generation, first - 1}
+			epochs[key] = epoch
+			tracker[key] = epoch.floor
+		}
+		if o.seq <= epoch.floor {
 			return nil
 		}
 	}

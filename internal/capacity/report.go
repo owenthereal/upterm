@@ -2,6 +2,7 @@ package capacity
 
 import (
 	"encoding/json"
+	"errors"
 	"io"
 	"sync"
 	"time"
@@ -57,7 +58,31 @@ type recorder struct {
 	mu      sync.Mutex
 	encoder *json.Encoder
 	err     error
+	fail    func(error)
 	summary Summary
+}
+
+const maxOutputBytes = int64(512 << 20)
+
+var errOutputBudget = errors.New("output_budget")
+
+// json.Encoder writes one complete encoded event at a time. Check its actual
+// encoded size, including escaping and LF, before forwarding any of it.
+type outputBudgetWriter struct {
+	out       io.Writer
+	remaining int64
+}
+
+func (w *outputBudgetWriter) Write(p []byte) (int, error) {
+	if int64(len(p)) > w.remaining {
+		return 0, errOutputBudget
+	}
+	n, err := w.out.Write(p)
+	w.remaining -= int64(n)
+	if n != len(p) && err == nil {
+		err = io.ErrShortWrite
+	}
+	return n, err
 }
 
 func (r *recorder) event(kind string, fields map[string]any) {
@@ -71,8 +96,15 @@ func (r *recorder) event(kind string, fields map[string]any) {
 	fields["run_id"] = r.summary.RunID
 	if r.err == nil {
 		r.err = r.encoder.Encode(fields)
+		if r.err != nil && r.fail != nil {
+			r.fail(r.err)
+		}
 	}
 }
 func newRecorder(out io.Writer, c Config) *recorder {
-	return &recorder{encoder: json.NewEncoder(out), summary: Summary{RunID: c.Manifest.RunID, RTTSampling: "uniform_reservoir_100000", OfferedHosts: c.Hosts, OfferedGuests: c.Hosts * c.GuestsPerHost, OfferedChannels: c.Hosts * c.GuestsPerHost * c.ChannelsPerGuest, PayloadBudgetBytes: c.PayloadBudgetBytes}}
+	limit := maxOutputBytes
+	if c.outputLimit > 0 && c.outputLimit < limit {
+		limit = c.outputLimit
+	}
+	return &recorder{encoder: json.NewEncoder(&outputBudgetWriter{out: out, remaining: limit}), summary: Summary{RunID: c.Manifest.RunID, RTTSampling: "uniform_reservoir_100000", OfferedHosts: c.Hosts, OfferedGuests: c.Hosts * c.GuestsPerHost, OfferedChannels: c.Hosts * c.GuestsPerHost * c.ChannelsPerGuest, PayloadBudgetBytes: c.PayloadBudgetBytes}}
 }

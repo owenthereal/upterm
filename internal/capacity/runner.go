@@ -468,6 +468,7 @@ func Run(ctx context.Context, c Config, out io.Writer) (result Summary, err erro
 	bounded, stop := context.WithDeadline(ctx, deadline)
 	defer stop()
 	runctx, cancel := context.WithCancelCause(bounded)
+	rec.fail = cancel
 	r := &runState{lastTelemetry: map[string]time.Time{}, cfg: c, guard: newGuard(c), rec: rec, ctx: runctx, cancel: cancel}
 	r.helper = c.HelperExecutable
 	if r.helper == "" {
@@ -502,8 +503,12 @@ func Run(ctx context.Context, c Config, out io.Writer) (result Summary, err erro
 		result = rec.summary
 		rec.mu.Unlock()
 		rec.event("summary", map[string]any{"summary": result})
-		if rec.err != nil && err == nil {
-			err = rec.err
+		if rec.err != nil {
+			err = errors.Join(err, rec.err)
+			result.DeliveryComplete = false
+			if result.StopReason != "cleanup_failure" {
+				result.StopReason = rec.err.Error()
+			}
 		}
 	}()
 	rec.event("phase_start", map[string]any{"config": safeConfig(c), "input_frame_bytes": 128, "host_output_frame_bytes": 1024, "framing_header_bytes": 44, "framing_newline_bytes": 1, "wire_overhead": "not measured", "duration_includes_admission": false})

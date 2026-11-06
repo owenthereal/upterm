@@ -26,6 +26,7 @@ func TestRealMixedTransportPairing(t *testing.T) {
 			c.Hosts, c.GuestsPerHost = tc.hosts, tc.guests
 			c.HostWSPercent, c.GuestWSPercent = 50, 50
 			c.DurationSeconds = 1
+			captureChurnTerminals(t, &c)
 			var out bytes.Buffer
 			s, err := Run(t.Context(), c, &out)
 			if err != nil {

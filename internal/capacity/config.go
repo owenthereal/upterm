@@ -60,6 +60,10 @@ type Config struct {
 	WatchdogFile        string   `json:"watchdog_file"`
 	// terminalIO observes a local test's raw PTY traffic before frame parsing.
 	terminalIO func(guest, channel, generation int, in io.WriteCloser, out io.Reader) (io.WriteCloser, io.Reader)
+	// beforeRestoreCommit lets local tests interleave a later actual cut.
+	beforeRestoreCommit func()
+	// outputLimit lets local tests exercise the same quota with small logs.
+	outputLimit int64
 }
 
 const MaxPayload = int64(50 << 30)

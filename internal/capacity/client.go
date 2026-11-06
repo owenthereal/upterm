@@ -82,6 +82,7 @@ type guest struct {
 
 	canary       bool
 	probeSeq     [4]int
+	inputStart   [4]int
 	pending      map[string]time.Time
 	challenges   map[string]time.Time
 	lifetimeStop func() bool
@@ -221,12 +222,14 @@ func (q *guest) connect(ctx context.Context, r *runState) error {
 		}
 		q.writers = append(q.writers, in)
 		stream := q.id*4 + ch
+		q.mu.Lock()
 		probeSeq := q.probeSeq[ch]
 		q.probeSeq[ch]++
 		if ch == 0 {
 			probeSeq = q.seq
 			q.seq++
 		}
+		q.mu.Unlock()
 		ready := make(chan struct{}, 1)
 		helperReady := make(chan struct{}, 1)
 		done := make(chan struct{})
@@ -234,7 +237,7 @@ func (q *guest) connect(ctx context.Context, r *runState) error {
 		go func() {
 			defer close(done)
 			tracker := sequenceTracker{}
-			epochs := map[string]int{}
+			epochs := map[string]inputEpoch{}
 			live := false
 			baseline := time.Time{}
 			hostKey := fmt.Sprintf("H:%d", q.host.id)
@@ -250,6 +253,7 @@ func (q *guest) connect(ctx context.Context, r *runState) error {
 					}
 					if !live {
 						tracker[hostKey] = o.seq - 1
+						r.baselineInputs(tracker, epochs, q.host.id)
 						baseline = barrier.sent
 						live = true
 					} else if last := tracker[hostKey]; last != o.seq-1 {
