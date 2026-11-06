@@ -67,19 +67,52 @@ func (o *geometryOutput) Write(p []byte) (int, error) {
 	return n, err
 }
 
+func geometryHasMarker(data, marker []byte) bool {
+	rows := bytes.Split(data, []byte{'\n'})
+	for _, row := range rows[:len(rows)-1] {
+		row = bytes.TrimSuffix(row, []byte{'\r'})
+		if start := bytes.LastIndex(row, []byte("CAP ")); start >= 0 && bytes.Equal(row[start:], marker) {
+			return true
+		}
+	}
+	return false
+}
+
+func TestGeometryOutputMarker(t *testing.T) {
+	// Captured from Windows CI run 42174271728, job 127748995046.
+	const prefix = "\x1b[?9001h\x1b[?1004h\x1b[?25l\x1b[2J\x1b[m\x1b[H"
+	const marker = "CAP I 00000314 00000007 1793946543794605400 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+	for _, tc := range []struct {
+		name   string
+		output string
+		want   bool
+	}{
+		{"captured Windows prefix", prefix + marker + "\r\n", true},
+		{"plain LF", marker + "\n", true},
+		{"plain CRLF", marker + "\r\n", true},
+		{"corrupt padding", prefix + marker[:len(marker)-1] + "y\r\n", false},
+		{"corrupt header", prefix + "CAP B" + marker[5:] + "\r\n", false},
+		{"wrong timestamp", prefix + marker[:24] + "1793946543794605401" + marker[43:] + "\r\n", false},
+		{"trailing data", prefix + marker + "extra\r\n", false},
+		{"trailing erase", prefix + marker + "\x1b[K\r\n", false},
+		{"incomplete LF framing", prefix + marker + "\r", false},
+		{"later mismatched CAP", prefix + marker + "CAP I 00000314 00000008 1793946543794605400\r\n", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := geometryHasMarker([]byte(tc.output), []byte(marker)); got != tc.want {
+				t.Fatalf("geometryHasMarker(%q) = %t, want %t", tc.output, got, tc.want)
+			}
+		})
+	}
+}
+
 func (o *geometryOutput) wait(t *testing.T, marker []byte) {
 	t.Helper()
 	timer := time.NewTimer(5 * time.Second)
 	defer timer.Stop()
 	for {
 		o.mu.Lock()
-		rows := bytes.Split(o.data.Bytes(), []byte{'\n'})
-		found := false
-		for _, row := range rows[:len(rows)-1] {
-			if bytes.Equal(bytes.TrimSuffix(row, []byte{'\r'}), marker) {
-				found = true
-			}
-		}
+		found := geometryHasMarker(o.data.Bytes(), marker)
 		o.mu.Unlock()
 		if found {
 			return
