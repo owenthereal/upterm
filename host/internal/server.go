@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -131,6 +132,10 @@ type Server struct {
 
 	// SFTP configuration
 	SFTPDisabled bool // Disable SFTP subsystem entirely
+	// SFTPRoot is caller-owned; WaitSFTP must succeed before it is closed.
+	SFTPRoot        *os.Root
+	SFTPWriteLimits *SFTPWriteLimits
+	sftpWorkers     rootedSFTPWorkers
 	// PermissionChecker supplies custom consent policy. Nil denies ungranted operations.
 	PermissionChecker consent.PermissionChecker
 	// TerminalConsent selects consent on the primary local terminal; mutually exclusive with PermissionChecker.
@@ -219,6 +224,16 @@ func logReplayFallback(logger *slog.Logger) func(error) {
 // guest, and — when host is not nil — the host door on host, for clients that
 // are already on this machine.
 func (s *Server) ServeWithContext(ctx context.Context, guest, host net.Listener) error {
+	if s.SFTPRoot != nil {
+		defer s.sftpWorkers.stop()
+		if !rootedSFTPSupported() {
+			return errors.New("rooted SFTP is unsupported on this platform")
+		}
+	}
+	sftpWriteLimits, err := newRootedSFTPWriteLimits(s.SFTPRoot, s.SFTPWriteLimits)
+	if err != nil {
+		return err
+	}
 	if s.TerminalConsent && s.PermissionChecker != nil {
 		return errors.New("TerminalConsent and PermissionChecker are mutually exclusive")
 	}
@@ -375,8 +390,13 @@ func (s *Server) ServeWithContext(ctx context.Context, guest, host net.Listener)
 		kind:              kindGuest,
 		cmdDone:           cmdDone,
 		commandResult:     cmd.Result,
+		sftpRoot:          s.SFTPRoot,
+		sftpWriteLimits:   sftpWriteLimits,
 
 		onPrivateCommandExit: s.onPrivateCommandExit,
+	}
+	if s.SFTPRoot != nil {
+		sh.sftpWorkers = &s.sftpWorkers
 	}
 
 	ss := []gssh.Signer{s.HostKey}
@@ -390,9 +410,9 @@ func (s *Server) ServeWithContext(ctx context.Context, guest, host net.Listener)
 
 		// Set up subsystem handlers (SFTP). The door admits a subsystem with
 		// the session's end, as it does a shell (see admitGuest), and SFTP
-		// hands that admission back as it starts: an SFTP session in progress
-		// is not waited for, and is cut off when the session ends, as it
-		// always was.
+		// hands that admission back as it starts. Rooted sessions separately
+		// register their workers for WaitSFTP; nil-root sessions retain their
+		// existing shutdown behavior.
 		var subsystemHandlers map[string]gssh.SubsystemHandler
 		if !s.SFTPDisabled {
 			subsystemHandlers = map[string]gssh.SubsystemHandler{
@@ -485,6 +505,9 @@ func (s *Server) ServeWithContext(ctx context.Context, guest, host net.Listener)
 			// door's listener's close. A command-led exit has already closed
 			// cmdDone by the time this runs.
 			releaseSessions(cmdDone, timing.outputDrain+guestFlushTimeout, cancel)
+			if s.SFTPRoot != nil {
+				s.sftpWorkers.stop()
+			}
 
 			// That cancel hangs up every forced command, and each one's guest is
 			// sent what it says on the way out and a reset once it has gone.
@@ -1087,6 +1110,9 @@ type sessionHandler struct {
 	// SFTP configuration
 	permissionChecker consent.PermissionChecker
 	sftpAutoAccept    bool
+	sftpRoot          *os.Root
+	sftpWriteLimits   *rootedSFTPWriteLimits
+	sftpWorkers       *rootedSFTPWorkers
 
 	// subsystems are the guest door's subsystem handlers, by name, so that
 	// admitGuest refuses one the door doesn't serve. Nil in a test's handler.
