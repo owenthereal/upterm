@@ -7,11 +7,13 @@ import (
 	"crypto/rand"
 	"encoding/json"
 	"encoding/pem"
+	"fmt"
 	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -33,13 +35,14 @@ type reconnectSessionInfo struct {
 	LogPath      string `json:"logPath"`
 }
 
-// testRelay is an uptermd built for one test. It listens on one loopback port
+// testRelay is an uptermd run for one test. It listens on one loopback port
 // and runs with one host key however many times it is restarted: a host that
 // redials a relay it has already pinned accepts the new run only if its key
 // is the one it pinned, and only the same address gives the same connect string.
 type testRelay struct {
 	t       *testing.T
 	bin     string
+	args    []string
 	keyFile string
 	logFile string
 	addr    string
@@ -48,23 +51,23 @@ type testRelay struct {
 	done chan struct{} // closed once cmd has been reaped
 }
 
-// newTestRelay builds uptermd and picks the port and host key it will run
-// with. It starts nothing, and registers the cleanup that kills whichever run
-// is current.
+// newTestRelay finds or builds uptermd, as relayBinary does, and picks the
+// port, host key and arguments it will run with. It starts nothing, and
+// registers the cleanup that kills whichever run is current.
 func newTestRelay(t *testing.T) *testRelay {
 	t.Helper()
 	dir := t.TempDir()
 	r := &testRelay{
 		t:       t,
-		bin:     filepath.Join(dir, "uptermd"),
 		keyFile: filepath.Join(dir, "uptermd_host_key"),
 		logFile: filepath.Join(dir, "uptermd.log"),
 	}
 
 	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Minute)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, "go", "build", "-o", r.bin, "github.com/owenthereal/upterm/cmd/uptermd").CombinedOutput()
-	require.NoError(t, err, "building uptermd: %s", out)
+	bin, err := relayBinary(ctx, dir)
+	require.NoError(t, err)
+	r.bin = bin
 
 	_, priv, err := ed25519.GenerateKey(rand.Reader)
 	require.NoError(t, err)
@@ -79,6 +82,9 @@ func newTestRelay(t *testing.T) *testRelay {
 	r.addr = l.Addr().String()
 	require.NoError(t, l.Close())
 
+	r.args, err = relayArgs(r.addr, r.keyFile, strings.Fields(os.Getenv(relayArgsEnv)))
+	require.NoError(t, err)
+
 	t.Cleanup(r.kill)
 	return r
 }
@@ -90,8 +96,9 @@ func (r *testRelay) start() {
 	require.NoError(r.t, err)
 	defer func() { _ = log.Close() }() // the child keeps its own copy
 
-	cmd := exec.Command(r.bin, "--ssh-addr", r.addr, "--private-key", r.keyFile)
+	cmd := exec.Command(r.bin, r.args...)
 	cmd.Stdout, cmd.Stderr = log, log
+	r.t.Logf("starting relay %s with argv %q", r.bin, cmd.Args)
 	require.NoError(r.t, cmd.Start())
 	done := make(chan struct{})
 	go func() {
@@ -112,6 +119,50 @@ func (r *testRelay) start() {
 		}
 	}
 	r.t.Fatalf("uptermd did not listen on %s in time:\n%s", r.addr, r.logTail())
+}
+
+// The variables that point the relay a test starts at another uptermd.
+const (
+	relayBinaryEnv = "UPTERM_E2E_RELAY_BINARY"
+	relayArgsEnv   = "UPTERM_E2E_RELAY_ARGS"
+)
+
+// relayBinary is the uptermd a test relay runs. With UPTERM_E2E_RELAY_BINARY
+// set, it is that program and nothing is built; the value must be an absolute
+// path or a command name found on PATH, and a relative path resolves against
+// the package directory go test runs in. Otherwise it is built from this
+// module into dir. The binary and the relay's whole argument list are logged
+// verbatim, so UPTERM_E2E_RELAY_ARGS must not carry secrets.
+func relayBinary(ctx context.Context, dir string) (string, error) {
+	if name := os.Getenv(relayBinaryEnv); name != "" {
+		bin, err := exec.LookPath(name)
+		if err != nil {
+			return "", fmt.Errorf("%s: %w", relayBinaryEnv, err)
+		}
+		return bin, nil
+	}
+	bin := filepath.Join(dir, "uptermd")
+	out, err := exec.CommandContext(ctx, "go", "build", "-o", bin, "github.com/owenthereal/upterm/cmd/uptermd").CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("building uptermd: %w: %s", err, out)
+	}
+	return bin, nil
+}
+
+// relayArgs is the argv after the program name for a relay on addr with the
+// host key in keyFile: the extra arguments first, then the harness's own. The
+// extra arguments may not set the address or the key. The harness relies on
+// both, and --private-key is a slice flag, so a second one would add a key
+// rather than replace the harness's.
+func relayArgs(addr, keyFile string, extra []string) ([]string, error) {
+	for _, arg := range extra {
+		for _, flag := range []string{"--ssh-addr", "--private-key"} {
+			if arg == flag || strings.HasPrefix(arg, flag+"=") {
+				return nil, fmt.Errorf("%s may not set %s: the harness sets it", relayArgsEnv, flag)
+			}
+		}
+	}
+	return append(slices.Clone(extra), "--ssh-addr", addr, "--private-key", keyFile), nil
 }
 
 // kill ends the current run abruptly, SIGKILL on Unix, and waits for it to be
