@@ -879,3 +879,85 @@ func TestLiteralDottedKeysCoexistingWithIgnoredValuesRemainUnknown(t *testing.T)
 		})
 	}
 }
+
+// The extensions key holds settings for extensions a build may not have, so
+// every command that reads config loads a file with it as it would without
+// it, whatever it holds, and says nothing about it.
+func TestConfigFileWithAnotherBuildsExtensionStillLoads(t *testing.T) {
+	restoreFlags(t)
+	setupSessionRoots(t)
+	withConfig(t, "")
+	path := utils.UptermConfigFilePath()
+	runs := [][]string{
+		{"session", "list"},
+		{"session", "current"},
+		{"session", "info", "nosuch"},
+		{"host", "--help"},
+	}
+	type result struct {
+		stdout, stderr string
+		code           int
+	}
+	runAll := func(body string) []result {
+		require.NoError(t, os.WriteFile(path, []byte(body), 0o600))
+		var results []result
+		for _, args := range runs {
+			stdout, stderr, code := runCLI(t, args...)
+			require.NotContains(t, stderr, "unknown config key", strings.Join(args, " "))
+			results = append(results, result{stdout, stderr, code})
+		}
+		return results
+	}
+
+	const base = "server: ssh://relay.example:22\n"
+	without := runAll(base)
+	for _, extensions := range []string{
+		"extensions:\n  other:\n    destination: work\n",
+		"extensions: 5\n",
+	} {
+		require.Equal(t, without, runAll(base+extensions), extensions)
+	}
+}
+
+// A top-level key that names no flag is refused as it always was, one that
+// looks like the extensions key included.
+func TestAnUnknownTopLevelKeyIsStillRefused(t *testing.T) {
+	for _, tc := range []struct{ body, key string }{
+		{"extension: {a: 1}\n", "extension.a"},
+		{"extension: {other: {destination: work}}\n", "extension.other.destination"},
+	} {
+		t.Run(tc.body, func(t *testing.T) {
+			restoreFlags(t)
+			setupSessionRoots(t)
+			withConfig(t, tc.body)
+			path := utils.UptermConfigFilePath()
+
+			_, stderr, code := runCLI(t, "session", "list")
+			require.Equal(t, 1, code)
+			require.Equal(t, "upterm: unknown config key \""+tc.key+"\" in "+path+"; remove it or correct the spelling\n", stderr)
+
+			t.Setenv("VISUAL", "true")
+			_, stderr, code = runCLI(t, "config", "edit")
+			require.Equal(t, 1, code)
+			require.Equal(t, "upterm: "+path+": unknown key \""+tc.key+"\"; run upterm config edit to fix it\n", stderr)
+		})
+	}
+
+	// A dotted key is a key of its own, not one of the extensions key's.
+	t.Run("dotted", func(t *testing.T) {
+		restoreFlags(t)
+		setupSessionRoots(t)
+		withConfig(t, "extensions.other: {destination: work}\n")
+		path := utils.UptermConfigFilePath()
+
+		_, stderr, code := runCLI(t, "session", "list")
+		require.Equal(t, 1, code)
+		require.Contains(t, stderr, "upterm: unknown config key \"extensions.other")
+
+		t.Setenv("VISUAL", "true")
+		_, stderr, code = runCLI(t, "config", "edit")
+		require.Equal(t, 1, code)
+		require.Equal(t, "upterm: "+path+": unknown key \"extensions.other\"; run upterm config edit to fix it\n"+
+			"upterm: "+path+": unknown key \"extensions.other.destination\"; run upterm config edit to fix it\n", stderr)
+	})
+}

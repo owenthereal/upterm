@@ -130,6 +130,12 @@ file: see 'upterm config --help'.`,
 	}
 	helpOnlyForKnownCommands(rootCmd)
 
+	// config's help lists the flags that take values only from the command
+	// line, which takes the whole tree.
+	if config, _, err := rootCmd.Find([]string{"config"}); err == nil {
+		config.Long = configLong(perRunHelp(rootCmd))
+	}
+
 	// The root and the groups run only to report an unknown command, so
 	// their usage shows the commands they hold and no run of their own:
 	// cobra's template, its runnable line kept for a command without
@@ -349,9 +355,14 @@ func bindFlagsToEnv(cmd *cobra.Command) (supplied map[string]bool, deps []deprec
 	// merges v.pflags as well as v.config, so taking this after BindPFlag would
 	// report every bound flag as present in the config file — and every
 	// ordinary run would then fail with "config key has no value".
+	//
+	// The extensions key and what it holds are no flag's, and no command
+	// reads them as config, whatever they hold.
 	configKeys := make(map[string]bool)
 	for _, k := range configKeysForCommand(v, cmd, literalKeys) {
-		configKeys[k] = true
+		if !inExtensions(k, literalKeys) {
+			configKeys[k] = true
+		}
 	}
 
 	// A config key with no matching flag anywhere in the command tree is
@@ -583,6 +594,22 @@ func configKeysForCommand(v *viper.Viper, cmd *cobra.Command, literalKeys map[st
 		result = append(result, key)
 	}
 	return result
+}
+
+// inExtensions reports whether key, one of configKeysForCommand's, is the
+// top-level extensions key or nested in its value. A key nested under a
+// dotted literal, such as extensions.other, is not: that literal names no
+// flag, and stays unknown.
+func inExtensions(key string, literalKeys map[string]bool) bool {
+	if !literalKeys[extensionsKey] || key != extensionsKey && !strings.HasPrefix(key, extensionsKey+".") {
+		return false
+	}
+	for literal := range literalKeys {
+		if literal != extensionsKey && (key == literal || strings.HasPrefix(key, literal+".")) {
+			return false
+		}
+	}
+	return true
 }
 
 // knownFlagNames returns the union of flag names across the whole command

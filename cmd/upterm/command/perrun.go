@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"slices"
+	"strings"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
@@ -100,4 +102,78 @@ func warnDeprecations(w io.Writer, deps []deprecation) {
 	for _, d := range deps {
 		_, _ = fmt.Fprintln(w, d.ignoredLine())
 	}
+}
+
+// perRunHelp is a line for each command under root with flags that take
+// values only from the command line, for config's help: the command's path
+// below root, then those flags in the order they were registered, wrapped at
+// 80 columns. The commands come depth first, each one's subcommands by name.
+func perRunHelp(root *cobra.Command) string {
+	var b strings.Builder
+	var walk func(c *cobra.Command)
+	walk = func(c *cobra.Command) {
+		if !c.HasSubCommands() {
+			var names []string
+			seen := make(map[string]bool)
+			for _, fs := range []*pflag.FlagSet{c.PersistentFlags(), c.Flags()} {
+				visitInOrder(fs, func(f *pflag.Flag) {
+					if seen[f.Name] || inherited(c, f) || !hasAnnotation(f, annotationPerRun) && !hasAnnotation(f, annotationCLIOnly) {
+						return
+					}
+					seen[f.Name] = true
+					names = append(names, "--"+f.Name)
+				})
+			}
+			if len(names) > 0 {
+				writeWrapped(&b, strings.TrimPrefix(c.CommandPath(), root.CommandPath()+" ")+":", names)
+			}
+		}
+		children := slices.Clone(c.Commands())
+		slices.SortFunc(children, func(a, b *cobra.Command) int { return strings.Compare(a.Name(), b.Name()) })
+		for _, child := range children {
+			walk(child)
+		}
+	}
+	walk(root)
+	return b.String()
+}
+
+// visitInOrder calls fn for each flag of fs in the order it was registered:
+// VisitAll sorts them by name unless SortFlags is off.
+func visitInOrder(fs *pflag.FlagSet, fn func(*pflag.Flag)) {
+	sorted := fs.SortFlags
+	fs.SortFlags = false
+	defer func() { fs.SortFlags = sorted }()
+	fs.VisitAll(fn)
+}
+
+// inherited reports whether f is a persistent flag of one of c's parents,
+// which cobra adds to c.Flags() once it parses them.
+func inherited(c *cobra.Command, f *pflag.Flag) bool {
+	for p := c.Parent(); p != nil; p = p.Parent() {
+		if p.PersistentFlags().Lookup(f.Name) == f {
+			return true
+		}
+	}
+	return false
+}
+
+// writeWrapped writes label and words, comma-separated, as a line indented by
+// two spaces, continued on lines indented by four so none is wider than 80
+// columns.
+func writeWrapped(b *strings.Builder, label string, words []string) {
+	const width = 80
+	line := "  " + label
+	for i, word := range words {
+		if i < len(words)-1 {
+			word += ","
+		}
+		if i > 0 && len(line)+1+len(word) > width {
+			b.WriteString(line + "\n")
+			line = "    " + word
+			continue
+		}
+		line += " " + word
+	}
+	b.WriteString(line + "\n")
 }
