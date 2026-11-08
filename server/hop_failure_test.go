@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"net"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -42,6 +43,45 @@ func TestHopGateNegativeReasons(t *testing.T) {
 		require.Equal(t, upterm.UpstreamKeyRefused, rejected.Message)
 		require.Zero(t, f.dialer.calls.Load())
 	})
+}
+
+// A gate hop whose home can't reach its host, after the mode exchange
+// admitted it, has its channels rejected with the classified reason, as any
+// other hop does, rather than closed without one.
+func TestHopGateReportsTheHostsFailure(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		host func(t *testing.T) string
+		want string
+	}{
+		{name: "host_key_mismatch", want: upterm.UpstreamHostKeyMismatch, host: func(t *testing.T) string {
+			// A host presenting a key other than the registration's run key.
+			addr, _ := stockTestUpstream(t, false, HostPrivateKeyContent)
+			return addr
+		}},
+		{name: "unreachable", want: upterm.UpstreamUnavailable, host: func(t *testing.T) string {
+			ln, err := net.Listen("tcp", "127.0.0.1:0")
+			require.NoError(t, err)
+			addr := ln.Addr().String()
+			require.NoError(t, ln.Close())
+			return addr
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newHopGateFixture(t)
+			f.dialer.addr = tc.host(t)
+			u, err := f.connect(t, f.auth, f.authority)
+			require.NoError(t, err)
+			h, err := negotiateHome(t.Context(), u, freshModeRequest("route"))
+			require.NoError(t, err)
+			require.Equal(t, AuthorityLocal, h.Ref().Authority)
+			_, _, err = u.conn.OpenChannel("session", nil)
+			var rejected *ssh.OpenChannelError
+			require.ErrorAs(t, err, &rejected, "the hop closed without telling the ingress why")
+			require.Equal(t, tc.want, rejected.Message)
+			require.Equal(t, int32(1), f.dialer.calls.Load())
+		})
+	}
 }
 
 func TestHopGateNegativeReplyControls(t *testing.T) {

@@ -517,6 +517,11 @@ func (p *SSHRouting) serveHopGate(ctx context.Context, peer sshPeer, auth *AuthR
 	defer stopDial()
 	upstream, err := p.upstreamAttempt(upstreamCtx, heldCtx, pr)
 	if err != nil {
+		// The ingress learns why, as from any other hop, on a fresh budget: a
+		// dial or handshake timeout has spent upstreamCtx's.
+		rejectCtx, stopReject := context.WithTimeout(heldCtx, min(stage, maxSSHRejectTimeout))
+		defer stopReject()
+		_ = rejectSSHChannels(rejectCtx, filtered, upstreamFailureReason(err), nil)
 		return err
 	}
 	defer upstream.Close()
