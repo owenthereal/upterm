@@ -39,6 +39,8 @@ type sshd struct {
 	// were minted by a proxy in this cluster; nothing else should get in.
 	Signers             []gossh.Signer
 	NodeAddr            string
+	NodeID              string
+	BootID              string
 	SessionDialListener SessionDialListener
 	MetricsProvider     provider.Provider
 	Logger              *slog.Logger
@@ -86,6 +88,7 @@ type sshd struct {
 	work           *sshSessionWork
 	server         *ssh.Server
 	sessions       *localSessions
+	authorities    *localAuthorityRegistry
 	forwardHandler *streamlocalForwardHandler
 	mux            sync.Mutex
 	// stopped records a Shutdown that arrived before Serve. run.Group fires
@@ -134,9 +137,12 @@ type localSessions struct {
 // localRegistration is a registration this node adopted, and the host
 // connection it was made on, which a takeover closes. reg is the handle
 // its lease keeper last rebuilt, if the keeper rebuilt one; it changes only
-// under localSessions' lock, while the slot is in the map.
+// under localSessions' lock, while the slot is in the map. home is the
+// registration's, minted when the slot was made; every handle the slot holds
+// carries it.
 type localRegistration struct {
 	reg  *Registration
+	home *localHome
 	conn io.Closer
 	// stopLease stops the lease keeper; nil when the store's entries don't
 	// expire.
@@ -177,6 +183,10 @@ func newLocalSessions(work *sshSessionWork, p provider.Provider, sessionManager 
 // reg's lease keeper starts only once reg is accepted, so a refused
 // registration is never renewed or rebuilt, and the one it replaced stops
 // being kept at the moment it's replaced.
+//
+// reg gets a home of its own, from its localRef, and the home of the one it
+// replaced is retired before anything else of that one is closed or released.
+// A second registration of the same identity is a second home.
 func (l *localSessions) add(work *sshWorkRef, reg *Registration, conn io.Closer) (*localRegistration, error) {
 	ttl := l.sessionManager.LeaseTTL()
 
@@ -186,7 +196,16 @@ func (l *localSessions) add(work *sshWorkRef, reg *Registration, conn io.Closer)
 		l.mu.Unlock()
 		return nil, supersededError(reg.Session, cur.reg.Session)
 	}
-	lr := &localRegistration{reg: reg, conn: conn, lost: make(chan struct{}, 1)}
+	ref := reg.localRef
+	if ref.Authority == "" {
+		ref = RegistrationRef{Authority: AuthorityLocal, SessionID: reg.ID(), Generation: reg.Generation(), RoutingID: reg.ID(), HomeNode: reg.Session.NodeAddr}
+	}
+	for _, key := range reg.Session.HostPublicKeys {
+		ref.RunPublicKeys = append(ref.RunPublicKeys, key.Marshal())
+	}
+	home := newLocalHome(ref)
+	reg.home = home
+	lr := &localRegistration{reg: reg, home: home, conn: conn, lost: make(chan struct{}, 1)}
 	var (
 		keeper     *leaseKeeper
 		keeperCtx  context.Context
@@ -196,14 +215,22 @@ func (l *localSessions) add(work *sshWorkRef, reg *Registration, conn io.Closer)
 		keeperWork = work.child()
 		keeperCtx, lr.stopLease = context.WithCancel(l.work.keeperContext)
 		keeper = &leaseKeeper{
-			sm:        l.sessionManager,
-			ttl:       ttl,
-			timing:    l.timing,
-			closeConn: func() { _ = conn.Close() },
-			replace:   l.replace,
-			lost:      lr.lost,
-			logger:    l.logger.With("session-id", reg.ID(), "generation", reg.Generation()),
+			sm:     l.sessionManager,
+			ttl:    ttl,
+			timing: l.timing,
+			// The home goes before the connection, so nothing that finds it
+			// held outlives the close.
+			closeConn: func() {
+				l.fence(reg)
+				_ = conn.Close()
+			},
+			replace: l.replace,
+			lost:    lr.lost,
+			logger:  l.logger.With("session-id", reg.ID(), "generation", reg.Generation()),
 		}
+	}
+	if ok && cur.home != home {
+		cur.home.retire()
 	}
 	l.regs[reg.ID()] = lr
 	if !ok {
@@ -225,8 +252,9 @@ func (l *localSessions) add(work *sshWorkRef, reg *Registration, conn io.Closer)
 // replace makes next, a rebuilt handle, the one this node serves for its
 // registration, and reports whether it did. It doesn't once that registration
 // has ended or been replaced: the rebuild then belongs to no one, and the
-// keeper releases it. Only the handle changes; the slot and all else it
-// holds stay as they are.
+// keeper releases it. A rebuild of another home's registration, however
+// identical, is one that has ended. Only the handle changes; the slot, its
+// home and all else it holds stay as they are.
 //
 // A loss reported until now was judged against the handle next replaces,
 // since reconcile reads the handle and reports under the same lock. It is
@@ -241,9 +269,10 @@ func (l *localSessions) replace(next *Registration) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	cur, ok := l.regs[next.ID()]
-	if !ok || !cur.reg.Same(next) {
+	if !ok || !cur.reg.Same(next) || (next.home != nil && cur.home != next.home) {
 		return false
 	}
+	next.home = cur.home
 	cur.reg = next
 	if cur.lostEpoch == next.epoch && cur.lostIndex <= next.index {
 		select {
@@ -342,7 +371,7 @@ func (l *localSessions) confirm(work *sshWorkRef, reg *Registration) error {
 		// The view is no earlier than reg's own write, and a rebuild that
 		// answers it writes later still.
 		l.mu.Lock()
-		if lr, ok := l.regs[reg.ID()]; ok && lr.reg.Same(reg) {
+		if lr, ok := l.regs[reg.ID()]; ok && lr.reg.Same(reg) && lr.home == reg.home {
 			reportLossLocked(lr, reg.epoch, reg.index)
 		}
 		l.mu.Unlock()
@@ -354,7 +383,7 @@ func (l *localSessions) confirm(work *sshWorkRef, reg *Registration) error {
 	l.mu.Lock()
 	lr, ok := l.regs[reg.ID()]
 	var handle *Registration
-	if ok && lr.reg.Same(reg) {
+	if ok && lr.reg.Same(reg) && lr.home == reg.home {
 		handle = lr.reg
 		l.removeLocked(reg.ID(), lr)
 	}
@@ -384,14 +413,30 @@ func reportLossLocked(lr *localRegistration, epoch, index uint64) {
 	}
 }
 
-// removeLocked drops lr, the slot for id, which a newer registration has
-// superseded, and stops its keeper. The caller holds l.mu, and retires the
-// slot's connection and handle once it has let go.
+// removeLocked drops lr, the slot for id, which has ended or a newer
+// registration has superseded: it retires its home and stops its keeper. The
+// caller holds l.mu, and closes the slot's connection and releases its
+// handles once it has let go, so both come after the home is retired.
 func (l *localSessions) removeLocked(id string, lr *localRegistration) {
+	lr.home.retire()
 	delete(l.regs, id)
 	l.gauge.Add(-1)
 	if lr.stopLease != nil {
 		lr.stopLease()
+	}
+}
+
+// fence retires reg's home, and stops its keeper, before a listener close, a
+// connection close or a store call that could block. It leaves the slot for
+// end, which releases a lease the keeper rebuilt along with reg's own.
+func (l *localSessions) fence(reg *Registration) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if cur, ok := l.regs[reg.ID()]; ok && cur.home == reg.home {
+		cur.home.retire()
+		if cur.stopLease != nil {
+			cur.stopLease()
+		}
 	}
 }
 
@@ -414,12 +459,12 @@ func (l *localSessions) retire(work *sshWorkRef, conn io.Closer, reg *Registrati
 }
 
 // active reports whether reg is the registration this node serves for its ID:
-// adopted, not ended, and not replaced.
+// adopted, not ended, not fenced, and not replaced.
 func (l *localSessions) active(reg *Registration) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	cur, ok := l.regs[reg.ID()]
-	return ok && cur.reg.Same(reg)
+	return ok && cur.home.Held() && cur.home == reg.home && cur.reg.Same(reg)
 }
 
 // end releases reg's store entry, and its slot, count and lease keeper while
@@ -432,18 +477,16 @@ func (l *localSessions) active(reg *Registration) bool {
 // but a rebuild stores the registration under a new lease that only the slot
 // knows. So ending the one this node serves releases the slot's handle, and
 // reg's too if its lease differs; otherwise a rebuilt entry would outlive its
-// host until the lease expired.
+// host until the lease expired. A slot of another home is another
+// registration's, however identical, and is left alone.
 func (l *localSessions) end(reg *Registration) {
 	release := []*Registration{reg}
 	l.mu.Lock()
-	if cur, ok := l.regs[reg.ID()]; ok && cur.reg.Same(reg) {
-		delete(l.regs, reg.ID())
-		l.gauge.Add(-1)
-		// Stopped before the release below, so the keeper can't take that
-		// release for a lost lease and rebuild the entry.
-		if cur.stopLease != nil {
-			cur.stopLease()
-		}
+	if cur, ok := l.regs[reg.ID()]; ok && cur.reg.Same(reg) && cur.home == reg.home {
+		// The keeper is stopped before the release below, so it can't take
+		// that release for a lost lease and rebuild the entry, and the home
+		// is retired before it.
+		l.removeLocked(reg.ID(), cur)
 		release = []*Registration{cur.reg}
 		if cur.reg.lease != reg.lease {
 			release = append(release, reg)
@@ -521,6 +564,7 @@ func (s *sshd) Serve(ln net.Listener) error {
 	sh := newStreamlocalForwardHandler(work, s.SessionManager, s.SessionDialListener, sessions,
 		s.Logger.With("com", "stream-local-handler"))
 	s.sessions = sessions
+	s.authorities = &localAuthorityRegistry{sessions: sessions}
 	s.forwardHandler = sh
 	s.ln = once
 	s.server = &ssh.Server{
@@ -663,25 +707,7 @@ func (s *sshd) adopt(work *sshWorkRef, ctx ssh.Context, reg *Registration, conn 
 		}
 		return false, []byte(registration.Superseded)
 	}
-	if prev != nil && prev.conn != conn {
-		// A takeover on this node. The old listener goes first, so the new
-		// registration can bind the session socket's name, and then the old
-		// host connection, so its guests go with it. Neither waits on the
-		// store: evict ends prev.reg in the background, so a slow release
-		// holds up neither the old connection's close nor the reply that
-		// tells the host its new registration is in.
-		s.forwardHandler.evict(work, prev.reg)
-		_ = prev.conn.Close()
-		// A lease the old registration's keeper rebuilt is known only to its
-		// slot. The old connection's cleanup releases the handle it was adopted
-		// with, and evict ends prev.reg only if it had bound a listener, so
-		// release it here. It holds nothing now the new registration holds the
-		// entry, and a store with no leases has nothing to release.
-		if prev.reg.lease != "" && prev.reg.lease != reg.lease {
-			child := work.child()
-			go func() { defer child.done(); s.releaseReplaced(prev.reg) }()
-		}
-	}
+	s.retirePrevious(work, prev, conn, reg)
 	if s.beforeConfirm != nil {
 		s.beforeConfirm(reg)
 	}
@@ -719,6 +745,30 @@ func (s *sshd) adopt(work *sshWorkRef, ctx ssh.Context, reg *Registration, conn 
 		s.pingOnce(ctx, reg, conn)
 	}
 	return true, nil
+}
+
+// retirePrevious closes what prev, the registration reg replaced, held on this
+// node, if it came over another connection. add has already retired its home.
+func (s *sshd) retirePrevious(work *sshWorkRef, prev *localRegistration, conn *gossh.ServerConn, reg *Registration) {
+	if prev != nil && prev.conn != conn {
+		// A takeover on this node. The old listener goes first, so the new
+		// registration can bind the session socket's name, and then the old
+		// host connection, so its guests go with it. Neither waits on the
+		// store: evict ends prev.reg in the background, so a slow release
+		// holds up neither the old connection's close nor the reply that
+		// tells the host its new registration is in.
+		s.forwardHandler.evict(work, prev.reg)
+		_ = prev.conn.Close()
+		// A lease the old registration's keeper rebuilt is known only to its
+		// slot. The old connection's cleanup releases the handle it was adopted
+		// with, and evict ends prev.reg only if it had bound a listener, so
+		// release it here. It holds nothing now the new registration holds the
+		// entry, and a store with no leases has nothing to release.
+		if prev.reg.lease != "" && prev.reg.lease != reg.lease {
+			child := work.child()
+			go func() { defer child.done(); s.releaseReplaced(prev.reg) }()
+		}
+	}
 }
 
 // contextKeyActivity holds the connection's *liveness.Conn, which records when
@@ -824,6 +874,8 @@ func (s *sshd) handleCreateSession(work *sshWorkRef, ctx ssh.Context, srv *ssh.S
 		sessReq.ClientAuthorizedKeys,
 	)
 	session.Generation = generation
+	// Every record this node writes names its authority.
+	session.AuthorityHint = AuthorityLocal
 
 	reg, sshUser, err := s.SessionManager.Register(context.Background(), session)
 	if errors.Is(err, ErrSuperseded) {
@@ -838,6 +890,11 @@ func (s *sshd) handleCreateSession(work *sshWorkRef, ctx ssh.Context, srv *ssh.S
 		)
 		return false, []byte(fmt.Sprintf("failed to create session: %v", err))
 	}
+	ctx.Lock()
+	registrationID, _ := ctx.Value(contextKeyDownstreamSessionID{}).([]byte)
+	ctx.Unlock()
+	reg.localRef = RegistrationRef{Authority: AuthorityLocal, SessionID: sessionID, Generation: generation, RoutingID: sessionID,
+		RegistrationID: registrationID, HomeNode: s.NodeAddr, HomeNodeID: s.NodeID, HomeBootID: s.BootID}
 	if s.onRegistered != nil {
 		s.onRegistered(ctx, reg)
 	}

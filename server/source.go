@@ -11,7 +11,12 @@
 //   - [GuestOrigin], where a connection entered the fleet;
 //   - [Opt.NodeID], [Opt.DenySources], [Opt.BootID] and [Opt.Extensions];
 //   - [Server.NodeID], [Server.BootID], [Server.DenySources] and
-//     [Server.Extensions].
+//     [Server.Extensions];
+//   - [SessionAuthority], what a registration answers to, with
+//     [AuthorityLocal] and [AuthorityDelegated];
+//   - [RegistrationRef], which identifies one adopted registration;
+//   - [Home], a registration as the node that adopted it holds it;
+//   - [Session.AuthorityHint].
 //
 // This API may change in any minor release, and each change is listed in the
 // release notes.

@@ -383,16 +383,18 @@ func (h *streamlocalForwardHandler) trackListener(reg *Registration, ln net.List
 // untrack closes reg's listener and stops tracking it, and reports whether reg
 // had one. A listener for reg's ID that another registration bound is left
 // alone, so a replaced registration's late cleanup can't close its successor's
-// socket.
+// socket; so is one of another home's, however identical. reg's home is
+// retired before its listener closes.
 func (h *streamlocalForwardHandler) untrack(reg *Registration) bool {
 	h.Lock()
 	defer h.Unlock()
 
 	fwd, ok := h.forwards[reg.ID()]
-	if !ok || !fwd.reg.Same(reg) {
+	if !ok || !fwd.reg.Same(reg) || fwd.reg.home != reg.home {
 		// Already closed, or not reg's
 		return false
 	}
+	h.sessions.fence(reg)
 	logger := h.logger.With("session-id", reg.ID())
 	if err := fwd.ln.Close(); err != nil {
 		logger.Error("error closing listener", "error", err)
