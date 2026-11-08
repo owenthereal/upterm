@@ -309,6 +309,37 @@ jobs:
       - name: Join core builds for js/wasm
         run: CGO_ENABLED=0 make wasm-check
 
+  # This build's relay in fleets with released ones, which make test-compat
+  # installs from the module proxy.
+  test-compat:
+    name: Compat (Ubuntu + Consul)
+    runs-on: ubuntu-latest
+    services:
+      consul:
+        image: consul:1.15
+        ports:
+          - 8500:8500
+        options: >-
+          --health-cmd "consul members"
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 15
+    steps:
+      - uses: actions/checkout@v7
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          check-latest: true
+      - name: Test
+        shell: bash
+        run: |
+          make test-compat 2>&1 | tee compat.log
+          if grep -n 'Consul not available' compat.log; then
+            echo "::error::A compatibility test skipped for want of Consul."
+            exit 1
+          fi
+
   test-e2e:
     name: E2E Tests
     runs-on: ubuntu-latest
@@ -382,6 +413,7 @@ jobs:
       - test-macos
       - test-windows
       - vet
+      - test-compat
       - test-e2e
       - build-and-release
     steps:

@@ -528,6 +528,12 @@ func withInternalListener(strict bool) func(*Server) {
 	return func(s *Server) { s.internalListener, s.strictProxy = true, strict }
 }
 
+// withLegacyHopsRefused has the relay refuse legacy hops, as uptermd's
+// --legacy-hops=false does: it gates every hop it starts and takes.
+func withLegacyHopsRefused() func(*Server) {
+	return func(s *Server) { s.refuseLegacyHops = true }
+}
+
 // rebindTimeout bounds the retries of a listen that failed.
 const rebindTimeout = 2 * time.Second
 
@@ -568,6 +574,10 @@ type Server struct {
 
 	strictProxy bool
 	proxyFront  net.Listener
+
+	// refuseLegacyHops is the relay's RefuseLegacyHops; see
+	// withLegacyHopsRefused.
+	refuseLegacyHops bool
 
 	// authorizedKeysFiles restricts which identities may register as hosts,
 	// uptermd's --authorized-keys.
@@ -667,6 +677,7 @@ func (s *Server) start() error {
 		SessionManager:      sm,
 		Logger:              logger,
 		AuthorizedKeysFiles: s.authorizedKeysFiles,
+		RefuseLegacyHops:    s.refuseLegacyHops,
 	}
 	if s.beforeServe != nil {
 		s.beforeServe(s)

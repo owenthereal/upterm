@@ -22,6 +22,7 @@ import (
 	"github.com/owenthereal/upterm/ws"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/crypto/ssh"
+	"google.golang.org/protobuf/proto"
 )
 
 // With an internal listener on every node, a guest joins however its host
@@ -58,7 +59,7 @@ func testInternalListenerJoins(t *testing.T, strict bool) {
 				{"host n1 WebSocket, guest n2 SSH", n1.joinURL("ws"), n2.joinURL("ssh"), true},
 			} {
 				t.Run(tc.name, func(t *testing.T) {
-					requireJoinsAsItsOwnKey(t, tc.host, n1.NodeAddr(), tc.guest)
+					requireJoinsAsItsOwnKey(t, tc.host, n1, tc.guest)
 					requireSuccessfulRouteClassification(t, n1, tc.guest, tc.hop)
 				})
 			}
@@ -90,7 +91,7 @@ func TestInternalListenerMixedFleet(t *testing.T) {
 		{"host n2, WebSocket guest n1", n2, n2.joinURL("ssh"), n1.joinURL("ws"), false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			requireJoinsAsItsOwnKey(t, tc.hostURL, tc.host.NodeAddr(), tc.guest)
+			requireJoinsAsItsOwnKey(t, tc.hostURL, tc.host, tc.guest)
 			requireSuccessfulRouteClassification(t, tc.host, tc.guest, tc.hop)
 		})
 	}
@@ -105,17 +106,17 @@ func useTestKeyPairs(t *testing.T) {
 	t.Cleanup(remove)
 }
 
-// requireJoinsAsItsOwnKey shares a session at hostURL that admits only the
-// guest's key, joins it at joinURL, and requires the guest to reach the host's
-// shell and the host to see the guest's own key. A hop taken for the key the
-// relay presents would be refused by such a session; on one that admitted any
-// key, it would join and show the host the relay's key.
-func requireJoinsAsItsOwnKey(t *testing.T, hostURL, hostNodeAddr, joinURL string, authorities ...ssh.Signer) {
+// requireJoinsAsItsOwnKey shares a session at hostURL, on host, that admits
+// only the guest's key, joins it at joinURL, and requires the guest to reach
+// the host's shell and the host to see the guest's own key. A hop taken for
+// the key the relay presents would be refused by such a session; on one that
+// admitted any key, it would join and show the host the relay's key.
+func requireJoinsAsItsOwnKey(t *testing.T, hostURL string, host *Server, joinURL string, authorities ...ssh.Signer) {
 	t.Helper()
-	requireJoinsWithNodeKey(t, hostURL, hostNodeAddr, joinURL, nil, authorities...)
+	requireJoinsWithNodeKey(t, hostURL, host, joinURL, nil, authorities...)
 }
 
-func requireJoinsWithNodeKey(t *testing.T, hostURL, hostNodeAddr, joinURL string, nodeKey ssh.PublicKey, authorities ...ssh.Signer) {
+func requireJoinsWithNodeKey(t *testing.T, hostURL string, host *Server, joinURL string, nodeKey ssh.PublicKey, authorities ...ssh.Signer) {
 	t.Helper()
 	joined := make(chan *api.Client, 4)
 	adminSocketFile := setupAdminSocket(t)
@@ -142,26 +143,52 @@ func requireJoinsWithNodeKey(t *testing.T, hostURL, hostNodeAddr, joinURL string
 	require.NoError(t, h.Share(hostURL))
 	t.Cleanup(h.Close)
 
-	session := getAndVerifySession(t, adminSocketFile, hostURL, hostNodeAddr)
+	session := getAndVerifySession(t, adminSocketFile, hostURL, host.NodeAddr())
 	joinAndReachHost(t, session, joinURL)
 
 	guestKey, _, _, _, err := ssh.ParseAuthorizedKey([]byte(ClientPublicKeyContent))
 	require.NoError(t, err)
 	require.Equal(t, utils.FingerprintSHA256(guestKey), awaitClientCallback(t, joined, "joined").PublicKeyFingerprint,
 		"the host saw a key other than the guest's own")
-	requireRefusedHop(t, session, hostNodeAddr, authorities...)
+	requireRefusedHop(t, session, host, authorities...)
 }
 
-// A refused key in a relay certificate earns a hop-only banner. Probe the same
+// requireRefusedHop probes the session's node with a relay certificate for a
+// guest the session doesn't admit, and requires the node to refuse it as a
+// hop, in the form that node refuses one: through the gate when it refuses
+// legacy hops, and otherwise as nodes did before the gate. Probe the same
 // restricted session separately from the successful join to observe the
 // receiving relay's classification without exposing its connection state.
-func requireRefusedHop(t *testing.T, session *api.GetSessionResponse, addr string, authorities ...ssh.Signer) {
+func requireRefusedHop(t *testing.T, session *api.GetSessionResponse, host *Server, authorities ...ssh.Signer) {
 	t.Helper()
+	authority := hopProbeAuthority(t, authorities...)
+	if host.refuseLegacyHops {
+		requireRefusedGateHop(t, session, host.NodeAddr(), authority)
+		return
+	}
+	banners, err := probeLegacyHop(t, session, host.NodeAddr(), authority)
+	require.ErrorContains(t, err, "unable to authenticate")
+	require.Equal(t, []string{upterm.HopBannerKeyRefused}, banners,
+		"the receiving relay did not classify the certificate as a hop")
+}
+
+// hopProbeAuthority is the key a refused-hop probe is signed with: the first
+// of authorities, or the relay's own key.
+func hopProbeAuthority(t *testing.T, authorities ...ssh.Signer) ssh.Signer {
+	t.Helper()
+	if len(authorities) > 0 {
+		return authorities[0]
+	}
 	authority, err := ssh.ParsePrivateKey([]byte(ServerPrivateKeyContent))
 	require.NoError(t, err)
-	if len(authorities) > 0 {
-		authority = authorities[0]
-	}
+	return authority
+}
+
+// probeLegacyHop offers addr a relay certificate, in the format that predates
+// the gate, for a guest the session doesn't admit. It returns the banners the
+// node sent, and the dial's error.
+func probeLegacyHop(t *testing.T, session *api.GetSessionResponse, addr string, authority ssh.Signer) ([]string, error) {
+	t.Helper()
 	otherGuest, _, _, _, err := ssh.ParseAuthorizedKey([]byte(HostPublicKeyContent))
 	require.NoError(t, err)
 	cert, err := (&server.UserCertSigner{
@@ -186,9 +213,119 @@ func requireRefusedHop(t *testing.T, session *api.GetSessionResponse, addr strin
 	if client != nil {
 		_ = client.Close()
 	}
-	require.ErrorContains(t, err, "unable to authenticate")
-	require.Equal(t, []string{upterm.HopBannerKeyRefused}, banners,
-		"the receiving relay did not classify the certificate as a hop")
+	return banners, err
+}
+
+// gateHopProbe is a gate hop's certificate for a guest the session doesn't
+// admit: its user and principal are the routing ID.
+func gateHopProbe(t *testing.T, session *api.GetSessionResponse, authority ssh.Signer) ssh.Signer {
+	t.Helper()
+	otherGuest, _, _, _, err := ssh.ParseAuthorizedKey([]byte(HostPublicKeyContent))
+	require.NoError(t, err)
+	cert, err := (&server.UserCertSigner{
+		SessionID: "refused-hop",
+		User:      session.SessionId,
+		AuthRequest: &server.AuthRequest{
+			ClientVersion: "SSH-2.0-Go",
+			AuthorizedKey: ssh.MarshalAuthorizedKey(otherGuest),
+			TypedAddress:  session.SshUser, TargetRoutingId: session.SessionId, GateProtocol: 1,
+		},
+	}).SignCert(authority)
+	require.NoError(t, err)
+	return cert
+}
+
+// A capable hop can read the held mode before the host's local key gate is
+// applied. The rejected original guest must still reach no channel.
+func requireRefusedGateHop(t *testing.T, session *api.GetSessionResponse, addr string, authority ssh.Signer) *server.GateRegistration {
+	t.Helper()
+	client, err := ssh.Dial("tcp", addr, &ssh.ClientConfig{
+		User: session.SessionId, Auth: []ssh.AuthMethod{ssh.PublicKeys(gateHopProbe(t, session, authority))},
+		HostKeyCallback: ssh.InsecureIgnoreHostKey(), Timeout: 5 * time.Second,
+	})
+	require.NoError(t, err)
+	defer func() { _ = client.Close() }()
+	deadline := time.AfterFunc(5*time.Second, func() { _ = client.Close() })
+	defer deadline.Stop()
+	require.Contains(t, string(client.ServerVersion()), "gate-v1")
+	nonce := make([]byte, 32)
+	_, err = rand.Read(nonce)
+	require.NoError(t, err)
+	body, err := proto.Marshal(&server.GateModeRequest{Protocol: 1, Nonce: nonce, RoutingId: session.SessionId})
+	require.NoError(t, err)
+	ok, reply, err := client.SendRequest(upterm.GateModeRequestType, true, body)
+	require.NoError(t, err)
+	require.True(t, ok)
+	var mode server.GateModeReply
+	require.NoError(t, proto.Unmarshal(reply, &mode))
+	require.Equal(t, nonce, mode.Nonce)
+	require.Equal(t, server.GateMode_GATE_MODE_LOCAL, mode.Registration.Mode)
+	require.Equal(t, session.SessionId, mode.Registration.RoutingId)
+	channel, _, err := client.OpenChannel("session", nil)
+	if channel != nil {
+		_ = channel.Close()
+	}
+	require.Error(t, err, "unlisted original guest passed the held local key gate")
+	return mode.Registration
+}
+
+// requireRefusedHop takes the form of refusal its node gives: a node that
+// refuses legacy hops takes none, and so gives no hop banner, while a node with
+// only a shared listener that doesn't gate serves a gate hop as a legacy one.
+func TestRefusedHopFormMatchesTheGate(t *testing.T) {
+	useTestKeyPairs(t)
+	authority := hopProbeAuthority(t)
+	for _, tc := range []struct {
+		name string
+		opts []func(*Server)
+	}{
+		{"legacy hops accepted", []func(*Server){withInternalListener(false)}},
+		{"legacy hops refused", []func(*Server){withInternalListener(false), withLegacyHopsRefused()}},
+		{"shared listener, legacy hops accepted", nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			node := newRedialRelay(t, routing.ModeEmbedded, tc.opts...)
+			// The relay's server, read under its lock, is set once it starts.
+			require.Eventually(t, func() bool { return node.NodeAddr() != "" }, 5*time.Second, 10*time.Millisecond)
+			session, _, registrationID := classificationSessionRegistered(t, node)
+			requireRefusedHop(t, session, node)
+
+			// The other form doesn't hold on this node.
+			if node.refuseLegacyHops {
+				banners, err := probeLegacyHop(t, session, node.NodeAddr(), authority)
+				require.ErrorContains(t, err, "unable to authenticate")
+				require.Empty(t, banners, "a node that refuses legacy hops judged a legacy hop's guest")
+				return
+			}
+			client, err := ssh.Dial("tcp", node.NodeAddr(), &ssh.ClientConfig{
+				User: session.SessionId, Auth: []ssh.AuthMethod{ssh.PublicKeys(gateHopProbe(t, session, authority))},
+				HostKeyCallback: ssh.InsecureIgnoreHostKey(), Timeout: 5 * time.Second,
+			})
+			if node.internalln != nil {
+				// An internal listener answers the gate on any node, from the
+				// registration the node's sshd adopted: exactly that one.
+				require.NoError(t, err)
+				_ = client.Close()
+				hostKey, err := ssh.ParsePrivateKey([]byte(HostPrivateKeyContent))
+				require.NoError(t, err)
+				want := &server.GateRegistration{
+					Mode:           server.GateMode_GATE_MODE_LOCAL,
+					SessionId:      session.SessionId,
+					RoutingId:      session.SessionId,
+					RunPublicKeys:  [][]byte{hostKey.PublicKey().Marshal()},
+					RegistrationId: registrationID,
+					HomeNode:       node.NodeAddr(),
+				}
+				got := requireRefusedGateHop(t, session, node.NodeAddr(), authority)
+				require.True(t, proto.Equal(want, got), "the gate answered %v, not the registration the node holds, %v", got, want)
+				return
+			}
+			if client != nil {
+				_ = client.Close()
+			}
+			require.ErrorContains(t, err, "unable to authenticate", "a shared listener that doesn't advertise served a gate hop through the gate")
+		})
+	}
 }
 
 // Exercise the successful connection's hop marker through channel rejection
@@ -253,21 +390,38 @@ func requireSuccessfulRouteClassification(t *testing.T, relay *Server, joinURL s
 // handshake on a real socket while using the relay's ordinary session routing.
 func classificationSession(t *testing.T, relay *Server) (*api.GetSessionResponse, <-chan string) {
 	t.Helper()
+	session, authenticated, _ := classificationSessionRegistered(t, relay)
+	return session, authenticated
+}
+
+// classificationSessionRegistered is classificationSession, which also
+// returns the registration's ID: the SSH session ID of the host connection
+// that registered it.
+func classificationSessionRegistered(t *testing.T, relay *Server) (*api.GetSessionResponse, <-chan string, []byte) {
+	t.Helper()
 	hostKey, err := ssh.ParsePrivateKey([]byte(HostPrivateKeyContent))
 	require.NoError(t, err)
 	authority := relay.Server.Signers[0]
 	guest, _, _, _, err := ssh.ParseAuthorizedKey([]byte(ClientPublicKeyContent))
 	require.NoError(t, err)
-	id := utils.GenerateSessionID()
-	socket, err := relay.Server.NetworkProvider.Session().Listen(id)
+	// Registered as a host registers, so the node adopts the session: a node
+	// that gates serves only the registrations it holds.
+	hostClient, err := ssh.Dial("tcp", relay.SSHAddr(), &ssh.ClientConfig{User: "fixture-host", ClientVersion: upterm.HostSSHClientVersion, Auth: []ssh.AuthMethod{ssh.PublicKeys(hostKey)}, HostKeyCallback: ssh.FixedHostKey(relay.Server.HostSigners[0].PublicKey()), Timeout: 5 * time.Second})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = hostClient.Close() })
+	body, err := proto.Marshal(&server.CreateSessionRequest{HostUser: "host", HostPublicKeys: [][]byte{ssh.MarshalAuthorizedKey(hostKey.PublicKey())}, ClientAuthorizedKeys: [][]byte{ssh.MarshalAuthorizedKey(guest)}})
+	require.NoError(t, err)
+	ok, reply, err := hostClient.SendRequest(upterm.ServerCreateSessionRequestType, true, body)
+	require.NoError(t, err)
+	require.True(t, ok)
+	var registered server.CreateSessionResponse
+	require.NoError(t, proto.Unmarshal(reply, &registered))
+	id, user := registered.SessionID, registered.SshUser
+	socket, err := hostClient.Listen("unix", id)
 	require.NoError(t, err)
 	ln, err := net.Listen("tcp4", "127.0.0.1:0")
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = ln.Close(); _ = socket.Close() })
-	user, err := relay.Server.SessionManager.CreateSession(server.NewSession(id, relay.NodeAddr(), "host",
-		[][]byte{ssh.MarshalAuthorizedKey(hostKey.PublicKey())}, [][]byte{ssh.MarshalAuthorizedKey(guest)}))
-	require.NoError(t, err)
-	t.Cleanup(func() { require.NoError(t, relay.Server.SessionManager.DeleteSession(id)) })
 
 	checker := server.UserCertChecker{IsUserAuthority: func(key ssh.PublicKey) bool {
 		return utils.KeysEqual(key, authority.PublicKey())
@@ -320,7 +474,7 @@ func classificationSession(t *testing.T, relay *Server) (*api.GetSessionResponse
 			t.Error("the session socket forwarder did not stop")
 		}
 	})
-	return &api.GetSessionResponse{SessionId: id, SshUser: user, NodeAddr: relay.NodeAddr()}, authenticated
+	return &api.GetSessionResponse{SessionId: id, SshUser: user, NodeAddr: relay.NodeAddr()}, authenticated, hostClient.SessionID()
 }
 
 func serveClassificationSession(ln net.Listener, cfg *ssh.ServerConfig, authenticated chan<- string) error {
@@ -388,7 +542,7 @@ func TestHopKeyRegistration(t *testing.T) {
 				for _, protocol := range []string{"ssh", "ws"} {
 					for j, guest := range nodes {
 						t.Run(fmt.Sprintf("host%d_%s_guest%d", i, protocol, j), func(t *testing.T) {
-							requireJoinsAsItsOwnKey(t, host.joinURL(protocol), host.NodeAddr(), guest.joinURL("ssh"), hop)
+							requireJoinsAsItsOwnKey(t, host.joinURL(protocol), host, guest.joinURL("ssh"), hop)
 							requireSuccessfulRouteClassification(t, host, guest.joinURL("ssh"), i != j)
 						})
 					}
@@ -439,7 +593,7 @@ func TestHopKeyRotationPhases(t *testing.T) {
 				for j, guest := range nodes {
 					if i != j {
 						t.Run(fmt.Sprintf("guest%d_to_host%d", j, i), func(t *testing.T) {
-							requireJoinsAsItsOwnKey(t, host.joinURL("ssh"), host.NodeAddr(), guest.joinURL("ssh"), signers[i])
+							requireJoinsAsItsOwnKey(t, host.joinURL("ssh"), host, guest.joinURL("ssh"), signers[i])
 							requireSuccessfulRouteClassification(t, host, guest.joinURL("ssh"), true)
 						})
 					}
@@ -699,7 +853,7 @@ func TestServerKeyRotationWithoutHopKey(t *testing.T) {
 			for entry, target := range []int{1, 0} {
 				t.Run(fmt.Sprintf("n%d_to_n%d", entry+1, target+1), func(t *testing.T) {
 					if tc.joins[entry] {
-						requireJoinsWithNodeKey(t, nodes[target].joinURL("ssh"), nodes[target].NodeAddr(), nodes[entry].joinURL("ssh"), keys[target].PublicKey(), keys[target])
+						requireJoinsWithNodeKey(t, nodes[target].joinURL("ssh"), nodes[target], nodes[entry].joinURL("ssh"), keys[target].PublicKey(), keys[target])
 						requireSuccessfulRouteClassification(t, nodes[target], nodes[entry].joinURL("ssh"), true)
 					} else {
 						requireRotationRouteRefused(t, nodes[entry], nodes[target], upterm.UpstreamAuthFailed)
@@ -754,7 +908,7 @@ func requireRotationJoinsBothWays(t *testing.T, nodes []*Server, keys, authoriti
 	t.Helper()
 	for entry, target := range []int{1, 0} {
 		t.Run(fmt.Sprintf("n%d_to_n%d", entry+1, target+1), func(t *testing.T) {
-			requireJoinsWithNodeKey(t, nodes[target].joinURL("ssh"), nodes[target].NodeAddr(), nodes[entry].joinURL("ssh"), keys[target].PublicKey(), authorities[target])
+			requireJoinsWithNodeKey(t, nodes[target].joinURL("ssh"), nodes[target], nodes[entry].joinURL("ssh"), keys[target].PublicKey(), authorities[target])
 			requireSuccessfulRouteClassification(t, nodes[target], nodes[entry].joinURL("ssh"), true)
 		})
 	}
@@ -811,6 +965,6 @@ func TestSharedListenerTrustedHop(t *testing.T) {
 	hop := newTestSigner(t)
 	entry := newRedialRelay(t, routing.ModeEmbedded, hopOptions(hop, nil, true))
 	target := newRedialRelay(t, routing.ModeEmbedded, hopOptions(nil, []ssh.PublicKey{hop.PublicKey()}, true))
-	requireJoinsAsItsOwnKey(t, target.joinURL("ssh"), target.NodeAddr(), entry.joinURL("ssh"), hop)
+	requireJoinsAsItsOwnKey(t, target.joinURL("ssh"), target, entry.joinURL("ssh"), hop)
 	requireSuccessfulRouteClassification(t, target, entry.joinURL("ssh"), true)
 }

@@ -169,6 +169,7 @@ func RootWith(ext *Extension) *cobra.Command {
 	cmd.PersistentFlags().StringSlice("hop-trusted-key", nil, "public key(s) whose signatures this node accepts on node hops, in addition to its hop keys")
 	cmd.PersistentFlags().StringSlice("node-trusted-key", nil, "public key(s) this node accepts from another relay node it hops to, in addition to its own server keys. Add a new server key here on every node before any node presents it, and keep the old one listed until no node presents it")
 	cmd.PersistentFlags().Bool("hop-refuse-host-key", false, "stop accepting node hops signed with the server's own keys")
+	cmd.PersistentFlags().Bool("legacy-hops", true, "exchange node hops in the format that predates the hop gate, so this node can share a fleet with older ones; turn it off only once every node supports the gate")
 	cmd.PersistentFlags().StringSliceP("private-key", "", nil, "server private key")
 	cmd.PersistentFlags().StringSliceP("hostname", "", nil, "server hostname for public-key authentication certificate principals. If empty, public-key authentication is used instead.")
 	cmd.PersistentFlags().BoolP("ssh-proxy-protocol", "", false, "enable PROXY protocol support for the SSH listener (for use behind TCP proxies like Traefik, HAProxy, or AWS ELB)")
@@ -338,6 +339,16 @@ func resolveConfig(cmd *cobra.Command) (*viper.Viper, server.Opt, error) {
 	if err := v.Unmarshal(&opt); err != nil {
 		return nil, opt, err
 	}
+	// RefuseLegacyHops is the opposite of --legacy-hops, so that its zero
+	// value, for a program that builds an Opt itself, is today's. It is
+	// decoded as Opt's own bools are, so a value that isn't one fails.
+	var hops struct {
+		LegacyHops bool `mapstructure:"legacy-hops"`
+	}
+	if err := v.Unmarshal(&hops); err != nil {
+		return nil, opt, err
+	}
+	opt.RefuseLegacyHops = !hops.LegacyHops
 
 	// Expand ${VAR} references after decoding rather than via a mapstructure
 	// decode hook: this keeps expansion ordered explicitly after viper's list

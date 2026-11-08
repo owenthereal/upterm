@@ -75,6 +75,55 @@ func (Ingress) EnumDescriptor() ([]byte, []int) {
 	return file_server_proto_rawDescGZIP(), []int{0}
 }
 
+type GateMode int32
+
+const (
+	GateMode_GATE_MODE_UNSPECIFIED GateMode = 0
+	GateMode_GATE_MODE_LOCAL       GateMode = 1
+	GateMode_GATE_MODE_DELEGATED   GateMode = 2
+)
+
+// Enum value maps for GateMode.
+var (
+	GateMode_name = map[int32]string{
+		0: "GATE_MODE_UNSPECIFIED",
+		1: "GATE_MODE_LOCAL",
+		2: "GATE_MODE_DELEGATED",
+	}
+	GateMode_value = map[string]int32{
+		"GATE_MODE_UNSPECIFIED": 0,
+		"GATE_MODE_LOCAL":       1,
+		"GATE_MODE_DELEGATED":   2,
+	}
+)
+
+func (x GateMode) Enum() *GateMode {
+	p := new(GateMode)
+	*p = x
+	return p
+}
+
+func (x GateMode) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (GateMode) Descriptor() protoreflect.EnumDescriptor {
+	return file_server_proto_enumTypes[1].Descriptor()
+}
+
+func (GateMode) Type() protoreflect.EnumType {
+	return &file_server_proto_enumTypes[1]
+}
+
+func (x GateMode) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use GateMode.Descriptor instead.
+func (GateMode) EnumDescriptor() ([]byte, []int) {
+	return file_server_proto_rawDescGZIP(), []int{1}
+}
+
 type CreateSessionRequest struct {
 	state                protoimpl.MessageState `protogen:"open.v1"`
 	HostUser             string                 `protobuf:"bytes,1,opt,name=hostUser,proto3" json:"hostUser,omitempty"`
@@ -255,8 +304,19 @@ type AuthRequest struct {
 	// The SSH session ID of the guest's own connection, at the node that
 	// terminated it. Hops carry it unchanged.
 	IngressConnection []byte `protobuf:"bytes,7,opt,name=ingress_connection,json=ingressConnection,proto3" json:"ingress_connection,omitempty"`
-	unknownFields     protoimpl.UnknownFields
-	sizeCache         protoimpl.SizeCache
+	// The SSH user the guest typed at the ingress node.
+	TypedAddress string `protobuf:"bytes,8,opt,name=typed_address,json=typedAddress,proto3" json:"typed_address,omitempty"`
+	// The routing ID the ingress node resolved that user to.
+	TargetRoutingId string `protobuf:"bytes,9,opt,name=target_routing_id,json=targetRoutingId,proto3" json:"target_routing_id,omitempty"`
+	// The ingress node's --node-id; empty when it has none.
+	IngressNodeId string `protobuf:"bytes,10,opt,name=ingress_node_id,json=ingressNodeId,proto3" json:"ingress_node_id,omitempty"`
+	// A random ID the ingress node gave this guest's admission attempt.
+	ConnectionId string `protobuf:"bytes,11,opt,name=connection_id,json=connectionId,proto3" json:"connection_id,omitempty"`
+	// 1 when the ingress node runs the hop gate for this hop; 0 for a hop in the
+	// format that predates the gate.
+	GateProtocol  uint32 `protobuf:"varint,12,opt,name=gate_protocol,json=gateProtocol,proto3" json:"gate_protocol,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *AuthRequest) Reset() {
@@ -338,6 +398,278 @@ func (x *AuthRequest) GetIngressConnection() []byte {
 	return nil
 }
 
+func (x *AuthRequest) GetTypedAddress() string {
+	if x != nil {
+		return x.TypedAddress
+	}
+	return ""
+}
+
+func (x *AuthRequest) GetTargetRoutingId() string {
+	if x != nil {
+		return x.TargetRoutingId
+	}
+	return ""
+}
+
+func (x *AuthRequest) GetIngressNodeId() string {
+	if x != nil {
+		return x.IngressNodeId
+	}
+	return ""
+}
+
+func (x *AuthRequest) GetConnectionId() string {
+	if x != nil {
+		return x.ConnectionId
+	}
+	return ""
+}
+
+func (x *AuthRequest) GetGateProtocol() uint32 {
+	if x != nil {
+		return x.GateProtocol
+	}
+	return 0
+}
+
+// The exact live registration a home node holds, as it answers the gate.
+type GateRegistration struct {
+	state          protoimpl.MessageState `protogen:"open.v1"`
+	Mode           GateMode               `protobuf:"varint,1,opt,name=mode,proto3,enum=server.GateMode" json:"mode,omitempty"`
+	AccountId      string                 `protobuf:"bytes,2,opt,name=account_id,json=accountId,proto3" json:"account_id,omitempty"`
+	SessionId      string                 `protobuf:"bytes,3,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
+	Generation     uint64                 `protobuf:"varint,4,opt,name=generation,proto3" json:"generation,omitempty"`
+	RoutingId      string                 `protobuf:"bytes,5,opt,name=routing_id,json=routingId,proto3" json:"routing_id,omitempty"`
+	RunPublicKeys  [][]byte               `protobuf:"bytes,6,rep,name=run_public_keys,json=runPublicKeys,proto3" json:"run_public_keys,omitempty"`
+	RegistrationId []byte                 `protobuf:"bytes,7,opt,name=registration_id,json=registrationId,proto3" json:"registration_id,omitempty"`
+	HomeNode       string                 `protobuf:"bytes,8,opt,name=home_node,json=homeNode,proto3" json:"home_node,omitempty"`
+	HomeNodeId     string                 `protobuf:"bytes,9,opt,name=home_node_id,json=homeNodeId,proto3" json:"home_node_id,omitempty"`
+	HomeBootId     string                 `protobuf:"bytes,10,opt,name=home_boot_id,json=homeBootId,proto3" json:"home_boot_id,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
+}
+
+func (x *GateRegistration) Reset() {
+	*x = GateRegistration{}
+	mi := &file_server_proto_msgTypes[3]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GateRegistration) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GateRegistration) ProtoMessage() {}
+
+func (x *GateRegistration) ProtoReflect() protoreflect.Message {
+	mi := &file_server_proto_msgTypes[3]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GateRegistration.ProtoReflect.Descriptor instead.
+func (*GateRegistration) Descriptor() ([]byte, []int) {
+	return file_server_proto_rawDescGZIP(), []int{3}
+}
+
+func (x *GateRegistration) GetMode() GateMode {
+	if x != nil {
+		return x.Mode
+	}
+	return GateMode_GATE_MODE_UNSPECIFIED
+}
+
+func (x *GateRegistration) GetAccountId() string {
+	if x != nil {
+		return x.AccountId
+	}
+	return ""
+}
+
+func (x *GateRegistration) GetSessionId() string {
+	if x != nil {
+		return x.SessionId
+	}
+	return ""
+}
+
+func (x *GateRegistration) GetGeneration() uint64 {
+	if x != nil {
+		return x.Generation
+	}
+	return 0
+}
+
+func (x *GateRegistration) GetRoutingId() string {
+	if x != nil {
+		return x.RoutingId
+	}
+	return ""
+}
+
+func (x *GateRegistration) GetRunPublicKeys() [][]byte {
+	if x != nil {
+		return x.RunPublicKeys
+	}
+	return nil
+}
+
+func (x *GateRegistration) GetRegistrationId() []byte {
+	if x != nil {
+		return x.RegistrationId
+	}
+	return nil
+}
+
+func (x *GateRegistration) GetHomeNode() string {
+	if x != nil {
+		return x.HomeNode
+	}
+	return ""
+}
+
+func (x *GateRegistration) GetHomeNodeId() string {
+	if x != nil {
+		return x.HomeNodeId
+	}
+	return ""
+}
+
+func (x *GateRegistration) GetHomeBootId() string {
+	if x != nil {
+		return x.HomeBootId
+	}
+	return ""
+}
+
+type GateModeRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Protocol      uint32                 `protobuf:"varint,1,opt,name=protocol,proto3" json:"protocol,omitempty"`
+	Nonce         []byte                 `protobuf:"bytes,2,opt,name=nonce,proto3" json:"nonce,omitempty"`
+	RoutingId     string                 `protobuf:"bytes,3,opt,name=routing_id,json=routingId,proto3" json:"routing_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GateModeRequest) Reset() {
+	*x = GateModeRequest{}
+	mi := &file_server_proto_msgTypes[4]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GateModeRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GateModeRequest) ProtoMessage() {}
+
+func (x *GateModeRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_server_proto_msgTypes[4]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GateModeRequest.ProtoReflect.Descriptor instead.
+func (*GateModeRequest) Descriptor() ([]byte, []int) {
+	return file_server_proto_rawDescGZIP(), []int{4}
+}
+
+func (x *GateModeRequest) GetProtocol() uint32 {
+	if x != nil {
+		return x.Protocol
+	}
+	return 0
+}
+
+func (x *GateModeRequest) GetNonce() []byte {
+	if x != nil {
+		return x.Nonce
+	}
+	return nil
+}
+
+func (x *GateModeRequest) GetRoutingId() string {
+	if x != nil {
+		return x.RoutingId
+	}
+	return ""
+}
+
+type GateModeReply struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Protocol      uint32                 `protobuf:"varint,1,opt,name=protocol,proto3" json:"protocol,omitempty"`
+	Nonce         []byte                 `protobuf:"bytes,2,opt,name=nonce,proto3" json:"nonce,omitempty"`
+	Registration  *GateRegistration      `protobuf:"bytes,3,opt,name=registration,proto3" json:"registration,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GateModeReply) Reset() {
+	*x = GateModeReply{}
+	mi := &file_server_proto_msgTypes[5]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GateModeReply) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GateModeReply) ProtoMessage() {}
+
+func (x *GateModeReply) ProtoReflect() protoreflect.Message {
+	mi := &file_server_proto_msgTypes[5]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GateModeReply.ProtoReflect.Descriptor instead.
+func (*GateModeReply) Descriptor() ([]byte, []int) {
+	return file_server_proto_rawDescGZIP(), []int{5}
+}
+
+func (x *GateModeReply) GetProtocol() uint32 {
+	if x != nil {
+		return x.Protocol
+	}
+	return 0
+}
+
+func (x *GateModeReply) GetNonce() []byte {
+	if x != nil {
+		return x.Nonce
+	}
+	return nil
+}
+
+func (x *GateModeReply) GetRegistration() *GateRegistration {
+	if x != nil {
+		return x.Registration
+	}
+	return nil
+}
+
 var File_server_proto protoreflect.FileDescriptor
 
 const file_server_proto_rawDesc = "" +
@@ -356,7 +688,7 @@ const file_server_proto_rawDesc = "" +
 	"\tsessionID\x18\x01 \x01(\tR\tsessionID\x12\x1a\n" +
 	"\bnodeAddr\x18\x02 \x01(\tR\bnodeAddr\x12\x19\n" +
 	"\bssh_user\x18\x03 \x01(\tR\asshUser\x12*\n" +
-	"\x10sessionKeyRedial\x18\x04 \x01(\bR\x10sessionKeyRedial\"\x98\x02\n" +
+	"\x10sessionKeyRedial\x18\x04 \x01(\bR\x10sessionKeyRedial\"\xdb\x03\n" +
 	"\vAuthRequest\x12%\n" +
 	"\x0eclient_version\x18\x01 \x01(\tR\rclientVersion\x12\x1f\n" +
 	"\vremote_addr\x18\x02 \x01(\tR\n" +
@@ -366,11 +698,49 @@ const file_server_proto_rawDesc = "" +
 	"local_addr\x18\x04 \x01(\tR\tlocalAddr\x12)\n" +
 	"\aingress\x18\x05 \x01(\x0e2\x0f.server.IngressR\aingress\x12!\n" +
 	"\fingress_node\x18\x06 \x01(\tR\vingressNode\x12-\n" +
-	"\x12ingress_connection\x18\a \x01(\fR\x11ingressConnection*J\n" +
+	"\x12ingress_connection\x18\a \x01(\fR\x11ingressConnection\x12#\n" +
+	"\rtyped_address\x18\b \x01(\tR\ftypedAddress\x12*\n" +
+	"\x11target_routing_id\x18\t \x01(\tR\x0ftargetRoutingId\x12&\n" +
+	"\x0fingress_node_id\x18\n" +
+	" \x01(\tR\ringressNodeId\x12#\n" +
+	"\rconnection_id\x18\v \x01(\tR\fconnectionId\x12#\n" +
+	"\rgate_protocol\x18\f \x01(\rR\fgateProtocol\"\xe7\x02\n" +
+	"\x10GateRegistration\x12$\n" +
+	"\x04mode\x18\x01 \x01(\x0e2\x10.server.GateModeR\x04mode\x12\x1d\n" +
+	"\n" +
+	"account_id\x18\x02 \x01(\tR\taccountId\x12\x1d\n" +
+	"\n" +
+	"session_id\x18\x03 \x01(\tR\tsessionId\x12\x1e\n" +
+	"\n" +
+	"generation\x18\x04 \x01(\x04R\n" +
+	"generation\x12\x1d\n" +
+	"\n" +
+	"routing_id\x18\x05 \x01(\tR\troutingId\x12&\n" +
+	"\x0frun_public_keys\x18\x06 \x03(\fR\rrunPublicKeys\x12'\n" +
+	"\x0fregistration_id\x18\a \x01(\fR\x0eregistrationId\x12\x1b\n" +
+	"\thome_node\x18\b \x01(\tR\bhomeNode\x12 \n" +
+	"\fhome_node_id\x18\t \x01(\tR\n" +
+	"homeNodeId\x12 \n" +
+	"\fhome_boot_id\x18\n" +
+	" \x01(\tR\n" +
+	"homeBootId\"b\n" +
+	"\x0fGateModeRequest\x12\x1a\n" +
+	"\bprotocol\x18\x01 \x01(\rR\bprotocol\x12\x14\n" +
+	"\x05nonce\x18\x02 \x01(\fR\x05nonce\x12\x1d\n" +
+	"\n" +
+	"routing_id\x18\x03 \x01(\tR\troutingId\"\x7f\n" +
+	"\rGateModeReply\x12\x1a\n" +
+	"\bprotocol\x18\x01 \x01(\rR\bprotocol\x12\x14\n" +
+	"\x05nonce\x18\x02 \x01(\fR\x05nonce\x12<\n" +
+	"\fregistration\x18\x03 \x01(\v2\x18.server.GateRegistrationR\fregistration*J\n" +
 	"\aIngress\x12\x17\n" +
 	"\x13INGRESS_UNSPECIFIED\x10\x00\x12\x0f\n" +
 	"\vINGRESS_SSH\x10\x01\x12\x15\n" +
-	"\x11INGRESS_WEBSOCKET\x10\x02B&Z$github.com/owenthereal/upterm/serverb\x06proto3"
+	"\x11INGRESS_WEBSOCKET\x10\x02*S\n" +
+	"\bGateMode\x12\x19\n" +
+	"\x15GATE_MODE_UNSPECIFIED\x10\x00\x12\x13\n" +
+	"\x0fGATE_MODE_LOCAL\x10\x01\x12\x17\n" +
+	"\x13GATE_MODE_DELEGATED\x10\x02B&Z$github.com/owenthereal/upterm/serverb\x06proto3"
 
 var (
 	file_server_proto_rawDescOnce sync.Once
@@ -384,21 +754,27 @@ func file_server_proto_rawDescGZIP() []byte {
 	return file_server_proto_rawDescData
 }
 
-var file_server_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_server_proto_msgTypes = make([]protoimpl.MessageInfo, 3)
+var file_server_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
+var file_server_proto_msgTypes = make([]protoimpl.MessageInfo, 6)
 var file_server_proto_goTypes = []any{
 	(Ingress)(0),                  // 0: server.Ingress
-	(*CreateSessionRequest)(nil),  // 1: server.CreateSessionRequest
-	(*CreateSessionResponse)(nil), // 2: server.CreateSessionResponse
-	(*AuthRequest)(nil),           // 3: server.AuthRequest
+	(GateMode)(0),                 // 1: server.GateMode
+	(*CreateSessionRequest)(nil),  // 2: server.CreateSessionRequest
+	(*CreateSessionResponse)(nil), // 3: server.CreateSessionResponse
+	(*AuthRequest)(nil),           // 4: server.AuthRequest
+	(*GateRegistration)(nil),      // 5: server.GateRegistration
+	(*GateModeRequest)(nil),       // 6: server.GateModeRequest
+	(*GateModeReply)(nil),         // 7: server.GateModeReply
 }
 var file_server_proto_depIdxs = []int32{
 	0, // 0: server.AuthRequest.ingress:type_name -> server.Ingress
-	1, // [1:1] is the sub-list for method output_type
-	1, // [1:1] is the sub-list for method input_type
-	1, // [1:1] is the sub-list for extension type_name
-	1, // [1:1] is the sub-list for extension extendee
-	0, // [0:1] is the sub-list for field type_name
+	1, // 1: server.GateRegistration.mode:type_name -> server.GateMode
+	5, // 2: server.GateModeReply.registration:type_name -> server.GateRegistration
+	3, // [3:3] is the sub-list for method output_type
+	3, // [3:3] is the sub-list for method input_type
+	3, // [3:3] is the sub-list for extension type_name
+	3, // [3:3] is the sub-list for extension extendee
+	0, // [0:3] is the sub-list for field type_name
 }
 
 func init() { file_server_proto_init() }
@@ -411,8 +787,8 @@ func file_server_proto_init() {
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_server_proto_rawDesc), len(file_server_proto_rawDesc)),
-			NumEnums:      1,
-			NumMessages:   3,
+			NumEnums:      2,
+			NumMessages:   6,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

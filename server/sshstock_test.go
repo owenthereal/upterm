@@ -1665,7 +1665,7 @@ func TestResolveMarksOnlyAFailedReadAsALookup(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			sm := newSessionManagerWithStore(tc.store, routing.NewEncodeDecoder(tc.mode))
 			a := proxyAuth{NodeAddr: "here:22", SessionManager: sm, Logger: logger}
-			_, err := a.resolve(&fakeConnMetadata{user: tc.user})
+			_, err := a.resolve(&fakeConnMetadata{user: tc.user}, tc.user)
 			require.Error(t, err)
 			var lookup *lookupError
 			require.Equal(t, tc.lookup, errors.As(err, &lookup), "%v", err)

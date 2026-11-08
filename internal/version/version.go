@@ -118,8 +118,10 @@ func ParseFromSSHVersion(sshVersion string) (*version.Version, error) {
 		return nil, fmt.Errorf("not a valid uptermd SSH version: %s", sshVersion)
 	}
 
-	// Extract and parse the version string
-	versionStr := matches[1]
+	// Extract and parse the version string. RFC 4253 lets a comment follow it
+	// after a space, as a relay's gate-v1 token does, so only the first
+	// space-separated token is the version.
+	versionStr, _, _ := strings.Cut(matches[1], " ")
 	v, err := Parse(versionStr)
 	if err != nil {
 		return nil, fmt.Errorf("invalid version format in SSH string %s: %w", sshVersion, err)

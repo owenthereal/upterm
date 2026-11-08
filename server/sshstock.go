@@ -6,11 +6,11 @@ import (
 	"fmt"
 	"net"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
 	"github.com/owenthereal/upterm/internal/liveness"
-	"github.com/owenthereal/upterm/internal/version"
 	"github.com/owenthereal/upterm/upterm"
 	"golang.org/x/crypto/ssh"
 )
@@ -89,6 +89,8 @@ func upstreamFailureReason(err error) error {
 		return errUpstreamUnavailable
 	case errors.Is(err, errUpstreamHostKeyMismatch):
 		return errUpstreamHostKeyMismatch
+	case errors.Is(err, errUpstreamNoHost):
+		return errUpstreamNoHost
 	case errors.As(err, &auth):
 		return auth.verdict()
 	case err != nil && strings.Contains(err.Error(), sshAuthFailure):
@@ -221,6 +223,9 @@ func (p *SSHRouting) stockConnection(ctx context.Context, accepted net.Conn, ins
 	stop := context.AfterFunc(ctx, func() { _ = raw.Close() })
 	defer stop()
 	var (
+		// gateAuth and gateKey are a gate hop's, which the gate serves.
+		gateAuth *AuthRequest
+		gateKey  ssh.PublicKey
 		first    *preparedRoute
 		verified ssh.PublicKey
 		// bannerSent is set once a refusal has carried a banner. x/crypto sends
@@ -245,13 +250,26 @@ func (p *SSHRouting) stockConnection(ctx context.Context, accepted net.Conn, ins
 		}
 		return err
 	}
+	// A listener that advertises the gate serves a gate hop through it. It
+	// neither resolves nor dials while authenticating one: the gate looks up
+	// this node's own registrations once the hop has named one.
+	advertises := p.Auth.advertises()
 	cfg := &ssh.ServerConfig{
-		ServerVersion: version.ServerSSHVersion(),
+		ServerVersion: serverVersion(advertises),
 		// Authorization only. x/crypto invokes this for unsigned public-key
 		// queries too, and a successful query takes `continue userAuthLoop`
 		// without incrementing authFailures, so MaxAuthTries does not bound it.
 		// Anything expensive here is reachable before any signature is verified.
 		PublicKeyCallback: func(meta ssh.ConnMetadata, key ssh.PublicKey) (*ssh.Permissions, error) {
+			if advertises && isRelayCertificate(key) {
+				auth, _, hop, err := p.Auth.authenticate(meta, key)
+				if err != nil {
+					return nil, refuse(meta, err)
+				}
+				if hop && auth.GateProtocol == 1 {
+					return &ssh.Permissions{}, nil
+				}
+			}
 			if _, _, _, err := p.Auth.authorize(meta, key); err != nil {
 				return nil, refuse(meta, err)
 			}
@@ -263,6 +281,16 @@ func (p *SSHRouting) stockConnection(ctx context.Context, accepted net.Conn, ins
 		// match credentials back to an offered key after the handshake. The
 		// permissions returned here are the ones the connection keeps.
 		VerifiedPublicKeyCallback: func(meta ssh.ConnMetadata, key ssh.PublicKey, _ *ssh.Permissions, _ string) (*ssh.Permissions, error) {
+			if advertises && isRelayCertificate(key) {
+				auth, original, hop, err := p.Auth.authenticate(meta, key)
+				if err != nil {
+					return nil, refuse(meta, err)
+				}
+				if hop && auth.GateProtocol == 1 {
+					gateAuth, gateKey = auth, original
+					return &ssh.Permissions{Extensions: map[string]string{permHop: ""}}, nil
+				}
+			}
 			planned, permissions, err := p.Auth.prepare(meta, key)
 			if err != nil {
 				return nil, refuse(meta, err)
@@ -292,6 +320,9 @@ func (p *SSHRouting) stockConnection(ctx context.Context, accepted net.Conn, ins
 	defer func() { _ = downstream.Close() }()
 	if err := raw.SetDeadline(time.Time{}); err != nil {
 		return err
+	}
+	if gateAuth != nil {
+		return p.serveHopGate(ctx, sshPeer{downstream, channels, requests}, gateAuth, gateKey, stage, inst)
 	}
 	if first == nil {
 		return fmt.Errorf("missing authenticated upstream credentials")
@@ -338,6 +369,7 @@ func (p *SSHRouting) stockConnection(ctx context.Context, accepted net.Conn, ins
 	// stale route, and is never retried elsewhere.
 	if err != nil && refreshable && !errors.Is(err, errUpstreamHostKeyMismatch) && upstreamCtx.Err() == nil {
 		if next, ok := p.Auth.refresh(upstreamCtx, downstream, verified, first); ok {
+			first = next
 			upstream, err = p.upstreamAttempt(upstreamCtx, ctx, next)
 		}
 	}
@@ -348,6 +380,9 @@ func (p *SSHRouting) stockConnection(ctx context.Context, accepted net.Conn, ins
 			inst.authenticatedHost.Add(1)
 		} else {
 			inst.authenticatedClient.Add(1)
+		}
+		if first.home != nil && !p.Auth.stillHeld(first.home) {
+			return errGateRefused
 		}
 		return forwardSSH(ctx, peer, upstream.sshPeer, abortScopeFor(clientVersion), inst.stalledChannelAborts, rewrite)
 	}
@@ -368,6 +403,12 @@ func (p *SSHRouting) stockConnection(ctx context.Context, accepted net.Conn, ins
 // upstreamConn is an upstream whose handshake completed. Close releases it,
 // and stops the watcher that would otherwise close it on shutdown.
 type upstreamConn struct {
+	// gateBusy admits one gate exchange at a time; now, when set, is the
+	// clock the gate's deadlines read; homeNode is the node a gate answer
+	// must name as its home.
+	gateBusy atomic.Bool
+	now      func() time.Time
+	homeNode string
 	sshPeer
 	raw  net.Conn
 	stop func() bool
@@ -375,8 +416,12 @@ type upstreamConn struct {
 
 func (u *upstreamConn) Close() {
 	_ = u.conn.Close()
-	u.stop()
-	_ = u.raw.Close()
+	if u.stop != nil {
+		u.stop()
+	}
+	if u.raw != nil {
+		_ = u.raw.Close()
+	}
 }
 
 // upstreamAttempt dials pr's target, and nothing else, and completes the
@@ -410,5 +455,30 @@ func (p *SSHRouting) upstreamAttempt(ctx, parent context.Context, pr *preparedRo
 		_ = conn.Close()
 		return fail(err)
 	}
-	return &upstreamConn{sshPeer: sshPeer{conn, channels, requests}, raw: raw, stop: stop}, nil
+	upstream := &upstreamConn{sshPeer: sshPeer{conn, channels, requests}, raw: raw, stop: stop, homeNode: pr.id.NodeAddr}
+	// A gate hop asks the home which registration it holds, and goes on only
+	// with the local one it names. A home without the token is refused only
+	// by a node that refuses legacy hops. The ingress spoke first, as
+	// x/crypto's client always does, so nothing here waits on the home's
+	// banner.
+	if pr.remote && pr.creds.gate {
+		if hasGateCapability(conn.ServerVersion()) {
+			home, err := negotiateHome(ctx, upstream, freshModeRequest(pr.id.Id))
+			if err != nil {
+				return nil, err
+			}
+			if home.Ref().Authority != AuthorityLocal {
+				upstream.Close()
+				return nil, errGateRefused
+			}
+		} else if p.Auth.RefuseLegacyHops {
+			upstream.Close()
+			return nil, errGateRefused
+		}
+	}
+	if pr.home != nil && !p.Auth.stillHeld(pr.home) {
+		upstream.Close()
+		return nil, errGateRefused
+	}
+	return upstream, nil
 }

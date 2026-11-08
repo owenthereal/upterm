@@ -115,12 +115,33 @@ func parseAuthRequestFromCert(principal string, cert *ssh.Certificate, isAuthori
 		return nil, cert.Key, err
 	}
 
+	// A gate hop names its target, which is its certificate's principal, and
+	// what the guest typed at its ingress.
+	if auth.GateProtocol != 0 {
+		if auth.GateProtocol != 1 || auth.TargetRoutingId != principal || auth.TypedAddress == "" {
+			return nil, cert.Key, errGateRefused
+		}
+	}
 	key, _, _, _, err := ssh.ParseAuthorizedKey(auth.AuthorizedKey)
 	if err != nil {
 		return nil, cert.Key, fmt.Errorf("error parsing public key from auth request: %w", err)
 	}
 
 	return &auth, key, nil
+}
+
+// strictAuthRequest refuses a hop certificate whose AuthRequest plain
+// decoding would read past: one over maxGatePayload, or with a field this
+// build doesn't know, a scalar given twice, or a value out of its field's
+// range. Gate hops are held to it, and so is every hop on a node that gates.
+// Elsewhere a legacy hop is decoded as it always was, so a field a newer node
+// adds never splits a fleet.
+func strictAuthRequest(cert *ssh.Certificate) error {
+	ext := cert.Extensions[upterm.SSHCertExtension]
+	if len(ext) > maxGatePayload || scanGate([]byte(ext), (&AuthRequest{}).ProtoReflect().Descriptor()) != nil {
+		return errGateRefused
+	}
+	return nil
 }
 
 // signerAuthority reports whether key is one of signers' public keys, and so
