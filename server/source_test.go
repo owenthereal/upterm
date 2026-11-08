@@ -447,6 +447,11 @@ func TestDenySourceUnmapsIPv4MappedAddresses(t *testing.T) {
 	require.True(t, sourceDenied(prefixes(t, "203.0.113.9"), nil, "[::ffff:203.0.113.9]:5"))
 	require.True(t, sourceDenied(prefixes(t, "::ffff:203.0.113.9"), nil, "203.0.113.9:5"))
 	require.False(t, sourceDenied(prefixes(t, "203.0.113.0/24"), nil, "[::ffff:203.0.114.9]:5"))
+	// A CIDR written in the mapped form denies the IPv4 sources it maps.
+	require.True(t, sourceDenied(prefixes(t, "::ffff:203.0.113.0/120"), nil, "203.0.113.9:5"))
+	require.True(t, sourceDenied(prefixes(t, "::ffff:203.0.113.0/120"), nil, "[::ffff:203.0.113.9]:5"))
+	require.True(t, sourceDenied(prefixes(t, "::ffff:203.0.113.9/128"), nil, "203.0.113.9:5"))
+	require.False(t, sourceDenied(prefixes(t, "::ffff:203.0.113.0/120"), nil, "203.0.114.9:5"))
 
 	filter := newDenyAddrs("203.0.113.9")
 	require.True(t, sourceDenied(nil, filter, "[::ffff:203.0.113.9]:5"))
@@ -467,7 +472,10 @@ func TestUnparseableSourceIsNotDenied(t *testing.T) {
 }
 
 func TestParseDenySources(t *testing.T) {
-	got, err := parseDenySources([]string{"203.0.113.9", "203.0.113.77/24", "2001:db8::1", "2001:db8::/32", "::ffff:198.51.100.7"})
+	got, err := parseDenySources([]string{
+		"203.0.113.9", "203.0.113.77/24", "2001:db8::1", "2001:db8::/32", "::ffff:198.51.100.7",
+		"::ffff:198.51.100.77/120", "::ffff:192.0.2.1/128", "::ffff:0:0/96", "::/80",
+	})
 	require.NoError(t, err)
 	require.Equal(t, []netip.Prefix{
 		netip.MustParsePrefix("203.0.113.9/32"),
@@ -475,6 +483,12 @@ func TestParseDenySources(t *testing.T) {
 		netip.MustParsePrefix("2001:db8::1/128"),
 		netip.MustParsePrefix("2001:db8::/32"),
 		netip.MustParsePrefix("198.51.100.7/32"),
+		// A prefix inside the IPv4-mapped range is the IPv4 prefix it maps;
+		// a wider IPv6 prefix stays IPv6.
+		netip.MustParsePrefix("198.51.100.0/24"),
+		netip.MustParsePrefix("192.0.2.1/32"),
+		netip.MustParsePrefix("0.0.0.0/0"),
+		netip.MustParsePrefix("::/80"),
 	}, got)
 	for _, bad := range []string{"300.1.1.1", "", "203.0.113.0/33", "fe80::1%en0", "host.example", "203.0.113.9:22"} {
 		_, err := parseDenySources([]string{"192.0.2.1", bad})

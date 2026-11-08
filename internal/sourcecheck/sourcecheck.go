@@ -70,5 +70,12 @@ func denySource(value string) (netip.Prefix, error) {
 	if err != nil {
 		return netip.Prefix{}, err
 	}
-	return prefix.Masked(), nil
+	prefix = prefix.Masked()
+	// A source is unmapped before it is matched, so a prefix inside the
+	// IPv4-mapped range is the IPv4 prefix it maps, or it would never match.
+	// A wider IPv6 prefix stays IPv6.
+	if addr := prefix.Addr(); addr.Is4In6() && prefix.Bits() >= 96 {
+		return netip.PrefixFrom(addr.Unmap(), prefix.Bits()-96), nil
+	}
+	return prefix, nil
 }
