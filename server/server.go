@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"os"
 	"slices"
@@ -20,6 +21,7 @@ import (
 	"github.com/go-kit/kit/metrics/provider"
 	"github.com/oklog/run"
 	"github.com/owenthereal/upterm/host/api"
+	"github.com/owenthereal/upterm/internal/sourcecheck"
 	"github.com/owenthereal/upterm/routing"
 	"github.com/owenthereal/upterm/utils"
 	"github.com/owenthereal/upterm/ws"
@@ -56,6 +58,21 @@ type Opt struct {
 	ConsulURL                string        `mapstructure:"consul-url"`
 	ConsulSessionTTL         string        `mapstructure:"consul-session-ttl"`
 	SentryDSN                string        `mapstructure:"sentry-dsn"`
+	NodeID                   string        `mapstructure:"node-id"`
+	DenySources              []string      `mapstructure:"deny-source"`
+
+	// BootID and Extensions don't come from configuration. uptermd sets
+	// BootID to a fresh random UUID each time it starts, and Extensions to
+	// what its extension built, if it was built with one.
+	BootID     string     `mapstructure:"-"`
+	Extensions Extensions `mapstructure:"-"`
+}
+
+// Extensions is what a relay built on uptermd adds to it. The zero value adds
+// nothing.
+type Extensions struct {
+	// Sources denies sources beyond DenySources. Nil denies nothing more.
+	Sources SourceFilter
 }
 
 // ResolvedRouting returns the effective routing mode. It resolves ModeAuto
@@ -94,6 +111,9 @@ func (opt *Opt) Validate() error {
 	}
 	if opt.HopRefuseHostKey && len(opt.HopKeys) == 0 && len(opt.HopTrustedKeys) == 0 && os.Getenv("HOP_KEY") == "" {
 		return fmt.Errorf("hop-refuse-host-key needs hop-key or hop-trusted-key, or no node could hop")
+	}
+	if err := sourcecheck.Check(opt.NodeID, opt.DenySources); err != nil {
+		return err
 	}
 	// Basic validation
 	if opt.SSHAddr == "" {
@@ -224,6 +244,11 @@ func Start(ctx context.Context, opt Opt, logger *slog.Logger) error {
 	if err != nil {
 		return err
 	}
+	// Parsed once, here, rather than on every connection.
+	denySources, err := parseDenySources(opt.DenySources)
+	if err != nil {
+		return err
+	}
 
 	// key signers + corresponding cert signers
 	hostSigners := slices.Clone(signers)
@@ -241,6 +266,12 @@ func Start(ctx context.Context, opt Opt, logger *slog.Logger) error {
 
 	// logger is already the parameter, just add context
 	logger = logger.With("app", "uptermd", "network", opt.Network, "network_opt", opt.NetworkOpts)
+	if opt.NodeID != "" {
+		logger = logger.With("node-id", opt.NodeID)
+	}
+	if opt.BootID != "" {
+		logger = logger.With("boot-id", opt.BootID)
+	}
 
 	var (
 		sshln      net.Listener
@@ -381,6 +412,10 @@ func Start(ctx context.Context, opt Opt, logger *slog.Logger) error {
 			SessionManager:      sessionManager,
 			Logger:              logger.With("component", "server"),
 			MetricsProvider:     mp,
+			NodeID:              opt.NodeID,
+			BootID:              opt.BootID,
+			DenySources:         denySources,
+			Extensions:          opt.Extensions,
 		}
 		// run.Group's interrupt signature is func(error), so a failing Shutdown
 		// has nowhere to report to and used to be logged and dropped: Start
@@ -450,6 +485,15 @@ type Server struct {
 	MetricsProvider     provider.Provider
 	SessionManager      *SessionManager
 	Logger              *slog.Logger
+
+	// NodeID names this node in its fleet, and BootID this run of it. Either
+	// may be empty. Neither is ever taken from what a host or guest sends.
+	NodeID string
+	BootID string
+	// DenySources are the sources this node refuses, besides those
+	// Extensions.Sources denies. See the package documentation for where.
+	DenySources []netip.Prefix
+	Extensions  Extensions
 
 	mux    sync.Mutex
 	ctx    context.Context
@@ -667,6 +711,7 @@ func (s *Server) ServeListeners(ctx context.Context, ls Listeners) error {
 	// The proxy's connections from hosts, which the sshd pings by. They are
 	// one process's: the proxy routes a host to this node's own sshd.
 	activity := newHostActivity()
+	deny := sourceDeny{prefixes: s.DenySources, filter: s.Extensions.Sources}
 
 	// run.Group actors do not start until Run, so until then nothing has taken
 	// any listener over, and each, handed over or opened here, is still this
@@ -751,6 +796,7 @@ func (s *Server) ServeListeners(ctx context.Context, ls Listeners) error {
 				hostActivity: activity,
 				listener:     l.kind,
 				instruments:  instruments,
+				deny:         deny,
 			}
 			g.Add(func() error {
 				return sp.Serve(l.ln)
@@ -800,6 +846,7 @@ func (s *Server) ServeListeners(ctx context.Context, ls Listeners) error {
 				ConnDialer:     cd,
 				SessionManager: s.SessionManager,
 				Logger:         s.Logger.With("component", "ws-proxy"),
+				deny:           deny,
 			}
 			g.Add(func() error {
 				return ws.Serve(ls.WS)
@@ -821,6 +868,7 @@ func (s *Server) ServeListeners(ctx context.Context, ls Listeners) error {
 			Logger:              s.Logger.With("component", "sshd"),
 			HostGateEnabled:     len(s.AuthorizedKeysFiles) > 0,
 			hostActivity:        activity,
+			deny:                deny,
 		}
 		g.Add(func() error {
 			return sshd.Serve(sshdln)

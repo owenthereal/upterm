@@ -1,6 +1,12 @@
 package server
 
-import "golang.org/x/crypto/ssh"
+import (
+	"bytes"
+	"net"
+	"net/netip"
+
+	"golang.org/x/crypto/ssh"
+)
 
 // listenerKind is which of a node's SSH listeners accepted a connection. A
 // connection that presents no certificate this relay minted takes its origin,
@@ -46,4 +52,38 @@ func originOf(kind listenerKind, conn ssh.ConnMetadata, nodeAddr string) (Ingres
 	}
 	// The shared listener, and a raw connection on the internal one.
 	return Ingress_INGRESS_UNSPECIFIED, "", conn.SessionID()
+}
+
+// GuestOrigin is where a connection entered the fleet, as the relay recorded
+// it.
+type GuestOrigin struct {
+	Ingress  Ingress
+	NodeAddr string // the node it entered by; "" if unknown
+	// SSHSessionID is its SSH session ID on the node it entered by.
+	SSHSessionID []byte
+	NodeID       string // that node's ID; "" if unknown
+	ConnectionID string
+	// Source is the address it came from, a canonical IP without a port. ""
+	// means the relay has no source it can vouch for.
+	Source string
+}
+
+// contextKeyHostOrigin holds a host connection's GuestOrigin in the sshd. It is
+// set only from a certificate this relay signed, so the host can't supply it.
+type contextKeyHostOrigin struct{}
+
+// originFromAuth is the origin auth records, its source unmapped and without
+// a port. A RemoteAddr that doesn't parse leaves Source empty.
+func originFromAuth(auth *AuthRequest) GuestOrigin {
+	if auth == nil {
+		return GuestOrigin{}
+	}
+	origin := GuestOrigin{Ingress: auth.Ingress, NodeAddr: auth.IngressNode, SSHSessionID: bytes.Clone(auth.IngressConnection)}
+	host, _, err := net.SplitHostPort(auth.RemoteAddr)
+	if err == nil {
+		if ip, err := netip.ParseAddr(host); err == nil {
+			origin.Source = ip.Unmap().String()
+		}
+	}
+	return origin
 }

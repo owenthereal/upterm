@@ -24,6 +24,8 @@ type webSocketProxy struct {
 	ConnDialer     connDialer
 	SessionManager *SessionManager
 	Logger         *slog.Logger
+	// deny is the sources refused at the upgrade.
+	deny sourceDeny
 
 	srv *http.Server
 	mux sync.Mutex
@@ -82,6 +84,7 @@ func (s *webSocketProxy) Serve(ln net.Listener) error {
 			ConnDialer:     s.ConnDialer,
 			SessionManager: s.SessionManager,
 			Logger:         s.Logger,
+			deny:           s.deny,
 		}),
 	}
 	s.mux.Unlock()
@@ -117,12 +120,18 @@ type wsHandler struct {
 	ConnDialer     connDialer
 	SessionManager *SessionManager
 	Logger         *slog.Logger
+	deny           sourceDeny
 }
 
 // ServeHTTP checks the following header:
 // * Authorization
 // * Upterm-Client-Version
 func (h *wsHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// A denied source is told only that it is forbidden.
+	if h.deny.denied(r.RemoteAddr) {
+		w.WriteHeader(http.StatusForbidden)
+		return
+	}
 	clientVersion := r.Header.Get(upterm.HeaderUptermClientVersion)
 	if clientVersion == "" {
 		h.httpError(w, fmt.Errorf("missing upterm client version"))
