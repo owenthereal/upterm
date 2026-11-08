@@ -1,0 +1,11 @@
+{
+  "account_id": "11111111-1111-4111-8111-111111111111",
+  "session_id": "22222222-2222-4222-8222-222222222222",
+  "generation": 7,
+  "routing_id": "abcdefghijklmnopqrst",
+  "run_public_key": "AAAAC3NzaC1lZDI1NTE5AAAAIAABAgMEBQYHCAkKCwwNDg8QERITFBUWFxgZGhscHR4f",
+  "registration_id": "b3JpZ2luYWwtaG9tZS1zc2gtc2Vzc2lvbg==",
+  "home_node": "[fd00::a]:2223",
+  "home_relay_id": "home-A",
+  "home_boot_id": "33333333-3333-4333-8333-333333333333"
+}

@@ -66,6 +66,10 @@ type Opt struct {
 	// what its extension built, if it was built with one.
 	BootID     string     `mapstructure:"-"`
 	Extensions Extensions `mapstructure:"-"`
+	// RefuseLegacyHops has the node gate every hop it starts and refuse every
+	// hop that doesn't use the gate. uptermd sets it to !--legacy-hops. The
+	// zero value accepts legacy hops, as nodes always have.
+	RefuseLegacyHops bool `mapstructure:"-"`
 }
 
 // Extensions is what a relay built on uptermd adds to it. The zero value adds
@@ -416,6 +420,7 @@ func Start(ctx context.Context, opt Opt, logger *slog.Logger) error {
 			BootID:              opt.BootID,
 			DenySources:         denySources,
 			Extensions:          opt.Extensions,
+			RefuseLegacyHops:    opt.RefuseLegacyHops,
 		}
 		// run.Group's interrupt signature is func(error), so a failing Shutdown
 		// has nowhere to report to and used to be logged and dropped: Start
@@ -494,6 +499,10 @@ type Server struct {
 	// Extensions.Sources denies. See the package documentation for where.
 	DenySources []netip.Prefix
 	Extensions  Extensions
+	// RefuseLegacyHops has this node gate every hop it starts, and refuse
+	// every hop that doesn't use the gate. The zero value accepts legacy hops,
+	// as nodes always have.
+	RefuseLegacyHops bool
 
 	mux    sync.Mutex
 	ctx    context.Context
@@ -734,6 +743,22 @@ func (s *Server) ServeListeners(ctx context.Context, ls Listeners) error {
 		return err
 	}
 
+	// This node's sshd is built first: every SSH proxy answers the gate from
+	// the registrations it holds.
+	daemon := &sshd{
+		SessionManager:      s.SessionManager,
+		HostSigners:         s.HostSigners, // TODO: use different host keys
+		Signers:             s.Signers,
+		NodeAddr:            s.NodeAddr,
+		NodeID:              s.NodeID,
+		BootID:              s.BootID,
+		SessionDialListener: sessionDialListener,
+		MetricsProvider:     s.MetricsProvider,
+		Logger:              s.Logger.With("component", "sshd"),
+		HostGateEnabled:     len(s.AuthorizedKeysFiles) > 0,
+		hostActivity:        activity,
+		deny:                deny,
+	}
 	var g run.Group
 	{
 		g.Add(func() error {
@@ -793,10 +818,13 @@ func (s *Server) ServeListeners(ctx context.Context, ls Listeners) error {
 				MetricsProvider:     s.MetricsProvider,
 				// The bridge carries WebSocket hosts, as the SSH listener
 				// carries the rest, and the internal listener refuses them.
-				hostActivity: activity,
-				listener:     l.kind,
-				instruments:  instruments,
-				deny:         deny,
+				hostActivity:     activity,
+				listener:         l.kind,
+				instruments:      instruments,
+				deny:             deny,
+				RefuseLegacyHops: s.RefuseLegacyHops,
+				NodeID:           s.NodeID,
+				authorities:      daemon,
 			}
 			g.Add(func() error {
 				return sp.Serve(l.ln)
@@ -858,26 +886,12 @@ func (s *Server) ServeListeners(ctx context.Context, ls Listeners) error {
 		}
 	}
 	{
-		sshd := sshd{
-			SessionManager:      s.SessionManager,
-			HostSigners:         s.HostSigners, // TODO: use different host keys
-			Signers:             s.Signers,
-			NodeAddr:            s.NodeAddr,
-			NodeID:              s.NodeID,
-			BootID:              s.BootID,
-			SessionDialListener: sessionDialListener,
-			MetricsProvider:     s.MetricsProvider,
-			Logger:              s.Logger.With("component", "sshd"),
-			HostGateEnabled:     len(s.AuthorizedKeysFiles) > 0,
-			hostActivity:        activity,
-			deny:                deny,
-		}
 		g.Add(func() error {
-			return sshd.Serve(sshdln)
+			return daemon.Serve(sshdln)
 		}, func(err error) {
-			if err := sshd.Shutdown(); err != nil {
+			if err := daemon.Shutdown(); err != nil {
 				stopResult.add(err)
-				sshd.Logger.Error("error during sshd shutdown", "error", err)
+				daemon.Logger.Error("error during sshd shutdown", "error", err)
 			}
 		})
 	}

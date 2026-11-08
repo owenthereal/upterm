@@ -218,6 +218,31 @@ func TestCheckCompatibilitySaysWhichSideIsAhead(t *testing.T) {
 	}
 }
 
+// RFC 4253 lets a comment follow the software version, after a space. A relay
+// that adds one, such as the gate-v1 token, still reports its version.
+func TestRelayVersionWithACommentIsUnderstood(t *testing.T) {
+	orig := Version
+	t.Cleanup(func() { Version = orig })
+	for _, v := range []string{"0.41.1", "1.2.0-rc.1+build.7"} {
+		t.Run(v, func(t *testing.T) {
+			Version = v
+			r := CheckCompatibility("SSH-2.0-uptermd-" + v + " gate-v1")
+			require.True(t, r.Compatible, r.Message)
+			require.Equal(t, "v"+v, r.ServerVersion)
+
+			parsed, err := ParseFromSSHVersion("SSH-2.0-uptermd-" + v + " gate-v1 another")
+			require.NoError(t, err)
+			require.Equal(t, v, parsed.String())
+		})
+	}
+	// Only the software version is read; nothing before the comment is
+	// dropped to make a version of it.
+	for _, sshVersion := range []string{"SSH-2.0-uptermd- gate-v1", "SSH-2.0-uptermd-gate-v1 0.41.1"} {
+		_, err := ParseFromSSHVersion(sshVersion)
+		require.Error(t, err, sshVersion)
+	}
+}
+
 func TestServerSSHVersion(t *testing.T) {
 	expected := "SSH-2.0-uptermd-" + Version
 	actual := ServerSSHVersion()

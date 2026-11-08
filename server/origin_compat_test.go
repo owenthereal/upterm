@@ -11,7 +11,33 @@ import (
 
 	"github.com/stretchr/testify/require"
 	"golang.org/x/crypto/ssh"
+	"google.golang.org/protobuf/encoding/protowire"
+	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/reflect/protoreflect"
 )
+
+func TestOriginWireCompatibility(t *testing.T) {
+	fields := (&AuthRequest{}).ProtoReflect().Descriptor().Fields()
+	for _, field := range []struct {
+		name   protoreflect.Name
+		number protoreflect.FieldNumber
+		kind   protoreflect.Kind
+	}{{"ingress", 5, protoreflect.EnumKind}, {"ingress_node", 6, protoreflect.StringKind}, {"ingress_connection", 7, protoreflect.BytesKind}} {
+		f := fields.ByName(field.name)
+		require.NotNil(t, f)
+		require.Equal(t, field.number, f.Number())
+		require.Equal(t, field.kind, f.Kind())
+	}
+	old := protowire.AppendTag(nil, 5, protowire.BytesType)
+	old = protowire.AppendString(old, "old-lease")
+	var auth AuthRequest
+	require.NoError(t, proto.Unmarshal(old, &auth))
+	require.Equal(t, Ingress_INGRESS_UNSPECIFIED, auth.Ingress)
+	require.NotEqual(t, Ingress_INGRESS_SSH, auth.Ingress)
+	// AuthRequest reserves nothing: its numbers are all in use.
+	require.Zero(t, auth.ProtoReflect().Descriptor().ReservedNames().Len())
+	require.Zero(t, auth.ProtoReflect().Descriptor().ReservedRanges().Len())
+}
 
 // A filter alone, with no built-in list, refuses at each point.
 func TestSourceFilterStandalone(t *testing.T) {

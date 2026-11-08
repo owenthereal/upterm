@@ -2,6 +2,7 @@ package command
 
 import (
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -20,6 +21,7 @@ var uptermdEnv = []string{
 	"UPTERMD_METRIC_ADDR", "UPTERMD_DEBUG", "UPTERMD_ROUTING",
 	"UPTERMD_CONSUL_URL", "UPTERMD_CONSUL_SESSION_TTL", "UPTERMD_SENTRY_DSN",
 	"SENTRY_DSN", "UPTERMD_HANDSHAKE_TIMEOUT", "UPTERMD_NODE_ID", "UPTERMD_DENY_SOURCE",
+	"UPTERMD_LEGACY_HOPS",
 }
 
 // ambientEnv lists variables that reach the decoded struct through flag
@@ -310,4 +312,49 @@ func TestNodeTrustedKeyFlag(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, []string{"key-one", "key-two"}, opt.NodeTrustedKeys)
 	require.Equal(t, "public key(s) this node accepts from another relay node it hops to, in addition to its own server keys. Add a new server key here on every node before any node presents it, and keep the old one listed until no node presents it", Root().PersistentFlags().Lookup("node-trusted-key").Usage)
+}
+
+// --legacy-hops is on unless turned off, and RefuseLegacyHops is its opposite,
+// from the command line, the environment or the config file.
+func TestLegacyHopsFlag(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		args   []string
+		env    string
+		config string
+		refuse bool
+	}{
+		{name: "default"},
+		{name: "flag off", args: []string{"--legacy-hops=false"}, refuse: true},
+		{name: "flag on", args: []string{"--legacy-hops"}},
+		{name: "environment", env: "false", refuse: true},
+		{name: "config file", config: "legacy-hops: false\n", refuse: true},
+		{name: "flag overrides environment", args: []string{"--legacy-hops=true"}, env: "false"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			resetUptermdEnv(t)
+			if tc.env != "" {
+				t.Setenv("UPTERMD_LEGACY_HOPS", tc.env)
+			}
+			args := tc.args
+			if tc.config != "" {
+				path := filepath.Join(t.TempDir(), "uptermd.yaml")
+				require.NoError(t, os.WriteFile(path, []byte(tc.config), 0o600))
+				args = append(args, "--config", path)
+			}
+			opt, err := unmarshalForTest(t, args...)
+			require.NoError(t, err)
+			require.Equal(t, tc.refuse, opt.RefuseLegacyHops)
+		})
+	}
+	t.Run("not a bool", func(t *testing.T) {
+		resetUptermdEnv(t)
+		t.Setenv("UPTERMD_LEGACY_HOPS", "flase")
+		_, err := unmarshalForTest(t)
+		require.ErrorContains(t, err, "legacy-hops")
+	})
+	flag := Root().PersistentFlags().Lookup("legacy-hops")
+	require.NotNil(t, flag)
+	require.Equal(t, "true", flag.DefValue)
+	require.Equal(t, "exchange node hops in the format that predates the hop gate, so this node can share a fleet with older ones; turn it off only once every node supports the gate", flag.Usage)
 }

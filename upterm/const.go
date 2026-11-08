@@ -17,6 +17,9 @@ const (
 	AttachNoticeEnvVar = "UPTERM_ATTACH_NOTICE"
 
 	// server
+	// GateModeRequestType asks the node a hop reached which registration it
+	// holds for a routing ID: GateModeRequest, answered by GateModeReply.
+	GateModeRequestType            = "gate-mode@upterm.dev"
 	ServerSSHServerVersion         = "SSH-2.0-uptermd"
 	ServerServerInfoRequestType    = "upterm-server-info@upterm.dev"
 	ServerCreateSessionRequestType = "upterm-create-session@upterm.dev"

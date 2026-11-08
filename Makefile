@@ -115,6 +115,17 @@ test-ftests-rest:
 test-e2e:
 	go test ./internal/e2e/... -timeout=180s -count=1 -v $(GO_TEST_FLAGS)
 
+# The mixed-version suite: this build's relay in fleets with released ones,
+# which it installs from the module proxy, each into a directory of its own
+# under $(COMPAT_BIN). Its Consul cases skip without Consul.
+COMPAT_BIN = $(BIN_DIR)/compat
+.PHONY: test-compat
+test-compat:
+	GOBIN=$(COMPAT_BIN)/v0.40.0 go install github.com/owenthereal/upterm/cmd/uptermd@v0.40.0 github.com/owenthereal/upterm/cmd/upterm@v0.40.0
+	GOBIN=$(COMPAT_BIN)/a72f5571 go install github.com/owenthereal/upterm/cmd/uptermd@a72f5571534fe074e993ed048061c13cb98bf6c4
+	GOBIN=$(COMPAT_BIN)/v0.41.1 go install github.com/owenthereal/upterm/cmd/uptermd@v0.41.1 github.com/owenthereal/upterm/cmd/upterm@v0.41.1
+	UPTERM_COMPAT_BIN=$(COMPAT_BIN) go test -tags compat ./ftests -run '^TestMixedVersionFleets$$' -timeout=900s -count=1 -v $(GO_TEST_FLAGS)
+
 .PHONY: vet
 vet:
 	docker run --rm -v $(CURDIR):/app:z -w /app golangci/golangci-lint:latest golangci-lint run -v --timeout 15m --fix

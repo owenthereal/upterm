@@ -58,4 +58,47 @@ message AuthRequest {
   // The SSH session ID of the guest's own connection, at the node that
   // terminated it. Hops carry it unchanged.
   bytes ingress_connection = 7;
+  // The SSH user the guest typed at the ingress node.
+  string typed_address = 8;
+  // The routing ID the ingress node resolved that user to.
+  string target_routing_id = 9;
+  // The ingress node's --node-id; empty when it has none.
+  string ingress_node_id = 10;
+  // A random ID the ingress node gave this guest's admission attempt.
+  string connection_id = 11;
+  // 1 when the ingress node runs the hop gate for this hop; 0 for a hop in the
+  // format that predates the gate.
+  uint32 gate_protocol = 12;
+}
+
+enum GateMode {
+  GATE_MODE_UNSPECIFIED = 0;
+  GATE_MODE_LOCAL = 1;
+  GATE_MODE_DELEGATED = 2;
+}
+
+// The exact live registration a home node holds, as it answers the gate.
+message GateRegistration {
+  GateMode mode = 1;
+  string account_id = 2;
+  string session_id = 3;
+  uint64 generation = 4;
+  string routing_id = 5;
+  repeated bytes run_public_keys = 6;
+  bytes registration_id = 7;
+  string home_node = 8;
+  string home_node_id = 9;
+  string home_boot_id = 10;
+}
+
+message GateModeRequest {
+  uint32 protocol = 1;
+  bytes nonce = 2;
+  string routing_id = 3;
+}
+
+message GateModeReply {
+  uint32 protocol = 1;
+  bytes nonce = 2;
+  GateRegistration registration = 3;
 }

@@ -204,6 +204,101 @@ func TestHopKeyStartup(t *testing.T) {
 	})
 }
 
+// TestHopKeyStartup, on a node that refuses legacy hops: the hop key
+// authenticates the hop and its mode exchange, and the guest is held to the
+// session's own keys through the gate.
+func TestHopKeyStartupThroughTheGate(t *testing.T) {
+	t.Setenv("PRIVATE_KEY", TestPrivateKeyContent)
+	for _, source := range []string{"file", "PEM"} {
+		t.Run(source, func(t *testing.T) {
+			t.Setenv("HOP_KEY", "")
+			opt := Opt{SSHAddr: "127.0.0.1:0", InternalAddr: "127.0.0.1:0", Network: "mem", HopRefuseHostKey: true, RefuseLegacyHops: true}
+			if source == "file" {
+				opt.HopKeys = []string{writeKeyFile(t, HostPrivateKeyContent)}
+			} else {
+				t.Setenv("HOP_KEY", HostPrivateKeyContent)
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			logs := make(proxyProtocolTestLogs, 128)
+			done := make(chan error, 1)
+			go func() { done <- Start(ctx, opt, slog.New(slog.NewJSONHandler(logs, nil))) }()
+			t.Cleanup(func() {
+				cancel()
+				select {
+				case err := <-done:
+					require.NoError(t, err)
+				case <-time.After(5 * time.Second):
+					t.Error("server did not stop")
+				}
+			})
+			var addr, internal string
+			timeout := time.After(5 * time.Second)
+			for addr == "" {
+				select {
+				case record := <-logs:
+					if record["msg"] == "starting server" {
+						addr = record["ssh_addr"].(string)
+						internal = record["internal_addr"].(string)
+					}
+				case <-timeout:
+					t.Fatal("server did not start")
+				}
+			}
+			// A successful registration request proves the hop key did not reach sshd.
+			relay, err := ssh.ParsePrivateKey([]byte(HostPrivateKeyContent))
+			require.NoError(t, err)
+			raw, err := net.Dial("tcp", addr)
+			require.NoError(t, err)
+			defer func() { _ = raw.Close() }()
+			require.NoError(t, raw.SetDeadline(time.Now().Add(5*time.Second)))
+			c, ch, req, err := ssh.NewClientConn(raw, addr, &ssh.ClientConfig{User: "host", ClientVersion: upterm.HostSSHClientVersion, Auth: []ssh.AuthMethod{ssh.PublicKeys(relay)}, HostKeyCallback: ssh.InsecureIgnoreHostKey()})
+			require.NoError(t, err)
+			client := ssh.NewClient(c, ch, req)
+			defer func() { _ = client.Close() }()
+			request, err := proto.Marshal(&CreateSessionRequest{HostUser: "host", HostPublicKeys: [][]byte{ssh.MarshalAuthorizedKey(relay.PublicKey())}, ClientAuthorizedKeys: [][]byte{ssh.MarshalAuthorizedKey(relay.PublicKey())}})
+			require.NoError(t, err)
+			ok, body, err := client.SendRequest(upterm.ServerCreateSessionRequestType, true, request)
+			require.NoError(t, err)
+			require.True(t, ok, "sshd refused registration: %s", body)
+			var session CreateSessionResponse
+			require.NoError(t, proto.Unmarshal(body, &session))
+			// The configured hop key authenticates the mode exchange, but does
+			// not authorize the original guest against the local key list.
+			other, _, _, _, err := ssh.ParseAuthorizedKey([]byte(TestPublicKeyContent))
+			require.NoError(t, err)
+			id, _, err := routing.NewEncodeDecoder(routing.ModeEmbedded).Decode(session.SshUser)
+			require.NoError(t, err)
+			cert, err := (&UserCertSigner{SessionID: "hop", User: id, AuthRequest: &AuthRequest{ClientVersion: "SSH-2.0-Go", AuthorizedKey: ssh.MarshalAuthorizedKey(other), GateProtocol: 1, TargetRoutingId: id, TypedAddress: session.SshUser}}).SignCert(relay)
+			require.NoError(t, err)
+			hopClient, err := ssh.Dial("tcp", internal, &ssh.ClientConfig{User: id, Auth: []ssh.AuthMethod{ssh.PublicKeys(cert)}, HostKeyCallback: ssh.InsecureIgnoreHostKey(), Timeout: 5 * time.Second})
+			require.NoError(t, err)
+			defer func() { _ = hopClient.Close() }()
+			deadline := time.AfterFunc(5*time.Second, func() { _ = hopClient.Close() })
+			defer deadline.Stop()
+			require.True(t, hasGateCapability(hopClient.ServerVersion()))
+			modeRequest := freshModeRequest(id)
+			modeBody, err := proto.Marshal(modeRequest)
+			require.NoError(t, err)
+			ok, body, err = hopClient.SendRequest(upterm.GateModeRequestType, true, modeBody)
+			require.NoError(t, err)
+			require.True(t, ok)
+			var mode GateModeReply
+			require.NoError(t, decodeGate(body, &mode))
+			require.Equal(t, modeRequest.Nonce, mode.Nonce)
+			require.Equal(t, id, mode.Registration.RoutingId)
+			require.Equal(t, GateMode_GATE_MODE_LOCAL, mode.Registration.Mode)
+			channel, _, err := hopClient.OpenChannel("session", nil)
+			if channel != nil {
+				_ = channel.Close()
+			}
+			var refused *ssh.OpenChannelError
+			require.ErrorAs(t, err, &refused)
+			require.Equal(t, upterm.UpstreamKeyRefused, refused.Message)
+		})
+	}
+}
+
 // A peer pinning the second relay key must still be offered its certificate
 // when hops fall back to the relay's full certificate set.
 func TestPlanPicksCredsRelayRotation(t *testing.T) {

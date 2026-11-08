@@ -16,7 +16,8 @@
 //     [AuthorityLocal] and [AuthorityDelegated];
 //   - [RegistrationRef], which identifies one adopted registration;
 //   - [Home], a registration as the node that adopted it holds it;
-//   - [Session.AuthorityHint].
+//   - [Session.AuthorityHint];
+//   - [Opt.RefuseLegacyHops] and [Server.RefuseLegacyHops].
 //
 // This API may change in any minor release, and each change is listed in the
 // release notes.

@@ -18,6 +18,7 @@ import (
 	"github.com/owenthereal/upterm/upterm"
 	"github.com/owenthereal/upterm/utils"
 	"golang.org/x/crypto/ssh"
+	"google.golang.org/protobuf/proto"
 )
 
 type sshProxy struct {
@@ -51,6 +52,15 @@ type sshProxy struct {
 
 	// deny is the sources this proxy refuses.
 	deny sourceDeny
+
+	// RefuseLegacyHops has this node gate every hop it starts, and refuse
+	// every hop that doesn't use the gate. NodeID is the node's --node-id, which
+	// its gate hops carry. authorities finds the registrations the node holds,
+	// for the gate to answer from; nil where a test builds the proxy alone,
+	// which then neither gates nor answers the gate.
+	RefuseLegacyHops bool
+	NodeID           string
+	authorities      homeLookup
 
 	routing *SSHRouting
 	mux     sync.Mutex
@@ -104,6 +114,9 @@ func (r *sshProxy) Serve(ln net.Listener) error {
 			deny:              r.deny,
 			authorizedKeys:    authorizedKeys,
 			Logger:            r.Logger.With("component", "auth"),
+			RefuseLegacyHops:  r.RefuseLegacyHops,
+			NodeID:            r.NodeID,
+			authorities:       r.authorities,
 		},
 		MetricsProvider: r.MetricsProvider,
 		Logger:          r.Logger,
@@ -249,8 +262,41 @@ type proxyAuth struct {
 	// before the banner and again at authentication, and a hop's certified
 	// source at authentication on any listener.
 	deny sourceDeny
+	// RefuseLegacyHops, NodeID and authorities are the sshProxy's.
+	RefuseLegacyHops bool
+	NodeID           string
+	authorities      homeLookup
 
 	Logger *slog.Logger
+}
+
+// gates reports whether this node starts gate hops: only once it refuses
+// legacy hops. A node that gates also holds every guest of its own sessions to
+// the keys it adopted them with, holds every hop it receives to the strict
+// AuthRequest scan, and forwards no hop on to another node. Any other node
+// hops, and serves legacy hops, exactly as nodes did before the gate.
+func (a proxyAuth) gates() bool {
+	return a.authorities != nil && a.RefuseLegacyHops
+}
+
+// advertises reports whether this proxy's listener advertises the gate, and
+// so serves the gate hops it receives through the gate. The internal listener
+// always does: no host connects there. A shared listener does only on a node
+// that gates, since a host reads the server version too. A public listener and
+// the bridge never do: neither takes a hop. It is fixed for the listener's
+// life, so nothing a client sends changes it.
+func (a proxyAuth) advertises() bool {
+	if a.authorities == nil {
+		return false
+	}
+	switch a.listener {
+	case listenerInternal:
+		return true
+	case listenerShared:
+		return a.gates()
+	default:
+		return false
+	}
 }
 
 func (a proxyAuth) checkAuthorizedKeys(conn ssh.ConnMetadata, pk ssh.PublicKey) error {
@@ -328,13 +374,21 @@ func loadAuthorizedKeys(paths []string) (map[string]struct{}, error) {
 }
 
 // routeCreds retains both kinds so a refreshed route can change locality.
-type routeCreds struct{ relay, hop []ssh.AuthMethod }
+// gate marks credentials minted for a gate hop.
+type routeCreds struct {
+	relay, hop []ssh.AuthMethod
+	gate       bool
+}
 
 // preparedRoute is one upstream attempt's plan, taken from one snapshot of the
 // session: where to dial, which host key to expect there, and the route to
 // compare against if it fails. Taking all three from one read is what keeps the
 // dial target and the host key it must present from disagreeing.
 type preparedRoute struct {
+	// home is the local registration a node that gates bound the attempt to;
+	// remote marks a hop to another node.
+	home   Home
+	remote bool
 	creds  routeCreds
 	id     *api.Identifier   // the dial target
 	route  Route             // node and generation, for the refresh comparison
@@ -347,6 +401,8 @@ type preparedRoute struct {
 // upstreamTarget is where one read of the session sends a connection, before
 // any credentials are attached.
 type upstreamTarget struct {
+	// home is the registration a node that gates holds for a local target.
+	home  Home
 	id    *api.Identifier
 	route Route
 	// local is the session when it lives on this node: its authorized keys
@@ -383,7 +439,7 @@ func (a proxyAuth) authenticate(conn ssh.ConnMetadata, pk ssh.PublicKey) (*AuthR
 		if conn.User() == "" {
 			return nil, nil, false, fmt.Errorf("empty session ID for host connection")
 		}
-	} else if _, _, err := a.SessionManager.GetEncodeDecoder().Decode(conn.User()); err != nil {
+	} else if _, _, err := a.SessionManager.GetEncodeDecoder().Decode(conn.User()); err != nil && !a.certifiesGateHop(conn.User(), pk) {
 		err = fmt.Errorf("invalid SSH user format: %w", err)
 		// Only an embedded-mode user carries more than the session ID, and so
 		// can be cut short to the ID alone. A Consul-mode user is the ID
@@ -455,6 +511,22 @@ func (a proxyAuth) authenticate(conn ssh.ConnMetadata, pk ssh.PublicKey) (*AuthR
 		auth.Ingress, auth.IngressNode, auth.IngressConnection = originOf(a.listener, conn, a.NodeAddr)
 	}
 
+	if hop {
+		// A gate hop's AuthRequest, and every hop's on a node that gates, is
+		// held to the strict scan.
+		if cert, ok := pk.(*ssh.Certificate); ok && (a.gates() || (auth.GateProtocol != 0 && a.advertises())) {
+			if err := strictAuthRequest(cert); err != nil {
+				return nil, nil, false, err
+			}
+		}
+		// A gate hop's user is the routing ID its certificate names.
+		if auth.GateProtocol != 0 {
+			if auth.GateProtocol != 1 || auth.TargetRoutingId != conn.User() || !gateID(auth.TargetRoutingId) || auth.TypedAddress == "" {
+				return nil, nil, false, errGateRefused
+			}
+		}
+	}
+
 	// The source the request records. A hop's is the guest's, as the node it
 	// entered by recorded it, never the sending node's. Any other connection's
 	// is its peer, which is a source only on the SSH listener: the internal
@@ -465,6 +537,20 @@ func (a proxyAuth) authenticate(conn ssh.ConnMetadata, pk ssh.PublicKey) (*AuthR
 		return nil, nil, false, errSourceDenied
 	}
 	return auth, key, hop, nil
+}
+
+// certifiesGateHop reports whether pk is a gate hop's certificate, signed for
+// user by an authority this listener trusts with hops. A gate hop's user is the
+// bare routing ID, which an embedded-mode node can't decode; such a hop is let
+// past the user check, and its identity checks then hold it to that ID.
+// Anything else keeps the user check as it was.
+func (a proxyAuth) certifiesGateHop(user string, pk ssh.PublicKey) bool {
+	cert, ok := pk.(*ssh.Certificate)
+	if !ok || !isRelayCertificate(pk) || a.listener == listenerPublic || a.listener == listenerBridge {
+		return false
+	}
+	auth, _, err := parseAuthRequestFromCert(user, cert, a.isHopAuthority)
+	return err == nil && auth.GateProtocol != 0
 }
 
 // authorize decides whether an offered key may proceed, and resolves where its
@@ -479,9 +565,33 @@ func (a proxyAuth) authorize(conn ssh.ConnMetadata, pk ssh.PublicKey) (*AuthRequ
 		return nil, nil, false, err
 	}
 
-	target, err := a.resolve(conn)
+	// A gate hop on a listener that advertises the gate is the gate's: its
+	// lookup is of this node's own registrations, after the handshake. It
+	// never resolves or dials here.
+	if hop && auth.GateProtocol == 1 && a.advertises() {
+		return auth, nil, true, nil
+	}
+	user := conn.User()
+	if hop && auth.GateProtocol != 0 {
+		// A gate hop on a listener that didn't advertise is a legacy hop to
+		// the session its certificate names. Embedded routing reads that as
+		// a session on this node; Consul routing asks the store.
+		user = a.SessionManager.GetEncodeDecoder().Encode(auth.TargetRoutingId, a.NodeAddr)
+		auth = legacyHop(auth)
+	}
+	target, err := a.resolve(conn, user)
 	if err != nil {
 		return nil, nil, false, err
+	}
+	if target.local != nil && a.gates() {
+		if err := a.bindLocal(target); err != nil {
+			return nil, nil, false, err
+		}
+	}
+	// A node that gates forwards no hop on to another node, and takes no
+	// legacy hop once it refuses them.
+	if hop && a.gates() && (a.RefuseLegacyHops || target.local == nil) {
+		return nil, nil, false, errGateRefused
 	}
 	// TODO: simplify auth key validation by moving it to host validation only
 	if !target.admits(key) {
@@ -495,13 +605,41 @@ func (a proxyAuth) authorize(conn ssh.ConnMetadata, pk ssh.PublicKey) (*AuthRequ
 	return auth, target, hop, nil
 }
 
-// resolve finds where conn's upstream goes, reading the session at most once.
-// A host's goes to this node's sshd. A guest's goes to the node its session is
-// on: in Consul mode the store says which, and the same read supplies the rest
-// of the route; in embedded mode the user names it, and only a session on this
-// node is read, from this node's own store.
-func (a proxyAuth) resolve(conn ssh.ConnMetadata) (*upstreamTarget, error) {
-	user := conn.User()
+// bindLocal binds target, a session on this node, to the registration this
+// node holds for it: its keys are the ones that registration was adopted with,
+// never a route cache's, and an attempt on it is fenced by that registration.
+func (a proxyAuth) bindLocal(target *upstreamTarget) error {
+	home, ok := a.authorities.Lookup(target.id.Id)
+	if !ok || home.Ref().Authority != AuthorityLocal {
+		return errGateRefused
+	}
+	session, ok := localHomeSession(a.authorities, home)
+	if !ok {
+		return errGateRefused
+	}
+	target.local = session
+	target.home = home
+	return nil
+}
+
+// legacyHop is auth in the format that predates the gate: without the gate's
+// fields, so that a node it is forwarded to serves it as a legacy hop too.
+func legacyHop(auth *AuthRequest) *AuthRequest {
+	legacy := proto.Clone(auth).(*AuthRequest)
+	legacy.TypedAddress = ""
+	legacy.TargetRoutingId = ""
+	legacy.IngressNodeId = ""
+	legacy.ConnectionId = ""
+	legacy.GateProtocol = 0
+	return legacy
+}
+
+// resolve finds where conn's upstream goes, reading the session at most once,
+// as user names it. A host's goes to this node's sshd. A guest's goes to the
+// node its session is on: in Consul mode the store says which, and the same
+// read supplies the rest of the route; in embedded mode the user names it, and
+// only a session on this node is read, from this node's own store.
+func (a proxyAuth) resolve(conn ssh.ConnMetadata, user string) (*upstreamTarget, error) {
 	if string(conn.ClientVersion()) == upterm.HostSSHClientVersion {
 		return &upstreamTarget{id: &api.Identifier{Id: user, Type: api.Identifier_HOST}}, nil
 	}
@@ -569,12 +707,18 @@ func (a proxyAuth) plan(conn ssh.ConnMetadata, target *upstreamTarget, creds rou
 		return errUpstreamHostKeyMismatch
 	}
 
-	pr := &preparedRoute{id: target.id, route: target.route, creds: creds}
+	pr := &preparedRoute{id: target.id, route: target.route, creds: creds, home: target.home, remote: !target.needsRelayCreds()}
 	auth := creds.hop
 	if target.needsRelayCreds() {
 		auth = creds.relay
 	}
-	pr.config = &ssh.ClientConfig{User: conn.User(), HostKeyCallback: hostKeyCb, Auth: auth}
+	// A gate hop's user is the routing ID; the user the guest typed travels
+	// only in its certified AuthRequest.
+	user := conn.User()
+	if !target.needsRelayCreds() && creds.gate {
+		user = target.id.Id
+	}
+	pr.config = &ssh.ClientConfig{User: user, HostKeyCallback: hostKeyCb, Auth: auth}
 	pr.config.BannerCallback = func(message string) error {
 		pr.banner = message
 		return nil
@@ -594,6 +738,22 @@ func (a proxyAuth) prepare(conn ssh.ConnMetadata, pk ssh.PublicKey) (*preparedRo
 	if err != nil {
 		return nil, nil, err
 	}
+	if target == nil {
+		return nil, nil, errGateRefused
+	}
+	// A node that gates records in a guest's AuthRequest what the guest typed
+	// and where it was routed. A hop to another node is then a gate hop; a
+	// host on this node is sent the same fields, without the protocol.
+	if !hop && target.id.Type == api.Identifier_CLIENT && a.gates() {
+		auth.TypedAddress = conn.User()
+		auth.TargetRoutingId = target.id.Id
+		auth.GateProtocol = 1
+		auth.IngressNodeId = a.NodeID
+		auth.ConnectionId, err = newConnectionID()
+		if err != nil {
+			return nil, nil, err
+		}
+	}
 
 	signers, err := a.newUserCertSigners(conn, auth)
 	if err != nil {
@@ -604,10 +764,17 @@ func (a proxyAuth) prepare(conn ssh.ConnMetadata, pk ssh.PublicKey) (*preparedRo
 	if hop {
 		perms.Extensions = map[string]string{permHop: ""}
 	}
-	creds := routeCreds{relay: []ssh.AuthMethod{ssh.PublicKeys(signers...)}}
+	creds := routeCreds{relay: []ssh.AuthMethod{ssh.PublicKeys(signers...)}, gate: auth.GateProtocol == 1}
 	creds.hop = creds.relay
+	if auth.GateProtocol == 1 {
+		hopSigners, err := signHopCerts(conn, auth, a.Signers)
+		if err != nil {
+			return nil, nil, err
+		}
+		creds.hop = []ssh.AuthMethod{ssh.PublicKeys(hopSigners...)}
+	}
 	if len(a.HopSigners) > 0 {
-		hop, err := signUserCerts(conn, auth, a.HopSigners[:1])
+		hop, err := signHopCerts(conn, auth, a.HopSigners[:1])
 		if err != nil {
 			return nil, nil, fmt.Errorf("error creating hop cert signer: %w", err)
 		}
@@ -629,6 +796,11 @@ func (a proxyAuth) prepareFrom(conn ssh.ConnMetadata, pk ssh.PublicKey, sess *Se
 	}
 
 	target := a.targetOf(sess)
+	if target.local != nil && a.gates() {
+		if err := a.bindLocal(target); err != nil {
+			return nil, err
+		}
+	}
 	if !target.admits(key) {
 		return nil, fmt.Errorf("public key not allowed")
 	}
@@ -680,8 +852,12 @@ func (a proxyAuth) refresh(ctx context.Context, conn ssh.ConnMetadata, pk ssh.Pu
 // ID, a hop's as well: the sshd binds a host's session proof to it, the one
 // value both ends of that connection share. A guest's ID at the node it
 // entered by travels in auth instead, as ingress_connection.
+// A host is never sent a gate hop's protocol: the certificate it gets is no
+// hop.
 func (a proxyAuth) newUserCertSigners(conn ssh.ConnMetadata, auth *AuthRequest) ([]ssh.Signer, error) {
-	return signUserCerts(conn, auth, a.Signers)
+	local := proto.Clone(auth).(*AuthRequest)
+	local.GateProtocol = 0
+	return signUserCerts(conn, local, a.Signers)
 }
 
 func signUserCerts(conn ssh.ConnMetadata, auth *AuthRequest, signers []ssh.Signer) ([]ssh.Signer, error) {
@@ -702,4 +878,23 @@ func signUserCerts(conn ssh.ConnMetadata, auth *AuthRequest, signers []ssh.Signe
 	}
 
 	return certSigners, nil
+}
+
+// signHopCerts mints a hop's certificates. A gate hop's principal is the
+// resolved routing ID; the address the guest typed remains only in the
+// certified AuthRequest. Any other hop's is conn's user, as always.
+func signHopCerts(conn ssh.ConnMetadata, auth *AuthRequest, signers []ssh.Signer) ([]ssh.Signer, error) {
+	user := conn.User()
+	if auth.GateProtocol == 1 {
+		user = auth.TargetRoutingId
+	}
+	var out []ssh.Signer
+	for _, signer := range signers {
+		s, err := (&UserCertSigner{SessionID: string(conn.SessionID()), User: user, AuthRequest: auth}).SignCert(signer)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, s)
+	}
+	return out, nil
 }

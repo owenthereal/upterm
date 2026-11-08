@@ -146,8 +146,12 @@ func forwardSSH(ctx context.Context, downstream, upstream sshPeer, scope sshAbor
 		// The rejections the downstream is sent are those of its own opens. The
 		// downstream's rejections of the upstream's opens pass on as they are.
 		opens := forwarder
+		global := forwarder
 		if i == 0 {
 			opens.rewrite = rewrite
+			// A gate request is a node's, over its hop: a downstream's of its
+			// own is answered false here, and reaches no one.
+			global.mayRequest = func(r *ssh.Request) bool { return !gateName(r.Type) }
 		}
 		workers.Go(func() { exited <- peerExit{i, source.conn.Wait()} })
 		workers.Go(func() {
@@ -160,7 +164,7 @@ func forwardSSH(ctx context.Context, downstream, upstream sshPeer, scope sshAbor
 			// not hold up drain completion on that reply, but still drain all channel
 			// buffers before closing the destination transport to release its sender.
 			// Zero grace: finished only signals drain completion, it writes nothing.
-			forwarder.requests(destination.conn, source.requests, nil, finished, 0, nil)
+			global.requests(destination.conn, source.requests, nil, finished, 0, nil)
 		})
 	}
 	var err error
@@ -235,6 +239,10 @@ type sshForwarder struct {
 	// rewrite words a rejection the destination sends as the source is passed
 	// it. Nil passes every one on as it is.
 	rewrite rejectionRewrite
+
+	// mayRequest, when set, decides which of the source's requests go on;
+	// nil passes all.
+	mayRequest func(*ssh.Request) bool
 }
 
 // A peer can pipeline channel opens without waiting for confirmation, and each
@@ -617,7 +625,15 @@ func (f sshForwarder) requests(destination sshRequestSender, incoming <-chan *ss
 			if locked {
 				replies.Lock()
 			}
-			ok, payload, err := destination.SendRequest(request.Type, job.awaitReply, request.Payload)
+			var (
+				ok      bool
+				payload []byte
+				err     error
+			)
+			// A refused request is answered here, in its turn.
+			if f.mayRequest == nil || f.mayRequest(request) {
+				ok, payload, err = destination.SendRequest(request.Type, job.awaitReply, request.Payload)
+			}
 			if err != nil {
 				ok, payload = false, nil
 			}
