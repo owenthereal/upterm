@@ -283,9 +283,11 @@ func (s *Server) neighbourDialer(dialer connDialer) connDialer { return dialer }
 type delegatedHost struct {
 	registration DelegatedRegistration
 	conn         *gossh.ServerConn
-	// unpublish withdraws the route a current registration published; nil
-	// for one that published none.
-	unpublish func()
+	// fence retires the home of the route a current registration published,
+	// and closes its listener, without waiting on the store; release then
+	// releases the route's store entry, which can be slow. Both are nil for a
+	// registration that published none.
+	fence, release func()
 
 	mu sync.Mutex
 	// retired is set once a final decision withdrew the route.
@@ -296,18 +298,28 @@ type delegatedHost struct {
 // still up: its route is withdrawn, so no guest reaches it again. The host
 // keeps its connection for its final reports.
 func (h *delegatedHost) retire() {
+	if release := h.withdraw(); release != nil {
+		release()
+	}
+}
+
+// withdraw is retire's first part: it retires the home, so no guest reaches
+// it, and returns the release of the route's store entry still to run, or
+// nil when there is none or the route was already withdrawn.
+func (h *delegatedHost) withdraw() (release func()) {
 	h.mu.Lock()
 	if h.retired {
 		h.mu.Unlock()
-		return
+		return nil
 	}
 	h.retired = true
-	unpublish := h.unpublish
+	fence, release := h.fence, h.release
 	h.mu.Unlock()
 
-	if unpublish != nil {
-		unpublish()
+	if fence != nil {
+		fence()
 	}
+	return release
 }
 
 type contextKeyDelegatedHost struct{}
@@ -646,10 +658,21 @@ func (s *sshd) createDelegatedSession(work *sshWorkRef, ctx ssh.Context, conn *g
 
 	host := &delegatedHost{registration: reg, conn: conn}
 	if published := ownedRegistration(ctx, sessionID); result.Disposition == DelegatedDisposition_DELEGATED_CURRENT && published != nil {
-		host.unpublish = func() {
-			// The listener goes with the store's entry, and the forward that
+		host.fence = func() {
+			// The home goes first, and the listener with it; the forward that
 			// bound it can't be opened again: the registration has ended.
+			s.sessions.fence(published)
 			s.forwardHandler.untrack(published)
+		}
+		host.release = func() {
+			// The store's entry goes last, as sshd work, so that a stop waits
+			// for it. A stopping sshd takes no more work, and leaves the
+			// release to the end of the host's connection.
+			work, ok := s.work.enter()
+			if !ok {
+				return
+			}
+			defer work.done()
 			s.sessions.end(published)
 		}
 	}
@@ -767,9 +790,18 @@ func (m *delegatedHosts) PushDecision(ctx context.Context, decision *DelegatedDe
 		return nil, ErrDelegatedHostNotFound
 	}
 	// Whatever the host makes of it, a final decision ends the relay's own
-	// part: no guest reaches the registration again.
+	// part: no guest reaches the registration again. The home is retired
+	// before the push; the store's release of the route, which can be slow,
+	// runs beside it, and is waited for only within the push's bound.
+	var released chan struct{}
 	if decision.Disposition != DelegatedDisposition_DELEGATED_CURRENT {
-		host.retire()
+		if release := host.withdraw(); release != nil {
+			released = make(chan struct{})
+			go func() {
+				defer close(released)
+				release()
+			}()
+		}
 	}
 	payload, err := proto.Marshal(decision)
 	if err != nil {
@@ -802,6 +834,12 @@ func (m *delegatedHosts) PushDecision(ctx context.Context, decision *DelegatedDe
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	case a = <-answered:
+	}
+	if released != nil {
+		select {
+		case <-released:
+		case <-ctx.Done():
+		}
 	}
 	if a.err != nil {
 		return nil, fmt.Errorf("pushing a delegated decision: %w", a.err)
