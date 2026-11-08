@@ -794,7 +794,7 @@ func (s *sshd) adopt(work *sshWorkRef, ctx ssh.Context, reg *Registration, conn 
 	// closes the connection, and a legacy host can't, so closing its
 	// connection would end its session for good.
 	if reg.Capable() {
-		s.pingOnce(ctx, reg, conn)
+		s.pingOnce(ctx, reg.ID(), conn)
 	}
 	return true, nil
 }
@@ -840,7 +840,7 @@ type contextKeyPinged struct{}
 // own connection: a WebSocket-only relay hands the host straight to this sshd.
 // The entry is taken once, here: it is the proxy's connection from this host for
 // as long as the host is connected, so there is nothing to look up again.
-func (s *sshd) pingOnce(ctx ssh.Context, reg *Registration, conn *gossh.ServerConn) {
+func (s *sshd) pingOnce(ctx ssh.Context, sessionID string, conn *gossh.ServerConn) {
 	ctx.Lock()
 	pinged, _ := ctx.Value(contextKeyPinged{}).(bool)
 	nodeConn, _ := ctx.Value(contextKeyActivity{}).(*liveness.Conn)
@@ -860,10 +860,10 @@ func (s *sshd) pingOnce(ctx ssh.Context, reg *Registration, conn *gossh.ServerCo
 	// at the end of its first silence, so a connection nothing records the
 	// reads of is left alone. Serve wraps every connection, so this is a bug.
 	if activity == nil {
-		s.Logger.Error("not pinging a host connection that has no record of its reads", "session-id", reg.ID())
+		s.Logger.Error("not pinging a host connection that has no record of its reads", "session-id", sessionID)
 		return
 	}
-	logger := s.Logger.With("session-id", reg.ID())
+	logger := s.Logger.With("session-id", sessionID)
 	logger.Debug("judging a host's silence by the reads of a connection", "connection", source)
 	go pingHost(ctx, conn, activity.LastRead, s.liveness, logger)
 }

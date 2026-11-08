@@ -666,6 +666,13 @@ func (s *sshd) createDelegatedSession(work *sshWorkRef, ctx ssh.Context, conn *g
 		return delegatedRefusal(DelegatedErrorCode_DELEGATED_UNAVAILABLE)
 	}
 	context.AfterFunc(ctx, obligation.end)
+	// A current registration's connection is pinged once it is adopted. A
+	// final one is kept only for the host's final reports, and is pinged
+	// alike, so a host that falls silent while its connection stays open
+	// ends, and stops being counted.
+	if result.Disposition != DelegatedDisposition_DELEGATED_CURRENT {
+		s.pingOnce(ctx, sessionID, conn)
+	}
 	logger.Info("registered a delegated session", "disposition", result.Disposition, "revision", result.DecisionRevision)
 	return true, b
 }

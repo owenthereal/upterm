@@ -1026,15 +1026,19 @@ func originRequest(t *testing.T, p proven, original string, generation uint64) *
 // delegatedSSHD is an sshd with authority composed and enabled.
 func delegatedSSHD(t *testing.T, authority Authority, opts ...func(*sshd)) *testSSHD {
 	t.Helper()
-	base := []func(*sshd){func(s *sshd) {
+	return newTestSSHD(t, append([]func(*sshd){withAuthority(authority)}, opts...)...)
+}
+
+// withAuthority composes and enables authority on an sshd.
+func withAuthority(authority Authority) func(*sshd) {
+	return func(s *sshd) {
 		s.Authority = authority
 		s.AuthorityEnabled = true
 		s.Protocols = []string{testProtocol}
 		s.NodeID = "home-machine"
 		s.BootID = fixtureBootID
 		s.delegated = newDelegatedHosts(s.NodeID, s.BootID, s.NodeAddr)
-	}}
-	return newTestSSHD(t, append(base, opts...)...)
+	}
 }
 
 // slotOf is the slot srv's sshd holds for id, if any.
