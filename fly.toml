@@ -55,8 +55,8 @@ proxy_proto_options = { version = "v2" }
 
 [services.concurrency]
 type = "connections"
-hard_limit = 2500
-soft_limit = 2000
+hard_limit = 150
+soft_limit = 125
 
 [[services.tcp_checks]]
 interval = "15s"
@@ -82,8 +82,8 @@ port = 443
 handlers = ["tls", "http"]
 [services.concurrency]
 type = "connections"
-hard_limit = 2500
-soft_limit = 2000
+hard_limit = 25
+soft_limit = 20
 
 [[services.http_checks]]
 interval = "30s"
