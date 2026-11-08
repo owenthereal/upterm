@@ -469,10 +469,20 @@ func (p *SSHRouting) serveHopGate(ctx context.Context, peer sshPeer, auth *AuthR
 	// connecting. It holds them within the forwarder's own bounds, and a flood
 	// beyond them closes the hop, as it closes any other.
 	go func() {
-		defer close(requests)
 		var queue []*ssh.Request
 		queuedBytes := 0
 		incoming := peer.requests
+		// stop ends the hand-over and, as the forwarder does once cancelled,
+		// keeps receiving what the guest still sends, discarding it, until the
+		// mux closes incoming: a mux left blocked delivering a request never
+		// sees its transport close.
+		stop := func() {
+			close(requests)
+			if incoming != nil {
+				for range incoming {
+				}
+			}
+		}
 		for incoming != nil || len(queue) > 0 {
 			var out chan<- *ssh.Request
 			var next *ssh.Request
@@ -481,6 +491,7 @@ func (p *SSHRouting) serveHopGate(ctx context.Context, peer sshPeer, auth *AuthR
 			}
 			select {
 			case <-heldCtx.Done():
+				stop()
 				return
 			case r, ok := <-incoming:
 				if !ok {
@@ -493,6 +504,7 @@ func (p *SSHRouting) serveHopGate(ctx context.Context, peer sshPeer, auth *AuthR
 					if err != nil {
 						cancel()
 						_ = peer.conn.Close()
+						stop()
 						return
 					}
 					continue
@@ -501,6 +513,7 @@ func (p *SSHRouting) serveHopGate(ctx context.Context, peer sshPeer, auth *AuthR
 				if len(queue) == maxSSHQueuedRequests || queuedBytes+size > maxSSHQueuedRequestBytes {
 					cancel()
 					_ = peer.conn.Close()
+					stop()
 					return
 				}
 				queue = append(queue, r)
@@ -511,6 +524,7 @@ func (p *SSHRouting) serveHopGate(ctx context.Context, peer sshPeer, auth *AuthR
 				queuedBytes -= len(next.Type) + len(next.Payload)
 			}
 		}
+		close(requests)
 	}()
 	session, ok := localHomeSession(p.Auth.authorities, g.home)
 	if !ok || session.NodeAddr != p.Auth.NodeAddr {

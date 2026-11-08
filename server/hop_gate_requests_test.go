@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/go-kit/kit/metrics/provider"
+	"github.com/owenthereal/upterm/upterm"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/crypto/ssh"
 )
@@ -18,14 +19,18 @@ import (
 // pendingHostHop is one gate hop of a hopGateFixture's home, served by
 // serveHopGate over loopback TCP, whose connection to the host is held at its
 // dial until release. The hop's global requests reach the gate through an
-// unbuffered channel, and taken names each one once the gate has received it,
-// so a test knows what the gate holds without waiting on time.
+// unbuffered channel, handed, and taken names each one once the gate has
+// received it, so a test knows what the gate holds without waiting on time.
+// A test can also send handed requests of its own, and end the hop's context
+// with cancel.
 type pendingHostHop struct {
 	ingress *upstreamConn
 	taken   <-chan string
 	dialing <-chan struct{}
 	release func()
+	cancel  context.CancelFunc
 	done    <-chan error
+	handed  chan<- *ssh.Request
 }
 
 // pendingHostStage is the hop's upstream stage: long enough that no timeout
@@ -58,6 +63,18 @@ func servePendingHostHop(t *testing.T, f *hopGateFixture, host string) *pendingH
 	t.Cleanup(cancel)
 	taken := make(chan string, 4*maxSSHQueuedRequests)
 	done := make(chan error, 1)
+	// handed is closed, ending the gate's source, once the mux's requests have
+	// all been relayed and the test sends no more: when the test ends.
+	handed, relayed, stop := make(chan *ssh.Request), make(chan struct{}), make(chan struct{})
+	t.Cleanup(func() {
+		close(stop)
+		select {
+		case <-relayed:
+			close(handed)
+		case <-time.After(5 * time.Second):
+			t.Error("the mux's requests never ended")
+		}
+	})
 	go func() {
 		raw, err := ln.Accept()
 		if err != nil {
@@ -71,14 +88,13 @@ func servePendingHostHop(t *testing.T, f *hopGateFixture, host string) *pendingH
 			return
 		}
 		defer func() { _ = conn.Close() }()
-		handed := make(chan *ssh.Request)
 		go func() {
-			defer close(handed)
+			defer close(relayed)
 			for r := range requests {
 				select {
 				case handed <- r:
 					taken <- r.Type
-				case <-ctx.Done():
+				case <-stop:
 					// Drain until the mux closes, so that it is never left
 					// blocked delivering a request.
 					for range requests {
@@ -115,7 +131,7 @@ func servePendingHostHop(t *testing.T, f *hopGateFixture, host string) *pendingH
 		t.Fatal("the home never dialed its host")
 	}
 	var once sync.Once
-	return &pendingHostHop{ingress: u, taken: taken, dialing: dialing, done: done, release: func() { once.Do(func() { close(released) }) }}
+	return &pendingHostHop{ingress: u, taken: taken, dialing: dialing, cancel: cancel, done: done, handed: handed, release: func() { once.Do(func() { close(released) }) }}
 }
 
 // requireTaken requires the gate to take n more requests.
@@ -126,6 +142,19 @@ func (h *pendingHostHop) requireTaken(t *testing.T, n int) {
 		case <-h.taken:
 		case <-time.After(5 * time.Second):
 			t.Fatalf("the gate took only %d of %d requests", i, n)
+		}
+	}
+}
+
+// requireReceived requires the gate to receive n more requests of the test's
+// own, each within a bound, as it must for as long as their source is open.
+func (h *pendingHostHop) requireReceived(t *testing.T, n int) {
+	t.Helper()
+	for i := range n {
+		select {
+		case h.handed <- &ssh.Request{Type: fmt.Sprintf("after-close-%d@upterm.test", i)}:
+		case <-time.After(5 * time.Second):
+			t.Fatalf("the gate stopped receiving its source's requests after %d of %d", i, n)
 		}
 	}
 }
@@ -275,6 +304,45 @@ func TestGateHopRefusesARequestFlood(t *testing.T) {
 				t.Fatalf("the host got %s", name)
 			default:
 			}
+		})
+	}
+}
+
+// A gate hop that closes keeps receiving the guest's requests, discarding
+// them, until its connection ends, as any hop's forwarder does once
+// cancelled: a mux left blocked delivering one never sees its transport
+// close. That holds however the hop closes: on a flood, on a gate request it
+// refuses, or when its context ends.
+func TestClosedGateHopKeepsReceivingRequests(t *testing.T) {
+	// More than the mux buffers, so that a gate that stopped receiving would
+	// leave the mux blocked.
+	const after = 2 * 16
+	for _, tc := range []struct {
+		name  string
+		close func(t *testing.T, h *pendingHostHop)
+	}{
+		{name: "flood", close: func(t *testing.T, h *pendingHostHop) {
+			for i := range maxSSHQueuedRequests + 1 {
+				_, _, err := h.ingress.conn.SendRequest(fmt.Sprintf("flood-%d@upterm.test", i), false, nil)
+				require.NoError(t, err)
+			}
+			h.requireTaken(t, maxSSHQueuedRequests+1)
+		}},
+		{name: "refused_gate_request", close: func(t *testing.T, h *pendingHostHop) {
+			// A second mode request: the gate refuses it and closes the hop.
+			go func() { _, _, _ = h.ingress.conn.SendRequest(upterm.GateModeRequestType, true, nil) }()
+			h.requireTaken(t, 1)
+		}},
+		{name: "context_ends", close: func(t *testing.T, h *pendingHostHop) { h.cancel() }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newHopGateFixture(t)
+			host, _ := recordingGateHost(t, f.signer)
+			h := servePendingHostHop(t, f, host)
+			defer h.release()
+			tc.close(t, h)
+			h.requireClosed(t, "the hop didn't close")
+			h.requireReceived(t, after)
 		})
 	}
 }
