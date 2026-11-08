@@ -461,18 +461,31 @@ func (p *SSHRouting) serveHopGate(ctx context.Context, peer sshPeer, auth *AuthR
 	ref := g.home.Ref()
 	heldCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	requests := make(chan *ssh.Request, 1)
+	requests := make(chan *ssh.Request)
 	filtered := peer
 	filtered.requests = requests
+	// The gate answers gate requests itself and holds the guest's others for
+	// the forwarder, which may not have started: the host can still be
+	// connecting. It holds them within the forwarder's own bounds, and a flood
+	// beyond them closes the hop, as it closes any other.
 	go func() {
 		defer close(requests)
-		for {
+		var queue []*ssh.Request
+		queuedBytes := 0
+		incoming := peer.requests
+		for incoming != nil || len(queue) > 0 {
+			var out chan<- *ssh.Request
+			var next *ssh.Request
+			if len(queue) > 0 {
+				out, next = requests, queue[0]
+			}
 			select {
 			case <-heldCtx.Done():
 				return
-			case r, ok := <-peer.requests:
+			case r, ok := <-incoming:
 				if !ok {
-					return
+					incoming = nil
+					continue
 				}
 				if gateName(r.Type) {
 					ok, b, err := g.request(r)
@@ -484,15 +497,18 @@ func (p *SSHRouting) serveHopGate(ctx context.Context, peer sshPeer, auth *AuthR
 					}
 					continue
 				}
-				select {
-				case requests <- r:
-				case <-heldCtx.Done():
-					return
-				default:
+				size := len(r.Type) + len(r.Payload)
+				if len(queue) == maxSSHQueuedRequests || queuedBytes+size > maxSSHQueuedRequestBytes {
 					cancel()
 					_ = peer.conn.Close()
 					return
 				}
+				queue = append(queue, r)
+				queuedBytes += size
+			case out <- next:
+				queue[0] = nil
+				queue = queue[1:]
+				queuedBytes -= len(next.Type) + len(next.Payload)
 			}
 		}
 	}()
