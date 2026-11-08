@@ -630,6 +630,12 @@ func TestInputAcceptedBeforeAHangUpIsDeliveredWhenTheCommandReads(t *testing.T) 
 				awaitPrimaryID(t, h.srv, changed, "", "departure did not release election ownership")
 			}
 			_, bOut, _ := h.connectHost(t, &hostPty{term: "xterm", cols: 80, rows: 24})
+			// The shell reply comes before the door has attached B to the
+			// output, and the released command ends the session as soon as it
+			// has read and printed. Released before B is watching, the session
+			// can end first, and B, arriving after it, is sent nothing at all.
+			// The replay is what says B is served.
+			readUntil(t, bOut, "READY")
 			require.NoError(t, os.WriteFile(release, nil, 0600))
 			require.Contains(t, readUntil(t, bOut, "DELIVERED"), "262144")
 		})
