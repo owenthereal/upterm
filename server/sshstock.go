@@ -278,6 +278,13 @@ func (p *SSHRouting) stockConnection(ctx context.Context, accepted net.Conn, ins
 	if err := raw.SetDeadline(time.Now().Add(stage)); err != nil {
 		return err
 	}
+	// A direct client's source, refused before the banner, with nothing
+	// written. Behind a PROXY listener, RemoteAddr reads the header first, under
+	// the deadline just set, and is its source. The internal listener's peer is
+	// another node, and the bridge's is this one: neither is checked here.
+	if l := p.Auth.listener; l != listenerInternal && l != listenerBridge && p.Auth.deny.any() && p.Auth.deny.denied(raw.RemoteAddr().String()) {
+		return errSourceDenied
+	}
 	downstream, channels, requests, err := ssh.NewServerConn(raw, cfg)
 	if err != nil {
 		return err

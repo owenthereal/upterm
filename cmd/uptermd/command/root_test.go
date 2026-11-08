@@ -19,7 +19,7 @@ var uptermdEnv = []string{
 	"UPTERMD_SSH_NETWORK", "UPTERMD_SSH_PROXY_PROTOCOL_REQUIRED", "UPTERMD_SSH_PROXY_PROTOCOL", "UPTERMD_NETWORK", "UPTERMD_NETWORK_OPT",
 	"UPTERMD_METRIC_ADDR", "UPTERMD_DEBUG", "UPTERMD_ROUTING",
 	"UPTERMD_CONSUL_URL", "UPTERMD_CONSUL_SESSION_TTL", "UPTERMD_SENTRY_DSN",
-	"SENTRY_DSN", "UPTERMD_HANDSHAKE_TIMEOUT",
+	"SENTRY_DSN", "UPTERMD_HANDSHAKE_TIMEOUT", "UPTERMD_NODE_ID", "UPTERMD_DENY_SOURCE",
 }
 
 // ambientEnv lists variables that reach the decoded struct through flag
@@ -63,8 +63,7 @@ func unmarshalForTest(t *testing.T, args ...string) (server.Opt, error) {
 	cmd := Root()
 	require.NoError(t, cmd.ParseFlags(args))
 
-	var opt server.Opt
-	err := unmarshalFlags(cmd, &opt)
+	_, opt, err := resolveConfig(cmd)
 	return opt, err
 }
 
@@ -210,8 +209,8 @@ func TestFrontDoorFlags(t *testing.T) {
 			}
 			cmd := Root()
 			require.NoError(t, cmd.ParseFlags(tc.args))
-			var opt server.Opt
-			require.NoError(t, unmarshalFlags(cmd, &opt))
+			_, opt, err := resolveConfig(cmd)
+			require.NoError(t, err)
 			require.Equal(t, tc.timeout, opt.HandshakeTimeout)
 		})
 	}
@@ -221,8 +220,8 @@ func TestNegativeHandshakeTimeout(t *testing.T) {
 	resetUptermdEnv(t)
 	cmd := Root()
 	require.NoError(t, cmd.ParseFlags([]string{"--handshake-timeout=-1s"}))
-	var opt server.Opt
-	require.NoError(t, unmarshalFlags(cmd, &opt))
+	_, opt, err := resolveConfig(cmd)
+	require.NoError(t, err)
 	require.ErrorContains(t, opt.Validate(), "handshake-timeout")
 }
 

@@ -49,6 +49,9 @@ type sshProxy struct {
 	// every SSH proxy of a Server. Nil has the proxy register its own.
 	instruments *routingInstruments
 
+	// deny is the sources this proxy refuses.
+	deny sourceDeny
+
 	routing *SSHRouting
 	mux     sync.Mutex
 	// stopped records a Shutdown that arrived before Serve; see sshd.stopped.
@@ -98,6 +101,7 @@ func (r *sshProxy) Serve(ln net.Listener) error {
 			ConnDialer:        r.ConnDialer,
 			NodeAddr:          r.NodeAddr,
 			listener:          r.listener,
+			deny:              r.deny,
 			authorizedKeys:    authorizedKeys,
 			Logger:            r.Logger.With("component", "auth"),
 		},
@@ -241,6 +245,10 @@ type proxyAuth struct {
 	NodeTrusted       []ssh.PublicKey
 	RefuseHostKeyHops bool
 	HostSigners       []ssh.Signer
+	// deny is the sources refused: on the SSH listener a connection's peer,
+	// before the banner and again at authentication, and a hop's certified
+	// source at authentication on any listener.
+	deny sourceDeny
 
 	Logger *slog.Logger
 }
@@ -442,14 +450,20 @@ func (a proxyAuth) authenticate(conn ssh.ConnMetadata, pk ssh.PublicKey) (*AuthR
 			LocalAddr:     conn.LocalAddr().String(),
 			AuthorizedKey: ssh.MarshalAuthorizedKey(key),
 		}
-		// Only a guest's request records where it entered. A host's goes to
-		// this node's own sshd, which admits the host by it, and stays as it
-		// has always been.
-		if string(conn.ClientVersion()) != upterm.HostSSHClientVersion {
-			auth.Ingress, auth.IngressNode, auth.IngressConnection = originOf(a.listener, conn, a.NodeAddr)
-		}
+		// A host's request records where it entered as a guest's does. It
+		// goes to this node's own sshd, which keeps that as the host's origin.
+		auth.Ingress, auth.IngressNode, auth.IngressConnection = originOf(a.listener, conn, a.NodeAddr)
 	}
 
+	// The source the request records. A hop's is the guest's, as the node it
+	// entered by recorded it, never the sending node's. Any other connection's
+	// is its peer, which is a source only on the SSH listener: the internal
+	// listener's peer is a node and the bridge's is this one, and a guest
+	// either hands over was checked by its client's address at the WebSocket
+	// upgrade.
+	if (hop || (a.listener != listenerInternal && a.listener != listenerBridge)) && a.deny.denied(auth.RemoteAddr) {
+		return nil, nil, false, errSourceDenied
+	}
 	return auth, key, hop, nil
 }
 

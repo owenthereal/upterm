@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/netip"
 	"sync"
 	"time"
 
@@ -45,6 +46,10 @@ type sshd struct {
 	// --authorized-keys. Without the gate any key gets in, so a host can redial
 	// with its session key alone and never touch its agent.
 	HostGateEnabled bool
+
+	// deny is the sources whose hosts may not register, judged by the source
+	// the host's certificate records.
+	deny sourceDeny
 
 	// liveness is how long a reconnect-capable host's connection may be silent
 	// before it is pinged and then closed; zero is liveness.DefaultTiming. Tests
@@ -579,17 +584,20 @@ func (s *sshd) Serve(ln net.Listener) error {
 // this door has no authorized-key check of its own to catch it.
 func (s *sshd) handlePublicKey(ctx ssh.Context, key ssh.PublicKey) bool {
 	checker := UserCertChecker{IsUserAuthority: s.isOwnAuthority}
-	if _, _, err := checker.Authenticate(ctx.User(), key); err != nil {
+	auth, _, err := checker.Authenticate(ctx.User(), key)
+	if err != nil {
 		s.Logger.Error("error parsing auth request from cert", "error", err)
 		return false
 	}
 
 	// The proxy minted the host's own SSH session ID into the certificate. It
 	// is the one value both ends of that connection share, and so what a
-	// session proof is bound to.
+	// session proof is bound to. The request it minted alongside records where
+	// the host came from.
 	if cert, ok := key.(*gossh.Certificate); ok {
 		ctx.Lock()
 		ctx.SetValue(contextKeyDownstreamSessionID{}, []byte(cert.KeyId))
+		ctx.SetValue(contextKeyHostOrigin{}, originFromAuth(auth))
 		ctx.Unlock()
 	}
 
@@ -780,6 +788,21 @@ func (s *sshd) createSessionHandler(ctx ssh.Context, srv *ssh.Server, req *gossh
 
 func (s *sshd) handleCreateSession(work *sshWorkRef, ctx ssh.Context, srv *ssh.Server, req *gossh.Request) (bool, []byte) {
 	conn := ctx.Value(ssh.ContextKeyConn).(*gossh.ServerConn)
+	// A host from a denied source is refused before anything is stored, and
+	// told nothing. A host without a certified source isn't refused, and nor is
+	// one this node's WebSocket bridge carried: the source its certificate
+	// records is the bridge's loopback address, and its client's address was
+	// checked at the upgrade. Only this node's SSH proxy records that, on the
+	// bridge, in a certificate signed with this node's key.
+	if s.deny.any() {
+		ctx.Lock()
+		origin, _ := ctx.Value(contextKeyHostOrigin{}).(GuestOrigin)
+		ctx.Unlock()
+		bridged := origin.Ingress == Ingress_INGRESS_WEBSOCKET && origin.NodeAddr == s.NodeAddr
+		if ip, err := netip.ParseAddr(origin.Source); err == nil && !bridged && ipDenied(s.deny.prefixes, s.deny.filter, ip.Unmap()) {
+			return false, nil
+		}
+	}
 
 	var sessReq CreateSessionRequest
 	if err := proto.Unmarshal(req.Payload, &sessReq); err != nil {

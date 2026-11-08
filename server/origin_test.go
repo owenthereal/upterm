@@ -113,8 +113,8 @@ func TestOriginOf(t *testing.T) {
 		})
 	}
 
-	// On listeners that admit hosts, a host's request stays as it has
-	// always been: this node's own sshd admits the host by it.
+	// On listeners that admit hosts, a host's request records where it
+	// entered as a guest's does, for this node's own sshd to read.
 	t.Run("a host connection", func(t *testing.T) {
 		for _, kind := range allListenerKinds {
 			a := proxyAuth{NodeAddr: "n1:22", listener: kind, SessionManager: sm, Logger: logger}
@@ -132,6 +132,7 @@ func TestOriginOf(t *testing.T) {
 				LocalAddr:     "198.51.100.1:22",
 				AuthorizedKey: ssh.MarshalAuthorizedKey(key.PublicKey()),
 			}
+			want.Ingress, want.IngressNode, want.IngressConnection = originOf(kind, originConn("session", upterm.HostSSHClientVersion, "sid"), "n1:22")
 			require.True(t, proto.Equal(want, auth), "listener %d: %v", kind, auth)
 		}
 	})
