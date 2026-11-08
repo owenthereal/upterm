@@ -863,6 +863,8 @@ func (s *Server) ServeListeners(ctx context.Context, ls Listeners) error {
 			HostSigners:         s.HostSigners, // TODO: use different host keys
 			Signers:             s.Signers,
 			NodeAddr:            s.NodeAddr,
+			NodeID:              s.NodeID,
+			BootID:              s.BootID,
 			SessionDialListener: sessionDialListener,
 			MetricsProvider:     s.MetricsProvider,
 			Logger:              s.Logger.With("component", "sshd"),

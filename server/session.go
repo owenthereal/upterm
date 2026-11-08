@@ -55,8 +55,12 @@ const (
 
 // Session represents the complete session information
 type Session struct {
-	ID       string
-	NodeAddr string
+	// AuthorityHint is what the route's writer says the registration answers
+	// to; empty when the record names nothing this node knows. It authorizes
+	// nothing: only the home node's own adopted registration does.
+	AuthorityHint SessionAuthority `json:"mode,omitempty"`
+	ID            string
+	NodeAddr      string
 	// Generation orders registrations of the same ID. 0 is a legacy
 	// registration: a random ID with no proof behind it.
 	Generation           uint64
@@ -68,8 +72,10 @@ type Session struct {
 // MarshalJSON implements custom JSON marshaling for Session
 func (s *Session) MarshalJSON() ([]byte, error) {
 	// Generation is omitted when zero, so a legacy entry reads exactly as it
-	// did before generations existed.
+	// did before generations existed. The hint comes first; a node from
+	// before it ignores the key.
 	type sessionJSON struct {
+		AuthorityHint        SessionAuthority `json:"mode,omitempty"`
 		ID                   string
 		NodeAddr             string
 		Generation           uint64 `json:",omitempty"`
@@ -89,6 +95,7 @@ func (s *Session) MarshalJSON() ([]byte, error) {
 	}
 
 	return json.Marshal(sessionJSON{
+		AuthorityHint:        s.AuthorityHint,
 		ID:                   s.ID,
 		NodeAddr:             s.NodeAddr,
 		Generation:           s.Generation,
@@ -101,6 +108,7 @@ func (s *Session) MarshalJSON() ([]byte, error) {
 // UnmarshalJSON implements custom JSON unmarshaling for Session
 func (s *Session) UnmarshalJSON(data []byte) error {
 	type sessionJSON struct {
+		AuthorityHint        json.RawMessage `json:"mode"`
 		ID                   string
 		NodeAddr             string
 		Generation           uint64 `json:",omitempty"`
@@ -114,6 +122,13 @@ func (s *Session) UnmarshalJSON(data []byte) error {
 		return err
 	}
 
+	// Only a hint this node knows is kept. Any other value, or none, reads as
+	// no hint, and fails nothing else in the record.
+	s.AuthorityHint = ""
+	var hint SessionAuthority
+	if json.Unmarshal(temp.AuthorityHint, &hint) == nil && (hint == AuthorityLocal || hint == AuthorityDelegated) {
+		s.AuthorityHint = hint
+	}
 	s.ID = temp.ID
 	s.NodeAddr = temp.NodeAddr
 	s.Generation = temp.Generation
@@ -159,7 +174,16 @@ func (s *Session) IsClientKeyAllowed(key ssh.PublicKey) bool {
 // releases or rebuilds the entry acts through the handle, so it can only touch
 // its own claim, never a successor's.
 type Registration struct {
-	Session *Session
+	// memoryClaim identifies the registration's lifetime in a store without
+	// leases. A rebuild keeps it; a fresh registration gets its own.
+	memoryClaim *memoryClaim
+	// home is the home this node adopted the registration with; a rebuilt
+	// handle carries its registration's. nil until adopted.
+	home *localHome
+	// localRef is what the home this node adopts the registration with is to
+	// say of it, from the connection it came over.
+	localRef RegistrationRef
+	Session  *Session
 	// ConfirmedAt is the send time of the lock-session creation this
 	// registration's lease came from (memory: taken before the write). The
 	// expiry budget counts from it, and the lease's TTL clock can't have
@@ -181,17 +205,20 @@ func (r *Registration) Generation() uint64 { return r.Session.Generation }
 // legacy registration keeps today's behaviour.
 func (r *Registration) Capable() bool { return r.Session.Generation > 0 }
 
-// Same reports whether r and o are the same registration. A rebuild stores the
-// same registration again under a new lease, and its handle stands in for the
-// one it replaced, so this compares identity rather than handles.
+// Same reports whether r and o are the same registration as the route sees
+// it. A rebuild stores the same registration again under a new lease, and its
+// handle stands in for the one it replaced, so this compares identity rather
+// than handles. A store's claim and a node's home also tell apart two
+// registrations of one identity, each a lifetime of its own.
 func (r *Registration) Same(o *Registration) bool {
 	return r != nil && o != nil && sameIdentity(r.Session, o.Session)
 }
 
-// sameIdentity reports whether a and b are the same registration. Only one
-// connection can hold an (ID, generation, node): a proof is bound to its
-// connection, another connection needs a higher generation, and a legacy ID is
-// random.
+// sameIdentity compares the route fields a registration and its rebuilds
+// share. Only one connection can hold an (ID, generation, node) at a time: a
+// proof is bound to its connection, another connection needs a higher
+// generation, and a legacy ID is random. A fresh registration after the route
+// is lost can have the same fields again, but not the same claim or home.
 func sameIdentity(a, b *Session) bool {
 	return a.ID == b.ID && a.Generation == b.Generation && a.NodeAddr == b.NodeAddr
 }
@@ -1542,9 +1569,17 @@ func (c *consulSessionStore) HasInCache(sessionID string) bool {
 	return c.cache.Has(sessionID)
 }
 
-// memorySessionStore is a simple in-memory implementation for testing/fallback
+// memoryClaim is one registration's lifetime in a memory store, shared by the
+// handles its rebuilds return. Its nonzero size makes separate allocations
+// distinct even when their contents are equal.
+type memoryClaim struct{ _ byte }
+
+// memorySessionStore is a simple in-memory implementation for testing/fallback.
+// claims holds the claim each stored entry is held under: without leases, it
+// is what tells a registration from a fresh one of the same identity.
 type memorySessionStore struct {
 	sessions map[string]*Session
+	claims   map[string]*memoryClaim
 	logger   *slog.Logger
 	mutex    sync.RWMutex
 }
@@ -1553,47 +1588,58 @@ type memorySessionStore struct {
 func newMemorySessionStore(logger *slog.Logger) *memorySessionStore {
 	return &memorySessionStore{
 		sessions: make(map[string]*Session),
+		claims:   make(map[string]*memoryClaim),
 		logger:   logger,
 	}
 }
 
-// Register stores session as a fresh registration.
+// Register stores session as a fresh registration, under a claim of its own.
 func (m *memorySessionStore) Register(_ context.Context, session *Session) (*Registration, error) {
-	return m.register(session, mayRegister)
+	return m.register(session, nil)
 }
 
-// Reregister stores reg's session again, over its own entry too.
+// Reregister stores reg's session again, over its own entry too, under reg's
+// claim.
 func (m *memorySessionStore) Reregister(_ context.Context, reg *Registration) (*Registration, error) {
-	return m.register(reg.Session, mayRebuild)
+	return m.register(reg.Session, reg.memoryClaim)
 }
 
-// register stores session, replacing a stored entry only where may allows.
-func (m *memorySessionStore) register(session *Session, may func(next, cur *Session) bool) (*Registration, error) {
+// register orders a fresh registration by generation. A rebuild, which
+// carries its claim, may also replace the entry its own claim holds, and
+// keeps that claim in the new handle.
+func (m *memorySessionStore) register(session *Session, claim *memoryClaim) (*Registration, error) {
 	confirmed := time.Now()
 
 	m.mutex.Lock()
 	defer m.mutex.Unlock()
 
-	if cur, ok := m.sessions[session.ID]; ok && !may(session, cur) {
+	if cur, ok := m.sessions[session.ID]; ok && !mayRegister(session, cur) &&
+		(claim == nil || m.claims[session.ID] != claim || !sameIdentity(session, cur)) {
 		return nil, supersededError(session, cur)
 	}
+	if claim == nil {
+		claim = &memoryClaim{}
+	}
 	m.sessions[session.ID] = session
+	m.claims[session.ID] = claim
 	m.logger.Debug("stored session data in memory",
 		"session", session.ID,
 		"node", session.NodeAddr,
 		"generation", session.Generation,
 	)
-	return &Registration{Session: session, ConfirmedAt: confirmed}, nil
+	return &Registration{Session: session, ConfirmedAt: confirmed, memoryClaim: claim}, nil
 }
 
-// Release deletes reg's entry only while it is still reg's, so a superseded
-// registration's cleanup leaves its successor in place.
+// Release deletes reg's entry only while reg's claim holds it, so a superseded
+// registration's cleanup, or an earlier lifetime's, leaves its successor in
+// place.
 func (m *memorySessionStore) Release(_ context.Context, reg *Registration) error {
 	m.mutex.Lock()
 	defer m.mutex.Unlock()
 
-	if cur, ok := m.sessions[reg.ID()]; ok && sameIdentity(cur, reg.Session) {
+	if cur, ok := m.sessions[reg.ID()]; ok && reg.memoryClaim != nil && m.claims[reg.ID()] == reg.memoryClaim && sameIdentity(cur, reg.Session) {
 		delete(m.sessions, reg.ID())
+		delete(m.claims, reg.ID())
 		m.logger.Debug("released session data from memory",
 			"session", reg.ID(),
 			"generation", reg.Generation(),
@@ -1602,13 +1648,13 @@ func (m *memorySessionStore) Release(_ context.Context, reg *Registration) error
 	return nil
 }
 
-// Renew has no lease to extend in memory. It reports whether reg still holds
-// its entry.
+// Renew has no lease to extend in memory. It reports whether reg's claim
+// still holds its entry.
 func (m *memorySessionStore) Renew(_ context.Context, reg *Registration) error {
 	m.mutex.RLock()
 	defer m.mutex.RUnlock()
 
-	if cur, ok := m.sessions[reg.ID()]; ok && sameIdentity(cur, reg.Session) {
+	if cur, ok := m.sessions[reg.ID()]; ok && reg.memoryClaim != nil && m.claims[reg.ID()] == reg.memoryClaim && sameIdentity(cur, reg.Session) {
 		return nil
 	}
 	return fmt.Errorf("session %s: %w", reg.ID(), ErrLeaseLost)
@@ -1646,6 +1692,7 @@ func (m *memorySessionStore) Delete(sessionID string) error {
 	defer m.mutex.Unlock()
 
 	delete(m.sessions, sessionID)
+	delete(m.claims, sessionID)
 	m.logger.Debug("deleted session data from memory",
 		"session", sessionID,
 	)
@@ -1659,6 +1706,7 @@ func (m *memorySessionStore) BatchDelete(sessionIDs []string) error {
 
 	for _, sessionID := range sessionIDs {
 		delete(m.sessions, sessionID)
+		delete(m.claims, sessionID)
 	}
 
 	m.logger.Debug("batch deleted sessions from memory", "count", len(sessionIDs))
@@ -1849,11 +1897,16 @@ func (sm *SessionManager) Renew(ctx context.Context, reg *Registration) error {
 // Reregister rebuilds reg after a known loss: the same registration, stored
 // again with a lease of its own. Unlike Register it may replace an entry of
 // reg's own identity; only reg's lease keeper calls it. The handle it returns
-// is Same as reg. Release reg afterwards only if its lease is non-empty and
-// differs from the new handle's: a store without leases keeps one entry for
-// both handles, and releasing reg there would delete the entry just rebuilt.
+// is Same as reg, and carries reg's home. Release reg afterwards only if its
+// lease is non-empty and differs from the new handle's: a store without leases
+// keeps one entry for both handles, and releasing reg there would delete the
+// entry just rebuilt.
 func (sm *SessionManager) Reregister(ctx context.Context, reg *Registration) (*Registration, error) {
-	return sm.store.Reregister(ctx, reg)
+	next, err := sm.store.Reregister(ctx, reg)
+	if err == nil {
+		next.home = reg.home
+	}
+	return next, err
 }
 
 // Observe has fn called with each view of every entry the store's watch

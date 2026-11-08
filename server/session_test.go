@@ -2261,3 +2261,39 @@ func (suite *ConsulStoreTestSuite) TestReleaseLeavesAnUnrelatedRegistrationReada
 	require.NoError(t, err)
 	require.Equal(t, bSession, got)
 }
+
+func TestMemoryRegistrationClaimsSurviveRebuild(t *testing.T) {
+	for _, generation := range []uint64{0, 1} {
+		t.Run(fmt.Sprint(generation), func(t *testing.T) {
+			store := newMemorySessionStore(slog.New(slog.DiscardHandler))
+			session := &Session{ID: "same", NodeAddr: "home", Generation: generation}
+			first, err := store.Register(t.Context(), session)
+			require.NoError(t, err)
+			require.NoError(t, store.Delete(session.ID))
+			rebuilt, err := store.Reregister(t.Context(), first)
+			require.NoError(t, err)
+			require.NoError(t, store.Renew(t.Context(), first), "original handle must still hold its rebuilt claim")
+			require.NoError(t, store.Renew(t.Context(), rebuilt))
+			require.NoError(t, store.Release(t.Context(), first))
+			_, err = store.Get(session.ID)
+			require.Error(t, err, "original handle releases its rebuilt lifetime")
+			next, err := store.Register(t.Context(), session)
+			require.NoError(t, err)
+			require.ErrorIs(t, store.Renew(t.Context(), first), ErrLeaseLost, "same route identity must not let an old claim renew a fresh lifetime")
+			require.NoError(t, store.Release(t.Context(), rebuilt))
+			_, err = store.Get(session.ID)
+			require.NoError(t, err, "stale rebuilt handle must not release the new lifetime")
+			_, err = store.Reregister(t.Context(), first)
+			require.ErrorIs(t, err, ErrSuperseded, "stale rebuild must not replace a fresh same-identity lifetime")
+			freshRebuilt, err := store.Reregister(t.Context(), next)
+			require.NoError(t, err)
+			require.NoError(t, store.Renew(t.Context(), freshRebuilt))
+			require.NoError(t, store.Release(t.Context(), first))
+			_, err = store.Get(session.ID)
+			require.NoError(t, err)
+			require.NoError(t, store.Release(t.Context(), next))
+			_, err = store.Get(session.ID)
+			require.Error(t, err, "fresh original handle releases its own rebuilt lifetime")
+		})
+	}
+}
