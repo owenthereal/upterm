@@ -75,6 +75,24 @@ type Opt struct {
 // Extensions is what a relay built on uptermd adds to it. The zero value adds
 // nothing.
 type Extensions struct {
+	// Authority decides delegated registrations. Nil refuses every one: the
+	// relay has only local sessions.
+	Authority Authority
+	// Enabled has Authority decide. With it false, the authority is dark: a
+	// well-formed delegated registration is refused as unavailable without
+	// asking it, and its prerequisites aren't required. An enabled authority
+	// needs the in-memory network provider, an internal listener, legacy hops
+	// refused, a NodeID and a UUID BootID; uptermd also requires its public
+	// SSH listener to be tcp4, with a PROXY header required. Enabled without
+	// an Authority does nothing.
+	Enabled bool
+	// Protocols are the delegated protocols Authority accepts, each 1 to 64
+	// printable bytes with no whitespace. A delegated registration in any
+	// other is refused as invalid.
+	Protocols []string
+	// Lifecycle, when set, is started before the relay accepts its first
+	// connection, and stopped when it stops.
+	Lifecycle Lifecycle
 	// Sources denies sources beyond DenySources. Nil denies nothing more.
 	Sources SourceFilter
 }
@@ -521,6 +539,11 @@ type Server struct {
 	stopResult             *serverServeStopResult
 	serveStopDeadline      time.Duration
 	sessionCleanupDeadline time.Duration
+
+	// delegated is the serving relay's delegated work, the Runtime its
+	// Lifecycle is started with, and daemon the sshd it serves with.
+	delegated *delegatedHosts
+	daemon    *sshd
 }
 
 // serverServeStopResult belongs to one Serve invocation. Shutdown retains the
@@ -697,7 +720,15 @@ func (s *Server) ServeWithContext(ctx context.Context, sshln net.Listener, wsln 
 // their WebSocket guests, and this node's WebSocket listener bridges to a
 // loopback listener opened here for it alone, so each listener knows what
 // arrives on it.
+//
+// With an enabled authority, it refuses to serve without the authority's
+// prerequisites, naming the first one missing. A Lifecycle is started before
+// anything is accepted, and an error it returns is returned as it is.
 func (s *Server) ServeListeners(ctx context.Context, ls Listeners) error {
+	if err := s.checkAuthority(ls); err != nil {
+		closeListeners(s.Logger, ls.SSH, ls.WS, ls.Internal)
+		return err
+	}
 	if ls.Internal != nil && ls.SSH == nil {
 		// Handed over all the same, so released as a failed start releases them.
 		closeListeners(s.Logger, ls.WS, ls.Internal)
@@ -712,8 +743,25 @@ func (s *Server) ServeListeners(ctx context.Context, ls Listeners) error {
 	served := s.served
 	stopResult := &serverServeStopResult{}
 	s.stopResult = stopResult
+	delegated := newDelegatedHosts(s.NodeID, s.BootID, s.NodeAddr)
+	s.delegated = delegated
 	s.mux.Unlock()
 	defer close(served)
+
+	if lifecycle := s.Extensions.Lifecycle; lifecycle != nil {
+		var once sync.Once
+		stop := func() { once.Do(lifecycle.Stop) }
+		defer stop()
+		if err := lifecycle.Start(s.ctx, delegated); err != nil {
+			s.cancel()
+			closeListeners(s.Logger, ls.SSH, ls.WS, ls.Internal)
+			return err
+		}
+		// The extension's workers stop as soon as serving is to stop, even
+		// while this node's own cleanup still needs time.
+		cancelStop := context.AfterFunc(s.ctx, stop)
+		defer cancelStop()
+	}
 
 	sshdDialListener := s.NetworkProvider.SSHD()
 	sessionDialListener := s.NetworkProvider.Session()
@@ -758,7 +806,14 @@ func (s *Server) ServeListeners(ctx context.Context, ls Listeners) error {
 		HostGateEnabled:     len(s.AuthorizedKeysFiles) > 0,
 		hostActivity:        activity,
 		deny:                deny,
+		Authority:           s.Extensions.Authority,
+		AuthorityEnabled:    s.Extensions.Enabled,
+		Protocols:           s.Extensions.Protocols,
+		delegated:           delegated,
 	}
+	s.mux.Lock()
+	s.daemon = daemon
+	s.mux.Unlock()
 	var g run.Group
 	{
 		g.Add(func() error {
@@ -773,7 +828,7 @@ func (s *Server) ServeListeners(ctx context.Context, ls Listeners) error {
 			NodeAddr:            s.NodeAddr,
 			SSHDDialListener:    sshdDialListener,
 			SessionDialListener: sessionDialListener,
-			NeighbourDialer:     tcpConnDialer{},
+			NeighbourDialer:     s.neighbourDialer(tcpConnDialer{}),
 			Logger:              s.Logger.With("component", "ssh-conn-dialer"),
 		}
 		// One set of routing metrics for all the SSH proxies, as there was for
@@ -818,13 +873,14 @@ func (s *Server) ServeListeners(ctx context.Context, ls Listeners) error {
 				MetricsProvider:     s.MetricsProvider,
 				// The bridge carries WebSocket hosts, as the SSH listener
 				// carries the rest, and the internal listener refuses them.
-				hostActivity:     activity,
-				listener:         l.kind,
-				instruments:      instruments,
-				deny:             deny,
-				RefuseLegacyHops: s.RefuseLegacyHops,
-				NodeID:           s.NodeID,
-				authorities:      daemon,
+				hostActivity:      activity,
+				listener:          l.kind,
+				instruments:       instruments,
+				deny:              deny,
+				RefuseLegacyHops:  s.RefuseLegacyHops,
+				AuthorityComposed: s.Extensions.Authority != nil,
+				NodeID:            s.NodeID,
+				authorities:       daemon,
 			}
 			g.Add(func() error {
 				return sp.Serve(l.ln)

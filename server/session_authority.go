@@ -82,7 +82,9 @@ func (h *localHome) retire() {
 // localAuthorityRegistry finds the homes of the registrations this node has
 // adopted. It reads localSessions under its lock, the one adoption and
 // retirement take, and never the route store or its cache: a route only says
-// where a session was registered, not that the registration is still held.
+// where a session was registered, not that the registration is still held. A
+// delegated registration's pending reservation has its home, but isn't
+// adopted, so isn't found.
 type localAuthorityRegistry struct{ sessions *localSessions }
 
 // Lookup returns the home of the registration this node serves for routingID,
@@ -92,7 +94,7 @@ func (r *localAuthorityRegistry) Lookup(routingID string) (Home, bool) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	lr, ok := l.regs[routingID]
-	if !ok || !lr.home.Held() {
+	if !ok || lr.reg.pending || !lr.home.Held() {
 		return nil, false
 	}
 	return lr.home, true

@@ -8,7 +8,11 @@
 // declarations:
 //
 //   - [GateModeRequestType], which asks the node a hop reached which
-//     registration it holds for a routing ID.
+//     registration it holds for a routing ID;
+//   - [ServerDelegatedControlRequestType], a host's report on its own
+//     delegated registration;
+//   - [HostDelegatedDecisionRequestType], a decision about a host's
+//     delegated session.
 //
 // This API may change in any minor release, and each change is listed in the
 // release notes.

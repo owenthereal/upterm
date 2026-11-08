@@ -58,6 +58,7 @@ const compatQuietBound = time.Second
 func TestMixedVersionFleets(t *testing.T) {
 	bins := compatBinDir(t)
 	newRelay := buildThisRelay(t)
+	darkRelay := buildRelay(t, "./testdata/darkrelay")
 	keys := compatKeys(t)
 
 	for _, old := range compatBaselines {
@@ -115,6 +116,28 @@ func TestMixedVersionFleets(t *testing.T) {
 						// routing ID, and refuses it first.
 						if mode == routing.ModeConsul {
 							requireCompatRefusedAfterHomeAuth(t, shareOn(t, o, keys), n, keys)
+						} else {
+							requireCompatRefused(t, shareOn(t, o, keys), n, nil, upterm.UpstreamAuthFailed, keys)
+						}
+						requireCompatJoin(t, shareOn(t, n, keys), n, keys)
+						requireCompatJoin(t, shareOn(t, o, keys), o, keys)
+					})
+
+					// The new node with an authority composed, dark, and legacy
+					// hops accepted, as a fleet's first node with one is: it
+					// gates its own hops, and falls back to today's handling
+					// toward the old node, which has no token. In Consul
+					// routing the old node serves that hop, whose user is the
+					// routing ID it expects; in embedded routing it can't
+					// decode that user, and refuses it.
+					t.Run("dark authority on the new node", func(t *testing.T) {
+						n := startCompatRelay(t, "dark", darkRelay, keys, compatLayout{mode: mode, consul: consul, internal: true})
+						o := oldNode(t)
+						requireCompatJoin(t, shareOn(t, n, keys), o, keys)
+						if mode == routing.ModeConsul {
+							s := shareOn(t, o, keys)
+							guest := requireCompatJoin(t, s, n, keys)
+							require.Equal(t, s.user, guest.user, "the hop's user is the routing ID, which is the user here")
 						} else {
 							requireCompatRefused(t, shareOn(t, o, keys), n, nil, upterm.UpstreamAuthFailed, keys)
 						}
@@ -196,11 +219,17 @@ func compatBinDir(t *testing.T) string {
 // buildThisRelay builds this checkout's uptermd.
 func buildThisRelay(t *testing.T) string {
 	t.Helper()
+	return buildRelay(t, "github.com/owenthereal/upterm/cmd/uptermd")
+}
+
+// buildRelay builds the uptermd at pkg, this checkout's.
+func buildRelay(t *testing.T, pkg string) string {
+	t.Helper()
 	out := filepath.Join(t.TempDir(), "uptermd")
 	if runtime.GOOS == "windows" {
 		out += ".exe"
 	}
-	cmd := exec.Command("go", "build", "-o", out, "github.com/owenthereal/upterm/cmd/uptermd")
+	cmd := exec.Command("go", "build", "-o", out, pkg)
 	cmd.Env = append(os.Environ(), "CGO_ENABLED=0")
 	output, err := cmd.CombinedOutput()
 	require.NoError(t, err, "building this checkout's uptermd: %s", output)

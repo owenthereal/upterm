@@ -53,6 +53,22 @@ type sshd struct {
 	// the host's certificate records.
 	deny sourceDeny
 
+	// Authority, when set, decides the delegated registrations this sshd
+	// sees, unless AuthorityEnabled is false, when it is dark: it is never
+	// asked, and every delegated registration is refused as unavailable.
+	// Protocols are the delegated protocols it accepts. delegated is the
+	// serving relay's delegated work, where the registrations it accepts are
+	// recorded. Without an authority a delegated registration is refused.
+	Authority        Authority
+	AuthorityEnabled bool
+	Protocols        []string
+	delegated        *delegatedHosts
+
+	// beforePublish is a test hook, run once a current delegated
+	// registration is adopted and immediately before its publication takes
+	// the runtime's lock.
+	beforePublish func(ctx context.Context)
+
 	// liveness is how long a reconnect-capable host's connection may be silent
 	// before it is pinged and then closed; zero is liveness.DefaultTiming. Tests
 	// shorten it.
@@ -187,23 +203,45 @@ func newLocalSessions(work *sshSessionWork, p provider.Provider, sessionManager 
 // reg gets a home of its own, from its localRef, and the home of the one it
 // replaced is retired before anything else of that one is closed or released.
 // A second registration of the same identity is a second home.
+//
+// A delegated registration comes with its home, and is added twice. First as
+// a pending reservation, before the store has it: it holds the ID with no
+// lease keeper, and nothing finds it. Then once the store has it, which only
+// succeeds while its reservation still holds the ID; it then keeps the
+// reservation's home, and replaces nothing. Each time, its obligation must
+// still be in force: no fence set and none changed since it began.
 func (l *localSessions) add(work *sshWorkRef, reg *Registration, conn io.Closer) (*localRegistration, error) {
 	ttl := l.sessionManager.LeaseTTL()
+	if w := reg.obligation; w != nil {
+		w.owner.mu.Lock()
+		defer w.owner.mu.Unlock()
+		if w.epoch != w.owner.epoch || w.owner.refusedLocked() {
+			return nil, ErrLeaseLost
+		}
+		w.fence = reg.home.retire
+	}
 
 	l.mu.Lock()
 	cur, ok := l.regs[reg.ID()]
+	if reg.home != nil && !reg.pending && (!ok || cur.home != reg.home || !cur.home.Held()) {
+		l.mu.Unlock()
+		return nil, ErrLeaseLost
+	}
 	if ok && cur.conn != conn && !mayRegister(reg.Session, cur.reg.Session) {
 		l.mu.Unlock()
 		return nil, supersededError(reg.Session, cur.reg.Session)
 	}
-	ref := reg.localRef
-	if ref.Authority == "" {
-		ref = RegistrationRef{Authority: AuthorityLocal, SessionID: reg.ID(), Generation: reg.Generation(), RoutingID: reg.ID(), HomeNode: reg.Session.NodeAddr}
+	home := reg.home
+	if home == nil {
+		ref := reg.localRef
+		if ref.Authority == "" {
+			ref = RegistrationRef{Authority: AuthorityLocal, SessionID: reg.ID(), Generation: reg.Generation(), RoutingID: reg.ID(), HomeNode: reg.Session.NodeAddr}
+		}
+		for _, key := range reg.Session.HostPublicKeys {
+			ref.RunPublicKeys = append(ref.RunPublicKeys, key.Marshal())
+		}
+		home = newLocalHome(ref)
 	}
-	for _, key := range reg.Session.HostPublicKeys {
-		ref.RunPublicKeys = append(ref.RunPublicKeys, key.Marshal())
-	}
-	home := newLocalHome(ref)
 	reg.home = home
 	lr := &localRegistration{reg: reg, home: home, conn: conn, lost: make(chan struct{}, 1)}
 	var (
@@ -211,7 +249,7 @@ func (l *localSessions) add(work *sshWorkRef, reg *Registration, conn io.Closer)
 		keeperCtx  context.Context
 		keeperWork *sshWorkRef
 	)
-	if ttl > 0 {
+	if ttl > 0 && !reg.pending {
 		keeperWork = work.child()
 		keeperCtx, lr.stopLease = context.WithCancel(l.work.keeperContext)
 		keeper = &leaseKeeper{
@@ -243,7 +281,7 @@ func (l *localSessions) add(work *sshWorkRef, reg *Registration, conn io.Closer)
 	if keeper != nil {
 		go func() { defer keeperWork.done(); keeper.run(keeperWork, keeperCtx, reg) }()
 	}
-	if !ok {
+	if !ok || cur.home == home {
 		return nil, nil
 	}
 	return cur, nil
@@ -440,6 +478,17 @@ func (l *localSessions) fence(reg *Registration) {
 	}
 }
 
+// discardPending drops reg's pending reservation, if it still holds the ID,
+// retiring its home. There is no store entry to release: the reservation
+// never had one.
+func (l *localSessions) discardPending(reg *Registration) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if cur, ok := l.regs[reg.ID()]; ok && cur.reg.pending && cur.home == reg.home {
+		l.removeLocked(reg.ID(), cur)
+	}
+}
+
 // retire closes a superseded registration's connection, and releases reg, the
 // handle its slot last held, in the background. The connection's own cleanup
 // ends the handle it was adopted with and finds no slot, so a lease the keeper
@@ -459,12 +508,12 @@ func (l *localSessions) retire(work *sshWorkRef, conn io.Closer, reg *Registrati
 }
 
 // active reports whether reg is the registration this node serves for its ID:
-// adopted, not ended, not fenced, and not replaced.
+// adopted, not pending, not ended, not fenced, and not replaced.
 func (l *localSessions) active(reg *Registration) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	cur, ok := l.regs[reg.ID()]
-	return ok && cur.home.Held() && cur.home == reg.home && cur.reg.Same(reg)
+	return ok && !cur.reg.pending && cur.home.Held() && cur.home == reg.home && cur.reg.Same(reg)
 }
 
 // end releases reg's store entry, and its slot, count and lease keeper while
@@ -610,6 +659,9 @@ func (s *sshd) Serve(ln net.Listener) error {
 			cancelStreamlocalForwardChannelType:   sh.Handler,
 			upterm.ServerCreateSessionRequestType: s.createSessionHandler,
 		},
+	}
+	if s.Authority != nil {
+		s.server.RequestHandlers[upterm.ServerDelegatedControlRequestType] = s.delegatedControlHandler
 	}
 	srv := s.server
 	s.mux.Unlock()
@@ -859,12 +911,40 @@ func (s *sshd) handleCreateSession(work *sshWorkRef, ctx ssh.Context, srv *ssh.S
 		return false, []byte(err.Error())
 	}
 
+	// A delegated registration is never registered as a local one, however
+	// it is refused.
+	if sessReq.DelegatedSession != nil {
+		return s.createDelegatedSession(work, ctx, conn, len(req.Payload), &sessReq)
+	}
+
 	sessionID, generation, err := s.sessionIdentity(ctx, &sessReq)
 	if err != nil {
 		s.Logger.Warn("refused a session proof", "error", err, "node", s.NodeAddr)
 		return false, []byte(registration.RefusedProof + ": " + err.Error())
 	}
 
+	sessResp, refusal := s.register(work, ctx, conn, &sessReq, sessionID, generation, nil, nil)
+	if sessResp == nil {
+		return false, refusal
+	}
+
+	b, err := proto.Marshal(sessResp)
+	if err != nil {
+		return false, []byte(err.Error())
+	}
+
+	return true, b
+}
+
+// register stores and adopts sessReq's session under sessionID, publishing
+// its route, and returns the reply to send. A nil reply is a refusal: refusal
+// is its body, registration.Superseded when a newer registration holds the
+// ID, and nil when the host's connection closed while registering.
+//
+// A delegated registration comes with the reference its home is to have, and
+// its obligation. Its home is reserved for the ID before the store call, so a
+// fence or drain that comes while the store is called retires it.
+func (s *sshd) register(work *sshWorkRef, ctx ssh.Context, conn *gossh.ServerConn, sessReq *CreateSessionRequest, sessionID string, generation uint64, delegatedRef *RegistrationRef, obligation *delegatedObligation) (*CreateSessionResponse, []byte) {
 	// Store complete session data for routing and session management
 	session := NewSession(
 		sessionID,
@@ -874,13 +954,31 @@ func (s *sshd) handleCreateSession(work *sshWorkRef, ctx ssh.Context, srv *ssh.S
 		sessReq.ClientAuthorizedKeys,
 	)
 	session.Generation = generation
+
 	// Every record this node writes names its authority.
-	session.AuthorityHint = AuthorityLocal
+	var pending *Registration
+	if delegatedRef != nil {
+		session.AuthorityHint = AuthorityDelegated
+		pending = &Registration{Session: session, home: newLocalHome(*delegatedRef), pending: true, obligation: obligation}
+		prev, err := s.sessions.add(work, pending, conn)
+		if err != nil {
+			return nil, []byte(registration.Superseded)
+		}
+		s.retirePrevious(work, prev, conn, pending)
+		stop := context.AfterFunc(ctx, func() { s.sessions.discardPending(pending) })
+		defer stop()
+		defer s.sessions.discardPending(pending)
+		if ctx.Err() != nil {
+			return nil, nil
+		}
+	} else {
+		session.AuthorityHint = AuthorityLocal
+	}
 
 	reg, sshUser, err := s.SessionManager.Register(context.Background(), session)
 	if errors.Is(err, ErrSuperseded) {
 		s.Logger.Warn("refused a superseded registration", "error", err, "session-id", sessionID)
-		return false, []byte(registration.Superseded)
+		return nil, []byte(registration.Superseded)
 	}
 	if err != nil {
 		s.Logger.Error("failed to create session",
@@ -888,33 +986,31 @@ func (s *sshd) handleCreateSession(work *sshWorkRef, ctx ssh.Context, srv *ssh.S
 			"session", sessionID,
 			"node", s.NodeAddr,
 		)
-		return false, []byte(fmt.Sprintf("failed to create session: %v", err))
+		return nil, []byte(fmt.Sprintf("failed to create session: %v", err))
 	}
-	ctx.Lock()
-	registrationID, _ := ctx.Value(contextKeyDownstreamSessionID{}).([]byte)
-	ctx.Unlock()
-	reg.localRef = RegistrationRef{Authority: AuthorityLocal, SessionID: sessionID, Generation: generation, RoutingID: sessionID,
-		RegistrationID: registrationID, HomeNode: s.NodeAddr, HomeNodeID: s.NodeID, HomeBootID: s.BootID}
+	if pending != nil {
+		reg.home = pending.home
+		reg.obligation = pending.obligation
+	} else {
+		ctx.Lock()
+		registrationID, _ := ctx.Value(contextKeyDownstreamSessionID{}).([]byte)
+		ctx.Unlock()
+		reg.localRef = RegistrationRef{Authority: AuthorityLocal, SessionID: sessionID, Generation: generation, RoutingID: sessionID,
+			RegistrationID: registrationID, HomeNode: s.NodeAddr, HomeNodeID: s.NodeID, HomeBootID: s.BootID}
+	}
 	if s.onRegistered != nil {
 		s.onRegistered(ctx, reg)
 	}
 	if ok, refusal := s.adopt(work, ctx, reg, conn); !ok {
-		return false, refusal
+		return nil, refusal
 	}
 
-	sessResp := &CreateSessionResponse{
+	return &CreateSessionResponse{
 		SessionID:        sessionID,
 		NodeAddr:         s.NodeAddr,
 		SshUser:          sshUser,
 		SessionKeyRedial: !s.HostGateEnabled,
-	}
-
-	b, err := proto.Marshal(sessResp)
-	if err != nil {
-		return false, []byte(err.Error())
-	}
-
-	return true, b
+	}, nil
 }
 
 // leftBeforeAuthenticating reports whether err is a client that left during

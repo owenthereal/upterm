@@ -20,6 +20,10 @@ message CreateSessionRequest {
   // The host key's signature over this connection's SSH session ID, the
   // secret and the generation.
   bytes hostKeyProof = 6;
+  // Set only for a run whose registration and guests an external authority
+  // decides. A relay that can't honour it refuses the registration; it never
+  // registers the run as a local session instead.
+  DelegatedSession delegated_session = 7;
 }
 
 message CreateSessionResponse {
@@ -29,6 +33,9 @@ message CreateSessionResponse {
   // True when this relay admits any host key (no --authorized-keys), so a
   // host can authenticate a redial with its session key alone.
   bool sessionKeyRedial = 4;
+  // The answer to a delegated registration: the request's protocol and
+  // external session ID echoed exactly, with the disposition and its revision.
+  DelegatedSession delegated_session = 5;
 }
 
 // Ingress is where a guest's connection entered the relay fleet.
@@ -70,6 +77,90 @@ message AuthRequest {
   // format that predates the gate.
   uint32 gate_protocol = 12;
 }
+
+// What the authority decided about a delegated session. Only current admits
+// guests. stopped ends the hosted command; withdrawn ends remote access and
+// leaves the command running locally. Both are final.
+enum DelegatedDisposition {
+  DELEGATED_UNSPECIFIED = 0;
+  DELEGATED_CURRENT = 1;
+  DELEGATED_STOPPED = 2;
+  DELEGATED_WITHDRAWN = 3;
+}
+
+// A delegated registration. The request carries the protocol and the external
+// session ID, with no disposition; the response echoes both exactly and adds
+// the disposition and its revision. The protocol is explicit, so a relay that
+// doesn't speak it can never treat the run as a local session.
+message DelegatedSession {
+  string protocol = 1;
+  string external_session_id = 2;
+  reserved 3, 4;
+  DelegatedDisposition disposition = 5;
+  // Orders the dispositions of one external session; at least 1 in a response.
+  uint64 decision_revision = 6;
+}
+
+// The host finished local startup.
+message DelegatedReady {}
+
+// The hosted command's actual outcome. exit_status is zero when the status
+// isn't known.
+message DelegatedExit {
+  sint32 exit_status = 1;
+  bool status_known = 2;
+}
+
+// A host's report on its own delegated registration, sent as
+// upterm-delegated-control@upterm.dev. sequence starts at 1 for each
+// generation and rises by one per report; a retried report repeats its
+// sequence and body exactly.
+message DelegatedControlRequest {
+  string external_session_id = 1;
+  uint64 generation = 2;
+  uint64 sequence = 3;
+  reserved 5, 7;
+  oneof event {
+    DelegatedReady ready = 4;
+    DelegatedExit exit = 6;
+  }
+}
+
+message DelegatedControlReply {
+  string external_session_id = 1;
+  uint64 generation = 2;
+  uint64 acknowledged_sequence = 3;
+  DelegatedDisposition disposition = 4;
+  uint64 decision_revision = 5;
+}
+
+// A decision the relay pushes to a host, as upterm-delegated-decision@upterm.dev.
+message DelegatedDecision {
+  string external_session_id = 1;
+  uint64 generation = 2;
+  DelegatedDisposition disposition = 3;
+  uint64 decision_revision = 4;
+}
+
+// The host received a decision. It says nothing of what the host has done.
+message DelegatedDecisionAck {
+  string external_session_id = 1;
+  uint64 generation = 2;
+  uint64 decision_revision = 3;
+}
+
+enum DelegatedErrorCode {
+  DELEGATED_ERROR_UNSPECIFIED = 0;
+  // Retryable: the same request may succeed later.
+  DELEGATED_UNAVAILABLE = 1;
+  DELEGATED_INVALID_REQUEST = 2;
+  // A newer registration replaced this one's transport.
+  DELEGATED_STALE_GENERATION = 3;
+  DELEGATED_UNSUPPORTED = 4;
+}
+
+// The body of a refused delegated request.
+message DelegatedError { DelegatedErrorCode code = 1; }
 
 enum GateMode {
   GATE_MODE_UNSPECIFIED = 0;
