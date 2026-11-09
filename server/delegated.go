@@ -68,7 +68,11 @@ type Runtime interface {
 	// PushDecision sends d to the host connection that registered d's
 	// external session at d's generation on this relay, and returns the
 	// host's acknowledgment: that the host received it, not that it acted on
-	// it. A final decision retires the registration before it is sent.
+	// it. A final decision retires the registration's home before it is
+	// sent, so no guest reaches it; the route's store entry is released
+	// alongside, and the push waits for that only within ctx, so a push the
+	// host acknowledged can return at ctx's end with the release still
+	// running.
 	// ErrDelegatedHostNotFound is no such connection. A *DelegatedRefusedError
 	// is the host refusing the decision, or answering it outside the
 	// delegated protocol, which is DELEGATED_UNSUPPORTED.
@@ -779,8 +783,8 @@ func wellFormedEvent(control *DelegatedControlRequest) bool {
 	return false
 }
 
-// PushDecision waits for the host at most ctx's life and
-// delegatedDecisionTimeout.
+// PushDecision waits for the host, and for the release of a final decision's
+// route, at most ctx's life and delegatedDecisionTimeout.
 func (m *delegatedHosts) PushDecision(ctx context.Context, decision *DelegatedDecision) (*DelegatedDecisionAck, error) {
 	if decision == nil || !validUUID(decision.ExternalSessionId) || decision.Generation == 0 || !ValidDelegatedDisposition(decision.Disposition, decision.DecisionRevision) {
 		return nil, errDelegatedDecision

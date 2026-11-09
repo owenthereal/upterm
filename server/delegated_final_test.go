@@ -155,3 +155,29 @@ func TestPushedFinalDecisionIsBoundedByItsDeadline(t *testing.T) {
 		require.Nil(t, slotOf(srv, p.id()))
 	})
 }
+
+// A final decision pushed while the relay is stopping retires the home before
+// the push returns, though the stopping sshd takes no release work: the home
+// would otherwise stay held, and joinable, until its host's connection ended.
+func TestPushedFinalDecisionRetiresTheHomeOnAStoppingRelay(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		srv := newBubbleSSHD(t, withAuthority(&fakeAuthority{}))
+		p := newProven(t)
+		host, _ := freezableOriginHost(t, srv, "original", nil)
+		ok, body := sendCreate(t, host, originRequest(t, p, "original", 1))
+		require.True(t, ok, "%q", body)
+		home, found := srv.sshd.Lookup(p.id())
+		require.True(t, found)
+
+		// The sshd stops taking work, as it does when the relay stops; its
+		// connections stay open.
+		srv.sshd.work.seal()
+
+		ctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
+		defer cancel()
+		_, _ = srv.sshd.delegated.PushDecision(ctx, &DelegatedDecision{ExternalSessionId: externalSessionID, Generation: 1, Disposition: DelegatedDisposition_DELEGATED_STOPPED, DecisionRevision: 2})
+		require.True(t, homeRetired(home), "the home stayed held after a final decision on a stopping relay")
+		_, found = srv.sshd.Lookup(p.id())
+		require.False(t, found, "the home stayed joinable after a final decision on a stopping relay")
+	})
+}
