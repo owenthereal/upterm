@@ -4,12 +4,14 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 
 	uptermctx "github.com/owenthereal/upterm/internal/context"
 	"github.com/owenthereal/upterm/internal/envexpand"
@@ -265,10 +267,21 @@ func (cmd *rootCmd) RunE(c *cobra.Command, args []string) error {
 		return err
 	}
 	opt.BootID = bootID
+	// started records the error the extension's Lifecycle failed to start
+	// with, which the server returns as it is, so it can be told apart and
+	// named after the extension.
+	var started *startedLifecycle
 	if ext := cmd.ext; ext != nil && ext.New != nil {
 		extensions, err := ext.New(c.Context(), newConfig(c, v, opt, logger.Logger))
 		if err != nil {
 			return fmt.Errorf("uptermd: extension %s: %w", ext.Name, err)
+		}
+		if err := checkListenersForAuthority(opt, extensions); err != nil {
+			return fmt.Errorf("uptermd: %w", err)
+		}
+		if extensions.Lifecycle != nil {
+			started = &startedLifecycle{Lifecycle: extensions.Lifecycle}
+			extensions.Lifecycle = started
 		}
 		opt.Extensions = extensions
 	}
@@ -279,10 +292,65 @@ func (cmd *rootCmd) RunE(c *cobra.Command, args []string) error {
 	// to the wrong end of the run.
 	if err := server.Start(c.Context(), opt, logger.Logger); err != nil {
 		logger.Error("uptermd exited with an error", "error", err)
+		if failed := started.failure(); failed != nil && errors.Is(err, failed) {
+			return fmt.Errorf("uptermd: extension %s: %w", cmd.ext.Name, failed)
+		}
 		return fmt.Errorf("uptermd: %w", err)
 	}
 
 	return nil
+}
+
+// The refusals of an enabled authority without the listener options that
+// make its hosts' sources trustworthy, which only the command can check:
+// they exist only as options of the listener it opens.
+var (
+	errAuthorityNeedsTCP4  = errors.New("an enabled authority needs --ssh-network tcp4")
+	errAuthorityNeedsPROXY = errors.New("an enabled authority needs --ssh-proxy-protocol-required")
+)
+
+// checkListenersForAuthority refuses an enabled authority whose public SSH
+// listener isn't IPv4 alone, behind a PROXY header that is required. The
+// server checks the rest of what an enabled authority needs as it starts.
+func checkListenersForAuthority(opt server.Opt, extensions server.Extensions) error {
+	if extensions.Authority == nil || !extensions.Enabled {
+		return nil
+	}
+	if opt.SSHNetwork != "tcp4" {
+		return errAuthorityNeedsTCP4
+	}
+	if !opt.SSHProxyProtocolRequired {
+		return errAuthorityNeedsPROXY
+	}
+	return nil
+}
+
+// startedLifecycle is an extension's Lifecycle, recording the error its
+// Start returned.
+type startedLifecycle struct {
+	server.Lifecycle
+
+	mu  sync.Mutex
+	err error
+}
+
+func (l *startedLifecycle) Start(ctx context.Context, rt server.Runtime) error {
+	err := l.Lifecycle.Start(ctx, rt)
+	l.mu.Lock()
+	l.err = err
+	l.mu.Unlock()
+	return err
+}
+
+// failure is the error Start returned; nil if it succeeded, never ran, or l
+// is nil.
+func (l *startedLifecycle) failure() error {
+	if l == nil {
+		return nil
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.err
 }
 
 // newBootID is a random version 4 UUID, in canonical lowercase form.

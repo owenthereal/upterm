@@ -23,6 +23,14 @@ const (
 	ServerSSHServerVersion         = "SSH-2.0-uptermd"
 	ServerServerInfoRequestType    = "upterm-server-info@upterm.dev"
 	ServerCreateSessionRequestType = "upterm-create-session@upterm.dev"
+	// ServerDelegatedControlRequestType is a host's report on its own
+	// delegated registration, host to relay: DelegatedControlRequest,
+	// answered by DelegatedControlReply or refused with a DelegatedError.
+	ServerDelegatedControlRequestType = "upterm-delegated-control@upterm.dev"
+	// HostDelegatedDecisionRequestType is a decision about a host's delegated
+	// session, relay to host: DelegatedDecision, answered by
+	// DelegatedDecisionAck.
+	HostDelegatedDecisionRequestType = "upterm-delegated-decision@upterm.dev"
 
 	// header
 	HeaderUptermClientVersion = "Upterm-Client-Version"

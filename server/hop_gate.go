@@ -28,14 +28,24 @@ import (
 // route. A node advertises that it answers the exchange with the gate-v1
 // token, appended to its SSH server version as an RFC 4253 comment.
 //
-// Gate hops are dormant unless a node refuses legacy hops. Such a node gates
-// every hop it starts, and refuses every hop that doesn't use the gate. Any
-// other node hops as nodes did before the gate: the guest's own SSH user, as
-// the hop's user and its certificate's principal, gate_protocol 0, and no gate
-// request. Every node answers the exchange for the registrations it holds, on
-// its internal listener, which no host connects to, and on a shared listener
-// only once it gates: a host reads the server version too, and releases from
-// before the token can't read a version with a comment.
+// Gate hops are dormant unless a node refuses legacy hops or has an authority
+// composed, dark or enabled. Such a node gates every hop it starts. One that
+// refuses legacy hops also refuses every hop that doesn't use the gate, and
+// every peer that doesn't advertise it. One that accepts them goes on, toward
+// a peer that doesn't advertise the gate, with today's handling on the same
+// connection and no mode exchange; the hop's certificate still carries
+// gate_protocol 1 and the routing ID as its user. A peer that has the gate
+// serves such a hop as a legacy hop in either routing mode, since the
+// listener it arrived on didn't advertise. A peer from before the gate serves
+// it only in Consul routing, where the routing ID is the user it expects: in
+// embedded routing, every peer of a node with an authority composed must run
+// a release with the gate. Any other node hops as nodes did before the gate:
+// the guest's own SSH user, as the hop's user and its certificate's
+// principal, gate_protocol 0, and no gate request. Every node answers the
+// exchange for the registrations it holds, on its internal listener, which no
+// host connects to, and on a shared listener only once it gates: a host reads
+// the server version too, and releases from before the token can't read a
+// version with a comment.
 
 // gateTimeout bounds each gate exchange: an answer is in time at exactly
 // gateTimeout after its request was sent, and late a nanosecond after.
@@ -84,7 +94,7 @@ func (r *localAuthorityRegistry) localSession(home Home) (*Session, bool) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	lr, ok := l.regs[home.Ref().RoutingID]
-	if !ok || lr.home != home || !home.Held() {
+	if !ok || lr.reg.pending || lr.home != home || !home.Held() {
 		return nil, false
 	}
 	session := *lr.reg.Session
@@ -221,8 +231,10 @@ func gateID(s string) bool {
 	return s != "" && len(s) <= 1024 && !strings.ContainsAny(s, "\x00\r\n\t ")
 }
 
-// validGateRegistration accepts a local registration: one that answers to no
-// account, with its routing ID as its session ID.
+// validGateRegistration accepts a local registration, one that answers to no
+// account, with its routing ID as its session ID; and a delegated one, with
+// an account, a generation, exactly one run key that is no certificate, a
+// node ID and a UUID boot ID for its home.
 func validGateRegistration(r *GateRegistration) error {
 	if r == nil || !gateID(r.RoutingId) || !gateID(r.SessionId) || !gateID(r.HomeNode) || len(r.RegistrationId) == 0 || len(r.RunPublicKeys) == 0 {
 		return errGateRefused
@@ -232,12 +244,19 @@ func validGateRegistration(r *GateRegistration) error {
 		if r.AccountId != "" || r.SessionId != r.RoutingId {
 			return errGateRefused
 		}
+	case GateMode_GATE_MODE_DELEGATED:
+		if !gateID(r.AccountId) || r.Generation == 0 || len(r.RunPublicKeys) != 1 || !gateID(r.HomeNodeId) || !validUUID(r.HomeBootId) {
+			return errGateRefused
+		}
 	default:
 		return errGateRefused
 	}
 	for _, wire := range r.RunPublicKeys {
 		key, err := ssh.ParsePublicKey(wire)
 		if err != nil || !bytes.Equal(key.Marshal(), wire) {
+			return errGateRefused
+		}
+		if _, cert := key.(*ssh.Certificate); cert && r.Mode == GateMode_GATE_MODE_DELEGATED {
 			return errGateRefused
 		}
 	}
@@ -397,9 +416,12 @@ func (g *hopGate) request(r *ssh.Request) (bool, []byte, error) {
 		if validGateRegistration(ref) != nil || !g.held() {
 			return false, nil, errGateRefused
 		}
-		if ref.Mode == GateMode_GATE_MODE_LOCAL {
-			g.admitted = true
+		// A delegated registration's guests are its authority's to admit,
+		// and this node admits none of them through the gate.
+		if ref.Mode != GateMode_GATE_MODE_LOCAL {
+			return false, nil, errGateRefused
 		}
+		g.admitted = true
 		b, _ := proto.Marshal(&GateModeReply{Protocol: 1, Nonce: g.nonce, Registration: ref})
 		return true, b, nil
 	}

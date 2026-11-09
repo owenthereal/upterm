@@ -183,7 +183,13 @@ type Registration struct {
 	// localRef is what the home this node adopts the registration with is to
 	// say of it, from the connection it came over.
 	localRef RegistrationRef
-	Session  *Session
+	// pending marks a delegated registration's reservation of its ID on this
+	// node, made before the store has it: it has a home, which nothing finds,
+	// and no lease keeper. obligation is a delegated registration's
+	// delegated work, whose fences its adoption is checked against.
+	pending    bool
+	obligation *delegatedObligation
+	Session    *Session
 	// ConfirmedAt is the send time of the lock-session creation this
 	// registration's lease came from (memory: taken before the write). The
 	// expiry budget counts from it, and the lease's TTL clock can't have

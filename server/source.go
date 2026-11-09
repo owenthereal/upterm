@@ -6,7 +6,8 @@
 // A program that embeds uptermd adds to the relay through these
 // declarations:
 //
-//   - [Extensions], what the program adds, and its Sources field;
+//   - [Extensions], what the program adds, and its Authority, Enabled,
+//     Protocols, Lifecycle and Sources fields;
 //   - [SourceFilter], which denies sources beyond DenySources;
 //   - [GuestOrigin], where a connection entered the fleet;
 //   - [Opt.NodeID], [Opt.DenySources], [Opt.BootID] and [Opt.Extensions];
@@ -17,7 +18,21 @@
 //   - [RegistrationRef], which identifies one adopted registration;
 //   - [Home], a registration as the node that adopted it holds it;
 //   - [Session.AuthorityHint];
-//   - [Opt.RefuseLegacyHops] and [Server.RefuseLegacyHops].
+//   - [Opt.RefuseLegacyHops] and [Server.RefuseLegacyHops];
+//   - [Authority], which decides delegated registrations;
+//   - [Lifecycle], what an extension runs beside a serving relay;
+//   - [Runtime], the extension's control over the relay's delegated work;
+//   - [Fence], which refuses new delegated registrations while it is set;
+//   - [DelegatedRegistration], a delegated registration as the relay
+//     verified it;
+//   - [RegistrationResult], an Authority's decision on one;
+//   - [Report], a host's report on its own delegated registration;
+//   - [Contact], what the relay has observed of a host's connection;
+//   - [DelegatedRefusedError], a definitive delegated refusal;
+//   - [DecodeDelegatedError], which reads a refused delegated request's body;
+//   - [ValidDelegatedDisposition], which reports whether a disposition is a
+//     decision with a revision that can order it;
+//   - [ErrDelegatedHostNotFound].
 //
 // This API may change in any minor release, and each change is listed in the
 // release notes.
@@ -53,6 +68,18 @@
 // clients over on the SSH listener itself, from this machine's own address,
 // so a list that names that address, such as loopback, refuses every
 // WebSocket client.
+//
+// # Hops between nodes
+//
+// A node whose guest's session is on another node hops there. By default it
+// hops as releases before the hop gate did. A node that refuses legacy hops,
+// or has an authority composed, dark or enabled, gates its hops instead: it
+// asks the other node which registration it holds before forwarding. Toward a
+// node that doesn't advertise the gate, a node that still accepts legacy hops
+// goes on without asking. Such a hop names the session by its routing ID,
+// which a release without the gate serves only in Consul routing; in embedded
+// routing, every node beside one with an authority composed must run a
+// release with the gate.
 package server
 
 import (

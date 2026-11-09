@@ -37,6 +37,13 @@ func TestOriginWireCompatibility(t *testing.T) {
 	// AuthRequest reserves nothing: its numbers are all in use.
 	require.Zero(t, auth.ProtoReflect().Descriptor().ReservedNames().Len())
 	require.Zero(t, auth.ProtoReflect().Descriptor().ReservedRanges().Len())
+	for _, m := range []proto.Message{&CreateSessionRequest{}, &CreateSessionResponse{}} {
+		f := m.ProtoReflect().Descriptor().Fields().ByName("delegated_session")
+		require.NotNil(t, f)
+		require.Equal(t, map[bool]protoreflect.FieldNumber{true: 7, false: 5}[m.ProtoReflect().Descriptor().Name() == "CreateSessionRequest"], f.Number())
+		require.Equal(t, protoreflect.MessageKind, f.Kind())
+		require.Equal(t, protoreflect.FullName("server.DelegatedSession"), f.Message().FullName())
+	}
 }
 
 // A filter alone, with no built-in list, refuses at each point.

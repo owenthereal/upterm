@@ -54,13 +54,16 @@ type sshProxy struct {
 	deny sourceDeny
 
 	// RefuseLegacyHops has this node gate every hop it starts, and refuse
-	// every hop that doesn't use the gate. NodeID is the node's --node-id, which
-	// its gate hops carry. authorities finds the registrations the node holds,
-	// for the gate to answer from; nil where a test builds the proxy alone,
-	// which then neither gates nor answers the gate.
-	RefuseLegacyHops bool
-	NodeID           string
-	authorities      homeLookup
+	// every hop that doesn't use the gate. AuthorityComposed, an authority
+	// composed, dark or enabled, has it gate every hop it starts too. NodeID
+	// is the node's --node-id, which its gate hops carry. authorities finds
+	// the registrations the node holds, for the gate to answer from; nil where
+	// a test builds the proxy alone, which then neither gates nor answers the
+	// gate.
+	RefuseLegacyHops  bool
+	AuthorityComposed bool
+	NodeID            string
+	authorities       homeLookup
 
 	routing *SSHRouting
 	mux     sync.Mutex
@@ -115,6 +118,7 @@ func (r *sshProxy) Serve(ln net.Listener) error {
 			authorizedKeys:    authorizedKeys,
 			Logger:            r.Logger.With("component", "auth"),
 			RefuseLegacyHops:  r.RefuseLegacyHops,
+			AuthorityComposed: r.AuthorityComposed,
 			NodeID:            r.NodeID,
 			authorities:       r.authorities,
 		},
@@ -262,21 +266,24 @@ type proxyAuth struct {
 	// before the banner and again at authentication, and a hop's certified
 	// source at authentication on any listener.
 	deny sourceDeny
-	// RefuseLegacyHops, NodeID and authorities are the sshProxy's.
-	RefuseLegacyHops bool
-	NodeID           string
-	authorities      homeLookup
+	// RefuseLegacyHops, AuthorityComposed, NodeID and authorities are the
+	// sshProxy's.
+	RefuseLegacyHops  bool
+	AuthorityComposed bool
+	NodeID            string
+	authorities       homeLookup
 
 	Logger *slog.Logger
 }
 
 // gates reports whether this node starts gate hops: only once it refuses
-// legacy hops. A node that gates also holds every guest of its own sessions to
-// the keys it adopted them with, holds every hop it receives to the strict
-// AuthRequest scan, and forwards no hop on to another node. Any other node
-// hops, and serves legacy hops, exactly as nodes did before the gate.
+// legacy hops, or has an authority composed, dark or enabled. A node that
+// gates also holds every guest of its own sessions to the keys it adopted
+// them with, holds every hop it receives to the strict AuthRequest scan, and
+// forwards no hop on to another node. Any other node hops, and serves legacy
+// hops, exactly as nodes did before the gate.
 func (a proxyAuth) gates() bool {
-	return a.authorities != nil && a.RefuseLegacyHops
+	return a.authorities != nil && (a.RefuseLegacyHops || a.AuthorityComposed)
 }
 
 // advertises reports whether this proxy's listener advertises the gate, and

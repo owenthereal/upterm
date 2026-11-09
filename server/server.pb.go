@@ -75,6 +75,118 @@ func (Ingress) EnumDescriptor() ([]byte, []int) {
 	return file_server_proto_rawDescGZIP(), []int{0}
 }
 
+// What the authority decided about a delegated session. Only current admits
+// guests. stopped ends the hosted command; withdrawn ends remote access and
+// leaves the command running locally. Both are final.
+type DelegatedDisposition int32
+
+const (
+	DelegatedDisposition_DELEGATED_UNSPECIFIED DelegatedDisposition = 0
+	DelegatedDisposition_DELEGATED_CURRENT     DelegatedDisposition = 1
+	DelegatedDisposition_DELEGATED_STOPPED     DelegatedDisposition = 2
+	DelegatedDisposition_DELEGATED_WITHDRAWN   DelegatedDisposition = 3
+)
+
+// Enum value maps for DelegatedDisposition.
+var (
+	DelegatedDisposition_name = map[int32]string{
+		0: "DELEGATED_UNSPECIFIED",
+		1: "DELEGATED_CURRENT",
+		2: "DELEGATED_STOPPED",
+		3: "DELEGATED_WITHDRAWN",
+	}
+	DelegatedDisposition_value = map[string]int32{
+		"DELEGATED_UNSPECIFIED": 0,
+		"DELEGATED_CURRENT":     1,
+		"DELEGATED_STOPPED":     2,
+		"DELEGATED_WITHDRAWN":   3,
+	}
+)
+
+func (x DelegatedDisposition) Enum() *DelegatedDisposition {
+	p := new(DelegatedDisposition)
+	*p = x
+	return p
+}
+
+func (x DelegatedDisposition) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (DelegatedDisposition) Descriptor() protoreflect.EnumDescriptor {
+	return file_server_proto_enumTypes[1].Descriptor()
+}
+
+func (DelegatedDisposition) Type() protoreflect.EnumType {
+	return &file_server_proto_enumTypes[1]
+}
+
+func (x DelegatedDisposition) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use DelegatedDisposition.Descriptor instead.
+func (DelegatedDisposition) EnumDescriptor() ([]byte, []int) {
+	return file_server_proto_rawDescGZIP(), []int{1}
+}
+
+type DelegatedErrorCode int32
+
+const (
+	DelegatedErrorCode_DELEGATED_ERROR_UNSPECIFIED DelegatedErrorCode = 0
+	// Retryable: the same request may succeed later.
+	DelegatedErrorCode_DELEGATED_UNAVAILABLE     DelegatedErrorCode = 1
+	DelegatedErrorCode_DELEGATED_INVALID_REQUEST DelegatedErrorCode = 2
+	// A newer registration replaced this one's transport.
+	DelegatedErrorCode_DELEGATED_STALE_GENERATION DelegatedErrorCode = 3
+	DelegatedErrorCode_DELEGATED_UNSUPPORTED      DelegatedErrorCode = 4
+)
+
+// Enum value maps for DelegatedErrorCode.
+var (
+	DelegatedErrorCode_name = map[int32]string{
+		0: "DELEGATED_ERROR_UNSPECIFIED",
+		1: "DELEGATED_UNAVAILABLE",
+		2: "DELEGATED_INVALID_REQUEST",
+		3: "DELEGATED_STALE_GENERATION",
+		4: "DELEGATED_UNSUPPORTED",
+	}
+	DelegatedErrorCode_value = map[string]int32{
+		"DELEGATED_ERROR_UNSPECIFIED": 0,
+		"DELEGATED_UNAVAILABLE":       1,
+		"DELEGATED_INVALID_REQUEST":   2,
+		"DELEGATED_STALE_GENERATION":  3,
+		"DELEGATED_UNSUPPORTED":       4,
+	}
+)
+
+func (x DelegatedErrorCode) Enum() *DelegatedErrorCode {
+	p := new(DelegatedErrorCode)
+	*p = x
+	return p
+}
+
+func (x DelegatedErrorCode) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (DelegatedErrorCode) Descriptor() protoreflect.EnumDescriptor {
+	return file_server_proto_enumTypes[2].Descriptor()
+}
+
+func (DelegatedErrorCode) Type() protoreflect.EnumType {
+	return &file_server_proto_enumTypes[2]
+}
+
+func (x DelegatedErrorCode) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use DelegatedErrorCode.Descriptor instead.
+func (DelegatedErrorCode) EnumDescriptor() ([]byte, []int) {
+	return file_server_proto_rawDescGZIP(), []int{2}
+}
+
 type GateMode int32
 
 const (
@@ -108,11 +220,11 @@ func (x GateMode) String() string {
 }
 
 func (GateMode) Descriptor() protoreflect.EnumDescriptor {
-	return file_server_proto_enumTypes[1].Descriptor()
+	return file_server_proto_enumTypes[3].Descriptor()
 }
 
 func (GateMode) Type() protoreflect.EnumType {
-	return &file_server_proto_enumTypes[1]
+	return &file_server_proto_enumTypes[3]
 }
 
 func (x GateMode) Number() protoreflect.EnumNumber {
@@ -121,7 +233,7 @@ func (x GateMode) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use GateMode.Descriptor instead.
 func (GateMode) EnumDescriptor() ([]byte, []int) {
-	return file_server_proto_rawDescGZIP(), []int{1}
+	return file_server_proto_rawDescGZIP(), []int{3}
 }
 
 type CreateSessionRequest struct {
@@ -140,9 +252,13 @@ type CreateSessionRequest struct {
 	Generation uint64 `protobuf:"varint,5,opt,name=generation,proto3" json:"generation,omitempty"`
 	// The host key's signature over this connection's SSH session ID, the
 	// secret and the generation.
-	HostKeyProof  []byte `protobuf:"bytes,6,opt,name=hostKeyProof,proto3" json:"hostKeyProof,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	HostKeyProof []byte `protobuf:"bytes,6,opt,name=hostKeyProof,proto3" json:"hostKeyProof,omitempty"`
+	// Set only for a run whose registration and guests an external authority
+	// decides. A relay that can't honour it refuses the registration; it never
+	// registers the run as a local session instead.
+	DelegatedSession *DelegatedSession `protobuf:"bytes,7,opt,name=delegated_session,json=delegatedSession,proto3" json:"delegated_session,omitempty"`
+	unknownFields    protoimpl.UnknownFields
+	sizeCache        protoimpl.SizeCache
 }
 
 func (x *CreateSessionRequest) Reset() {
@@ -217,6 +333,13 @@ func (x *CreateSessionRequest) GetHostKeyProof() []byte {
 	return nil
 }
 
+func (x *CreateSessionRequest) GetDelegatedSession() *DelegatedSession {
+	if x != nil {
+		return x.DelegatedSession
+	}
+	return nil
+}
+
 type CreateSessionResponse struct {
 	state     protoimpl.MessageState `protogen:"open.v1"`
 	SessionID string                 `protobuf:"bytes,1,opt,name=sessionID,proto3" json:"sessionID,omitempty"`
@@ -225,6 +348,9 @@ type CreateSessionResponse struct {
 	// True when this relay admits any host key (no --authorized-keys), so a
 	// host can authenticate a redial with its session key alone.
 	SessionKeyRedial bool `protobuf:"varint,4,opt,name=sessionKeyRedial,proto3" json:"sessionKeyRedial,omitempty"`
+	// The answer to a delegated registration: the request's protocol and
+	// external session ID echoed exactly, with the disposition and its revision.
+	DelegatedSession *DelegatedSession `protobuf:"bytes,5,opt,name=delegated_session,json=delegatedSession,proto3" json:"delegated_session,omitempty"`
 	unknownFields    protoimpl.UnknownFields
 	sizeCache        protoimpl.SizeCache
 }
@@ -285,6 +411,13 @@ func (x *CreateSessionResponse) GetSessionKeyRedial() bool {
 		return x.SessionKeyRedial
 	}
 	return false
+}
+
+func (x *CreateSessionResponse) GetDelegatedSession() *DelegatedSession {
+	if x != nil {
+		return x.DelegatedSession
+	}
+	return nil
 }
 
 type AuthRequest struct {
@@ -433,6 +566,531 @@ func (x *AuthRequest) GetGateProtocol() uint32 {
 	return 0
 }
 
+// A delegated registration. The request carries the protocol and the external
+// session ID, with no disposition; the response echoes both exactly and adds
+// the disposition and its revision. The protocol is explicit, so a relay that
+// doesn't speak it can never treat the run as a local session.
+type DelegatedSession struct {
+	state             protoimpl.MessageState `protogen:"open.v1"`
+	Protocol          string                 `protobuf:"bytes,1,opt,name=protocol,proto3" json:"protocol,omitempty"`
+	ExternalSessionId string                 `protobuf:"bytes,2,opt,name=external_session_id,json=externalSessionId,proto3" json:"external_session_id,omitempty"`
+	Disposition       DelegatedDisposition   `protobuf:"varint,5,opt,name=disposition,proto3,enum=server.DelegatedDisposition" json:"disposition,omitempty"`
+	// Orders the dispositions of one external session; at least 1 in a response.
+	DecisionRevision uint64 `protobuf:"varint,6,opt,name=decision_revision,json=decisionRevision,proto3" json:"decision_revision,omitempty"`
+	unknownFields    protoimpl.UnknownFields
+	sizeCache        protoimpl.SizeCache
+}
+
+func (x *DelegatedSession) Reset() {
+	*x = DelegatedSession{}
+	mi := &file_server_proto_msgTypes[3]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DelegatedSession) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DelegatedSession) ProtoMessage() {}
+
+func (x *DelegatedSession) ProtoReflect() protoreflect.Message {
+	mi := &file_server_proto_msgTypes[3]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DelegatedSession.ProtoReflect.Descriptor instead.
+func (*DelegatedSession) Descriptor() ([]byte, []int) {
+	return file_server_proto_rawDescGZIP(), []int{3}
+}
+
+func (x *DelegatedSession) GetProtocol() string {
+	if x != nil {
+		return x.Protocol
+	}
+	return ""
+}
+
+func (x *DelegatedSession) GetExternalSessionId() string {
+	if x != nil {
+		return x.ExternalSessionId
+	}
+	return ""
+}
+
+func (x *DelegatedSession) GetDisposition() DelegatedDisposition {
+	if x != nil {
+		return x.Disposition
+	}
+	return DelegatedDisposition_DELEGATED_UNSPECIFIED
+}
+
+func (x *DelegatedSession) GetDecisionRevision() uint64 {
+	if x != nil {
+		return x.DecisionRevision
+	}
+	return 0
+}
+
+// The host finished local startup.
+type DelegatedReady struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *DelegatedReady) Reset() {
+	*x = DelegatedReady{}
+	mi := &file_server_proto_msgTypes[4]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DelegatedReady) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DelegatedReady) ProtoMessage() {}
+
+func (x *DelegatedReady) ProtoReflect() protoreflect.Message {
+	mi := &file_server_proto_msgTypes[4]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DelegatedReady.ProtoReflect.Descriptor instead.
+func (*DelegatedReady) Descriptor() ([]byte, []int) {
+	return file_server_proto_rawDescGZIP(), []int{4}
+}
+
+// The hosted command's actual outcome. exit_status is zero when the status
+// isn't known.
+type DelegatedExit struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	ExitStatus    int32                  `protobuf:"zigzag32,1,opt,name=exit_status,json=exitStatus,proto3" json:"exit_status,omitempty"`
+	StatusKnown   bool                   `protobuf:"varint,2,opt,name=status_known,json=statusKnown,proto3" json:"status_known,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *DelegatedExit) Reset() {
+	*x = DelegatedExit{}
+	mi := &file_server_proto_msgTypes[5]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DelegatedExit) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DelegatedExit) ProtoMessage() {}
+
+func (x *DelegatedExit) ProtoReflect() protoreflect.Message {
+	mi := &file_server_proto_msgTypes[5]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DelegatedExit.ProtoReflect.Descriptor instead.
+func (*DelegatedExit) Descriptor() ([]byte, []int) {
+	return file_server_proto_rawDescGZIP(), []int{5}
+}
+
+func (x *DelegatedExit) GetExitStatus() int32 {
+	if x != nil {
+		return x.ExitStatus
+	}
+	return 0
+}
+
+func (x *DelegatedExit) GetStatusKnown() bool {
+	if x != nil {
+		return x.StatusKnown
+	}
+	return false
+}
+
+// A host's report on its own delegated registration, sent as
+// upterm-delegated-control@upterm.dev. sequence starts at 1 for each
+// generation and rises by one per report; a retried report repeats its
+// sequence and body exactly.
+type DelegatedControlRequest struct {
+	state             protoimpl.MessageState `protogen:"open.v1"`
+	ExternalSessionId string                 `protobuf:"bytes,1,opt,name=external_session_id,json=externalSessionId,proto3" json:"external_session_id,omitempty"`
+	Generation        uint64                 `protobuf:"varint,2,opt,name=generation,proto3" json:"generation,omitempty"`
+	Sequence          uint64                 `protobuf:"varint,3,opt,name=sequence,proto3" json:"sequence,omitempty"`
+	// Types that are valid to be assigned to Event:
+	//
+	//	*DelegatedControlRequest_Ready
+	//	*DelegatedControlRequest_Exit
+	Event         isDelegatedControlRequest_Event `protobuf_oneof:"event"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *DelegatedControlRequest) Reset() {
+	*x = DelegatedControlRequest{}
+	mi := &file_server_proto_msgTypes[6]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DelegatedControlRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DelegatedControlRequest) ProtoMessage() {}
+
+func (x *DelegatedControlRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_server_proto_msgTypes[6]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DelegatedControlRequest.ProtoReflect.Descriptor instead.
+func (*DelegatedControlRequest) Descriptor() ([]byte, []int) {
+	return file_server_proto_rawDescGZIP(), []int{6}
+}
+
+func (x *DelegatedControlRequest) GetExternalSessionId() string {
+	if x != nil {
+		return x.ExternalSessionId
+	}
+	return ""
+}
+
+func (x *DelegatedControlRequest) GetGeneration() uint64 {
+	if x != nil {
+		return x.Generation
+	}
+	return 0
+}
+
+func (x *DelegatedControlRequest) GetSequence() uint64 {
+	if x != nil {
+		return x.Sequence
+	}
+	return 0
+}
+
+func (x *DelegatedControlRequest) GetEvent() isDelegatedControlRequest_Event {
+	if x != nil {
+		return x.Event
+	}
+	return nil
+}
+
+func (x *DelegatedControlRequest) GetReady() *DelegatedReady {
+	if x != nil {
+		if x, ok := x.Event.(*DelegatedControlRequest_Ready); ok {
+			return x.Ready
+		}
+	}
+	return nil
+}
+
+func (x *DelegatedControlRequest) GetExit() *DelegatedExit {
+	if x != nil {
+		if x, ok := x.Event.(*DelegatedControlRequest_Exit); ok {
+			return x.Exit
+		}
+	}
+	return nil
+}
+
+type isDelegatedControlRequest_Event interface {
+	isDelegatedControlRequest_Event()
+}
+
+type DelegatedControlRequest_Ready struct {
+	Ready *DelegatedReady `protobuf:"bytes,4,opt,name=ready,proto3,oneof"`
+}
+
+type DelegatedControlRequest_Exit struct {
+	Exit *DelegatedExit `protobuf:"bytes,6,opt,name=exit,proto3,oneof"`
+}
+
+func (*DelegatedControlRequest_Ready) isDelegatedControlRequest_Event() {}
+
+func (*DelegatedControlRequest_Exit) isDelegatedControlRequest_Event() {}
+
+type DelegatedControlReply struct {
+	state                protoimpl.MessageState `protogen:"open.v1"`
+	ExternalSessionId    string                 `protobuf:"bytes,1,opt,name=external_session_id,json=externalSessionId,proto3" json:"external_session_id,omitempty"`
+	Generation           uint64                 `protobuf:"varint,2,opt,name=generation,proto3" json:"generation,omitempty"`
+	AcknowledgedSequence uint64                 `protobuf:"varint,3,opt,name=acknowledged_sequence,json=acknowledgedSequence,proto3" json:"acknowledged_sequence,omitempty"`
+	Disposition          DelegatedDisposition   `protobuf:"varint,4,opt,name=disposition,proto3,enum=server.DelegatedDisposition" json:"disposition,omitempty"`
+	DecisionRevision     uint64                 `protobuf:"varint,5,opt,name=decision_revision,json=decisionRevision,proto3" json:"decision_revision,omitempty"`
+	unknownFields        protoimpl.UnknownFields
+	sizeCache            protoimpl.SizeCache
+}
+
+func (x *DelegatedControlReply) Reset() {
+	*x = DelegatedControlReply{}
+	mi := &file_server_proto_msgTypes[7]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DelegatedControlReply) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DelegatedControlReply) ProtoMessage() {}
+
+func (x *DelegatedControlReply) ProtoReflect() protoreflect.Message {
+	mi := &file_server_proto_msgTypes[7]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DelegatedControlReply.ProtoReflect.Descriptor instead.
+func (*DelegatedControlReply) Descriptor() ([]byte, []int) {
+	return file_server_proto_rawDescGZIP(), []int{7}
+}
+
+func (x *DelegatedControlReply) GetExternalSessionId() string {
+	if x != nil {
+		return x.ExternalSessionId
+	}
+	return ""
+}
+
+func (x *DelegatedControlReply) GetGeneration() uint64 {
+	if x != nil {
+		return x.Generation
+	}
+	return 0
+}
+
+func (x *DelegatedControlReply) GetAcknowledgedSequence() uint64 {
+	if x != nil {
+		return x.AcknowledgedSequence
+	}
+	return 0
+}
+
+func (x *DelegatedControlReply) GetDisposition() DelegatedDisposition {
+	if x != nil {
+		return x.Disposition
+	}
+	return DelegatedDisposition_DELEGATED_UNSPECIFIED
+}
+
+func (x *DelegatedControlReply) GetDecisionRevision() uint64 {
+	if x != nil {
+		return x.DecisionRevision
+	}
+	return 0
+}
+
+// A decision the relay pushes to a host, as upterm-delegated-decision@upterm.dev.
+type DelegatedDecision struct {
+	state             protoimpl.MessageState `protogen:"open.v1"`
+	ExternalSessionId string                 `protobuf:"bytes,1,opt,name=external_session_id,json=externalSessionId,proto3" json:"external_session_id,omitempty"`
+	Generation        uint64                 `protobuf:"varint,2,opt,name=generation,proto3" json:"generation,omitempty"`
+	Disposition       DelegatedDisposition   `protobuf:"varint,3,opt,name=disposition,proto3,enum=server.DelegatedDisposition" json:"disposition,omitempty"`
+	DecisionRevision  uint64                 `protobuf:"varint,4,opt,name=decision_revision,json=decisionRevision,proto3" json:"decision_revision,omitempty"`
+	unknownFields     protoimpl.UnknownFields
+	sizeCache         protoimpl.SizeCache
+}
+
+func (x *DelegatedDecision) Reset() {
+	*x = DelegatedDecision{}
+	mi := &file_server_proto_msgTypes[8]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DelegatedDecision) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DelegatedDecision) ProtoMessage() {}
+
+func (x *DelegatedDecision) ProtoReflect() protoreflect.Message {
+	mi := &file_server_proto_msgTypes[8]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DelegatedDecision.ProtoReflect.Descriptor instead.
+func (*DelegatedDecision) Descriptor() ([]byte, []int) {
+	return file_server_proto_rawDescGZIP(), []int{8}
+}
+
+func (x *DelegatedDecision) GetExternalSessionId() string {
+	if x != nil {
+		return x.ExternalSessionId
+	}
+	return ""
+}
+
+func (x *DelegatedDecision) GetGeneration() uint64 {
+	if x != nil {
+		return x.Generation
+	}
+	return 0
+}
+
+func (x *DelegatedDecision) GetDisposition() DelegatedDisposition {
+	if x != nil {
+		return x.Disposition
+	}
+	return DelegatedDisposition_DELEGATED_UNSPECIFIED
+}
+
+func (x *DelegatedDecision) GetDecisionRevision() uint64 {
+	if x != nil {
+		return x.DecisionRevision
+	}
+	return 0
+}
+
+// The host received a decision. It says nothing of what the host has done.
+type DelegatedDecisionAck struct {
+	state             protoimpl.MessageState `protogen:"open.v1"`
+	ExternalSessionId string                 `protobuf:"bytes,1,opt,name=external_session_id,json=externalSessionId,proto3" json:"external_session_id,omitempty"`
+	Generation        uint64                 `protobuf:"varint,2,opt,name=generation,proto3" json:"generation,omitempty"`
+	DecisionRevision  uint64                 `protobuf:"varint,3,opt,name=decision_revision,json=decisionRevision,proto3" json:"decision_revision,omitempty"`
+	unknownFields     protoimpl.UnknownFields
+	sizeCache         protoimpl.SizeCache
+}
+
+func (x *DelegatedDecisionAck) Reset() {
+	*x = DelegatedDecisionAck{}
+	mi := &file_server_proto_msgTypes[9]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DelegatedDecisionAck) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DelegatedDecisionAck) ProtoMessage() {}
+
+func (x *DelegatedDecisionAck) ProtoReflect() protoreflect.Message {
+	mi := &file_server_proto_msgTypes[9]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DelegatedDecisionAck.ProtoReflect.Descriptor instead.
+func (*DelegatedDecisionAck) Descriptor() ([]byte, []int) {
+	return file_server_proto_rawDescGZIP(), []int{9}
+}
+
+func (x *DelegatedDecisionAck) GetExternalSessionId() string {
+	if x != nil {
+		return x.ExternalSessionId
+	}
+	return ""
+}
+
+func (x *DelegatedDecisionAck) GetGeneration() uint64 {
+	if x != nil {
+		return x.Generation
+	}
+	return 0
+}
+
+func (x *DelegatedDecisionAck) GetDecisionRevision() uint64 {
+	if x != nil {
+		return x.DecisionRevision
+	}
+	return 0
+}
+
+// The body of a refused delegated request.
+type DelegatedError struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Code          DelegatedErrorCode     `protobuf:"varint,1,opt,name=code,proto3,enum=server.DelegatedErrorCode" json:"code,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *DelegatedError) Reset() {
+	*x = DelegatedError{}
+	mi := &file_server_proto_msgTypes[10]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DelegatedError) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DelegatedError) ProtoMessage() {}
+
+func (x *DelegatedError) ProtoReflect() protoreflect.Message {
+	mi := &file_server_proto_msgTypes[10]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DelegatedError.ProtoReflect.Descriptor instead.
+func (*DelegatedError) Descriptor() ([]byte, []int) {
+	return file_server_proto_rawDescGZIP(), []int{10}
+}
+
+func (x *DelegatedError) GetCode() DelegatedErrorCode {
+	if x != nil {
+		return x.Code
+	}
+	return DelegatedErrorCode_DELEGATED_ERROR_UNSPECIFIED
+}
+
 // The exact live registration a home node holds, as it answers the gate.
 type GateRegistration struct {
 	state          protoimpl.MessageState `protogen:"open.v1"`
@@ -452,7 +1110,7 @@ type GateRegistration struct {
 
 func (x *GateRegistration) Reset() {
 	*x = GateRegistration{}
-	mi := &file_server_proto_msgTypes[3]
+	mi := &file_server_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -464,7 +1122,7 @@ func (x *GateRegistration) String() string {
 func (*GateRegistration) ProtoMessage() {}
 
 func (x *GateRegistration) ProtoReflect() protoreflect.Message {
-	mi := &file_server_proto_msgTypes[3]
+	mi := &file_server_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -477,7 +1135,7 @@ func (x *GateRegistration) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GateRegistration.ProtoReflect.Descriptor instead.
 func (*GateRegistration) Descriptor() ([]byte, []int) {
-	return file_server_proto_rawDescGZIP(), []int{3}
+	return file_server_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *GateRegistration) GetMode() GateMode {
@@ -561,7 +1219,7 @@ type GateModeRequest struct {
 
 func (x *GateModeRequest) Reset() {
 	*x = GateModeRequest{}
-	mi := &file_server_proto_msgTypes[4]
+	mi := &file_server_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -573,7 +1231,7 @@ func (x *GateModeRequest) String() string {
 func (*GateModeRequest) ProtoMessage() {}
 
 func (x *GateModeRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_server_proto_msgTypes[4]
+	mi := &file_server_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -586,7 +1244,7 @@ func (x *GateModeRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GateModeRequest.ProtoReflect.Descriptor instead.
 func (*GateModeRequest) Descriptor() ([]byte, []int) {
-	return file_server_proto_rawDescGZIP(), []int{4}
+	return file_server_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *GateModeRequest) GetProtocol() uint32 {
@@ -621,7 +1279,7 @@ type GateModeReply struct {
 
 func (x *GateModeReply) Reset() {
 	*x = GateModeReply{}
-	mi := &file_server_proto_msgTypes[5]
+	mi := &file_server_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -633,7 +1291,7 @@ func (x *GateModeReply) String() string {
 func (*GateModeReply) ProtoMessage() {}
 
 func (x *GateModeReply) ProtoReflect() protoreflect.Message {
-	mi := &file_server_proto_msgTypes[5]
+	mi := &file_server_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -646,7 +1304,7 @@ func (x *GateModeReply) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GateModeReply.ProtoReflect.Descriptor instead.
 func (*GateModeReply) Descriptor() ([]byte, []int) {
-	return file_server_proto_rawDescGZIP(), []int{5}
+	return file_server_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *GateModeReply) GetProtocol() uint32 {
@@ -674,7 +1332,7 @@ var File_server_proto protoreflect.FileDescriptor
 
 const file_server_proto_rawDesc = "" +
 	"\n" +
-	"\fserver.proto\x12\x06server\"\xf8\x01\n" +
+	"\fserver.proto\x12\x06server\"\xbf\x02\n" +
 	"\x14CreateSessionRequest\x12\x1a\n" +
 	"\bhostUser\x18\x01 \x01(\tR\bhostUser\x12&\n" +
 	"\x0ehostPublicKeys\x18\x02 \x03(\fR\x0ehostPublicKeys\x122\n" +
@@ -683,12 +1341,14 @@ const file_server_proto_rawDesc = "" +
 	"\n" +
 	"generation\x18\x05 \x01(\x04R\n" +
 	"generation\x12\"\n" +
-	"\fhostKeyProof\x18\x06 \x01(\fR\fhostKeyProof\"\x98\x01\n" +
+	"\fhostKeyProof\x18\x06 \x01(\fR\fhostKeyProof\x12E\n" +
+	"\x11delegated_session\x18\a \x01(\v2\x18.server.DelegatedSessionR\x10delegatedSession\"\xdf\x01\n" +
 	"\x15CreateSessionResponse\x12\x1c\n" +
 	"\tsessionID\x18\x01 \x01(\tR\tsessionID\x12\x1a\n" +
 	"\bnodeAddr\x18\x02 \x01(\tR\bnodeAddr\x12\x19\n" +
 	"\bssh_user\x18\x03 \x01(\tR\asshUser\x12*\n" +
-	"\x10sessionKeyRedial\x18\x04 \x01(\bR\x10sessionKeyRedial\"\xdb\x03\n" +
+	"\x10sessionKeyRedial\x18\x04 \x01(\bR\x10sessionKeyRedial\x12E\n" +
+	"\x11delegated_session\x18\x05 \x01(\v2\x18.server.DelegatedSessionR\x10delegatedSession\"\xdb\x03\n" +
 	"\vAuthRequest\x12%\n" +
 	"\x0eclient_version\x18\x01 \x01(\tR\rclientVersion\x12\x1f\n" +
 	"\vremote_addr\x18\x02 \x01(\tR\n" +
@@ -704,7 +1364,49 @@ const file_server_proto_rawDesc = "" +
 	"\x0fingress_node_id\x18\n" +
 	" \x01(\tR\ringressNodeId\x12#\n" +
 	"\rconnection_id\x18\v \x01(\tR\fconnectionId\x12#\n" +
-	"\rgate_protocol\x18\f \x01(\rR\fgateProtocol\"\xe7\x02\n" +
+	"\rgate_protocol\x18\f \x01(\rR\fgateProtocol\"\xd7\x01\n" +
+	"\x10DelegatedSession\x12\x1a\n" +
+	"\bprotocol\x18\x01 \x01(\tR\bprotocol\x12.\n" +
+	"\x13external_session_id\x18\x02 \x01(\tR\x11externalSessionId\x12>\n" +
+	"\vdisposition\x18\x05 \x01(\x0e2\x1c.server.DelegatedDispositionR\vdisposition\x12+\n" +
+	"\x11decision_revision\x18\x06 \x01(\x04R\x10decisionRevisionJ\x04\b\x03\x10\x04J\x04\b\x04\x10\x05\"\x10\n" +
+	"\x0eDelegatedReady\"S\n" +
+	"\rDelegatedExit\x12\x1f\n" +
+	"\vexit_status\x18\x01 \x01(\x11R\n" +
+	"exitStatus\x12!\n" +
+	"\fstatus_known\x18\x02 \x01(\bR\vstatusKnown\"\xf7\x01\n" +
+	"\x17DelegatedControlRequest\x12.\n" +
+	"\x13external_session_id\x18\x01 \x01(\tR\x11externalSessionId\x12\x1e\n" +
+	"\n" +
+	"generation\x18\x02 \x01(\x04R\n" +
+	"generation\x12\x1a\n" +
+	"\bsequence\x18\x03 \x01(\x04R\bsequence\x12.\n" +
+	"\x05ready\x18\x04 \x01(\v2\x16.server.DelegatedReadyH\x00R\x05ready\x12+\n" +
+	"\x04exit\x18\x06 \x01(\v2\x15.server.DelegatedExitH\x00R\x04exitB\a\n" +
+	"\x05eventJ\x04\b\x05\x10\x06J\x04\b\a\x10\b\"\x89\x02\n" +
+	"\x15DelegatedControlReply\x12.\n" +
+	"\x13external_session_id\x18\x01 \x01(\tR\x11externalSessionId\x12\x1e\n" +
+	"\n" +
+	"generation\x18\x02 \x01(\x04R\n" +
+	"generation\x123\n" +
+	"\x15acknowledged_sequence\x18\x03 \x01(\x04R\x14acknowledgedSequence\x12>\n" +
+	"\vdisposition\x18\x04 \x01(\x0e2\x1c.server.DelegatedDispositionR\vdisposition\x12+\n" +
+	"\x11decision_revision\x18\x05 \x01(\x04R\x10decisionRevision\"\xd0\x01\n" +
+	"\x11DelegatedDecision\x12.\n" +
+	"\x13external_session_id\x18\x01 \x01(\tR\x11externalSessionId\x12\x1e\n" +
+	"\n" +
+	"generation\x18\x02 \x01(\x04R\n" +
+	"generation\x12>\n" +
+	"\vdisposition\x18\x03 \x01(\x0e2\x1c.server.DelegatedDispositionR\vdisposition\x12+\n" +
+	"\x11decision_revision\x18\x04 \x01(\x04R\x10decisionRevision\"\x93\x01\n" +
+	"\x14DelegatedDecisionAck\x12.\n" +
+	"\x13external_session_id\x18\x01 \x01(\tR\x11externalSessionId\x12\x1e\n" +
+	"\n" +
+	"generation\x18\x02 \x01(\x04R\n" +
+	"generation\x12+\n" +
+	"\x11decision_revision\x18\x03 \x01(\x04R\x10decisionRevision\"@\n" +
+	"\x0eDelegatedError\x12.\n" +
+	"\x04code\x18\x01 \x01(\x0e2\x1a.server.DelegatedErrorCodeR\x04code\"\xe7\x02\n" +
 	"\x10GateRegistration\x12$\n" +
 	"\x04mode\x18\x01 \x01(\x0e2\x10.server.GateModeR\x04mode\x12\x1d\n" +
 	"\n" +
@@ -736,7 +1438,18 @@ const file_server_proto_rawDesc = "" +
 	"\aIngress\x12\x17\n" +
 	"\x13INGRESS_UNSPECIFIED\x10\x00\x12\x0f\n" +
 	"\vINGRESS_SSH\x10\x01\x12\x15\n" +
-	"\x11INGRESS_WEBSOCKET\x10\x02*S\n" +
+	"\x11INGRESS_WEBSOCKET\x10\x02*x\n" +
+	"\x14DelegatedDisposition\x12\x19\n" +
+	"\x15DELEGATED_UNSPECIFIED\x10\x00\x12\x15\n" +
+	"\x11DELEGATED_CURRENT\x10\x01\x12\x15\n" +
+	"\x11DELEGATED_STOPPED\x10\x02\x12\x17\n" +
+	"\x13DELEGATED_WITHDRAWN\x10\x03*\xaa\x01\n" +
+	"\x12DelegatedErrorCode\x12\x1f\n" +
+	"\x1bDELEGATED_ERROR_UNSPECIFIED\x10\x00\x12\x19\n" +
+	"\x15DELEGATED_UNAVAILABLE\x10\x01\x12\x1d\n" +
+	"\x19DELEGATED_INVALID_REQUEST\x10\x02\x12\x1e\n" +
+	"\x1aDELEGATED_STALE_GENERATION\x10\x03\x12\x19\n" +
+	"\x15DELEGATED_UNSUPPORTED\x10\x04*S\n" +
 	"\bGateMode\x12\x19\n" +
 	"\x15GATE_MODE_UNSPECIFIED\x10\x00\x12\x13\n" +
 	"\x0fGATE_MODE_LOCAL\x10\x01\x12\x17\n" +
@@ -754,27 +1467,45 @@ func file_server_proto_rawDescGZIP() []byte {
 	return file_server_proto_rawDescData
 }
 
-var file_server_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
-var file_server_proto_msgTypes = make([]protoimpl.MessageInfo, 6)
+var file_server_proto_enumTypes = make([]protoimpl.EnumInfo, 4)
+var file_server_proto_msgTypes = make([]protoimpl.MessageInfo, 14)
 var file_server_proto_goTypes = []any{
-	(Ingress)(0),                  // 0: server.Ingress
-	(GateMode)(0),                 // 1: server.GateMode
-	(*CreateSessionRequest)(nil),  // 2: server.CreateSessionRequest
-	(*CreateSessionResponse)(nil), // 3: server.CreateSessionResponse
-	(*AuthRequest)(nil),           // 4: server.AuthRequest
-	(*GateRegistration)(nil),      // 5: server.GateRegistration
-	(*GateModeRequest)(nil),       // 6: server.GateModeRequest
-	(*GateModeReply)(nil),         // 7: server.GateModeReply
+	(Ingress)(0),                    // 0: server.Ingress
+	(DelegatedDisposition)(0),       // 1: server.DelegatedDisposition
+	(DelegatedErrorCode)(0),         // 2: server.DelegatedErrorCode
+	(GateMode)(0),                   // 3: server.GateMode
+	(*CreateSessionRequest)(nil),    // 4: server.CreateSessionRequest
+	(*CreateSessionResponse)(nil),   // 5: server.CreateSessionResponse
+	(*AuthRequest)(nil),             // 6: server.AuthRequest
+	(*DelegatedSession)(nil),        // 7: server.DelegatedSession
+	(*DelegatedReady)(nil),          // 8: server.DelegatedReady
+	(*DelegatedExit)(nil),           // 9: server.DelegatedExit
+	(*DelegatedControlRequest)(nil), // 10: server.DelegatedControlRequest
+	(*DelegatedControlReply)(nil),   // 11: server.DelegatedControlReply
+	(*DelegatedDecision)(nil),       // 12: server.DelegatedDecision
+	(*DelegatedDecisionAck)(nil),    // 13: server.DelegatedDecisionAck
+	(*DelegatedError)(nil),          // 14: server.DelegatedError
+	(*GateRegistration)(nil),        // 15: server.GateRegistration
+	(*GateModeRequest)(nil),         // 16: server.GateModeRequest
+	(*GateModeReply)(nil),           // 17: server.GateModeReply
 }
 var file_server_proto_depIdxs = []int32{
-	0, // 0: server.AuthRequest.ingress:type_name -> server.Ingress
-	1, // 1: server.GateRegistration.mode:type_name -> server.GateMode
-	5, // 2: server.GateModeReply.registration:type_name -> server.GateRegistration
-	3, // [3:3] is the sub-list for method output_type
-	3, // [3:3] is the sub-list for method input_type
-	3, // [3:3] is the sub-list for extension type_name
-	3, // [3:3] is the sub-list for extension extendee
-	0, // [0:3] is the sub-list for field type_name
+	7,  // 0: server.CreateSessionRequest.delegated_session:type_name -> server.DelegatedSession
+	7,  // 1: server.CreateSessionResponse.delegated_session:type_name -> server.DelegatedSession
+	0,  // 2: server.AuthRequest.ingress:type_name -> server.Ingress
+	1,  // 3: server.DelegatedSession.disposition:type_name -> server.DelegatedDisposition
+	8,  // 4: server.DelegatedControlRequest.ready:type_name -> server.DelegatedReady
+	9,  // 5: server.DelegatedControlRequest.exit:type_name -> server.DelegatedExit
+	1,  // 6: server.DelegatedControlReply.disposition:type_name -> server.DelegatedDisposition
+	1,  // 7: server.DelegatedDecision.disposition:type_name -> server.DelegatedDisposition
+	2,  // 8: server.DelegatedError.code:type_name -> server.DelegatedErrorCode
+	3,  // 9: server.GateRegistration.mode:type_name -> server.GateMode
+	15, // 10: server.GateModeReply.registration:type_name -> server.GateRegistration
+	11, // [11:11] is the sub-list for method output_type
+	11, // [11:11] is the sub-list for method input_type
+	11, // [11:11] is the sub-list for extension type_name
+	11, // [11:11] is the sub-list for extension extendee
+	0,  // [0:11] is the sub-list for field type_name
 }
 
 func init() { file_server_proto_init() }
@@ -782,13 +1513,17 @@ func file_server_proto_init() {
 	if File_server_proto != nil {
 		return
 	}
+	file_server_proto_msgTypes[6].OneofWrappers = []any{
+		(*DelegatedControlRequest_Ready)(nil),
+		(*DelegatedControlRequest_Exit)(nil),
+	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_server_proto_rawDesc), len(file_server_proto_rawDesc)),
-			NumEnums:      2,
-			NumMessages:   6,
+			NumEnums:      4,
+			NumMessages:   14,
 			NumExtensions: 0,
 			NumServices:   0,
 		},
