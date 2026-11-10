@@ -13,6 +13,7 @@ import (
 	"github.com/owenthereal/upterm/host"
 	"github.com/owenthereal/upterm/host/api"
 	"github.com/owenthereal/upterm/host/sessiondir"
+	"github.com/owenthereal/upterm/internal/termtext"
 	"github.com/owenthereal/upterm/internal/version"
 	"github.com/owenthereal/upterm/utils"
 	"golang.org/x/crypto/ssh"
@@ -50,7 +51,7 @@ func runDaemon(ctx context.Context, logger *slog.Logger, args []string, conn net
 func reportDaemonFailure(conn net.Conn, err error) {
 	child := bootstrap.NewChild(conn, nil)
 	defer func() { _ = child.Close() }()
-	child.Failed(failureText(err), false, false)
+	child.Failed(bootstrap.Failure{Text: failureText(err)})
 }
 
 // failureText is err as the daemon tells its parent, which prints it on
@@ -60,6 +61,47 @@ func reportDaemonFailure(conn net.Conn, err error) {
 func failureText(err error) string {
 	return strings.Join(errorLines(err), "; ")
 }
+
+// verbatimError is a failure told in words chosen for the operator, which
+// the parent prints as they are, line for line, once it has made them safe
+// for a terminal. nameTaken says the name is taken where the run was placed,
+// which a generated name is redrawn for.
+type verbatimError struct {
+	text      string
+	nameTaken bool
+}
+
+func (e verbatimError) Error() string { return e.text }
+
+func (e verbatimError) Unwrap() error {
+	if e.nameTaken {
+		return host.ErrNameTaken
+	}
+	return nil
+}
+
+// failureOf is why the daemon's session did not start, err, as its parent is
+// told: a name taken where the run was placed, or a failure in the
+// operator's own words, as text the parent prints as it is, made safe for a
+// terminal here; anything else as failureText says it.
+func failureOf(err error) bootstrap.Failure {
+	f := bootstrap.Failure{
+		Text:      failureText(err),
+		NameInUse: errors.Is(err, sessiondir.ErrNameInUse),
+		Abandoned: errors.Is(err, host.ErrSessionAbandoned),
+	}
+	var taken *host.NameTakenError
+	if errors.As(err, &taken) {
+		f.Text, f.Verbatim, f.NameTaken = safeText(taken.Text), true, true
+	} else if verbatim, ok := err.(verbatimError); ok {
+		f.Text, f.Verbatim, f.NameTaken = safeText(verbatim.text), true, verbatim.nameTaken
+	}
+	return f
+}
+
+// safeText is text with its lines kept and nothing in it that can control a
+// terminal.
+func safeText(text string) string { return string(termtext.Sanitize([]byte(text), false)) }
 
 // runDaemonProcess is upterm host's session logic run as the daemon, with
 // the operator's terminal on the far end of conn rather than this process's
@@ -77,12 +119,24 @@ func runDaemonProcess(ctx context.Context, logger *slog.Logger, opts hostOptions
 
 	h, err := buildDaemonHost(ctx, name, opts, child, logger)
 	if err != nil {
-		child.Failed(failureText(err), false, false)
+		child.Failed(bootstrap.Failure{Text: failureText(err)})
 		return err
 	}
 	err = run(ctx, h)
 	if err != nil {
-		child.Failed(failureText(err), errors.Is(err, sessiondir.ErrNameInUse), errors.Is(err, host.ErrSessionAbandoned))
+		f := failureOf(err)
+		// A broker's error, and anything else a delegated run fails with, may
+		// carry its words: the terminal is given them made safe, as a
+		// verbatim failure's are. Only a verbatim failure keeps its lines:
+		// any other is printed inside a line of upterm's own, where a line of
+		// its own could pass for one of upterm's.
+		if h.Broker != nil {
+			f.Text = safeText(f.Text)
+			if !f.Verbatim {
+				f.Text = strings.ReplaceAll(f.Text, "\n", "�")
+			}
+		}
+		child.Failed(f)
 	}
 	return err
 }

@@ -115,6 +115,10 @@ type Server struct {
 	// rests on: until this fires, "ready" would mean a command that may still
 	// fail to start.
 	OnCommandStarted func()
+	// MayStart, if set, is asked immediately before the command starts, and
+	// the command starts only if it says so. A no is final: the command never
+	// starts, and the session waits to be ended. Nil starts it unasked.
+	MayStart func() bool
 	// beforePublishPTY holds the real command-start/publication boundary for tests.
 	beforePublishPTY func()
 	// onPrivateCommandExit runs once a private command's handler has recorded
@@ -304,6 +308,13 @@ func (s *Server) ServeWithContext(ctx context.Context, guest, host net.Listener)
 					shared.abandon()
 					return cmdCtx.Err()
 				}
+			}
+			if s.MayStart != nil && !s.MayStart() {
+				// Whoever said no ends the session, and why it ended is
+				// theirs to say, not this return's.
+				shared.abandon()
+				<-cmdCtx.Done()
+				return cmdCtx.Err()
 			}
 			ptmx, err := cmd.Start(cmdCtx, shared.initialSize())
 			if err != nil {

@@ -206,14 +206,28 @@ func (c *Child) Started(sessionID, status string, joinState *api.JoinState) erro
 	return c.send(&api.Startup{Msg: &api.Startup_Started{Started: &api.Started{SessionId: sessionID, Status: status, JoinState: joinState}}})
 }
 
-// Failed reports that the session did not start. Nothing is sent after
-// Started: the parent has gone by then, and a session that started and then
-// ended is an outcome the record carries, not a startup failure.
-func (c *Child) Failed(msg string, nameInUse, abandoned bool) {
+// Failed reports that the session did not start, and why. Nothing is sent
+// after Started: the parent has gone by then, and a session that started and
+// then ended is an outcome the record carries, not a startup failure.
+func (c *Child) Failed(f Failure) {
 	if c.started.Load() {
 		return
 	}
-	_ = c.send(&api.Startup{Msg: &api.Startup_Failed{Failed: &api.Failed{Error: msg, NameInUse: nameInUse, Abandoned: abandoned}}})
+	_ = c.send(&api.Startup{Msg: &api.Startup_Failed{Failed: &api.Failed{
+		Error: f.Text, NameInUse: f.NameInUse, Abandoned: f.Abandoned, Verbatim: f.Verbatim, NameTaken: f.NameTaken,
+	}}})
+}
+
+// Failure is why the session did not start, as the parent is told it.
+type Failure struct {
+	Text string
+	// NameInUse asks the parent to draw another name, and Abandoned says the
+	// parent's own answer ended the session.
+	NameInUse, Abandoned bool
+	// Verbatim says Text is to be printed as it is, once the parent has made
+	// it safe for a terminal, and NameTaken that the name is taken where the
+	// run was placed, which the parent redraws a generated name for.
+	Verbatim, NameTaken bool
 }
 
 // Close disarms and closes the connection. Disarming first: the close makes

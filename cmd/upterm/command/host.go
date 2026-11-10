@@ -425,7 +425,9 @@ func runWithNameRetry(logger *slog.Logger, explicit string, newName func() strin
 		if err == nil {
 			return nil
 		}
-		if explicit != "" || !errors.Is(err, sessiondir.ErrNameInUse) {
+		// Taken here, or where the run was placed: either way the name drawn
+		// is the one at fault.
+		if explicit != "" || (!errors.Is(err, sessiondir.ErrNameInUse) && !errors.Is(err, host.ErrNameTaken)) {
 			return err
 		}
 		// The last collision is the one the user is told about, so it is not

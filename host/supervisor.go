@@ -89,6 +89,10 @@ type supervisor struct {
 	// sessionKeyFirst says the next attempt offers the session key ahead of
 	// the recorded identities. Once false it stays false.
 	sessionKeyFirst bool
+	// sshUser, when set, is the SSH user guests reach the session as,
+	// whatever user the relay registers it under: a delegated session's
+	// guest address.
+	sshUser string
 	// jitter is the schedule's: how much of a bound to wait. Nil waits a
 	// uniformly random part of it.
 	jitter func(time.Duration) time.Duration
@@ -208,6 +212,21 @@ func (s *supervisor) reconnect(ctx context.Context, sched *schedule, deadline ti
 		s.generation++
 		generation, offered := s.generation, s.sessionKeyFirst
 		t, resp, err := s.try(ctx, deadline, generation, offered)
+		if err == nil && t.Listener() == nil {
+			// A delegated registration the authority decided against: no
+			// route, nothing for guests, and nothing to redial for. It
+			// replaces the lost tunnel as the current one, for the reports
+			// still to be made on it, whatever has become of ctx meanwhile,
+			// and the decision is acted on by whoever watches the run's
+			// decisions.
+			s.mu.Lock()
+			prev := s.cur
+			s.cur = t
+			s.mu.Unlock()
+			prev.Close()
+			<-ctx.Done()
+			return nil, false
+		}
 		if ctx.Err() != nil {
 			// The session is ending. That is not the relay failing, and a
 			// tunnel the attempt did establish has nothing left to serve.
@@ -296,9 +315,13 @@ func (s *supervisor) install(t tunnel, resp *server.CreateSessionResponse, gener
 	// Its connection has already ended, so this is quick.
 	prev.Close()
 
+	user := resp.SshUser
+	if s.sshUser != "" {
+		user = s.sshUser
+	}
 	prevNode, prevUser := s.route.Get()
-	s.route.Set(resp.NodeAddr, resp.SshUser)
-	moved := prevNode != resp.NodeAddr || prevUser != resp.SshUser
+	s.route.Set(resp.NodeAddr, user)
+	moved := prevNode != resp.NodeAddr || prevUser != user
 	s.sessionKeyFirst = s.sessionKeyFirst && t.SessionKeyRedial()
 	if result := version.CheckCompatibility(string(t.ServerVersion())); !result.Compatible {
 		s.logger.Warn("server version mismatch", "message", result.Message,

@@ -243,16 +243,30 @@ func TestParentRunEndsOnContextCancelledDuringAccept(t *testing.T) {
 	require.ErrorIs(t, <-childErr, ErrParentGone)
 }
 
+// Every part of a failure reaches the parent as it was sent.
 func TestFailedReachesTheParent(t *testing.T) {
-	a, b := pair(t)
-	child := NewChild(a, nil)
-	parent := NewParent(b, nil, io.Discard, nil)
-	go child.Failed("name in use: x", true, false)
-	out, err := parent.Run(context.Background(), Handlers{})
-	require.NoError(t, err)
-	require.NotNil(t, out.Failed)
-	require.True(t, out.Failed.NameInUse)
-	require.Equal(t, "name in use: x", out.Failed.Error)
+	for _, f := range []Failure{
+		{Text: "name in use: x", NameInUse: true},
+		{Text: "declined", Abandoned: true},
+		{Text: "line one\nline two", Verbatim: true},
+		{Text: "taken here", Verbatim: true, NameTaken: true},
+		{Text: "exec: no such file"},
+	} {
+		t.Run(f.Text, func(t *testing.T) {
+			a, b := pair(t)
+			child := NewChild(a, nil)
+			parent := NewParent(b, nil, io.Discard, nil)
+			go child.Failed(f)
+			out, err := parent.Run(context.Background(), Handlers{})
+			require.NoError(t, err)
+			require.NotNil(t, out.Failed)
+			require.Equal(t, f.Text, out.Failed.Error)
+			require.Equal(t, f.NameInUse, out.Failed.NameInUse)
+			require.Equal(t, f.Abandoned, out.Failed.Abandoned)
+			require.Equal(t, f.Verbatim, out.Failed.Verbatim)
+			require.Equal(t, f.NameTaken, out.Failed.NameTaken)
+		})
+	}
 }
 
 func TestFailedAfterStartedIsNotSent(t *testing.T) {
@@ -277,7 +291,7 @@ func TestFailedAfterStartedIsNotSent(t *testing.T) {
 	require.NoError(t, child.Started("sid", "ready", nil))
 	m := <-got
 	require.NotNil(t, m.GetStarted())
-	child.Failed("late", false, false)
+	child.Failed(Failure{Text: "late", Verbatim: true, NameTaken: true})
 	require.NoError(t, child.Close())
 	require.ErrorIs(t, <-errs, io.EOF)
 	select {

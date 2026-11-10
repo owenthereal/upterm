@@ -35,11 +35,14 @@ type Relay struct {
 	config *ssh.ServerConfig
 	answer func(*server.CreateSessionRequest) (bool, []byte)
 
-	mu      sync.Mutex
-	admit   func(ssh.PublicKey) bool
-	offered []ssh.PublicKey
-	conns   map[net.Conn]struct{}
-	closed  bool
+	mu       sync.Mutex
+	admit    func(ssh.PublicKey) bool
+	offered  []ssh.PublicKey
+	conns    map[net.Conn]struct{}
+	closed   bool
+	handlers map[string]func([]byte) (bool, []byte)
+	latest   *ssh.ServerConn
+	onAccept func()
 
 	forwards    atomic.Int64
 	connections atomic.Int64
@@ -92,6 +95,38 @@ func (r *Relay) Offered() []ssh.PublicKey {
 	return append([]ssh.PublicKey(nil), r.offered...)
 }
 
+// OnAccept has fn run for each connection the relay accepts from now on, as
+// it is accepted: before the relay has read any of it, and before the
+// handshake can go on.
+func (r *Relay) OnAccept(fn func()) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.onAccept = fn
+}
+
+// Handle answers every request named name with fn from now on, in place of
+// the refusal a request the relay does not know gets.
+func (r *Relay) Handle(name string, fn func(payload []byte) (ok bool, body []byte)) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.handlers == nil {
+		r.handlers = make(map[string]func([]byte) (bool, []byte))
+	}
+	r.handlers[name] = fn
+}
+
+// Push sends a request named name to the client of the newest connection that
+// completed its handshake, and returns the client's reply.
+func (r *Relay) Push(name string, payload []byte) (bool, []byte, error) {
+	r.mu.Lock()
+	conn := r.latest
+	r.mu.Unlock()
+	if conn == nil {
+		return false, nil, errors.New("fakerelay: no connection to push to")
+	}
+	return conn.SendRequest(name, true, payload)
+}
+
 // Forwards is how many streamlocal-forward requests the relay has granted.
 func (r *Relay) Forwards() int { return int(r.forwards.Load()) }
 
@@ -120,6 +155,12 @@ func (r *Relay) accept() {
 		}
 		r.connections.Add(1)
 		r.mu.Lock()
+		onAccept := r.onAccept
+		r.mu.Unlock()
+		if onAccept != nil {
+			onAccept()
+		}
+		r.mu.Lock()
 		if r.closed {
 			r.mu.Unlock()
 			_ = conn.Close()
@@ -146,6 +187,9 @@ func (r *Relay) serve(conn net.Conn) {
 		return
 	}
 	defer func() { _ = sconn.Close() }()
+	r.mu.Lock()
+	r.latest = sconn
+	r.mu.Unlock()
 
 	r.wg.Add(1)
 	go func() {
@@ -173,7 +217,15 @@ func (r *Relay) serve(conn net.Conn) {
 		case cancelStreamlocalForward:
 			_ = req.Reply(true, nil)
 		default:
-			_ = req.Reply(false, nil)
+			r.mu.Lock()
+			handle := r.handlers[req.Type]
+			r.mu.Unlock()
+			if handle == nil {
+				_ = req.Reply(false, nil)
+				continue
+			}
+			ok, body := handle(req.Payload)
+			_ = req.Reply(ok, body)
 		}
 	}
 }
