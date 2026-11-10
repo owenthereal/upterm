@@ -190,10 +190,10 @@ type pendingReport struct {
 	sequence uint64
 	payload  []byte
 	// sent is the request carrying the report while the relay hasn't
-	// answered it, or has and the answer is unread; nil otherwise. SSH
-	// answers one want-reply request at a time, so a second sent behind it
-	// would only queue: a report is sent again only once its last request
-	// has been answered.
+	// answered it, or has and the answer is unread; nil otherwise. x/crypto
+	// sends one want-reply global request at a time, so a second sent behind
+	// it would only queue: a report is sent again only once its last request
+	// has been answered and that answer read.
 	sent *sentRequest
 }
 
@@ -262,10 +262,10 @@ func (r *delegatedReports) acknowledged(event DelegatedEvent, sequence uint64) {
 // applies the disposition the relay answers with to Decisions. Any error
 // leaves the report unacknowledged, and sending the same event again repeats
 // its sequence and bytes exactly; a different event takes the next sequence.
-// A report sent again while the relay hasn't answered it waits on the request
-// already sent, and takes its answer, rather than send another. ctx bounds
-// the wait for the relay's answer. A *server.DelegatedRefusedError is the
-// relay's refusal; ErrDelegatedRelayUnsupported an answer outside the
+// A report sent again before the answer to its last request has been read
+// waits on that request, and takes its answer, rather than send another.
+// ctx bounds the wait for the relay's answer. A *server.DelegatedRefusedError
+// is the relay's refusal; ErrDelegatedRelayUnsupported an answer outside the
 // delegated protocol.
 func (c *ReverseTunnel) Report(ctx context.Context, event DelegatedEvent) error {
 	if c.Delegated == nil || c.Client == nil || c.reports == nil {

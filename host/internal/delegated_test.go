@@ -713,10 +713,10 @@ func TestDelegatedReports(t *testing.T) {
 		require.Equal(t, uint64(1), controls[0].Sequence)
 	})
 
-	// SSH answers one want-reply request at a time, so a report sent again
-	// while the relay hasn't answered the first would only queue behind it,
-	// one more each retry, for as long as the relay stays silent. A retry
-	// waits on the report already sent instead, and takes its answer.
+	// x/crypto sends one want-reply global request at a time, so a report
+	// sent again while the relay hasn't answered the first would only queue
+	// behind it, one more each retry, for as long as the relay stays silent.
+	// A retry waits on the report already sent instead, and takes its answer.
 	t.Run("a retry waits on the report already sent", func(t *testing.T) {
 		relayKey, hostKey, secret := newKeyAndSecret(t)
 		id := registration.ID(hostKey.PublicKey(), secret)
@@ -735,6 +735,11 @@ func TestDelegatedReports(t *testing.T) {
 		arrived := make(chan struct{})
 		var once sync.Once
 		release := make(chan struct{})
+		// A failure before the relay is let answer must not leave its
+		// handler blocked: registered after the relay's own cleanup, this
+		// runs first.
+		unblock := sync.OnceFunc(func() { close(release) })
+		t.Cleanup(unblock)
 		fake.Handle(upterm.ServerDelegatedControlRequestType, func(payload []byte) (bool, []byte) {
 			var req server.DelegatedControlRequest
 			if err := proto.Unmarshal(payload, &req); err != nil {
@@ -769,7 +774,7 @@ func TestDelegatedReports(t *testing.T) {
 			require.ErrorIs(t, rt.Report(over, ready), context.Canceled)
 		}
 
-		close(release)
+		unblock()
 		require.NoError(t, rt.Report(t.Context(), ready), "the relay's answer to the report already sent wasn't taken")
 		mu.Lock()
 		defer mu.Unlock()
