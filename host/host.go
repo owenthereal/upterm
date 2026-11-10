@@ -366,6 +366,8 @@ type Host struct {
 	// every redial alike: Host, HostKeyCallback and ProxyURL are not
 	// consulted, and nothing prompts or reads known_hosts. An error from
 	// Place ends the run with that error before any command is launched.
+	// The authority decides who joins, so a delegated run takes no
+	// AuthorizedKeys: Run refuses the two together before it does anything.
 	//
 	// The relay then decides the registration, and Run follows what the
 	// authority decided: a session stopped or withdrawn before its command
@@ -657,6 +659,11 @@ func (c *Host) Run(ctx context.Context) (runErr error) {
 	}
 	if c.TerminalConsent && c.PermissionChecker != nil {
 		return errors.New("TerminalConsent and PermissionChecker are mutually exclusive")
+	}
+	// Refused here, before a name is claimed or the run is placed, rather
+	// than by the registration once both have happened.
+	if c.Broker != nil && len(c.AuthorizedKeys) > 0 {
+		return errors.New("a delegated run takes no authorized keys: its authority decides who joins")
 	}
 	// First, before anything here can write a byte. Whatever a
 	// SessionCreatedCallback prints, and whatever a VersionWarningCallback or

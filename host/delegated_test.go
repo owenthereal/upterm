@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"net"
 	"net/url"
@@ -1515,4 +1516,22 @@ func TestBrokerErrorEndsTheRun(t *testing.T) {
 	require.NoError(t, rerr)
 	require.Equal(t, sessiondir.ReasonStartupFailed, rec.Reason)
 	require.Nil(t, rec.Delegation)
+}
+
+// A delegated run's authority decides who joins it, so a run handed
+// authorized keys as well is refused before anything is done for it: no name
+// is claimed, nothing is placed or recorded, and nothing is dialled.
+func TestDelegatedRunRefusesAuthorizedKeys(t *testing.T) {
+	p := newPlacedHost(t)
+	guest, err := NewHostKey()
+	require.NoError(t, err)
+	p.h.AuthorizedKeys = []*AuthorizedKey{{PublicKeys: []ssh.PublicKey{guest.PublicKey()}, Comment: "a guest"}}
+	var places atomic.Int32
+	err = p.run(t, func(Run, *Placement) { places.Add(1) })
+	require.EqualError(t, err, "a delegated run takes no authorized keys: its authority decides who joins")
+	require.Zero(t, places.Load(), "the run was placed")
+	require.Zero(t, p.published.Load(), "the broker was told the run was published")
+	require.Zero(t, p.fake.Connections(), "the run dialled the relay")
+	_, err = sessiondir.ReadRecord(p.stateRoot, p.h.Name)
+	require.ErrorIs(t, err, fs.ErrNotExist, "the run claimed its name and wrote a record")
 }

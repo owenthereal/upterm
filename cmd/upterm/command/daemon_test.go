@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -596,8 +597,8 @@ func (f placeFunc) Place(ctx context.Context, run host.Run) (host.Placement, err
 // placedFailure is what the operator's terminal shows of a run, placed by
 // broker, that fails before it starts: a real daemon, in this process on the
 // far end of a pipe, running a real host, with the parent printing as upterm
-// host does.
-func placedFailure(t *testing.T, broker host.Broker) string {
+// host does. Each of configure is applied to the host before it runs.
+func placedFailure(t *testing.T, broker host.Broker, configure ...func(*host.Host)) string {
 	t.Helper()
 	daemonTestRoots(t)
 	spawn := func(opts spawnOptions) (net.Conn, *os.Process, error) {
@@ -608,6 +609,9 @@ func placedFailure(t *testing.T, broker host.Broker) string {
 			defer func() { _ = a.Close() }()
 			_ = runDaemonProcess(context.Background(), discardLogger(), testHostOptions(), a, opts.name, func(ctx context.Context, h *host.Host) error {
 				h.Broker = broker
+				for _, c := range configure {
+					c(h)
+				}
 				return h.Run(ctx)
 			})
 		}()
@@ -699,6 +703,23 @@ func TestAPlacementErrorIsMadeSafeForTheTerminal(t *testing.T) {
 		requireEveryLineIsUpterms(t, out)
 		require.Equal(t, "upterm: session s could not start: refused�upterm: attach with upterm attach x��here (see /var/log/upterm.log)\n", out)
 	})
+}
+
+// A delegated run handed authorized keys is refused before it is placed, and
+// the operator is told so as any session that could not start is.
+func TestADelegatedRunWithAuthorizedKeysIsRefusedBeforeItIsPlaced(t *testing.T) {
+	guest, err := host.NewHostKey()
+	require.NoError(t, err)
+	var places atomic.Int32
+	broker := placeFunc(func(context.Context, host.Run) (host.Placement, error) {
+		places.Add(1)
+		return host.Placement{}, errors.New("placed")
+	})
+	out := placedFailure(t, broker, func(h *host.Host) {
+		h.AuthorizedKeys = []*host.AuthorizedKey{{PublicKeys: []ssh.PublicKey{guest.PublicKey()}}}
+	})
+	require.Equal(t, "upterm: session s could not start: a delegated run takes no authorized keys: its authority decides who joins (see /var/log/upterm.log)\n", out)
+	require.Zero(t, places.Load(), "the run was placed")
 }
 
 // TestRunDaemonProcessTreatsALostParentAtSessionCreatedAsAbandonment pins the
