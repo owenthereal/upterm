@@ -533,7 +533,9 @@ func report(ctx context.Context, t tunnel, event internal.DelegatedEvent) error 
 // registration is current, until the relay acknowledges it, refuses it
 // outright, or the authority decides the session's end, or ctx ends. A report
 // the relay could not take is sent again, identically on the same
-// registration, after delegatedReportRetry.
+// registration, after delegatedReportRetry; one it hasn't answered yet is
+// waited on again rather than sent again, so a registration has one ready
+// report outstanding at most.
 func (m *delegatedMode) reportReady(ctx context.Context, current func() tunnel, logger *slog.Logger) {
 	for failed := false; m.final() == server.DelegatedDisposition_DELEGATED_UNSPECIFIED; failed = true {
 		err := report(ctx, current(), internal.DelegatedEvent{})

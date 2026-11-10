@@ -685,7 +685,9 @@ func TestDelegatedReports(t *testing.T) {
 		require.Equal(t, uint64(2), controls[2].Sequence)
 	})
 
-	t.Run("an unanswered report is retried identically", func(t *testing.T) {
+	// Through a real relay: the retry of a report the relay was slow to
+	// answer is that report's answer, not a second report.
+	t.Run("an unanswered report's retry takes its answer", func(t *testing.T) {
 		authority := &fakeAuthority{}
 		release := make(chan struct{})
 		var once sync.Once
@@ -707,9 +709,74 @@ func TestDelegatedReports(t *testing.T) {
 		close(release)
 		require.NoError(t, rt.Report(t.Context(), ready))
 		_, controls := authority.seen()
-		require.Len(t, controls, 2)
-		require.True(t, proto.Equal(controls[0], controls[1]))
-		require.Equal(t, uint64(1), controls[1].Sequence)
+		require.Len(t, controls, 1, "the retry sent the report again")
+		require.Equal(t, uint64(1), controls[0].Sequence)
+	})
+
+	// SSH answers one want-reply request at a time, so a report sent again
+	// while the relay hasn't answered the first would only queue behind it,
+	// one more each retry, for as long as the relay stays silent. A retry
+	// waits on the report already sent instead, and takes its answer.
+	t.Run("a retry waits on the report already sent", func(t *testing.T) {
+		relayKey, hostKey, secret := newKeyAndSecret(t)
+		id := registration.ID(hostKey.PublicKey(), secret)
+		fake := fakerelay.Start(t, relayKey, func(*server.CreateSessionRequest) (bool, []byte) {
+			return respond(&server.DelegatedSession{Protocol: testProtocol, ExternalSessionId: externalSessionID, Disposition: server.DelegatedDisposition_DELEGATED_CURRENT, DecisionRevision: 1}, "user")(id)
+		})
+		var decisions DelegatedDecisions
+		rt := fakeDelegatedTunnel(t, fake, relayKey, hostKey, secret, &decisions)
+		_, err := rt.Establish(t.Context())
+		require.NoError(t, err)
+
+		var (
+			mu       sync.Mutex
+			payloads [][]byte
+		)
+		arrived := make(chan struct{})
+		var once sync.Once
+		release := make(chan struct{})
+		fake.Handle(upterm.ServerDelegatedControlRequestType, func(payload []byte) (bool, []byte) {
+			var req server.DelegatedControlRequest
+			if err := proto.Unmarshal(payload, &req); err != nil {
+				return false, nil
+			}
+			mu.Lock()
+			payloads = append(payloads, payload)
+			mu.Unlock()
+			once.Do(func() { close(arrived) })
+			<-release
+			b, _ := proto.Marshal(echo(&req, server.DelegatedDisposition_DELEGATED_CURRENT, 1))
+			return true, b
+		})
+
+		// The first report reaches the relay, which doesn't answer it.
+		first, cancelFirst := context.WithCancel(t.Context())
+		reported := make(chan error, 1)
+		go func() { reported <- rt.Report(first, ready) }()
+		select {
+		case <-arrived:
+		case <-time.After(10 * time.Second):
+			t.Fatal("the report never reached the relay")
+		}
+		cancelFirst()
+		require.ErrorIs(t, <-reported, context.Canceled)
+
+		// Retries whose wait is over before the relay answers, as one whose
+		// time ran out is.
+		over, cancel := context.WithCancel(t.Context())
+		cancel()
+		for range 3 {
+			require.ErrorIs(t, rt.Report(over, ready), context.Canceled)
+		}
+
+		close(release)
+		require.NoError(t, rt.Report(t.Context(), ready), "the relay's answer to the report already sent wasn't taken")
+		mu.Lock()
+		defer mu.Unlock()
+		require.Equal(t, 1, len(payloads), "a retry sent the report again behind the one the relay hadn't answered")
+		d, revision := decisions.Current()
+		require.Equal(t, server.DelegatedDisposition_DELEGATED_CURRENT, d)
+		require.Equal(t, uint64(1), revision)
 	})
 
 	t.Run("answers outside the protocol", func(t *testing.T) {

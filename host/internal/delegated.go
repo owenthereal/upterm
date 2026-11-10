@@ -183,19 +183,34 @@ func (e DelegatedEvent) request(sessionID string, generation, sequence uint64) *
 type delegatedReports struct {
 	mu      sync.Mutex
 	last    uint64
-	pending map[DelegatedEvent]pendingReport
+	pending map[DelegatedEvent]*pendingReport
 }
 
 type pendingReport struct {
 	sequence uint64
 	payload  []byte
+	// sent is the request carrying the report while the relay hasn't
+	// answered it, or has and the answer is unread; nil otherwise. SSH
+	// answers one want-reply request at a time, so a second sent behind it
+	// would only queue: a report is sent again only once its last request
+	// has been answered.
+	sent *sentRequest
+}
+
+// sentRequest is a global request on its way, and once done is closed, the
+// relay's answer to it.
+type sentRequest struct {
+	done chan struct{}
+	ok   bool
+	body []byte
+	err  error
 }
 
 func (r *delegatedReports) prepare(event DelegatedEvent, sessionID string, generation uint64) (pendingReport, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if p, ok := r.pending[event]; ok {
-		return p, nil
+		return *p, nil
 	}
 	payload, err := proto.Marshal(event.request(sessionID, generation, r.last+1))
 	if err != nil {
@@ -203,17 +218,42 @@ func (r *delegatedReports) prepare(event DelegatedEvent, sessionID string, gener
 	}
 	r.last++
 	if r.pending == nil {
-		r.pending = make(map[DelegatedEvent]pendingReport)
+		r.pending = make(map[DelegatedEvent]*pendingReport)
 	}
-	p := pendingReport{sequence: r.last, payload: payload}
+	p := &pendingReport{sequence: r.last, payload: payload}
 	r.pending[event] = p
-	return p, nil
+	return *p, nil
+}
+
+// send is the request carrying event's report, numbered sequence: the one
+// already sent while it has no read answer, or one send starts now.
+func (r *delegatedReports) send(event DelegatedEvent, sequence uint64, send func() *sentRequest) *sentRequest {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	p, ok := r.pending[event]
+	if !ok || p.sequence != sequence {
+		return send()
+	}
+	if p.sent == nil {
+		p.sent = send()
+	}
+	return p.sent
+}
+
+// answered says sent's answer has been read, so the report's next send is a
+// new request.
+func (r *delegatedReports) answered(event DelegatedEvent, sent *sentRequest) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if p, ok := r.pending[event]; ok && p.sent == sent {
+		p.sent = nil
+	}
 }
 
 func (r *delegatedReports) acknowledged(event DelegatedEvent, sequence uint64) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if r.pending[event].sequence == sequence {
+	if p, ok := r.pending[event]; ok && p.sequence == sequence {
 		delete(r.pending, event)
 	}
 }
@@ -222,8 +262,10 @@ func (r *delegatedReports) acknowledged(event DelegatedEvent, sequence uint64) {
 // applies the disposition the relay answers with to Decisions. Any error
 // leaves the report unacknowledged, and sending the same event again repeats
 // its sequence and bytes exactly; a different event takes the next sequence.
-// ctx bounds the wait for the relay's answer. A *server.DelegatedRefusedError
-// is the relay's refusal; ErrDelegatedRelayUnsupported an answer outside the
+// A report sent again while the relay hasn't answered it waits on the request
+// already sent, and takes its answer, rather than send another. ctx bounds
+// the wait for the relay's answer. A *server.DelegatedRefusedError is the
+// relay's refusal; ErrDelegatedRelayUnsupported an answer outside the
 // delegated protocol.
 func (c *ReverseTunnel) Report(ctx context.Context, event DelegatedEvent) error {
 	if c.Delegated == nil || c.Client == nil || c.reports == nil {
@@ -238,13 +280,23 @@ func (c *ReverseTunnel) Report(ctx context.Context, event DelegatedEvent) error 
 		return err
 	}
 
-	ok, body, err := sendRequest(ctx, c.Client, upterm.ServerDelegatedControlRequestType, report.payload)
-	if err != nil {
-		return fmt.Errorf("delegated report: %w", err)
+	client := c.Client
+	sent := c.reports.send(event, report.sequence, func() *sentRequest {
+		return sendRequest(client, upterm.ServerDelegatedControlRequestType, report.payload)
+	})
+	select {
+	case <-ctx.Done():
+		return fmt.Errorf("delegated report: %w", ctx.Err())
+	case <-sent.done:
 	}
-	if !ok {
-		return delegatedRefusal(body)
+	c.reports.answered(event, sent)
+	if sent.err != nil {
+		return fmt.Errorf("delegated report: %w", sent.err)
 	}
+	if !sent.ok {
+		return delegatedRefusal(sent.body)
+	}
+	body := sent.body
 	var reply server.DelegatedControlReply
 	if len(body) > maxDelegatedPayload || proto.Unmarshal(body, &reply) != nil ||
 		reply.ExternalSessionId != sessionID || reply.Generation != generation || reply.AcknowledgedSequence != report.sequence {
@@ -257,27 +309,17 @@ func (c *ReverseTunnel) Report(ctx context.Context, event DelegatedEvent) error 
 	return nil
 }
 
-// sendRequest sends a global request and waits for its reply until ctx ends.
-// x/crypto offers no way to abandon a sent request, so it is the wait that is
-// abandoned: the request goes on until the relay answers or the connection
+// sendRequest sends a global request and returns it on its way. x/crypto
+// offers no way to abandon a sent request, so a caller can only stop waiting
+// for it: the request goes on until the relay answers or the connection
 // closes.
-func sendRequest(ctx context.Context, client *ssh.Client, name string, payload []byte) (bool, []byte, error) {
-	type answer struct {
-		ok   bool
-		body []byte
-		err  error
-	}
-	answered := make(chan answer, 1)
+func sendRequest(client *ssh.Client, name string, payload []byte) *sentRequest {
+	sent := &sentRequest{done: make(chan struct{})}
 	go func() {
-		ok, body, err := client.SendRequest(name, true, payload)
-		answered <- answer{ok, body, err}
+		sent.ok, sent.body, sent.err = client.SendRequest(name, true, payload)
+		close(sent.done)
 	}()
-	select {
-	case <-ctx.Done():
-		return false, nil, ctx.Err()
-	case a := <-answered:
-		return a.ok, a.body, a.err
-	}
+	return sent
 }
 
 // delegatedRefusal is what a delegated host makes of a relay's refusal: the
