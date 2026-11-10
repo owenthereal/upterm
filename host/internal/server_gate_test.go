@@ -3,6 +3,7 @@
 package internal
 
 import (
+	"context"
 	"io"
 	"os"
 	"path/filepath"
@@ -57,6 +58,56 @@ func TestGateTimesOutWithoutStartingTheCommand(t *testing.T) {
 	_, err := os.Stat(mark)
 	require.True(t, os.IsNotExist(err), "a timed-out gate must never have started the command")
 	require.Equal(t, CommandResult{}, h.srv.CommandResult())
+}
+
+// MayStart is asked immediately before the command starts, and only a yes
+// starts it. A no leaves the command unstarted: the server waits to be ended
+// rather than ending the session itself, so whoever said no says why it
+// ended.
+func TestMayStartIsAskedBeforeTheCommandStarts(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		let  bool
+	}{{"yes", true}, {"no", false}} {
+		t.Run(tc.name, func(t *testing.T) {
+			cmd, env, mark := markerCommand(t, `sleep 30`)
+			// Whether the command had been started by the time MayStart was
+			// asked.
+			asked := make(chan bool, 1)
+			started := make(chan struct{})
+			srv := &Server{Command: cmd, CommandEnv: env, OnCommandStarted: func() { close(started) }}
+			srv.MayStart = func() bool {
+				asked <- srv.cmd.cmd != nil
+				return tc.let
+			}
+			h := startHost(t, srv)
+			select {
+			case afterStart := <-asked:
+				require.False(t, afterStart, "MayStart was asked once the command had started")
+			case <-time.After(harnessTimeout):
+				t.Fatal("MayStart was never asked")
+			}
+			if tc.let {
+				select {
+				case <-started:
+				case <-time.After(harnessTimeout):
+					t.Fatal("the command never started")
+				}
+				return
+			}
+			h.stop(t)
+			require.ErrorIs(t, <-h.done, context.Canceled, "the server ended the session itself, not when it was ended")
+			require.Nil(t, srv.cmd.cmd, "the command was started")
+			select {
+			case <-started:
+				t.Fatal("the command was reported started")
+			default:
+			}
+			_, err := os.Stat(mark)
+			require.True(t, os.IsNotExist(err), "the command ran")
+			require.Equal(t, CommandResult{}, h.srv.CommandResult())
+		})
+	}
 }
 
 func TestGateOpensThePtyAtTheInitialClientsSize(t *testing.T) {

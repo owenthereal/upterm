@@ -18,6 +18,24 @@
 // runtime root at all. A per-name lock is only ever acquired under the
 // registry that guards the directory it lives in, because a lock inside a
 // directory cannot protect that directory from removal.
+//
+// # Extension API
+//
+// A program that embeds upterm reads, and describes to the host, a delegated
+// session's record through these declarations:
+//
+//   - [Record.Delegation], and [Delegation], what ties a local session to the
+//     authority that decides it;
+//   - [DelegationAssociation], who the run was placed for;
+//   - [DelegationDisplay] and [DelegationLink], what the authority shows
+//     about the session;
+//   - [DecisionStopped] and [DecisionWithdrawn], the values of
+//     Delegation.Decision;
+//   - [TunnelReasonAuthorityRefused], [TunnelReasonWithdrawn] and
+//     [TunnelReasonTrustLapsed].
+//
+// This API may change in any minor release, and each change is listed in the
+// release notes.
 package sessiondir
 
 import (

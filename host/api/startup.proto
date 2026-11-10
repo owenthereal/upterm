@@ -83,6 +83,12 @@ message Failed {
   string error = 1;
   bool name_in_use = 2;
   bool abandoned = 3;
+  // The text in error is printed exactly as it is, after the parent's
+  // sanitizing: lines kept, and nothing that can control a terminal.
+  bool verbatim = 4;
+  // The name is taken where the run was placed; a generated name is redrawn
+  // as for name_in_use.
+  bool name_taken = 5;
 }
 
 // Hello carries the nonce a transport that cannot inherit a descriptor uses

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net"
 	"net/url"
+	"strings"
 	"sync/atomic"
 	"testing"
 
@@ -416,4 +417,157 @@ func TestRelayKeyChangedErrorSurvivesWhatItIsGivenToPrint(t *testing.T) {
 
 	// The marker alone, on a zero value.
 	require.Equal(t, "the relay's key is not the one this session started with", (&RelayKeyChangedError{namesAuthority: true}).Error())
+}
+
+func mustPins(t *testing.T, keys ...ssh.PublicKey) RelayPins {
+	t.Helper()
+	blobs := make([][]byte, len(keys))
+	for i, key := range keys {
+		blobs[i] = key.Marshal()
+	}
+	pins, err := ParseRelayPins(blobs)
+	require.NoError(t, err)
+	return pins
+}
+
+// A delegated run's relay may present any key, or any authority's
+// certificate, that the placement pinned, on its first connection and on
+// every redial alike, and the authority recorded for guest certificates is
+// the one each connection verified. Holding to the first observed key instead
+// would refuse a rotation the placement allowed.
+func TestRelayRotationWithinPlacementPins(t *testing.T) {
+	old, rotated := testSigner(t), testSigner(t)
+	pins := mustPins(t, old.PublicKey(), rotated.PublicKey())
+
+	t.Run("the callback", func(t *testing.T) {
+		var a RelayAuthority
+		require.NoError(t, a.PinnedTo(pins, "")("relay.example:22", nil, old.PublicKey()))
+		require.True(t, a.IsUserAuthority(old.PublicKey()))
+
+		require.NoError(t, a.PinnedTo(pins, "")("relay.example:22", nil, rotated.PublicKey()), "a redial refused a pinned rotation")
+		require.True(t, a.IsUserAuthority(rotated.PublicKey()), "the verified authority is the one recorded")
+		require.False(t, a.IsUserAuthority(old.PublicKey()))
+
+		cert := hostCert(t, old, testSigner(t).PublicKey(), []string{"relay.example"}, ssh.CertTimeInfinity)
+		require.NoError(t, a.PinnedTo(pins, "")("relay.example:22", nil, cert))
+		require.True(t, a.IsUserAuthority(old.PublicKey()), "a certificate's verified authority is its pinned signer")
+
+		// The standalone redial policy, by contrast, holds to what it first saw.
+		require.Error(t, a.Pinned()("relay.example:22", nil, rotated.PublicKey()))
+	})
+
+	t.Run("redials", func(t *testing.T) {
+		authority := &fakeAuthority{}
+		first := startDelegatingRelay(t, authority)
+		second := startDelegatingRelay(t, authority, withHostCert)
+		pins := mustPins(t, first.identity[0].PublicKey(), second.identity[0].PublicKey())
+		hostKey := testSigner(t)
+		var (
+			relayAuthority RelayAuthority
+			decisions      DelegatedDecisions
+		)
+		rt := first.delegatedTunnel(t, hostKey, 1, &decisions)
+		rt.HostKeyCallback = relayAuthority.PinnedTo(pins, "")
+		_, err := rt.Establish(t.Context())
+		require.NoError(t, err)
+		require.True(t, relayAuthority.IsUserAuthority(first.identity[0].PublicKey()))
+
+		redial := second.delegatedTunnel(t, hostKey, 2, &decisions)
+		redial.SessionSecret = rt.SessionSecret
+		redial.HostKeyCallback = relayAuthority.PinnedTo(pins, "")
+		_, err = redial.Establish(t.Context())
+		require.NoError(t, err, "a redial to the rotated relay was refused")
+		require.True(t, relayAuthority.IsUserAuthority(second.identity[0].PublicKey()))
+		require.False(t, relayAuthority.IsUserAuthority(first.identity[0].PublicKey()))
+	})
+}
+
+// A delegated run trusts nothing on first sight: a key or certificate outside
+// the placement's pins is refused on the first connection as on any other,
+// nothing is recorded, and no pin set can be empty, oversized, or hold a
+// certificate, a duplicate or a key spelled other than canonically.
+func TestDelegatedRunTrustsOnlyItsPins(t *testing.T) {
+	pinned, other := testSigner(t), testSigner(t)
+	hostKey := testSigner(t)
+	pins := mustPins(t, pinned.PublicKey())
+
+	userCert := hostCert(t, pinned, hostKey.PublicKey(), []string{"relay.example"}, ssh.CertTimeInfinity)
+	userCert.CertType = ssh.UserCert
+	require.NoError(t, userCert.SignCert(rand.Reader, pinned))
+	for name, tc := range map[string]struct {
+		key ssh.PublicKey
+		ok  bool
+	}{
+		"the pinned key":                  {pinned.PublicKey(), true},
+		"a pinned authority's cert":       {hostCert(t, pinned, hostKey.PublicKey(), []string{"relay.example"}, ssh.CertTimeInfinity), true},
+		"another key":                     {other.PublicKey(), false},
+		"a cert naming no host":           {hostCert(t, pinned, hostKey.PublicKey(), nil, ssh.CertTimeInfinity), false},
+		"a cert for another host":         {hostCert(t, pinned, hostKey.PublicKey(), []string{"elsewhere.example"}, ssh.CertTimeInfinity), false},
+		"an expired cert":                 {hostCert(t, pinned, hostKey.PublicKey(), []string{"relay.example"}, 1), false},
+		"a user cert":                     {userCert, false},
+		"another authority's cert":        {hostCert(t, other, hostKey.PublicKey(), []string{"relay.example"}, ssh.CertTimeInfinity), false},
+		"another authority certifying it": {hostCert(t, other, pinned.PublicKey(), []string{"relay.example"}, ssh.CertTimeInfinity), false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			var a RelayAuthority
+			err := a.PinnedTo(pins, "Example")("relay.example:22", nil, tc.key)
+			if tc.ok {
+				require.NoError(t, err)
+				require.True(t, a.IsUserAuthority(pinned.PublicKey()))
+				return
+			}
+			var notPinned *RelayKeyNotPinnedError
+			require.ErrorAs(t, err, &notPinned)
+			require.Equal(t, tc.key, notPinned.Key)
+			require.True(t, strings.HasSuffix(err.Error(), " is not one Example listed for this relay"), err.Error())
+			require.False(t, a.IsUserAuthority(pinned.PublicKey()), "a refused key recorded an authority")
+			require.False(t, a.IsUserAuthority(other.PublicKey()), "a refused key recorded an authority")
+			// Refused again on a second sight: nothing was learned from the first.
+			require.Error(t, a.PinnedTo(pins, "Example")("relay.example:22", nil, tc.key))
+		})
+	}
+
+	// The refusal names who listed the pins, or says whose they are when the
+	// placement gave no name.
+	notPinned := &RelayKeyNotPinnedError{Hostname: "relay.example:22", Key: other.PublicKey()}
+	require.Equal(t, "the relay's key for relay.example:22 ("+utils.FingerprintSHA256(other.PublicKey())+") is not one the session's authority listed for this relay", notPinned.Error())
+	notPinned.Authority = "Example"
+	require.Equal(t, "the relay's key for relay.example:22 ("+utils.FingerprintSHA256(other.PublicKey())+") is not one Example listed for this relay", notPinned.Error())
+
+	cert := hostCert(t, pinned, hostKey.PublicKey(), []string{"relay.example"}, ssh.CertTimeInfinity)
+	sixteen := make([][]byte, 16)
+	for i := range sixteen {
+		sixteen[i] = testSigner(t).PublicKey().Marshal()
+	}
+	_, err := ParseRelayPins(sixteen)
+	require.NoError(t, err, "16 pins")
+	for name, blobs := range map[string][][]byte{
+		"no pins":     nil,
+		"17 pins":     append(append([][]byte(nil), sixteen...), testSigner(t).PublicKey().Marshal()),
+		"a cert":      {cert.Marshal()},
+		"a duplicate": {pinned.PublicKey().Marshal(), pinned.PublicKey().Marshal()},
+		"trailing":    {append(pinned.PublicKey().Marshal(), 0)},
+		"not a key":   {[]byte("ssh-ed25519")},
+	} {
+		_, err := ParseRelayPins(blobs)
+		require.Error(t, err, name)
+	}
+
+	t.Run("a relay outside the pins", func(t *testing.T) {
+		authority := &fakeAuthority{}
+		relay := startDelegatingRelay(t, authority)
+		var (
+			relayAuthority RelayAuthority
+			decisions      DelegatedDecisions
+		)
+		rt := relay.delegatedTunnel(t, testSigner(t), 1, &decisions)
+		rt.HostKeyCallback = relayAuthority.PinnedTo(pins, "")
+		_, err := rt.Establish(t.Context())
+		var notPinned *RelayKeyNotPinnedError
+		require.ErrorAs(t, err, &notPinned)
+		require.False(t, relayAuthority.IsUserAuthority(relay.identity[0].PublicKey()))
+		registrations, _ := authority.seen()
+		require.Empty(t, registrations, "a host that refused the relay registered with it")
+		requireUndecided(t, &decisions)
+	})
 }

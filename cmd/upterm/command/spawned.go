@@ -298,6 +298,11 @@ func (s *spawnedSession) runWithDetachContext(ctx context.Context, notify func(c
 			return displayErr
 		case f.Abandoned:
 			return fmt.Errorf("session %s was not started: %s", s.name, f.Error)
+		case f.Verbatim:
+			// The text as it was chosen for the operator, each line as it
+			// was given, so that a command one of them gives can be copied
+			// whole; the log goes on a line of its own.
+			return verbatimError{text: safeText(f.Error) + seeLog("\n(see %s)", s.loggedTo()), nameTaken: f.NameTaken}
 		default:
 			return fmt.Errorf("session %s could not start: %s%s", s.name, f.Error, seeLog(" (see %s)", s.loggedTo()))
 		}

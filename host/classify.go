@@ -7,6 +7,7 @@ import (
 	"github.com/owenthereal/upterm/host/internal"
 	"github.com/owenthereal/upterm/host/sessiondir"
 	"github.com/owenthereal/upterm/internal/registration"
+	"github.com/owenthereal/upterm/server"
 )
 
 // retryClass says how a caller that retries a failed redial should pace the
@@ -61,6 +62,8 @@ func classify(err error) (reason string, class retryClass) {
 		createRefused    *internal.CreateSessionRefusedError
 		forwardRefused   *internal.ForwardRefusedError
 		permissionDenied *internal.PermissionDeniedError
+		notPinned        *internal.RelayKeyNotPinnedError
+		delegatedRefused *server.DelegatedRefusedError
 	)
 	switch {
 	case errors.As(err, &agentUnavailable):
@@ -71,11 +74,23 @@ func classify(err error) (reason string, class retryClass) {
 	case errors.As(err, &agentRefused):
 		return sessiondir.TunnelReasonAgentRefused, blocked
 
-	case errors.As(err, &keyChanged):
+	// A delegated run's relay presenting a key outside the pins its placement
+	// listed is a changed relay key all the same.
+	case errors.As(err, &keyChanged), errors.As(err, &notPinned):
 		return sessiondir.TunnelReasonRelayKeyChanged, blocked
 
-	case errors.Is(err, internal.ErrRelayUnsupported):
+	case errors.Is(err, internal.ErrRelayUnsupported), errors.Is(err, internal.ErrDelegatedRelayUnsupported):
 		return sessiondir.TunnelReasonRelayUnsupported, blocked
+
+	// The authority's own answer to a registration: unavailable, or a newer
+	// registration of this session that won, clears with time, and only this
+	// transport lost; refused, it won't.
+	case errors.As(err, &delegatedRefused):
+		switch delegatedRefused.Code {
+		case server.DelegatedErrorCode_DELEGATED_UNAVAILABLE, server.DelegatedErrorCode_DELEGATED_STALE_GENERATION:
+			return sessiondir.TunnelReasonRelayError, transient
+		}
+		return sessiondir.TunnelReasonAuthorityRefused, blocked
 
 	case errors.As(err, &createRefused):
 		if strings.HasPrefix(createRefused.Body, registration.RefusedProof) {

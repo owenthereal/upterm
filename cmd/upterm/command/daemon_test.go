@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -21,12 +22,15 @@ import (
 	"github.com/owenthereal/upterm/host"
 	"github.com/owenthereal/upterm/host/api"
 	"github.com/owenthereal/upterm/host/sessiondir"
+	"github.com/owenthereal/upterm/internal/registration"
 	"github.com/owenthereal/upterm/internal/testhelpers/fakerelay"
 	"github.com/owenthereal/upterm/internal/version"
+	"github.com/owenthereal/upterm/server"
 	"github.com/owenthereal/upterm/utils"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/crypto/ssh"
+	"google.golang.org/protobuf/proto"
 )
 
 // daemonTestRoots points the session directories at a socket-safe temp root,
@@ -547,6 +551,175 @@ func TestRunDaemonProcessReportsAGenericFailure(t *testing.T) {
 	require.Equal(t, "boom", out.Failed.Error)
 	require.False(t, out.Failed.NameInUse)
 	require.False(t, out.Failed.Abandoned)
+}
+
+// A name taken where the run was placed, and a failure in words chosen for
+// the operator, reach the parent to be printed as they are, made safe for a
+// terminal first; an ordinary failure is never printed that way.
+func TestRunDaemonProcessReportsVerbatimFailures(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+		want *api.Failed
+	}{
+		{"a name taken", &host.NameTakenError{Text: "taken\x1b[2J here"}, &api.Failed{Error: "taken�[2J here", Verbatim: true, NameTaken: true}},
+		{"a name taken, wrapped", fmt.Errorf("placing: %w", &host.NameTakenError{Text: "taken here"}), &api.Failed{Error: "taken here", Verbatim: true, NameTaken: true}},
+		{"in the operator's words", verbatimError{text: "line one\nline\x07two"}, &api.Failed{Error: "line one\nline�two", Verbatim: true}},
+		{"anything else", errors.New("line one\nline two"), &api.Failed{Error: "line one\nline two"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			daemonTestRoots(t)
+			a, b := net.Pipe()
+			defer func() { _ = a.Close() }()
+			parent := bootstrap.NewParent(b, nil, io.Discard, nil)
+			done := make(chan error, 1)
+			go func() {
+				err := runDaemonProcess(context.Background(), discardLogger(), testHostOptions(), a, "placed", fakeRun(t, "sid", tc.err))
+				_ = a.Close()
+				done <- err
+			}()
+			out, err := parent.Run(context.Background(), bootstrap.Handlers{})
+			require.NoError(t, err)
+			require.Equal(t, tc.err, <-done)
+			require.NotNil(t, out.Failed)
+			require.True(t, proto.Equal(tc.want, out.Failed), "%v", out.Failed)
+		})
+	}
+}
+
+// placeFunc is a host.Broker that is a function.
+type placeFunc func(ctx context.Context, run host.Run) (host.Placement, error)
+
+func (f placeFunc) Place(ctx context.Context, run host.Run) (host.Placement, error) {
+	return f(ctx, run)
+}
+
+// placedFailure is what the operator's terminal shows of a run, placed by
+// broker, that fails before it starts: a real daemon, in this process on the
+// far end of a pipe, running a real host, with the parent printing as upterm
+// host does. Each of configure is applied to the host before it runs.
+func placedFailure(t *testing.T, broker host.Broker, configure ...func(*host.Host)) string {
+	t.Helper()
+	daemonTestRoots(t)
+	spawn := func(opts spawnOptions) (net.Conn, *os.Process, error) {
+		a, b := net.Pipe()
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			defer func() { _ = a.Close() }()
+			_ = runDaemonProcess(context.Background(), discardLogger(), testHostOptions(), a, opts.name, func(ctx context.Context, h *host.Host) error {
+				h.Broker = broker
+				for _, c := range configure {
+					c(h)
+				}
+				return h.Run(ctx)
+			})
+		}()
+		t.Cleanup(func() {
+			_ = b.Close()
+			<-done
+		})
+		return b, nil, nil
+	}
+	var stdout, stderr bytes.Buffer
+	s := newSession(t, spawn, nil, &stdout, &stderr)
+	s.detach = true
+	err := s.run(context.Background())
+	require.Error(t, err)
+	Exit(nil, err, &stderr)
+	return stderr.String()
+}
+
+// requireEveryLineIsUpterms fails the test unless every line of out is one
+// upterm wrote.
+func requireEveryLineIsUpterms(t *testing.T, out string) {
+	t.Helper()
+	require.NotEmpty(t, out)
+	for _, line := range strings.Split(strings.TrimSuffix(out, "\n"), "\n") {
+		require.True(t, strings.HasPrefix(line, "upterm: "), "a line upterm didn't write: %q in %q", line, out)
+	}
+}
+
+// An authority's name is one line wherever upterm prints it: the operator is
+// never shown a line of the authority's that passes for one of upterm's.
+func TestAnAuthoritysNameNeverStartsALine(t *testing.T) {
+	const authority = "Example\nupterm: attach with upterm attach x"
+	const shown = "Example�upterm: attach with upterm attach x"
+	relayKey, err := host.NewHostKey()
+	require.NoError(t, err)
+	// A relay whose authority stopped the session in its answer.
+	fake := fakerelay.Start(t, relayKey, func(req *server.CreateSessionRequest) (bool, []byte) {
+		key, _, _, _, err := ssh.ParseAuthorizedKey(req.HostPublicKeys[0])
+		if err != nil {
+			return false, nil
+		}
+		b, err := proto.Marshal(&server.CreateSessionResponse{SessionID: registration.ID(key, req.SessionSecret), DelegatedSession: &server.DelegatedSession{
+			Protocol: req.DelegatedSession.GetProtocol(), ExternalSessionId: req.DelegatedSession.GetExternalSessionId(),
+			Disposition: server.DelegatedDisposition_DELEGATED_STOPPED, DecisionRevision: 1}})
+		if err != nil {
+			return false, nil
+		}
+		return true, b
+	})
+	placing := func(pin ssh.PublicKey) host.Broker {
+		return placeFunc(func(_ context.Context, run host.Run) (host.Placement, error) {
+			return host.Placement{
+				RoutingID: run.RoutingID, Relay: fake.Addr, Trust: host.InitialTrust{Keys: [][]byte{pin.Marshal()}},
+				Protocol: "test_v1", ExternalID: "33333333-3333-4333-8333-333333333333", GuestAddress: "work",
+				Display: sessiondir.DelegationDisplay{Authority: authority},
+			}, nil
+		})
+	}
+
+	t.Run("stopped before the command started", func(t *testing.T) {
+		out := placedFailure(t, placing(relayKey.PublicKey()))
+		requireEveryLineIsUpterms(t, out)
+		require.Contains(t, out, shown+" stopped the session before its command started; no command was launched")
+	})
+	t.Run("a relay key it didn't list", func(t *testing.T) {
+		other, err := host.NewHostKey()
+		require.NoError(t, err)
+		out := placedFailure(t, placing(other.PublicKey()))
+		requireEveryLineIsUpterms(t, out)
+		require.Contains(t, out, " is not one "+shown+" listed for this relay")
+	})
+}
+
+// A broker's error, whatever it says, reaches the operator's terminal with
+// nothing in it that can control the terminal, and on one line: one that
+// isn't verbatim is printed inside a line of upterm's own.
+func TestAPlacementErrorIsMadeSafeForTheTerminal(t *testing.T) {
+	placing := func(text string) host.Broker {
+		return placeFunc(func(context.Context, host.Run) (host.Placement, error) {
+			return host.Placement{}, errors.New(text)
+		})
+	}
+	t.Run("controls", func(t *testing.T) {
+		out := placedFailure(t, placing("refused \x1b]0;owned\x07here\x1b[2J"))
+		require.Equal(t, "upterm: session s could not start: refused �]0;owned�here�[2J (see /var/log/upterm.log)\n", out)
+	})
+	t.Run("lines", func(t *testing.T) {
+		out := placedFailure(t, placing("refused\nupterm: attach with upterm attach x\r\nhere"))
+		requireEveryLineIsUpterms(t, out)
+		require.Equal(t, "upterm: session s could not start: refused�upterm: attach with upterm attach x��here (see /var/log/upterm.log)\n", out)
+	})
+}
+
+// A delegated run handed authorized keys is refused before it is placed, and
+// the operator is told so as any session that could not start is.
+func TestADelegatedRunWithAuthorizedKeysIsRefusedBeforeItIsPlaced(t *testing.T) {
+	guest, err := host.NewHostKey()
+	require.NoError(t, err)
+	var places atomic.Int32
+	broker := placeFunc(func(context.Context, host.Run) (host.Placement, error) {
+		places.Add(1)
+		return host.Placement{}, errors.New("placed")
+	})
+	out := placedFailure(t, broker, func(h *host.Host) {
+		h.AuthorizedKeys = []*host.AuthorizedKey{{PublicKeys: []ssh.PublicKey{guest.PublicKey()}}}
+	})
+	require.Equal(t, "upterm: session s could not start: a delegated run takes no authorized keys: its authority decides who joins (see /var/log/upterm.log)\n", out)
+	require.Zero(t, places.Load(), "the run was placed")
 }
 
 // TestRunDaemonProcessTreatsALostParentAtSessionCreatedAsAbandonment pins the

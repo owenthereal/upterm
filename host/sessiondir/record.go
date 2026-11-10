@@ -35,6 +35,15 @@ const (
 	TunnelReasonRelayUnsupported     = "relay_unsupported"
 	TunnelReasonProofRefused         = "proof_refused"
 	TunnelReasonReconnectUnsupported = "reconnect_unsupported"
+	// TunnelReasonAuthorityRefused is the relay refusing a delegated
+	// registration as invalid or unsupported. TunnelReasonWithdrawn is the
+	// session's authority withdrawing its remote access, which ends the
+	// tunnel while the command goes on running. TunnelReasonTrustLapsed is
+	// reserved for the relay keys a delegated session trusts lapsing; nothing
+	// sets it yet.
+	TunnelReasonAuthorityRefused = "authority_refused"
+	TunnelReasonWithdrawn        = "withdrawn"
+	TunnelReasonTrustLapsed      = "trust_lapsed"
 )
 
 // Whether the relay derives session IDs, known after the first connection.
@@ -157,7 +166,61 @@ type Record struct {
 	// the process that knows, for the reason AdminSocket is: the reader's
 	// state root need not be the daemon's.
 	LogPath string `json:"log_path,omitempty"`
+	// Delegation is the delegated session this one runs as, written in full
+	// before the relay is dialled; only its Decision changes later. Nil for
+	// every other session.
+	Delegation *Delegation `json:"delegation,omitempty"`
 }
+
+// Delegation is what ties a local session to the external authority that
+// decides its registration and its guests: where the run was placed, what the
+// authority calls it, and what it says about it. None of it is a credential.
+type Delegation struct {
+	DelegationAssociation
+	DelegationDisplay
+	ExternalSessionID string `json:"external_session_id"`
+	RoutingID         string `json:"routing_id"`
+	// Relay is the host:port the run registers with.
+	Relay string `json:"relay"`
+	// GuestAddress is the SSH user guests reach the session as.
+	GuestAddress string `json:"guest_address"`
+	// Decision is DecisionStopped or DecisionWithdrawn once the authority has
+	// stopped the session or withdrawn its remote access with the command
+	// started, or about to be: a stop is written before the session's stop
+	// is requested, a withdrawal once the tunnel is closed. Empty before, and
+	// for good when the authority decided earlier: that run launches nothing.
+	Decision string `json:"decision,omitempty"`
+}
+
+// DelegationAssociation is who the run was placed for: the service, the
+// account and the login, and the external session this one replaced, if any.
+type DelegationAssociation struct {
+	Service string `json:"service"`
+	Account string `json:"account"`
+	Login   string `json:"login"`
+	// SupersededSessionID is empty when the run replaced none.
+	SupersededSessionID string `json:"superseded_session_id,omitempty"`
+}
+
+// DelegationDisplay is what the authority shows about the session: its own
+// name, which may be empty, links and note lines.
+type DelegationDisplay struct {
+	Authority string           `json:"authority"`
+	Links     []DelegationLink `json:"links"`
+	Notes     []string         `json:"notes"`
+}
+
+// DelegationLink is one of the authority's links about the session.
+type DelegationLink struct {
+	Label string `json:"label"`
+	URL   string `json:"url"`
+}
+
+// The values of Delegation.Decision.
+const (
+	DecisionStopped   = "stopped"
+	DecisionWithdrawn = "withdrawn"
+)
 
 // Update mutates the record and republishes it atomically.
 //

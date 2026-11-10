@@ -512,9 +512,44 @@ func TestRecordJSONNames(t *testing.T) {
 	require.NoError(t, err)
 	fields = nil
 	require.NoError(t, json.Unmarshal(raw, &fields))
-	for _, name := range []string{"reconnect", "tunnel_lost_at", "tunnel_reason", "tunnel_error", "next_attempt_at"} {
+	for _, name := range []string{"reconnect", "tunnel_lost_at", "tunnel_reason", "tunnel_error", "next_attempt_at", "delegation"} {
 		require.NotContains(t, fields, name)
 	}
+
+	// A delegated session's record says, under delegation, everything its
+	// placement said about it, each under its own name.
+	raw, err = json.Marshal(Record{Delegation: &Delegation{
+		DelegationAssociation: DelegationAssociation{Service: "https://authority.example", Account: "a", Login: "l", SupersededSessionID: "old"},
+		DelegationDisplay: DelegationDisplay{
+			Authority: "Example",
+			Links:     []DelegationLink{{Label: "Dashboard", URL: "https://authority.example/s"}},
+			Notes:     []string{"a note"},
+		},
+		ExternalSessionID: "s", RoutingID: "r", Relay: "relay.example:22", GuestAddress: "work", Decision: DecisionStopped,
+	}})
+	require.NoError(t, err)
+	fields = nil
+	require.NoError(t, json.Unmarshal(raw, &fields))
+	require.Equal(t, map[string]any{
+		"authority": "Example", "service": "https://authority.example", "account": "a", "login": "l",
+		"external_session_id": "s", "routing_id": "r", "relay": "relay.example:22", "guest_address": "work",
+		"links":                 []any{map[string]any{"label": "Dashboard", "url": "https://authority.example/s"}},
+		"notes":                 []any{"a note"},
+		"superseded_session_id": "old", "decision": "stopped",
+	}, fields["delegation"])
+
+	// Only the session it replaced and the decision are left out until
+	// there is one; the authority's name is there even when it is empty.
+	raw, err = json.Marshal(Delegation{DelegationDisplay: DelegationDisplay{Links: []DelegationLink{}, Notes: []string{}}})
+	require.NoError(t, err)
+	fields = nil
+	require.NoError(t, json.Unmarshal(raw, &fields))
+	require.Equal(t, map[string]any{
+		"authority": "", "service": "", "account": "", "login": "", "external_session_id": "", "routing_id": "",
+		"relay": "", "guest_address": "", "links": []any{}, "notes": []any{},
+	}, fields)
+	require.Equal(t, "stopped", DecisionStopped)
+	require.Equal(t, "withdrawn", DecisionWithdrawn)
 }
 
 // Dropping LoginCommand during record decoding or claim publication loses the

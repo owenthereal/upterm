@@ -353,6 +353,43 @@ type Host struct {
 	// it next. Nil when AdminSocketFile was supplied, which is how tests
 	// drive Host without taking a name.
 	SessionDir *sessiondir.Dir
+
+	// NameGenerated says the caller drew Name rather than being given it,
+	// which the Broker is told.
+	NameGenerated bool
+
+	// Broker, when set, makes the run a delegated session: one whose
+	// registration, and whose guests, an external authority decides. Run
+	// calls its Place once, after the name is claimed and before anything is
+	// dialled, and the run registers only with the relay the placement names,
+	// trusting only the relay keys it lists, on the first connection and on
+	// every redial alike: Host, HostKeyCallback and ProxyURL are not
+	// consulted, and nothing prompts or reads known_hosts. An error from
+	// Place ends the run with that error before any command is launched.
+	// The authority decides who joins, so a delegated run takes no
+	// AuthorizedKeys: Run refuses the two together before it does anything.
+	//
+	// The relay then decides the registration, and Run follows what the
+	// authority decided: a session stopped or withdrawn before its command
+	// started launches nothing; one stopped later is stopped as `session
+	// stop` stops it; one withdrawn later goes on running locally, with its
+	// admin and attach sockets, and guests can't reach it through the relay
+	// any more. Run tells the relay once the session is ready, and the
+	// command's exit when it has one to tell. Called on Run's own goroutine.
+	Broker Broker
+	// DecisionCallback, if set, is told once when the authority stops or
+	// withdraws a delegated session whose command has been let start, once the
+	// session has acted on it and the record says so. Called on a goroutine
+	// of the host's own; it must not block, since the session's end waits
+	// for it.
+	DecisionCallback func(Decision)
+	// onStopRequested is a per-Host test hook run when the session's stop is
+	// requested, whoever requests it, before the request is acted on.
+	onStopRequested func()
+	// atLaunch is a per-Host test barrier run immediately before a delegated
+	// run's command starts, once it has been let start: blocking in it holds
+	// the command back with that settled.
+	atLaunch func()
 }
 
 // ErrSessionAbandoned marks a session given up before its command started, as
@@ -623,6 +660,11 @@ func (c *Host) Run(ctx context.Context) (runErr error) {
 	if c.TerminalConsent && c.PermissionChecker != nil {
 		return errors.New("TerminalConsent and PermissionChecker are mutually exclusive")
 	}
+	// Refused here, before a name is claimed or the run is placed, rather
+	// than by the registration once both have happened.
+	if c.Broker != nil && len(c.AuthorizedKeys) > 0 {
+		return errors.New("a delegated run takes no authorized keys: its authority decides who joins")
+	}
 	// First, before anything here can write a byte. Whatever a
 	// SessionCreatedCallback prints, and whatever a VersionWarningCallback or
 	// a RelayWarningCallback prints, goes out well before the signal actor is
@@ -634,7 +676,12 @@ func (c *Host) Run(ctx context.Context) (runErr error) {
 	// Admin stop has its own cause; external parent cancellation remains distinct.
 	ctx, cancelRun := context.WithCancelCause(ctx)
 	defer cancelRun(nil)
-	requestStop := func() { cancelRun(errSessionStopped) }
+	requestStop := func() {
+		if c.onStopRequested != nil {
+			c.onStopRequested()
+		}
+		cancelRun(errSessionStopped)
+	}
 
 	// The session's two facts, and every status the record carries is derived
 	// from them. On the Host for Status from Run's entry, so that a caller
@@ -645,21 +692,25 @@ func (c *Host) Run(ctx context.Context) (runErr error) {
 	c.state.Store(state)
 	defer c.state.Store(nil)
 
-	u, err := url.Parse(c.Host)
-	if err != nil {
-		return fmt.Errorf("error parsing host url: %s", err)
-	}
-	// A ws:// or wss:// URL without a port gets its scheme's, as `upterm
-	// host` gives it. Whatever checks the relay's key is handed host:port --
-	// the host key callback, and the check a redial is pinned with, which
-	// refuses a bare hostname -- and so is the session's Host. ws drops a
-	// default port from the URL it dials, so nothing on the wire changes.
-	if u.Port() == "" {
-		switch u.Scheme {
-		case "ws":
-			u.Host += ":80"
-		case "wss":
-			u.Host += ":443"
+	// A delegated run dials the relay its placement names, and never this one.
+	u := &url.URL{}
+	if c.Broker == nil {
+		if u, err = url.Parse(c.Host); err != nil {
+			return fmt.Errorf("error parsing host url: %s", err)
+		}
+		// A ws:// or wss:// URL without a port gets its scheme's, as `upterm
+		// host` gives it. Whatever checks the relay's key is handed host:port
+		// -- the host key callback, and the check a redial is pinned with,
+		// which refuses a bare hostname -- and so is the session's Host. ws
+		// drops a default port from the URL it dials, so nothing on the wire
+		// changes.
+		if u.Port() == "" {
+			switch u.Scheme {
+			case "ws":
+				u.Host += ":80"
+			case "wss":
+				u.Host += ":443"
+			}
 		}
 	}
 
@@ -800,6 +851,35 @@ func (c *Host) Run(ctx context.Context) (runErr error) {
 		}()
 	}
 
+	// What guests may do, as the session reports it, and as a delegated run
+	// tells its broker what guests may ask the relay for.
+	permissions := internal.Permissions{
+		AutoAccept:                   c.AutoAccept,
+		ReadOnly:                     c.ReadOnly,
+		SFTPDisabled:                 c.SFTPDisabled,
+		AllowLocalTCPForwarding:      c.AllowLocalTCPForwarding,
+		FileTransferApprovalRequired: c.FileTransferApprovalRequired,
+		AllowLoopbackTCPForwarding:   c.AllowLoopbackTCPForwarding,
+		ForwardingDisabled:           c.ForwardingDisabled,
+		AcceptExec:                   c.AcceptExec,
+		ExecDisabled:                 c.ExecDisabled,
+		TerminalConsent:              c.TerminalConsent,
+		PermissionChecker:            c.PermissionChecker,
+	}
+
+	// A delegated run is placed now, once the name is claimed and before
+	// anything is dialled, for this run's key and routing ID; the relay it
+	// registers with is the one the placement names. Recording the delegation
+	// follows the placement directly, so nothing can see the one without the
+	// other.
+	var delegated *delegatedMode
+	if c.Broker != nil {
+		if delegated, err = c.startDelegated(ctx, hostKey, secret, permissions); err != nil {
+			return err
+		}
+		u = delegated.relay
+	}
+
 	logger := c.Logger.With("server", u.String())
 	logger.Info("Establishing reverse tunnel")
 	// The relay this host verifies is the only authority for the guest
@@ -826,6 +906,9 @@ func (c *Host) Run(ctx context.Context) (runErr error) {
 		ProxyURL:        c.ProxyURL,
 		Logger:          logger.With("component", "reverse-tunnel"),
 	}
+	// A delegated run's first connection trusts only the keys its placement
+	// listed, as every redial does, and registers the delegated session.
+	delegated.tunnel(rt, relayAuthority)
 	// The tunnel Run closes on its way out. Until the supervisor exists that
 	// is the first one, and Close is nil-safe on a tunnel that never
 	// established: Establish closes whatever a failed attempt opened. Once
@@ -858,6 +941,13 @@ func (c *Host) Run(ctx context.Context) (runErr error) {
 		return err
 	}
 	state.setReconnect(rt.ReconnectSupported())
+	// A delegated session the relay's answer stopped or withdrew has no
+	// route, and nothing is launched for it.
+	if d := delegated.final(); d != server.DelegatedDisposition_DELEGATED_UNSPECIFIED {
+		err := delegated.beforeLaunch(d)
+		logger.Error(delegated.authority+" decided against the session before its command started", "error", err)
+		return err
+	}
 
 	// Check server version compatibility after establishing connection
 	serverVersion := string(rt.ServerVersion())
@@ -886,18 +976,25 @@ func (c *Host) Run(ctx context.Context) (runErr error) {
 		if c.RelayWarningCallback != nil {
 			c.RelayWarningCallback(RelayWarning{Kind: NoReconnect})
 		}
-	} else if err := relayAuthority.CheckRedial(u.Host); err != nil {
-		logger.Warn(fmt.Sprintf("the relay's certificate isn't valid for %s, so a reconnect would be refused; use the relay's own hostname in --server", u.Hostname()),
-			"error", err)
-		if c.RelayWarningCallback != nil {
-			c.RelayWarningCallback(RelayWarning{Kind: CertNotValidForServer, Host: u.Hostname()})
+	} else if delegated == nil {
+		// A delegated run's redials trust its pins, not what this connection
+		// was shown, so only a local run has this to say.
+		if err := relayAuthority.CheckRedial(u.Host); err != nil {
+			logger.Warn(fmt.Sprintf("the relay's certificate isn't valid for %s, so a reconnect would be refused; use the relay's own hostname in --server", u.Hostname()),
+				"error", err)
+			if c.RelayWarningCallback != nil {
+				c.RelayWarningCallback(RelayWarning{Kind: CertNotValidForServer, Host: u.Hostname()})
+			}
 		}
 	}
 
+	// A delegated session's guests reach it at its guest address, whatever
+	// the relay registered.
+	sshUser := delegated.address(sessResp.SshUser)
 	// Where guests reach the session now. A redial may register it on
 	// another node, and GetSession reads this rather than the first answer.
 	route := &internal.SessionRoute{}
-	route.Set(sessResp.NodeAddr, sessResp.SshUser)
+	route.Set(sessResp.NodeAddr, sshUser)
 
 	// The ID, but not readiness: the session is registered and nothing more.
 	// Nothing has accepted it, the admin socket is unbound and the command
@@ -908,14 +1005,15 @@ func (c *Host) Run(ctx context.Context) (runErr error) {
 		SessionId:      sessResp.SessionID,
 		Host:           u.String(),
 		NodeAddr:       sessResp.NodeAddr,
-		SshUser:        sessResp.SshUser,
+		SshUser:        sshUser,
 		Command:        c.Command,
 		ForceCommand:   c.ForceCommand,
 		LoginCommand:   c.LoginCommand,
 		AuthorizedKeys: toApiAuthorizedKeys(c.AuthorizedKeys),
 		SftpDisabled:   c.SFTPDisabled,
-		// The same emptiness the guest door admits anyone on.
-		Open: c.AutoAccept && len(aks) == 0,
+		// The same emptiness the guest door admits anyone on. The authority
+		// decides who reaches a delegated session, so none is open.
+		Open: c.AutoAccept && len(aks) == 0 && c.Broker == nil,
 	}
 	// The relay key the first connection trusted, and how. Redials never
 	// ask the callback that decided it: they are pinned to the key it
@@ -926,19 +1024,7 @@ func (c *Host) Run(ctx context.Context) (runErr error) {
 			session.RelayKeyTrust = proto.String(trusted.Trust)
 		}
 	}
-	internal.Permissions{
-		AutoAccept:                   c.AutoAccept,
-		ReadOnly:                     c.ReadOnly,
-		SFTPDisabled:                 c.SFTPDisabled,
-		AllowLocalTCPForwarding:      c.AllowLocalTCPForwarding,
-		FileTransferApprovalRequired: c.FileTransferApprovalRequired,
-		AllowLoopbackTCPForwarding:   c.AllowLoopbackTCPForwarding,
-		ForwardingDisabled:           c.ForwardingDisabled,
-		AcceptExec:                   c.AcceptExec,
-		ExecDisabled:                 c.ExecDisabled,
-		TerminalConsent:              c.TerminalConsent,
-		PermissionChecker:            c.PermissionChecker,
-	}.Report(session)
+	permissions.Report(session)
 	// The name the session holds, which is not c.Name when Run was handed a
 	// socket (the name is then ignored) or generated one (c.Name is empty).
 	var sessionName string
@@ -1128,6 +1214,7 @@ func (c *Host) Run(ctx context.Context) (runErr error) {
 				ProxyURL:         c.ProxyURL,
 				Logger:           logger.With("component", "reverse-tunnel", "generation", generation),
 			}
+			delegated.tunnel(t, relayAuthority)
 			resp, err := t.Establish(ctx)
 			if err != nil {
 				// No tunnel, not a nil *ReverseTunnel: one in the interface
@@ -1156,9 +1243,20 @@ func (c *Host) Run(ctx context.Context) (runErr error) {
 		generation:      1,
 		supported:       rt.ReconnectSupported(),
 		sessionKeyFirst: rt.SessionKeyRedial() && !c.IdentitiesOnly,
+		sshUser:         delegated.address(""),
 		logger:          logger,
 		onTunnel:        c.TunnelCallback,
 	}
+	// current is the tunnel a delegated run reports on: the supervisor's
+	// current one, or the first until the supervisor has started.
+	current := func() tunnel {
+		if t := sup.current(); t != nil {
+			return t
+		}
+		return rt
+	}
+	// Closed once teardown has begun, by the first interrupt.
+	tearingDown := make(chan struct{})
 
 	var g run.Group
 	// Interrupts run in registration order. Deliver the selected cause to
@@ -1181,7 +1279,6 @@ func (c *Host) Run(ctx context.Context) (runErr error) {
 		// which teardown doesn't prevent: a ready write that came second
 		// would carry ending, and the ready callback would report a session
 		// that started as one that is ending.
-		tearingDown := make(chan struct{})
 		g.Add(func() error {
 			<-tearingDown
 			<-readySettled
@@ -1217,6 +1314,21 @@ func (c *Host) Run(ctx context.Context) (runErr error) {
 		// the interrupt carries its cause to attached clients. The signal
 		// actor still observes the parent and initiates ordinary teardown.
 		ctx, cancel := context.WithCancelCause(context.WithoutCancel(ctx))
+		// A delegated run's command starts only if no final decision came
+		// first, which the decision actor below reads from the same place. A
+		// local run's command starts unasked, as it always has.
+		var mayStart func() bool
+		if delegated != nil {
+			mayStart = func() bool {
+				if !delegated.mayLaunch() {
+					return false
+				}
+				if c.atLaunch != nil {
+					c.atLaunch()
+				}
+				return true
+			}
+		}
 		sshServer = internal.Server{
 			Command:                    c.Command,
 			CommandEnv:                 commandEnv,
@@ -1249,6 +1361,7 @@ func (c *Host) Run(ctx context.Context) (runErr error) {
 			PermissionChecker:          c.PermissionChecker,
 			TerminalConsent:            c.TerminalConsent,
 			SFTPAutoAccept:             c.AutoAccept || c.SFTPAutoAccept,
+			MayStart:                   mayStart,
 			OnCommandStarted: func() {
 				cmdOnce.Do(func() { close(cmdReady) })
 				if c.CommandStartedCallback != nil {
@@ -1281,19 +1394,101 @@ func (c *Host) Run(ctx context.Context) (runErr error) {
 			cancel(err)
 		})
 	}
+	// The tunnel's supervisor's context, and supDone, closed once it has
+	// returned. A withdrawal ends it too, and not the session.
+	supCtx, cancelSup := context.WithCancel(context.WithoutCancel(ctx))
+	supDone := make(chan struct{})
 	{
 		// The tunnel's supervisor, after the guest door it swaps tunnels
 		// behind. Its context is the group's to cancel, as the ssh server's
 		// is: an actor that returned the moment a `session stop` cancelled
 		// ctx could be the group's first, and the run would be recorded as
 		// whatever that return said rather than as stopped. It returns only
-		// after its interrupt.
-		supCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
+		// after its interrupt, even when a withdrawal ended the supervisor
+		// first.
+		interrupted := make(chan struct{})
 		g.Add(func() error {
 			sup.run(supCtx, rt)
+			close(supDone)
+			<-interrupted
 			return nil
 		}, func(error) {
-			cancel()
+			close(interrupted)
+			cancelSup()
+		})
+	}
+	if delegated != nil {
+		// What the authority decides about the session, once it is final.
+		// Before the command has been let start, the run ends there, and
+		// nothing is launched: the command's start asks the same latch, so
+		// exactly one of the two holds. After, a stop is a stop as `session
+		// stop` makes one, with the guest door closed to anyone new at once;
+		// a withdrawal ends the delegated tunnel and its redials, and leaves
+		// the command, the admin socket and the attach socket as they are. A
+		// withdrawal that comes once the session is ending is no news: it is
+		// how the relay answers the exit the session is about to report.
+		stop := make(chan struct{})
+		g.Add(func() error {
+			select {
+			case <-delegated.decisions.Terminal():
+			case <-stop:
+				return nil
+			}
+			d := delegated.final()
+			if !delegated.launched() {
+				err := delegated.beforeLaunch(d)
+				logger.Error(delegated.authority+" decided against the session before its command started", "error", err)
+				return err
+			}
+			switch d {
+			case server.DelegatedDisposition_DELEGATED_STOPPED:
+				// Acted on before anyone is told. The record says first that
+				// it was the authority's stop, so that whoever is told the
+				// session stopped can read whose it was.
+				logger.Warn(delegated.authority + " stopped the session; terminating the command")
+				guestDoor.Fail(delegated.stopped())
+				c.recordDecision(delegated, sessiondir.DecisionStopped, logger)
+				requestStop()
+				if c.DecisionCallback != nil {
+					c.DecisionCallback(DecisionStopped)
+				}
+			case server.DelegatedDisposition_DELEGATED_WITHDRAWN:
+				if closed(tearingDown) {
+					break
+				}
+				logger.Warn(delegated.authority + " withdrew the session's remote access; the command goes on running locally")
+				cancelSup()
+				<-supDone
+				guestDoor.Fail(delegated.withdrawn())
+				current().Close()
+				state.withdrawn(time.Now())
+				sup.publish()
+				c.recordDecision(delegated, sessiondir.DecisionWithdrawn, logger)
+				if c.DecisionCallback != nil {
+					c.DecisionCallback(DecisionWithdrawn)
+				}
+			}
+			<-stop
+			return nil
+		}, func(error) {
+			close(stop)
+		})
+	}
+	if delegated != nil {
+		// The authority is told the session is ready once its record says
+		// so, on whichever tunnel is current, and asked again until it
+		// answers.
+		reportCtx, cancelReports := context.WithCancel(context.WithoutCancel(ctx))
+		g.Add(func() error {
+			select {
+			case <-sessionReady:
+				delegated.reportReady(reportCtx, current, logger)
+			case <-reportCtx.Done():
+			}
+			<-reportCtx.Done()
+			return nil
+		}, func(error) {
+			cancelReports()
 		})
 	}
 	{
@@ -1546,6 +1741,12 @@ func (c *Host) Run(ctx context.Context) (runErr error) {
 		// The timeout that fired, which `session set` may have replaced
 		// since launch.
 		logger.Info("no guest joined within the join timeout; session ended", "timeout", joins.snapshot().Timeout)
+	}
+	// The command's own outcome, once it has one, is a delegated session's to
+	// report, on the tunnel that is current, under a budget of its own: the
+	// run's context is cancelled by now, and the report outlives it.
+	if delegated != nil && closed(cmdReady) {
+		delegated.reportExit(current(), sshServer.CommandResult(), logger)
 	}
 
 	if errors.Is(err, errJoinTimeout) {

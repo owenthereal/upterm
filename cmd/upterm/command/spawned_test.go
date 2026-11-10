@@ -6,7 +6,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
+	"log/slog"
 	"net"
 	"os"
 	"path/filepath"
@@ -19,6 +21,7 @@ import (
 
 	"github.com/owenthereal/upterm/attach"
 	"github.com/owenthereal/upterm/cmd/upterm/command/internal/bootstrap"
+	"github.com/owenthereal/upterm/host"
 	"github.com/owenthereal/upterm/host/api"
 	"github.com/owenthereal/upterm/host/sessiondir"
 	"github.com/owenthereal/upterm/internal/logging"
@@ -91,7 +94,7 @@ func (d *scriptedDaemon) startup(t *testing.T, name string) <-chan api.Accept_De
 		dec, err := child.SessionCreated(created)
 		got <- dec
 		if err != nil || dec != api.Accept_ACCEPTED {
-			child.Failed("declined", false, true)
+			child.Failed(bootstrap.Failure{Text: "declined", Abandoned: true})
 			return
 		}
 		_ = child.Listening("/run/t.sock", []string{hostKey})
@@ -231,7 +234,7 @@ func TestASessionWithoutItsLogPointsNoLineAtIt(t *testing.T) {
 		spawn, d := spawnFor()
 		var stdout, stderr bytes.Buffer
 		s := newSession(t, spawn, nil, &stdout, &stderr)
-		go func() { d.await().Failed("exec: no such file", false, false) }()
+		go func() { d.await().Failed(bootstrap.Failure{Text: "exec: no such file"}) }()
 		require.EqualError(t, s.run(context.Background()), "session s could not start: exec: no such file"+see, "log off: %v", logOff)
 
 		// The local terminal was disconnected.
@@ -974,10 +977,95 @@ func TestSpawnedSessionRedrawsATakenName(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	s := newSession(t, spawn, nil, &stdout, &stderr)
 	s.detach = true
-	go func() { d.await().Failed("name in use: s", true, false) }()
+	go func() { d.await().Failed(bootstrap.Failure{Text: "name in use: s", NameInUse: true}) }()
 	err := s.run(context.Background())
 	require.ErrorIs(t, err, sessiondir.ErrNameInUse, "runWithGeneratedNameRetry redraws on exactly this error")
 	require.EqualError(t, err, "a running session is already named s; attach with upterm attach s, or pick another --name")
+}
+
+// spawnTaken runs a detached session named name whose daemon answers that the
+// name is taken where the run was placed, with text, or, when start is set,
+// starts it.
+func spawnTaken(t *testing.T, name, text string, start bool) error {
+	t.Helper()
+	spawn, d := newScriptedDaemon(t)
+	var stdout, stderr bytes.Buffer
+	s := newSession(t, spawn, nil, &stdout, &stderr)
+	s.name, s.detach = name, true
+	if start {
+		dec := d.startup(t, name)
+		go func() {
+			<-dec
+			d.start()
+		}()
+	} else {
+		go func() { d.await().Failed(bootstrap.Failure{Text: text, Verbatim: true, NameTaken: true}) }()
+	}
+	return s.run(context.Background())
+}
+
+// A generated name taken where the run was placed is redrawn as one a local
+// session holds is: a fresh name for each spawn, and the same log line for
+// each redraw.
+func TestNameTakenRedrawsAGeneratedName(t *testing.T) {
+	logs := &capturingHandler{}
+	var names []string
+	err := runWithNameRetry(slog.New(logs), "", generatedNames(), func(name string) error {
+		names = append(names, name)
+		return spawnTaken(t, name, "taken here", len(names) == 3)
+	})
+	require.NoError(t, err)
+	require.Equal(t, 0, Exit(nil, err, io.Discard))
+	require.Equal(t, []string{"bash-0001", "bash-0002", "bash-0003"}, names)
+	require.Equal(t, redrawLogs("bash-0001", "bash-0002"), logs.captured())
+}
+
+// A name the operator gave that is taken where the run was placed is not
+// redrawn, and the operator is told what the broker said, never that a local
+// session holds the name; so is a generated name taken on every draw.
+func TestNameTakenPrintsTheBrokersTextForAnExplicitName(t *testing.T) {
+	t.Run("explicit", func(t *testing.T) {
+		logs := &capturingHandler{}
+		var names []string
+		err := runWithNameRetry(slog.New(logs), "mine", generatedNames(), func(name string) error {
+			names = append(names, name)
+			return spawnTaken(t, name, "taken here", false)
+		})
+		require.ErrorIs(t, err, host.ErrNameTaken)
+		require.Equal(t, []string{"mine"}, names)
+		require.Empty(t, logs.captured())
+		var stderr bytes.Buffer
+		require.Equal(t, 1, Exit(nil, err, &stderr))
+		require.Equal(t, "upterm: taken here\n(see /var/log/upterm.log)\n", stderr.String())
+		require.NotContains(t, stderr.String(), "attach with upterm attach")
+	})
+	t.Run("taken on every draw", func(t *testing.T) {
+		var names []string
+		err := runWithNameRetry(discardLogger(), "", generatedNames(), func(name string) error {
+			names = append(names, name)
+			return spawnTaken(t, name, "taken here", false)
+		})
+		require.Len(t, names, maxGeneratedNameAttempts)
+		var stderr bytes.Buffer
+		require.Equal(t, 1, Exit(nil, err, &stderr))
+		require.Equal(t, "upterm: taken here\n(see /var/log/upterm.log)\n", stderr.String())
+	})
+}
+
+// A broker's error is printed in the broker's words, made safe for a
+// terminal: lines kept, the prefix on the first only, and the log's pointer
+// on a line of its own, never as a session that could not start.
+func TestBrokerErrorReachesTheOperatorVerbatim(t *testing.T) {
+	spawn, d := newScriptedDaemon(t)
+	var stdout, stderr bytes.Buffer
+	s := newSession(t, spawn, nil, &stdout, &stderr)
+	go func() { d.await().Failed(bootstrap.Failure{Text: "line one\nline\x1btwo", Verbatim: true}) }()
+	err := s.run(context.Background())
+	require.NotErrorIs(t, err, host.ErrNameTaken)
+	var out bytes.Buffer
+	require.Equal(t, 1, Exit(nil, err, &out))
+	require.Equal(t, "upterm: line one\nline�two\n(see /var/log/upterm.log)\n", out.String())
+	require.NotContains(t, out.String(), "could not start")
 }
 
 func TestSpawnedSessionDeclineIsNotAnError(t *testing.T) {
@@ -1200,7 +1288,7 @@ func TestSpawnedSessionWaitsForItsTerminalWhenTheSessionFails(t *testing.T) {
 		defer stop()
 		defer terminal.release()
 		require.Equal(t, "/run/t.sock", <-terminal.attached)
-		d.await().Failed("exec: no such file", false, false)
+		d.await().Failed(bootstrap.Failure{Text: "exec: no such file"})
 		synctest.Wait()
 
 		time.Sleep(100*time.Millisecond - time.Nanosecond)
@@ -1347,7 +1435,7 @@ func TestSpawnedSessionWaitsAreIndependent(t *testing.T) {
 				defer stop()
 				defer terminal.release()
 				<-terminal.attached
-				d.await().Failed("exec: no such file", false, false)
+				d.await().Failed(bootstrap.Failure{Text: "exec: no such file"})
 				synctest.Wait()
 			}
 			time.Sleep(100*time.Millisecond - time.Nanosecond)
@@ -1449,7 +1537,7 @@ func TestSpawnedSessionReportsAnAbandonmentItDidNotCause(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	s := newSession(t, spawn, nil, &stdout, &stderr)
 	s.detach = true
-	go func() { d.await().Failed("no initial client", false, true) }()
+	go func() { d.await().Failed(bootstrap.Failure{Text: "no initial client", Abandoned: true}) }()
 	err := s.run(context.Background())
 	require.EqualError(t, err, "session s was not started: no initial client")
 }

@@ -106,6 +106,13 @@ type ReverseTunnel struct {
 	ProxyURL        *url.URL
 	HostKeyCallback ssh.HostKeyCallback
 	Logger          *slog.Logger
+	// Delegated is supplied only for a delegated run: its protocol and its
+	// external session ID, with no disposition. Establish then registers only
+	// on the relay's exact acknowledgment, listens for guests only while the
+	// decision in force is current, and answers the relay's decisions;
+	// Decisions orders all of them and must be set.
+	Delegated *server.DelegatedSession
+	Decisions *DelegatedDecisions
 
 	// ln is the forwarded listener, wrapped so that closing it is bounded by
 	// listenerCloseGrace rather than by the relay's willingness to answer.
@@ -121,11 +128,20 @@ type ReverseTunnel struct {
 	// What the relay did with the last successful Establish's proof.
 	reconnectSupported bool
 	sessionKeyRedial   bool
+
+	// reports numbers the last delegated Establish's control reports.
+	reports *delegatedReports
 }
 
 // ErrRelayUnsupported is a redial answered as a relay without proofs answers:
 // with a random ID, under which no guest could find the session.
 var ErrRelayUnsupported = errors.New("the relay answered with a session ID not derived from this host's key")
+
+// ErrDelegatedRelayUnsupported keeps a delegated host from becoming a local
+// session: the relay ignored or mismatched the delegated registration, or
+// answered it, a report or a decision outside the delegated protocol,
+// refusals it did not explain included.
+var ErrDelegatedRelayUnsupported = errors.New("relay did not acknowledge the delegated registration")
 
 // errNeverConnected is what Wait says of a tunnel whose dial or handshake
 // never produced a connection.
@@ -259,6 +275,14 @@ func (c *ReverseTunnel) Establish(ctx context.Context) (*server.CreateSessionRes
 	if c.RequireDerivedID && c.SessionSecret == nil {
 		return nil, errors.New("reverse tunnel: RequireDerivedID needs a SessionSecret")
 	}
+	if c.Delegated != nil {
+		d := c.Delegated
+		if !ValidDelegatedProtocol(d.Protocol) || !ValidUUID(d.ExternalSessionId) || d.Disposition != server.DelegatedDisposition_DELEGATED_UNSPECIFIED || d.DecisionRevision != 0 ||
+			c.Decisions == nil || c.SessionSecret == nil || c.Generation == 0 || len(c.AuthorizedKeys) != 0 {
+			return nil, errors.New("reverse tunnel: invalid delegated registration")
+		}
+		c.reports = &delegatedReports{}
+	}
 
 	user, err := user.Current()
 	if err != nil {
@@ -335,6 +359,12 @@ func (c *ReverseTunnel) Establish(ctx context.Context) (*server.CreateSessionRes
 		}
 		return nil, sshDialError(c.Host, c.ProxyURL, len(c.Signers), err)
 	}
+	// A delegated registration answers the relay's decisions about it. Nothing
+	// else ever does: a host that isn't delegated refuses them as it refuses
+	// every request from the relay.
+	if c.Delegated != nil {
+		reqs = delegatedRequests(reqs, c.Delegated.ExternalSessionId, c.Generation, c.Decisions)
+	}
 	// The client this listener and this keepalive belong to, kept apart from
 	// the field. A second Establish replaces the field, and either of them
 	// acting on the replacement would close a connection that is not the one
@@ -360,6 +390,7 @@ func (c *ReverseTunnel) Establish(ctx context.Context) (*server.CreateSessionRes
 		HostUser:             user.Username,
 		HostPublicKeys:       hostPublicKeys,
 		ClientAuthorizedKeys: authorizedKeys,
+		DelegatedSession:     c.Delegated,
 	}
 	if c.SessionSecret != nil {
 		// Signed over this connection's SSH session ID, which the relay reads
@@ -374,22 +405,49 @@ func (c *ReverseTunnel) Establish(ctx context.Context) (*server.CreateSessionRes
 
 	sessResp, err := createSession(client, req)
 	if err != nil {
+		if c.Delegated != nil {
+			err = delegatedCreateError(err)
+		}
 		return fail(fmt.Errorf("error creating session: %w", err))
+	}
+
+	// The acknowledgment echoes the registration exactly, with a decision; a
+	// stopped or withdrawn one has no SSH user, since it has no route.
+	ack := sessResp.DelegatedSession
+	if c.Delegated != nil {
+		if ack == nil || ack.Protocol != c.Delegated.Protocol || ack.ExternalSessionId != c.Delegated.ExternalSessionId || !server.ValidDelegatedDisposition(ack.Disposition, ack.DecisionRevision) ||
+			(ack.Disposition != server.DelegatedDisposition_DELEGATED_CURRENT && sessResp.SshUser != "") {
+			return fail(ErrDelegatedRelayUnsupported)
+		}
 	}
 
 	// Honoured only if the ID is the derived one: a relay without proofs
 	// ignores the fields and answers with a random ID, and says nothing else.
 	reconnectSupported := c.SessionSecret != nil &&
 		sessResp.SessionID == registration.ID(c.HostKey.PublicKey(), c.SessionSecret)
-	if c.SessionSecret != nil && !reconnectSupported && c.RequireDerivedID {
+	if c.SessionSecret != nil && !reconnectSupported && (c.RequireDerivedID || c.Delegated != nil) {
 		// Before the listen: closing the connection cancels a registration
 		// under an ID no guest knows, and no forward is ever requested for it.
 		return fail(fmt.Errorf("error creating session: %w", ErrRelayUnsupported))
 	}
 
-	ln, err := client.Listen("unix", sessResp.SessionID)
-	if err != nil {
-		return fail(&ForwardRefusedError{Err: err})
+	// Guests are forwarded only while the decision in force, ordered against
+	// everything decided before this registration, is current. Otherwise the
+	// connection stays, for final reports, with no listener.
+	routable := true
+	if c.Delegated != nil {
+		if err := c.Decisions.Apply(ack.Disposition, ack.DecisionRevision); err != nil {
+			return fail(ErrDelegatedRelayUnsupported)
+		}
+		inForce, _ := c.Decisions.Current()
+		routable = inForce == server.DelegatedDisposition_DELEGATED_CURRENT
+	}
+
+	var ln net.Listener
+	if routable {
+		if ln, err = client.Listen("unix", sessResp.SessionID); err != nil {
+			return fail(&ForwardRefusedError{Err: err})
+		}
 	}
 
 	// The attempt is over, and the tunnel outlives its context. A stop that
@@ -434,7 +492,10 @@ func (c *ReverseTunnel) Establish(ctx context.Context) (*server.CreateSessionRes
 		stopKeepAlive()
 		_ = client.Close()
 	}
-	c.ln = newBoundedListener(ln, listenerCloseGrace, closeClient)
+	c.ln = nil
+	if ln != nil {
+		c.ln = newBoundedListener(ln, listenerCloseGrace, closeClient)
+	}
 
 	// The relay is alive while its bytes arrive, whatever they are; a probe
 	// only prompts a relay that has gone quiet.
@@ -490,10 +551,27 @@ func createSession(client *ssh.Client, req *server.CreateSessionRequest) (*serve
 
 	var resp server.CreateSessionResponse
 	if err := proto.Unmarshal(body, &resp); err != nil {
-		return nil, fmt.Errorf("error unmarshaling created session: %w", err)
+		return nil, fmt.Errorf("%w: %w", errMalformedSessionReply, err)
 	}
 
 	return &resp, nil
+}
+
+var errMalformedSessionReply = errors.New("error unmarshaling created session")
+
+// delegatedCreateError is what a delegated host makes of a failed
+// registration: the relay's own refusal, or ErrDelegatedRelayUnsupported for
+// a refusal or an answer it cannot read. Only a transport failure is left as
+// it was.
+func delegatedCreateError(err error) error {
+	var refused *CreateSessionRefusedError
+	switch {
+	case errors.As(err, &refused):
+		return delegatedRefusal([]byte(refused.Body))
+	case errors.Is(err, errMalformedSessionReply):
+		return ErrDelegatedRelayUnsupported
+	}
+	return err
 }
 
 // boundedListener is a forwarded listener whose Close cannot outlive twice the

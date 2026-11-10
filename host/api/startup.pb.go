@@ -661,10 +661,16 @@ func (x *Started) GetJoinState() *JoinState {
 // Failed: the session did not start. name_in_use asks the parent to draw
 // another name; abandoned means the parent's own answer ended it.
 type Failed struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Error         string                 `protobuf:"bytes,1,opt,name=error,proto3" json:"error,omitempty"`
-	NameInUse     bool                   `protobuf:"varint,2,opt,name=name_in_use,json=nameInUse,proto3" json:"name_in_use,omitempty"`
-	Abandoned     bool                   `protobuf:"varint,3,opt,name=abandoned,proto3" json:"abandoned,omitempty"`
+	state     protoimpl.MessageState `protogen:"open.v1"`
+	Error     string                 `protobuf:"bytes,1,opt,name=error,proto3" json:"error,omitempty"`
+	NameInUse bool                   `protobuf:"varint,2,opt,name=name_in_use,json=nameInUse,proto3" json:"name_in_use,omitempty"`
+	Abandoned bool                   `protobuf:"varint,3,opt,name=abandoned,proto3" json:"abandoned,omitempty"`
+	// The text in error is printed exactly as it is, after the parent's
+	// sanitizing: lines kept, and nothing that can control a terminal.
+	Verbatim bool `protobuf:"varint,4,opt,name=verbatim,proto3" json:"verbatim,omitempty"`
+	// The name is taken where the run was placed; a generated name is redrawn
+	// as for name_in_use.
+	NameTaken     bool `protobuf:"varint,5,opt,name=name_taken,json=nameTaken,proto3" json:"name_taken,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -716,6 +722,20 @@ func (x *Failed) GetNameInUse() bool {
 func (x *Failed) GetAbandoned() bool {
 	if x != nil {
 		return x.Abandoned
+	}
+	return false
+}
+
+func (x *Failed) GetVerbatim() bool {
+	if x != nil {
+		return x.Verbatim
+	}
+	return false
+}
+
+func (x *Failed) GetNameTaken() bool {
+	if x != nil {
+		return x.NameTaken
 	}
 	return false
 }
@@ -945,11 +965,14 @@ const file_startup_proto_rawDesc = "" +
 	"session_id\x18\x01 \x01(\tR\tsessionId\x12\x16\n" +
 	"\x06status\x18\x02 \x01(\tR\x06status\x12-\n" +
 	"\n" +
-	"join_state\x18\x03 \x01(\v2\x0e.api.JoinStateR\tjoinState\"\\\n" +
+	"join_state\x18\x03 \x01(\v2\x0e.api.JoinStateR\tjoinState\"\x97\x01\n" +
 	"\x06Failed\x12\x14\n" +
 	"\x05error\x18\x01 \x01(\tR\x05error\x12\x1e\n" +
 	"\vname_in_use\x18\x02 \x01(\bR\tnameInUse\x12\x1c\n" +
-	"\tabandoned\x18\x03 \x01(\bR\tabandoned\"\x1d\n" +
+	"\tabandoned\x18\x03 \x01(\bR\tabandoned\x12\x1a\n" +
+	"\bverbatim\x18\x04 \x01(\bR\bverbatim\x12\x1d\n" +
+	"\n" +
+	"name_taken\x18\x05 \x01(\bR\tnameTaken\"\x1d\n" +
 	"\x05Hello\x12\x14\n" +
 	"\x05nonce\x18\x01 \x01(\tR\x05nonce\"\x1a\n" +
 	"\x04Line\x12\x12\n" +

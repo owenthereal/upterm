@@ -155,6 +155,17 @@ func (s *sessionState) tunnelLost(lostAt time.Time, lastErr string) {
 	s.changed()
 }
 
+// withdrawn says the session's authority withdrew its remote access at at:
+// the tunnel is down for good, and nothing redials it, while the session goes
+// on.
+func (s *sessionState) withdrawn(at time.Time) {
+	s.mu.Lock()
+	s.tunnel = tunnelLost
+	s.lostAt, s.reason, s.lastErr, s.nextAt = at, sessiondir.TunnelReasonWithdrawn, "", time.Time{}
+	s.mu.Unlock()
+	s.changed()
+}
+
 // status is the status the facts give now.
 func (s *sessionState) status() string {
 	s.mu.Lock()
