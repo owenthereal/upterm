@@ -700,3 +700,66 @@ func TestWaitingGuestCutOffAtExpiry(t *testing.T) {
 	}
 	require.Eventually(t, func() bool { _, g := proxy.delegated.Counts(); return g == 0 }, 5*time.Second, 10*time.Millisecond, "the cut-off guest is still counted")
 }
+
+// When a waiting screen ends while its guest has pipelined more requests on
+// the session than the connection holds for it, those requests are drained
+// until the connection closes them, and the screen ends: its connection's
+// handler returns, the guest is no longer counted, and a drain returns.
+// Ending, the screen may take in a request still waiting or notice its end
+// first, by chance, and only the second leaves requests undelivered; so each
+// way it ends is tried several times, side by side.
+func TestWaitingScreenEndsWithPipelinedRequests(t *testing.T) {
+	for _, ending := range []string{"expiry", "drain"} {
+		t.Run(ending, func(t *testing.T) {
+			for attempt := range 8 {
+				t.Run(fmt.Sprint(attempt), func(t *testing.T) {
+					t.Parallel()
+					expires := time.Now().Add(time.Minute)
+					if ending == "expiry" {
+						expires = time.Now().Add(time.Second)
+					}
+					authority := &fakeAuthority{}
+					a := newApproval(expires)
+					authority.admitWith(waitingOn(waitingMessage, a))
+					ln := newStallingWrites(t)
+					proxy, addr, reg, signer := stockTestProxyOn(t, ln, 4*time.Second, &stockTestDialer{}, enabledIngress(authority, nil))
+					guest, err := ssh.Dial("tcp", addr, &ssh.ClientConfig{User: waitingUser, Auth: []ssh.AuthMethod{ssh.PublicKeys(newProven(t).key)}, HostKeyCallback: ssh.FixedHostKey(signer.PublicKey()), Timeout: 5 * time.Second})
+					require.NoError(t, err)
+					t.Cleanup(func() { _ = guest.Close() })
+					shell := startWaitingShell(t, guest, a, waitingMessage, ptyRequest(24, 80), "")
+
+					// The screen blocks answering the guest, which goes on
+					// sending: more than the connection holds for the
+					// session.
+					ln.stalling.Store(true)
+					go func() {
+						_, _ = shell.session.SendRequest("window-change", true, ssh.Marshal(&windowChangeMsg{Columns: 100, Rows: 30}))
+					}()
+					select {
+					case <-ln.stalled:
+					case <-time.After(5 * time.Second):
+						t.Fatal("the screen never answered the guest")
+					}
+					for range 64 {
+						_, err := shell.session.SendRequest("env", false, ssh.Marshal(struct{ Name, Value string }{"LANG", "C"}))
+						require.NoError(t, err)
+					}
+
+					if ending == "drain" {
+						// Long enough for the relay to have taken in what
+						// the guest sent.
+						time.Sleep(200 * time.Millisecond)
+						ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+						defer cancel()
+						require.NoError(t, proxy.delegated.Drain(ctx), "a drain waited on a screen that had ended")
+					}
+					require.Eventually(t, func() bool { _, g := proxy.delegated.Counts(); return g == 0 }, time.Until(expires)+waitingGrace+5*time.Second, 10*time.Millisecond, "the screen's guest is still counted")
+					require.Eventually(t, func() bool {
+						active, _ := gatherValue(t, reg, "test_server_routing_active_connections_count", nil)
+						return active == 0
+					}, 5*time.Second, 10*time.Millisecond, "the screen's connection never ended")
+				})
+			}
+		})
+	}
+}

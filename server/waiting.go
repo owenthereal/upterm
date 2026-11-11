@@ -114,10 +114,13 @@ func (p *SSHRouting) serveWaiting(g *guestConn, peer sshPeer, stage time.Duratio
 	var (
 		workers sync.WaitGroup
 		session *waitingSession
+		// ended is closed once the screen is over, however it ends.
+		ended = make(chan struct{})
 	)
 	defer func() {
 		limit.Stop()
 		stopWaiting()
+		close(ended)
 		_ = peer.conn.Close()
 		workers.Wait()
 	}()
@@ -140,7 +143,25 @@ func (p *SSHRouting) serveWaiting(g *guestConn, peer sshPeer, stage time.Duratio
 			if err != nil {
 				continue
 			}
-			s := &waitingSession{channel: ch, requests: requests}
+			// The session's requests reach the screen through forwarded
+			// while it lasts. Once it is over, what the guest still sends is
+			// discarded, unanswered, until the mux closes the requests: a mux
+			// left blocked delivering one never sees its transport close, and
+			// the screen's workers would never end.
+			forwarded := make(chan *gossh.Request)
+			workers.Go(func() {
+				defer close(forwarded)
+				for request := range requests {
+					select {
+					case forwarded <- request:
+					case <-ended:
+						for range requests {
+						}
+						return
+					}
+				}
+			})
+			s := &waitingSession{channel: ch, requests: forwarded}
 			// Taken in from the start, so that nothing the guest sends can
 			// wait in the connection for later.
 			workers.Go(func() { _, _ = io.Copy(io.Discard, ch) })

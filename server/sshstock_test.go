@@ -70,7 +70,16 @@ func stockTestProxyOn(t *testing.T, ln net.Listener, timeout time.Duration, dial
 		return ok
 	}, time.Second, time.Millisecond)
 	t.Cleanup(func() {
-		_ = proxy.Shutdown()
+		// Bounded, so that a connection the proxy can't join fails the test
+		// rather than hanging it.
+		stopped := make(chan struct{})
+		go func() { _ = proxy.Shutdown(); close(stopped) }()
+		select {
+		case <-stopped:
+		case <-time.After(10 * time.Second):
+			t.Error("proxy did not stop: a connection never ended")
+			return
+		}
 		select {
 		case err := <-done:
 			require.True(t, isRequestedStop(err), "Serve after Shutdown must report the stop it was asked for, got %v", err)
