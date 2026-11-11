@@ -61,6 +61,9 @@ type SSHRouting struct {
 	// with the other SSH listeners' routing. Nil registers a set of its own.
 	instruments *routingInstruments
 
+	// beforeForward is the sshProxy's test hook.
+	beforeForward func()
+
 	cancel   context.CancelFunc
 	workers  sync.WaitGroup
 	listener net.Listener

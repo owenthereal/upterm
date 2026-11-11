@@ -65,6 +65,18 @@ type sshProxy struct {
 	NodeID            string
 	authorities       homeLookup
 
+	// authority decides the guests that aren't a local session's, once it is
+	// enabled; a guest takes the composed path whenever one is composed, dark
+	// or enabled. delegated is the relay's delegated work, which a delegated
+	// guest or hop is part of. Both are nil where nothing is composed.
+	authority        Authority
+	AuthorityEnabled bool
+	delegated        *delegatedHosts
+
+	// beforeForward is a test hook, run as an allowed delegated guest's
+	// forwarding is about to begin, before its allow is checked once more.
+	beforeForward func()
+
 	routing *SSHRouting
 	mux     sync.Mutex
 	// stopped records a Shutdown that arrived before Serve; see sshd.stopped.
@@ -121,11 +133,15 @@ func (r *sshProxy) Serve(ln net.Listener) error {
 			AuthorityComposed: r.AuthorityComposed,
 			NodeID:            r.NodeID,
 			authorities:       r.authorities,
+			authority:         r.authority,
+			AuthorityEnabled:  r.AuthorityEnabled,
+			delegated:         r.delegated,
 		},
 		MetricsProvider: r.MetricsProvider,
 		Logger:          r.Logger,
 		hostActivity:    r.hostActivity,
 		instruments:     r.instruments,
+		beforeForward:   r.beforeForward,
 	}
 	r.mux.Unlock()
 
@@ -272,6 +288,10 @@ type proxyAuth struct {
 	AuthorityComposed bool
 	NodeID            string
 	authorities       homeLookup
+	// authority, AuthorityEnabled and delegated are the sshProxy's.
+	authority        Authority
+	AuthorityEnabled bool
+	delegated        *delegatedHosts
 
 	Logger *slog.Logger
 }
@@ -393,13 +413,17 @@ type routeCreds struct {
 // dial target and the host key it must present from disagreeing.
 type preparedRoute struct {
 	// home is the local registration a node that gates bound the attempt to;
-	// remote marks a hop to another node.
-	home   Home
-	remote bool
-	creds  routeCreds
-	id     *api.Identifier   // the dial target
-	route  Route             // node and generation, for the refresh comparison
-	config *ssh.ClientConfig // credentials, and the host-key policy for that target
+	// remote marks a hop to another node. delegatedGate marks the attempt of
+	// a guest on the composed path, which may go on over a hop whose home
+	// holds a delegated registration: its admission asserts the authority's
+	// allow before the hop is used.
+	home          Home
+	remote        bool
+	delegatedGate bool
+	creds         routeCreds
+	id            *api.Identifier   // the dial target
+	route         Route             // node and generation, for the refresh comparison
+	config        *ssh.ClientConfig // credentials, and the host-key policy for that target
 	// banner is the last banner the target sent as the attempt authenticated.
 	// A relay node states its verdict on a refused key there.
 	banner string

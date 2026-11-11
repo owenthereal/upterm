@@ -167,6 +167,7 @@ func (r *gateFixtureRegistry) localSession(h Home) (*Session, bool) {
 type hopGateFixture struct {
 	proxy                    *sshProxy
 	addr                     string
+	route                    string
 	signer, guest, authority ssh.Signer
 	registry                 *gateFixtureRegistry
 	home                     *localHome
@@ -179,11 +180,17 @@ type hopGateFixture struct {
 // registration "route". It gates: it refuses legacy hops. Its host echoes.
 func newHopGateFixture(t *testing.T, options ...func(*sshProxy)) *hopGateFixture {
 	t.Helper()
+	return newHopGateFixtureFor(t, "route", options...)
+}
+
+// newHopGateFixtureFor is newHopGateFixture holding the registration route.
+func newHopGateFixtureFor(t *testing.T, route string, options ...func(*sshProxy)) *hopGateFixture {
+	t.Helper()
 	host, peers := gateEchoHost(t)
 	signer, err := ssh.ParsePrivateKey([]byte(TestPrivateKeyContent))
 	require.NoError(t, err)
 	guest, authority := certTestSigner(t), certTestSigner(t)
-	ref := RegistrationRef{Authority: AuthorityLocal, SessionID: "route", Generation: 7, RoutingID: "route", RunPublicKeys: [][]byte{signer.PublicKey().Marshal()}, RegistrationID: []byte("host-original-session"), HomeNode: "home:2222", HomeNodeID: "home-machine", HomeBootID: fixtureBootID}
+	ref := RegistrationRef{Authority: AuthorityLocal, SessionID: route, Generation: 7, RoutingID: route, RunPublicKeys: [][]byte{signer.PublicKey().Marshal()}, RegistrationID: []byte("host-original-session"), HomeNode: "home:2222", HomeNodeID: "home-machine", HomeBootID: fixtureBootID}
 	h := newLocalHome(ref)
 	registry := &gateFixtureRegistry{}
 	registry.current.Store(h)
@@ -199,21 +206,21 @@ func newHopGateFixture(t *testing.T, options ...func(*sshProxy)) *hopGateFixture
 		for _, option := range options {
 			option(p)
 		}
-		session := &Session{ID: "route", NodeAddr: ref.HomeNode, Generation: 7, HostPublicKeys: []ssh.PublicKey{signer.PublicKey()}, ClientAuthorizedKeys: []ssh.PublicKey{guest.PublicKey()}, AuthorityHint: AuthorityLocal}
+		session := &Session{ID: route, NodeAddr: ref.HomeNode, Generation: 7, HostPublicKeys: []ssh.PublicKey{signer.PublicKey()}, ClientAuthorizedKeys: []ssh.PublicKey{guest.PublicKey()}, AuthorityHint: AuthorityLocal}
 		registry.session = session
 		_, err := p.SessionManager.CreateSession(session)
 		require.NoError(t, err)
 	})
-	return &hopGateFixture{proxy: proxy, addr: addr, signer: signer, guest: guest, authority: authority, registry: registry, home: h, dialer: dialer, peers: peers, auth: &AuthRequest{ClientVersion: "SSH-2.0-original-client", RemoteAddr: "203.0.113.7:1234", LocalAddr: "198.51.100.1:22", AuthorizedKey: ssh.MarshalAuthorizedKey(guest.PublicKey()), Ingress: Ingress_INGRESS_SSH, IngressNode: "ingress:2222", IngressConnection: []byte("original-guest-session"), TypedAddress: "typed-user", TargetRoutingId: "route", IngressNodeId: "ingress-machine", ConnectionId: "60000000-0000-4000-8000-000000000006", GateProtocol: 1}}
+	return &hopGateFixture{proxy: proxy, addr: addr, route: route, signer: signer, guest: guest, authority: authority, registry: registry, home: h, dialer: dialer, peers: peers, auth: &AuthRequest{ClientVersion: "SSH-2.0-original-client", RemoteAddr: "203.0.113.7:1234", LocalAddr: "198.51.100.1:22", AuthorizedKey: ssh.MarshalAuthorizedKey(guest.PublicKey()), Ingress: Ingress_INGRESS_SSH, IngressNode: "ingress:2222", IngressConnection: []byte("original-guest-session"), TypedAddress: "typed-user", TargetRoutingId: route, IngressNodeId: "ingress-machine", ConnectionId: "60000000-0000-4000-8000-000000000006", GateProtocol: 1}}
 }
 
 func (f *hopGateFixture) connect(t *testing.T, auth *AuthRequest, authority ssh.Signer) (*upstreamConn, error) {
 	t.Helper()
-	cert, err := (&UserCertSigner{SessionID: "ingress-cert-id", User: "route", AuthRequest: auth}).SignCert(authority)
+	cert, err := (&UserCertSigner{SessionID: "ingress-cert-id", User: f.route, AuthRequest: auth}).SignCert(authority)
 	require.NoError(t, err)
 	raw, err := net.DialTimeout("tcp", f.addr, time.Second)
 	require.NoError(t, err)
-	conn, channels, requests, err := ssh.NewClientConn(raw, f.addr, &ssh.ClientConfig{User: "route", Auth: []ssh.AuthMethod{ssh.PublicKeys(cert)}, HostKeyCallback: ssh.FixedHostKey(f.signer.PublicKey())})
+	conn, channels, requests, err := ssh.NewClientConn(raw, f.addr, &ssh.ClientConfig{User: f.route, Auth: []ssh.AuthMethod{ssh.PublicKeys(cert)}, HostKeyCallback: ssh.FixedHostKey(f.signer.PublicKey())})
 	if err != nil {
 		_ = raw.Close()
 		return nil, err
@@ -1271,9 +1278,11 @@ func TestGateAcrossTwoConsulNodes(t *testing.T) {
 	}
 	// The host echoes arbitrary requests. A true reply would prove a guest's
 	// gate request reached the hop.
-	ok, _, err = c.SendRequest(upterm.GateModeRequestType, true, []byte("guest-controlled"))
-	require.NoError(t, err)
-	require.False(t, ok)
+	for _, name := range []string{upterm.GateModeRequestType, upterm.GateAdmitRequestType} {
+		ok, _, err = c.SendRequest(name, true, []byte("guest-controlled"))
+		require.NoError(t, err)
+		require.False(t, ok, name)
+	}
 	ok, _, err = c.SendRequest(upterm.OpenSSHKeepAliveRequestType, true, nil)
 	require.NoError(t, err)
 	require.True(t, ok)
@@ -1420,20 +1429,13 @@ func TestLegacyMigrationWithADarkAuthority(t *testing.T) {
 	}
 }
 
-// Until delegated guests are admitted, none is: a delegated registration's
-// home refuses every hop to it, and an ingress refuses a guest whose home
-// reports one, without reaching its host.
-func TestDelegatedSessionAdmitsNoGuest(t *testing.T) {
-	t.Run("a gate hop to its home", func(t *testing.T) {
-		f := newHopGateFixture(t, func(p *sshProxy) { p.AuthorityComposed = true })
-		f.delegatedHome(t)
-		u, err := f.connect(t, f.auth, f.authority)
-		require.NoError(t, err)
-		_, err = negotiateHome(t.Context(), u, freshModeRequest("route"))
-		require.Error(t, err)
-		require.Zero(t, f.dialer.calls.Load(), "the home reached a delegated registration's host")
-	})
-
+// A delegated session's guest is admitted only by its authority's allow: an
+// attempt that isn't a delegated guest's refuses a home that reports a
+// delegated registration, without reaching its host, and a guest the
+// authority doesn't allow never reaches the host at its home. The home's own
+// gate holds a hop until its admission is asserted; see
+// TestHopGateAdmission.
+func TestDelegatedSessionAdmitsNoGuestWithoutAnAllow(t *testing.T) {
 	t.Run("a home that reports one", func(t *testing.T) {
 		key, err := ssh.ParsePrivateKey([]byte(TestPrivateKeyContent))
 		require.NoError(t, err)
@@ -1598,4 +1600,387 @@ func TestDarkIngressFallsBackToUpgradedPeers(t *testing.T) {
 			}
 		})
 	}
+}
+
+// ---- delegated registrations through the gate ----
+
+// admissionOf is the assertion an ingress makes of h, f's delegated home over
+// its hop, for f's guest.
+func (f *hopGateFixture) admissionOf(h Home) *GateAdmission {
+	remote := h.(*remoteHome)
+	return &GateAdmission{Protocol: 1, ModeNonce: bytes.Clone(remote.nonce), Registration: gateRegistration(h.Ref()), IngressNodeId: f.auth.IngressNodeId, ConnectionId: f.auth.ConnectionId,
+		IngressSshSessionId: bytes.Clone(f.auth.IngressConnection), KeyFingerprint: publicKeyFingerprint(f.guest.PublicKey()), Sequence: 1, Capabilities: []string{"shell"}}
+}
+
+// A delegated registration's home holds a hop, channels and requests alike,
+// until the ingress asserts its authority's allow: once, over that hop, for
+// that guest, of exactly the registration it answered with. Any other
+// assertion is refused before its host is reached. An asserted hop reaches
+// the host as the guest, is confirmed held over the hop, and ends when the
+// registration does.
+func TestHopGateAdmission(t *testing.T) {
+	for _, fault := range []string{"missing_assertion", "wrong_generation", "wrong_registration", "wrong_run_key", "wrong_nonce", "wrong_account", "wrong_home_node", "wrong_home_node_id", "wrong_home_boot", "wrong_session", "wrong_route", "wrong_key", "wrong_ingress", "wrong_connection", "wrong_original_session", "zero_sequence", "unknown_capability", "duplicate_capability", "retired_after_reply", "replaced_same_reference", "another_hop"} {
+		t.Run(fault, func(t *testing.T) {
+			f := delegatedGateHome(t)
+			u, err := f.connect(t, f.auth, f.authority)
+			require.NoError(t, err)
+			h, err := negotiateHome(t.Context(), u, freshModeRequest(f.route))
+			require.NoError(t, err)
+			// Both channels and globals are refused while the assertion is
+			// outstanding.
+			_, _, err = u.conn.OpenChannel("session", nil)
+			require.Error(t, err)
+			ok, _, err := u.conn.SendRequest("application-probe", true, nil)
+			require.NoError(t, err)
+			require.False(t, ok)
+			require.Zero(t, f.dialer.calls.Load(), "the host handshake didn't wait for the assertion")
+			a := f.admissionOf(h)
+			switch fault {
+			case "missing_assertion":
+				u.Close()
+				return
+			case "wrong_generation":
+				a.Registration.Generation++
+			case "wrong_registration":
+				a.Registration.RegistrationId = []byte("another-host")
+			case "wrong_run_key":
+				a.Registration.RunPublicKeys = [][]byte{certTestSigner(t).PublicKey().Marshal()}
+			case "wrong_nonce":
+				a.ModeNonce[0] ^= 1
+			case "wrong_account":
+				a.Registration.AccountId = "another-account"
+			case "wrong_home_node":
+				a.Registration.HomeNode = "another-home"
+			case "wrong_home_node_id":
+				a.Registration.HomeNodeId = "another-machine"
+			case "wrong_home_boot":
+				a.Registration.HomeBootId = "70000000-0000-4000-8000-000000000007"
+			case "wrong_session":
+				a.Registration.SessionId = "another-session"
+			case "wrong_route":
+				a.Registration.RoutingId = "another-route"
+			case "wrong_key":
+				a.KeyFingerprint = publicKeyFingerprint(f.authority.PublicKey())
+			case "wrong_ingress":
+				a.IngressNodeId = "another-ingress"
+			case "wrong_connection":
+				a.ConnectionId = "70000000-0000-4000-8000-000000000007"
+			case "wrong_original_session":
+				a.IngressSshSessionId = []byte("hop-session")
+			case "zero_sequence":
+				a.Sequence = 0
+			case "unknown_capability":
+				a.Capabilities = []string{"admin"}
+			case "duplicate_capability":
+				a.Capabilities = []string{"shell", "shell"}
+			case "replaced_same_reference":
+				f.registry.current.Store(newLocalHome(f.home.Ref()))
+			case "retired_after_reply":
+				f.home.retire()
+			case "another_hop":
+				// This hop's assertion, made on another hop to the same
+				// registration.
+				other, err := f.connect(t, f.auth, f.authority)
+				require.NoError(t, err)
+				_, err = negotiateHome(t.Context(), other, freshModeRequest(f.route))
+				require.NoError(t, err)
+				u = other
+			}
+			// Sent directly, to exercise the home apart from the ingress's own
+			// checks.
+			body, err := proto.Marshal(a)
+			require.NoError(t, err)
+			ok, _, _ = u.conn.SendRequest(upterm.GateAdmitRequestType, true, body)
+			require.False(t, ok, "the home accepted a mismatched assertion")
+			require.Zero(t, f.dialer.calls.Load(), "the refusal didn't precede every host byte and channel")
+		})
+	}
+
+	t.Run("healthy_delegated", func(t *testing.T) {
+		f := delegatedGateHome(t)
+		u, err := f.connect(t, f.auth, f.authority)
+		require.NoError(t, err)
+		h, err := negotiateHome(t.Context(), u, freshModeRequest(f.route))
+		require.NoError(t, err)
+		a := f.admissionOf(h)
+		require.NoError(t, assertHomeAdmission(t.Context(), h, a))
+		host := awaitHost(t, f.peers)
+		require.Equal(t, string(ssh.MarshalAuthorizedKey(f.guest.PublicKey())), host.Permissions.Extensions["key"], "the host saw the hop's signer, not the guest")
+		certKey, err := ssh.ParsePublicKey([]byte(host.Permissions.Extensions["cert"]))
+		require.NoError(t, err)
+		cert := certKey.(*ssh.Certificate)
+		require.Equal(t, []string{f.route}, cert.ValidPrincipals)
+		carried, _, err := parseAuthRequestFromCert(f.route, cert, func(k ssh.PublicKey) bool { return bytes.Equal(k.Marshal(), f.signer.PublicKey().Marshal()) })
+		require.NoError(t, err)
+		require.Equal(t, f.auth.IngressConnection, carried.IngressConnection)
+		require.Equal(t, f.auth.ConnectionId, carried.ConnectionId)
+		require.Equal(t, f.auth.TypedAddress, carried.TypedAddress)
+		require.Equal(t, string(u.conn.SessionID()), cert.KeyId, "the host certificate doesn't identify this hop")
+		_, guests := f.proxy.delegated.Counts()
+		require.Equal(t, 1, guests, "an asserted hop isn't counted as delegated work")
+
+		channel, requests, err := u.conn.OpenChannel("session", nil)
+		require.NoError(t, err)
+		defer func() { _ = channel.Close() }()
+		go ssh.DiscardRequests(requests)
+		_, err = channel.Write([]byte("original guest data"))
+		require.NoError(t, err)
+		require.NoError(t, h.(*remoteHome).checkHeld(t.Context(), 2, gateTimeout))
+		require.True(t, h.Confirm(t.Context()), "a held registration wasn't confirmed over the hop")
+		echo := make([]byte, len("original guest data"))
+		_, err = io.ReadFull(channel, echo)
+		require.NoError(t, err)
+		require.Equal(t, "original guest data", string(echo))
+		ok, _, err := u.conn.SendRequest(upterm.OpenSSHKeepAliveRequestType, true, nil)
+		require.NoError(t, err)
+		require.True(t, ok)
+		// The home holds the hop to the capabilities the assertion named, a
+		// shell, whatever the ingress lets through.
+		ok, err = channel.SendRequest("exec", true, ssh.Marshal(struct{ Command string }{"uptime"}))
+		require.NoError(t, err)
+		require.False(t, ok, "the home let a shell-only hop exec")
+		_, _, err = u.conn.OpenChannel("direct-tcpip", nil)
+		var refused *ssh.OpenChannelError
+		require.ErrorAs(t, err, &refused, "the home opened a forwarding channel on a shell-only hop")
+		require.Equal(t, ssh.Prohibited, refused.Reason)
+		f.home.retire()
+		select {
+		case <-h.Done():
+		case <-time.After(time.Second):
+			t.Fatal("a retired registration kept its admitted hop open")
+		}
+		require.False(t, h.Confirm(t.Context()), "a retired registration was confirmed")
+		require.Eventually(t, func() bool { _, g := f.proxy.delegated.Counts(); return g == 0 }, 5*time.Second, 10*time.Millisecond, "an ended hop is still counted")
+	})
+
+	t.Run("replayed", func(t *testing.T) {
+		f := delegatedGateHome(t)
+		u, err := f.connect(t, f.auth, f.authority)
+		require.NoError(t, err)
+		h, err := negotiateHome(t.Context(), u, freshModeRequest(f.route))
+		require.NoError(t, err)
+		a := f.admissionOf(h)
+		require.NoError(t, assertHomeAdmission(t.Context(), h, a))
+		awaitHost(t, f.peers)
+		require.Error(t, assertHomeAdmission(t.Context(), h, a), "the ingress asserted twice")
+		body, err := proto.Marshal(a)
+		require.NoError(t, err)
+		ok, _, _ := u.conn.SendRequest(upterm.GateAdmitRequestType, true, body)
+		require.False(t, ok, "the home accepted a replayed assertion")
+		require.EqualValues(t, 1, f.dialer.calls.Load())
+		select {
+		case <-h.Done():
+		case <-time.After(time.Second):
+			t.Fatal("a replayed assertion left the hop open")
+		}
+	})
+
+	// A held check at the asserted sequence is answered; one below it is
+	// refused, and the home closes the hop.
+	t.Run("held_below_the_assertion", func(t *testing.T) {
+		f := delegatedGateHome(t)
+		u, err := f.connect(t, f.auth, f.authority)
+		require.NoError(t, err)
+		h, err := negotiateHome(t.Context(), u, freshModeRequest(f.route))
+		require.NoError(t, err)
+		a := f.admissionOf(h)
+		a.Sequence = 5
+		require.NoError(t, assertHomeAdmission(t.Context(), h, a))
+		awaitHost(t, f.peers)
+		held := func(sequence uint64) (bool, []byte) {
+			body, err := proto.Marshal(&GateHeldRequest{Protocol: 1, ModeNonce: bytes.Clone(h.(*remoteHome).nonce), Registration: gateRegistration(h.Ref()), Sequence: sequence})
+			require.NoError(t, err)
+			ok, reply, err := u.conn.SendRequest(upterm.GateHeldRequestType, true, body)
+			require.NoError(t, err)
+			return ok, reply
+		}
+		ok, body := held(5)
+		require.True(t, ok, "the home refused a held check at the asserted sequence")
+		var reply GateHeldReply
+		require.NoError(t, proto.Unmarshal(body, &reply))
+		require.True(t, reply.Held)
+		ok, _ = held(4)
+		require.False(t, ok, "the home answered a held check below the asserted sequence")
+		select {
+		case <-h.Done():
+		case <-time.After(time.Second):
+			t.Fatal("a held check below the asserted sequence left the hop open")
+		}
+	})
+}
+
+// The home accepts the assertion at exactly 5 seconds after the mode
+// exchange, and refuses it a nanosecond later.
+func TestHopModeAssertionDeadline(t *testing.T) {
+	for _, offset := range []time.Duration{5 * time.Second, 5*time.Second + time.Nanosecond} {
+		t.Run(offset.String(), func(t *testing.T) {
+			f := delegatedGateHome(t)
+			now := time.Now()
+			g := &hopGate{auth: f.auth, key: f.guest.PublicKey(), lookup: f.registry, now: func() time.Time { return now }}
+			request := freshModeRequest(f.route)
+			body, err := proto.Marshal(request)
+			require.NoError(t, err)
+			ok, _, err := g.request(&ssh.Request{Type: upterm.GateModeRequestType, WantReply: true, Payload: body})
+			require.NoError(t, err)
+			require.True(t, ok)
+			require.False(t, g.admitted, "a delegated hop was admitted by its mode exchange")
+			a := &GateAdmission{Protocol: 1, ModeNonce: request.Nonce, Registration: gateRegistration(f.home.Ref()), IngressNodeId: f.auth.IngressNodeId, ConnectionId: f.auth.ConnectionId, IngressSshSessionId: f.auth.IngressConnection, KeyFingerprint: publicKeyFingerprint(f.guest.PublicKey()), Sequence: 1, Capabilities: []string{"shell"}}
+			body, err = proto.Marshal(a)
+			require.NoError(t, err)
+			now = now.Add(offset)
+			ok, _, err = g.request(&ssh.Request{Type: upterm.GateAdmitRequestType, WantReply: true, Payload: body})
+			require.Equal(t, offset == 5*time.Second, ok)
+			if offset > 5*time.Second {
+				require.Error(t, err)
+				require.False(t, g.admitted)
+			} else {
+				require.NoError(t, err)
+				require.True(t, g.admitted)
+			}
+		})
+	}
+}
+
+// Neither an unsigned probe with a hop's certificate nor a guest that
+// connects to the internal listener raw reaches the home's host, a
+// signature or the authority, even an enabled one: the internal listener is
+// no SSH ingress.
+func TestHopGateUnsignedProbeAndRawInternal(t *testing.T) {
+	authority := &fakeAuthority{}
+	f := delegatedGateHome(t, func(p *sshProxy) {
+		p.authority, p.AuthorityEnabled, p.AuthorityComposed = authority, true, true
+		p.NodeID = "home-machine"
+	})
+	cert, err := (&UserCertSigner{SessionID: "probe", User: f.route, AuthRequest: f.auth}).SignCert(f.authority)
+	require.NoError(t, err)
+	_, err = ssh.Dial("tcp", f.addr, &ssh.ClientConfig{User: f.route, Auth: []ssh.AuthMethod{ssh.PublicKeys(refusingSigner{cert})}, HostKeyCallback: ssh.FixedHostKey(f.signer.PublicKey())})
+	require.Error(t, err)
+	require.Zero(t, f.dialer.calls.Load(), "an unsigned probe started a host handshake")
+	_, err = ssh.Dial("tcp", f.addr, &ssh.ClientConfig{User: f.route, Auth: []ssh.AuthMethod{ssh.PublicKeys(f.guest)}, HostKeyCallback: ssh.FixedHostKey(f.signer.PublicKey())})
+	require.Error(t, err)
+	admissions, _ := authority.guests()
+	require.Empty(t, admissions, "a raw internal guest reached the authority")
+	require.Zero(t, f.dialer.calls.Load())
+}
+
+// A hop no hop authority signed never reaches a delegated home's gate.
+func TestHopModeUntrustedHomeAndHop(t *testing.T) {
+	f := delegatedGateHome(t)
+	_, err := f.connect(t, f.auth, certTestSigner(t))
+	require.Error(t, err)
+	require.Zero(t, f.dialer.calls.Load())
+	require.Zero(t, f.registry.lookups.Load(), "an untrusted hop reached the gate")
+}
+
+// A hop whose assertion never comes is closed within the stage, without its
+// host ever being dialled.
+func TestHopModePreForwardTimeout(t *testing.T) {
+	f := delegatedGateHome(t)
+	u, err := f.connect(t, f.auth, f.authority)
+	require.NoError(t, err)
+	h, err := negotiateHome(t.Context(), u, freshModeRequest(f.route))
+	require.NoError(t, err)
+	select {
+	case <-h.Done():
+	case <-time.After(2 * time.Second):
+		t.Fatal("a hop without its assertion was kept open")
+	}
+	require.Zero(t, f.dialer.calls.Load(), "the timeout reached the host")
+}
+
+// A home on this node confirms while it is held and ctx lasts. A home on
+// another node is asked over the hop, and is confirmed by an answer at
+// exactly 2 seconds and not by one a nanosecond later, which retires it.
+func TestHomeConfirm(t *testing.T) {
+	t.Run("local", func(t *testing.T) {
+		home := newLocalHome(RegistrationRef{Authority: AuthorityDelegated, RoutingID: sessionRoute})
+		require.True(t, home.Confirm(t.Context()))
+		ctx, cancel := context.WithCancel(t.Context())
+		cancel()
+		require.False(t, home.Confirm(ctx), "a local home was confirmed after its context ended")
+		home.retire()
+		require.False(t, home.Confirm(t.Context()), "a retired local home was confirmed")
+	})
+
+	for _, offset := range []time.Duration{2 * time.Second, 2*time.Second + time.Nanosecond} {
+		t.Run(offset.String(), func(t *testing.T) {
+			key := certTestSigner(t)
+			received, replyNow := make(chan struct{}), make(chan struct{})
+			u := gateContractPeer(t, key, func(r *ssh.Request) {
+				switch r.Type {
+				case upterm.GateModeRequestType:
+					var request GateModeRequest
+					if proto.Unmarshal(r.Payload, &request) != nil {
+						_ = r.Reply(false, nil)
+						return
+					}
+					reply := &GateModeReply{Protocol: 1, Nonce: request.Nonce, Registration: gateRegistration(RegistrationRef{Authority: AuthorityDelegated, AccountID: fixtureAccountID, SessionID: externalSessionID, Generation: 1, RoutingID: sessionRoute,
+						RunPublicKeys: [][]byte{key.PublicKey().Marshal()}, RegistrationID: []byte("host-original"), HomeNode: "home", HomeNodeID: "home-machine", HomeBootID: fixtureBootID})}
+					body, _ := proto.Marshal(reply)
+					_ = r.Reply(true, body)
+				case upterm.GateHeldRequestType:
+					var request GateHeldRequest
+					if proto.Unmarshal(r.Payload, &request) != nil {
+						_ = r.Reply(false, nil)
+						return
+					}
+					close(received)
+					<-replyNow
+					body, _ := proto.Marshal(&GateHeldReply{Request: &request, Held: true})
+					_ = r.Reply(true, body)
+				default:
+					_ = r.Reply(false, nil)
+				}
+			})
+			home, err := negotiateHome(t.Context(), u, freshModeRequest(sessionRoute))
+			require.NoError(t, err)
+			start := time.Now()
+			var elapsed atomic.Int64
+			u.now = func() time.Time { return start.Add(time.Duration(elapsed.Load())) }
+			confirmed := make(chan bool, 1)
+			go func() { confirmed <- home.Confirm(t.Context()) }()
+			<-received
+			elapsed.Store(int64(offset))
+			close(replyNow)
+			if offset > 2*time.Second {
+				require.False(t, <-confirmed, "an answer after 2 seconds confirmed the home")
+				require.False(t, home.Held(), "a home that failed its check was kept")
+			} else {
+				require.True(t, <-confirmed, "an answer at 2 seconds didn't confirm the home")
+				require.True(t, home.Held())
+			}
+		})
+	}
+}
+
+// A delegated registration's home answers the mode exchange only for a hop
+// whose guest came in by SSH ingress that recorded its node, its node ID, its
+// own SSH session and a connection ID; any other hop is refused before its
+// host is reached.
+func TestHopGateRefusesAnUntrustedOrigin(t *testing.T) {
+	for name, change := range map[string]func(*AuthRequest){
+		"websocket ingress":     func(a *AuthRequest) { a.Ingress = Ingress_INGRESS_WEBSOCKET },
+		"unspecified ingress":   func(a *AuthRequest) { a.Ingress = Ingress_INGRESS_UNSPECIFIED },
+		"no ingress node":       func(a *AuthRequest) { a.IngressNode = "" },
+		"no ingress node ID":    func(a *AuthRequest) { a.IngressNodeId = "" },
+		"no connection ID":      func(a *AuthRequest) { a.ConnectionId = "connection" },
+		"no ingress connection": func(a *AuthRequest) { a.IngressConnection = nil },
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := delegatedGateHome(t)
+			auth := proto.Clone(f.auth).(*AuthRequest)
+			change(auth)
+			u, err := f.connect(t, auth, f.authority)
+			require.NoError(t, err)
+			_, err = negotiateHome(t.Context(), u, freshModeRequest(f.route))
+			require.Error(t, err, "a delegated home answered a hop from an untrusted origin")
+			require.Zero(t, f.dialer.calls.Load())
+		})
+	}
+	// The same hop from SSH ingress is answered.
+	f := delegatedGateHome(t)
+	u, err := f.connect(t, f.auth, f.authority)
+	require.NoError(t, err)
+	_, err = negotiateHome(t.Context(), u, freshModeRequest(f.route))
+	require.NoError(t, err)
 }

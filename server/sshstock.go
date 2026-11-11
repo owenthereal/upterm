@@ -219,6 +219,14 @@ func (p *SSHRouting) stockConnection(ctx context.Context, accepted net.Conn, ins
 	// raw records its reads from the first byte, the handshake's included, for
 	// the node's sshd to judge a host's silence by. See hostActivity.
 	raw := liveness.NewConn(accepted)
+	// guest is the connection's admission, should it be a guest of a relay
+	// with an authority composed. Its end comes last, once all else has let
+	// go.
+	var guest *guestConn
+	if p.Auth.authority != nil {
+		guest = newGuestConn(ctx, raw)
+		defer guest.end()
+	}
 	defer func() { _ = raw.Close() }()
 	stop := context.AfterFunc(ctx, func() { _ = raw.Close() })
 	defer stop()
@@ -252,8 +260,13 @@ func (p *SSHRouting) stockConnection(ctx context.Context, accepted net.Conn, ins
 	}
 	// A listener that advertises the gate serves a gate hop through it. It
 	// neither resolves nor dials while authenticating one: the gate looks up
-	// this node's own registrations once the hop has named one.
+	// this node's own registrations once the hop has named one. With an
+	// authority composed, a guest's admission is the composed path's: a hop
+	// another node starts is told apart first, on any listener.
 	advertises := p.Auth.advertises()
+	composed := p.Auth.authority != nil
+	stage := p.handshakeTimeout() / 2
+	stageDeadline := time.Now().Add(stage)
 	cfg := &ssh.ServerConfig{
 		ServerVersion: serverVersion(advertises),
 		// Authorization only. x/crypto invokes this for unsigned public-key
@@ -261,14 +274,25 @@ func (p *SSHRouting) stockConnection(ctx context.Context, accepted net.Conn, ins
 		// without incrementing authFailures, so MaxAuthTries does not bound it.
 		// Anything expensive here is reachable before any signature is verified.
 		PublicKeyCallback: func(meta ssh.ConnMetadata, key ssh.PublicKey) (*ssh.Permissions, error) {
-			if advertises && isRelayCertificate(key) {
-				auth, _, hop, err := p.Auth.authenticate(meta, key)
+			hop := false
+			if (advertises || composed) && isRelayCertificate(key) {
+				auth, _, isHop, err := p.Auth.authenticate(meta, key)
 				if err != nil {
 					return nil, refuse(meta, err)
 				}
-				if hop && auth.GateProtocol == 1 {
+				if isHop && auth.GateProtocol == 1 && advertises {
 					return &ssh.Permissions{}, nil
 				}
+				hop = isHop
+			}
+			// A guest with an authority composed is the composed path's, and
+			// is asked nothing until it has signed: this only classifies its
+			// user, which may ask the authority whether it claims it.
+			if !hop && p.Auth.composedGuest(meta) {
+				if _, _, err := p.Auth.guestKey(meta, key); err != nil {
+					return nil, err
+				}
+				return &ssh.Permissions{}, nil
 			}
 			if _, _, _, err := p.Auth.authorize(meta, key); err != nil {
 				return nil, refuse(meta, err)
@@ -281,15 +305,25 @@ func (p *SSHRouting) stockConnection(ctx context.Context, accepted net.Conn, ins
 		// match credentials back to an offered key after the handshake. The
 		// permissions returned here are the ones the connection keeps.
 		VerifiedPublicKeyCallback: func(meta ssh.ConnMetadata, key ssh.PublicKey, _ *ssh.Permissions, _ string) (*ssh.Permissions, error) {
-			if advertises && isRelayCertificate(key) {
-				auth, original, hop, err := p.Auth.authenticate(meta, key)
+			hop := false
+			if (advertises || composed) && isRelayCertificate(key) {
+				auth, original, isHop, err := p.Auth.authenticate(meta, key)
 				if err != nil {
 					return nil, refuse(meta, err)
 				}
-				if hop && auth.GateProtocol == 1 {
+				if isHop && auth.GateProtocol == 1 && advertises {
 					gateAuth, gateKey = auth, original
 					return &ssh.Permissions{Extensions: map[string]string{permHop: ""}}, nil
 				}
+				hop = isHop
+			}
+			// Refused without a banner: a guest the authority did not admit
+			// learns only that its key was refused.
+			if !hop && p.Auth.composedGuest(meta) {
+				if err := p.admitGuest(guest, meta, key, stageDeadline, stage); err != nil {
+					return nil, err
+				}
+				return &ssh.Permissions{}, nil
 			}
 			planned, permissions, err := p.Auth.prepare(meta, key)
 			if err != nil {
@@ -302,8 +336,7 @@ func (p *SSHRouting) stockConnection(ctx context.Context, accepted net.Conn, ins
 	for _, key := range p.HostSigners {
 		cfg.AddHostKey(key)
 	}
-	stage := p.handshakeTimeout() / 2
-	if err := raw.SetDeadline(time.Now().Add(stage)); err != nil {
+	if err := raw.SetDeadline(stageDeadline); err != nil {
 		return err
 	}
 	// A direct client's source, refused before the banner, with nothing
@@ -323,6 +356,18 @@ func (p *SSHRouting) stockConnection(ctx context.Context, accepted net.Conn, ins
 	}
 	if gateAuth != nil {
 		return p.serveHopGate(ctx, sshPeer{downstream, channels, requests}, gateAuth, gateKey, stage, inst)
+	}
+	if guest != nil && guest.guest != nil {
+		guest.mu.Lock()
+		guest.authenticated = true
+		guest.mu.Unlock()
+		if guest.admission.Verdict == VerdictAllow && guest.admission.Target.Registration.Authority == AuthorityLocal {
+			defer guest.upstream.Close()
+			// Counted as the stock path counts it: its upstream is up.
+			inst.authenticatedClient.Add(1)
+			return forwardSSH(guest.ctx, sshPeer{downstream, channels, requests}, guest.upstream.sshPeer, abortConnection, inst.stalledChannelAborts, nil)
+		}
+		return p.serveDelegatedGuest(ctx, guest, sshPeer{downstream, channels, requests}, stage, inst)
 	}
 	if first == nil {
 		return fmt.Errorf("missing authenticated upstream credentials")
@@ -405,10 +450,11 @@ func (p *SSHRouting) stockConnection(ctx context.Context, accepted net.Conn, ins
 type upstreamConn struct {
 	// gateBusy admits one gate exchange at a time; now, when set, is the
 	// clock the gate's deadlines read; homeNode is the node a gate answer
-	// must name as its home.
+	// must name as its home, and home the registration it named.
 	gateBusy atomic.Bool
 	now      func() time.Time
 	homeNode string
+	home     Home
 	sshPeer
 	raw  net.Conn
 	stop func() bool
@@ -457,21 +503,22 @@ func (p *SSHRouting) upstreamAttempt(ctx, parent context.Context, pr *preparedRo
 	}
 	upstream := &upstreamConn{sshPeer: sshPeer{conn, channels, requests}, raw: raw, stop: stop, homeNode: pr.id.NodeAddr}
 	// A gate hop asks the home which registration it holds, and goes on only
-	// with the local one it names. A home without the token is refused only
-	// by a node that refuses legacy hops. The ingress spoke first, as
-	// x/crypto's client always does, so nothing here waits on the home's
-	// banner.
+	// with the local one it names, unless the attempt is a delegated guest's,
+	// whose admission asserts the authority's allow before using the hop. A
+	// home without the token is refused only by a node that refuses legacy
+	// hops. The ingress spoke first, as x/crypto's client always does, so
+	// nothing here waits on the home's banner.
 	if pr.remote && pr.creds.gate {
 		if hasGateCapability(conn.ServerVersion()) {
 			home, err := negotiateHome(ctx, upstream, freshModeRequest(pr.id.Id))
 			if err != nil {
 				return nil, err
 			}
-			if home.Ref().Authority != AuthorityLocal {
+			if home.Ref().Authority != AuthorityLocal && !pr.delegatedGate {
 				upstream.Close()
 				return nil, errGateRefused
 			}
-		} else if p.Auth.RefuseLegacyHops {
+		} else if p.Auth.RefuseLegacyHops || p.Auth.AuthorityEnabled {
 			upstream.Close()
 			return nil, errGateRefused
 		}

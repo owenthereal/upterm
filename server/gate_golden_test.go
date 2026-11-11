@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	"golang.org/x/crypto/ssh"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -17,7 +18,9 @@ import (
 // testdata/authrequest.golden with the gate's fields added, and these. The
 // delegated messages take gate-v1.json's session ID as their external
 // session ID, and its generation; a host's request takes its run key as the
-// host key, and the response its routing ID and home node.
+// host key, and the response its routing ID and home node. A gate admission
+// names that run key's fingerprint as the guest's key, and the gate's
+// admission and held check take the golden sequence.
 const (
 	goldenTypedAddress  = "guest-typed-user"
 	goldenIngressNodeID = "ingress-B"
@@ -32,6 +35,8 @@ const (
 	goldenSessionSecret    = "session-secret"
 	goldenHostKeyProof     = "host-key-proof"
 	goldenSSHUser          = "guest-ssh-user"
+
+	goldenIngressSSHSessionID = "ingress-ssh-session"
 )
 
 // goldenRegistration is testdata/gate-v1.json as a GateRegistration. The
@@ -95,6 +100,11 @@ func TestRelayWireGolden(t *testing.T) {
 		return &DelegatedSession{Protocol: goldenProtocol, ExternalSessionId: session, Disposition: DelegatedDisposition_DELEGATED_CURRENT, DecisionRevision: goldenDecisionRevision}
 	}
 	exit := func() *DelegatedExit { return &DelegatedExit{ExitStatus: goldenExitStatus, StatusKnown: true} }
+	runKey, err := ssh.ParsePublicKey(registration.RunPublicKeys[0])
+	require.NoError(t, err)
+	held := func() *GateHeldRequest {
+		return &GateHeldRequest{Protocol: 1, ModeNonce: goldenNonce(), Registration: registration, Sequence: goldenSequence}
+	}
 
 	built := map[string]proto.Message{
 		"AuthRequest":      auth,
@@ -138,6 +148,13 @@ func TestRelayWireGolden(t *testing.T) {
 		},
 		"DelegatedDecisionAck": &DelegatedDecisionAck{ExternalSessionId: session, Generation: registration.Generation, DecisionRevision: goldenDecisionRevision},
 		"DelegatedError":       &DelegatedError{Code: DelegatedErrorCode_DELEGATED_STALE_GENERATION},
+		"GateAdmission": &GateAdmission{
+			Protocol: 1, ModeNonce: goldenNonce(), Registration: registration, IngressNodeId: goldenIngressNodeID, ConnectionId: goldenConnectionID,
+			IngressSshSessionId: []byte(goldenIngressSSHSessionID), KeyFingerprint: publicKeyFingerprint(runKey), Sequence: goldenSequence,
+			Capabilities: []string{"shell", "exec"},
+		},
+		"GateHeldRequest": held(),
+		"GateHeldReply":   &GateHeldReply{Request: held(), Held: true},
 	}
 
 	f, err := os.Open("testdata/relay-wire.golden")

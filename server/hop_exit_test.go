@@ -73,6 +73,11 @@ func TestHopGateLocalRetirementDuringDial(t *testing.T) {
 			case <-time.After(3 * time.Second):
 				t.Fatal("retired local host dial exceeded original stage")
 			}
+			if release {
+				// The completed dial finds the home retired and closes the hop.
+				requireHopClosed(t, u, "retired home kept the hop open")
+				return
+			}
 			_, _, err = u.conn.OpenChannel("session", nil)
 			require.Error(t, err, "retired home admitted a guest channel")
 		})
@@ -103,13 +108,20 @@ func (c heldExitOpen) Accept() (ssh.Channel, <-chan *ssh.Request, error) {
 }
 
 func TestHopGateRetirementPreservesLocalExitTail(t *testing.T) {
-	for _, stalled := range []bool{false, true} {
-		name := string(AuthorityLocal)
+	for _, tc := range []struct {
+		authority SessionAuthority
+		stalled   bool
+	}{{AuthorityLocal, false}, {AuthorityDelegated, false}, {AuthorityLocal, true}} {
+		stalled := tc.stalled
+		name := string(tc.authority)
 		if stalled {
 			name += "_stalled"
 		}
 		t.Run(name, func(t *testing.T) {
 			f := newHopGateFixture(t)
+			if tc.authority == AuthorityDelegated {
+				f.delegatedHome(t)
+			}
 			hostListener, err := net.Listen("tcp", "127.0.0.1:0")
 			require.NoError(t, err)
 			defer func() { _ = hostListener.Close() }()
@@ -197,8 +209,11 @@ func TestHopGateRetirementPreservesLocalExitTail(t *testing.T) {
 			}()
 			u, err := f.connect(t, f.auth, f.authority)
 			require.NoError(t, err)
-			_, err = negotiateHome(t.Context(), u, freshModeRequest("route"))
+			home, err := negotiateHome(t.Context(), u, freshModeRequest("route"))
 			require.NoError(t, err)
+			if tc.authority == AuthorityDelegated {
+				require.NoError(t, assertHomeAdmission(t.Context(), home, f.admissionOf(home)))
+			}
 			channel, requests, err := u.conn.OpenChannel("session", nil)
 			require.NoError(t, err)
 			defer func() { _ = channel.Close() }()
@@ -209,7 +224,15 @@ func TestHopGateRetirementPreservesLocalExitTail(t *testing.T) {
 			}
 			<-hostSent
 			f.home.retire()
-			if stalled {
+			if tc.authority == AuthorityDelegated {
+				// A delegated registration's retirement interrupts even what
+				// the host already sent.
+				select {
+				case <-disconnected:
+				case <-time.After(time.Second):
+					t.Fatal("delegated retirement waited for buffered status")
+				}
+			} else if stalled {
 				select {
 				case <-disconnected:
 				case <-time.After(sshForwardDrainTimeout + time.Second):

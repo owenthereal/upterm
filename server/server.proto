@@ -193,3 +193,27 @@ message GateModeReply {
   bytes nonce = 2;
   GateRegistration registration = 3;
 }
+
+message GateAdmission {
+  uint32 protocol = 1;
+  bytes mode_nonce = 2;
+  GateRegistration registration = 3;
+  string ingress_node_id = 4;
+  string connection_id = 5;
+  bytes ingress_ssh_session_id = 6;
+  string key_fingerprint = 7;
+  uint64 sequence = 8;
+  repeated string capabilities = 9;
+}
+
+message GateHeldRequest {
+  uint32 protocol = 1;
+  bytes mode_nonce = 2;
+  GateRegistration registration = 3;
+  uint64 sequence = 4;
+}
+
+message GateHeldReply {
+  GateHeldRequest request = 1;
+  bool held = 2;
+}

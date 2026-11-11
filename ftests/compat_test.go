@@ -129,7 +129,9 @@ func TestMixedVersionFleets(t *testing.T) {
 					// toward the old node, which has no token. In Consul
 					// routing the old node serves that hop, whose user is the
 					// routing ID it expects; in embedded routing it can't
-					// decode that user, and refuses it.
+					// decode that user, and refuses it. With an authority
+					// composed, a guest's hop is made as the guest
+					// authenticates, so that refusal is the guest's own.
 					t.Run("dark authority on the new node", func(t *testing.T) {
 						n := startCompatRelay(t, "dark", darkRelay, keys, compatLayout{mode: mode, consul: consul, internal: true})
 						o := oldNode(t)
@@ -139,7 +141,7 @@ func TestMixedVersionFleets(t *testing.T) {
 							guest := requireCompatJoin(t, s, n, keys)
 							require.Equal(t, s.user, guest.user, "the hop's user is the routing ID, which is the user here")
 						} else {
-							requireCompatRefused(t, shareOn(t, o, keys), n, nil, upterm.UpstreamAuthFailed, keys)
+							requireCompatRefusedAtEntry(t, shareOn(t, o, keys), n, keys)
 						}
 						requireCompatJoin(t, shareOn(t, n, keys), n, keys)
 						requireCompatJoin(t, shareOn(t, o, keys), o, keys)
@@ -673,6 +675,28 @@ func refuseCompatGuest(t *testing.T, s *compatSession, entry, refuser *compatRel
 			"%s didn't log the gate's refusal:\n%s", refuser.name, refuser.output.String())
 	}
 	return c
+}
+
+// requireCompatRefusedAtEntry requires a guest of s entering at entry, a
+// node with an authority composed, to be refused as it authenticates, as any
+// unknown key is: such a node hops to the guest's home then, and a home that
+// refuses the hop refuses the guest. It is sent no banner, and reaches no
+// host, watched for compatQuietBound.
+func requireCompatRefusedAtEntry(t *testing.T, s *compatSession, entry *compatRelay, keys compatKeyFiles) {
+	t.Helper()
+	var banners []string
+	c, err := ssh.Dial("tcp", entry.ssh, &ssh.ClientConfig{User: s.user, ClientVersion: upterm.JoinSSHClientVersion, Auth: []ssh.AuthMethod{ssh.PublicKeys(keys.guest)}, HostKeyCallback: entry.hostKeyCallback,
+		BannerCallback: func(m string) error { banners = append(banners, m); return nil }, Timeout: 5 * time.Second})
+	if c != nil {
+		_ = c.Close()
+	}
+	require.ErrorContains(t, err, "unable to authenticate", "a guest entering at %s was let in", entry.name)
+	require.Empty(t, banners, "a guest entering at %s was sent a banner", entry.name)
+	select {
+	case <-s.guests:
+		t.Fatalf("a guest entering at %s reached its host", entry.name)
+	case <-time.After(compatQuietBound):
+	}
 }
 
 // errGateRefusedText is the error a node logs when the gate refuses a hop.

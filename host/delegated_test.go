@@ -81,6 +81,17 @@ func (a *testAuthorityRelay) Control(_ context.Context, r server.Report) (*serve
 	return answer(r.Request)
 }
 
+// The relay's authority decides no guest: these tests are the host's.
+func (a *testAuthorityRelay) Claims(string) bool { return false }
+
+func (a *testAuthorityRelay) Admit(context.Context, *server.Guest, server.GuestRequest) (server.Admission, error) {
+	return server.Admission{}, nil
+}
+
+func (a *testAuthorityRelay) Unreachable(context.Context, *server.Guest, server.Target) []byte {
+	return nil
+}
+
 func (a *testAuthorityRelay) seen() ([]server.DelegatedRegistration, []*server.DelegatedControlRequest) {
 	a.mu.Lock()
 	defer a.mu.Unlock()

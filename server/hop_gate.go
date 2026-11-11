@@ -46,6 +46,14 @@ import (
 // host connects to, and on a shared listener only once it gates: a host reads
 // the server version too, and releases from before the token can't read a
 // version with a comment.
+//
+// A delegated registration's home answers the mode exchange only for a guest
+// that came in by SSH ingress, and then holds the hop until the ingress
+// asserts its authority's admission, once and within the exchange's 5
+// seconds, with gate-admit: the exact registration it answered with, the
+// guest's key and connection, and the capabilities the hop is held to. The
+// ingress can then ask it over the hop, with gate-held, whether it still
+// holds the registration.
 
 // gateTimeout bounds each gate exchange: an answer is in time at exactly
 // gateTimeout after its request was sent, and late a nanosecond after.
@@ -145,7 +153,7 @@ func (a proxyAuth) stillHeld(home Home) bool {
 // guest never hands a newer home a gate request the guest made up.
 func gateName(name string) bool {
 	switch name {
-	case upterm.GateModeRequestType, "gate-admit@upterm.dev", "gate-held@upterm.dev":
+	case upterm.GateModeRequestType, upterm.GateAdmitRequestType, upterm.GateHeldRequestType:
 		return true
 	}
 	return false
@@ -223,12 +231,47 @@ func decodeGate(b []byte, dst proto.Message) error {
 		if v.Protocol != 1 || len(v.Nonce) != 32 || validGateRegistration(v.Registration) != nil {
 			return errGateRefused
 		}
+	case *GateAdmission:
+		if v.Protocol != 1 || len(v.ModeNonce) != 32 || validGateRegistration(v.Registration) != nil || !gateID(v.IngressNodeId) || !validUUID(v.ConnectionId) || len(v.IngressSshSessionId) == 0 || v.KeyFingerprint == "" || v.Sequence == 0 || !validGateCapabilities(v.Capabilities) {
+			return errGateRefused
+		}
+	case *GateHeldRequest:
+		if v.Protocol != 1 || len(v.ModeNonce) != 32 || validGateRegistration(v.Registration) != nil || v.Sequence == 0 {
+			return errGateRefused
+		}
+	case *GateHeldReply:
+		if v.Request == nil {
+			return errGateRefused
+		}
+		b, _ := proto.Marshal(v.Request)
+		return decodeGate(b, v.Request)
 	}
 	return nil
 }
 
 func gateID(s string) bool {
 	return s != "" && len(s) <= 1024 && !strings.ContainsAny(s, "\x00\r\n\t ")
+}
+
+// validGateCapabilities accepts one to four distinct capabilities, each of
+// shell, exec, sftp and direct-tcpip.
+func validGateCapabilities(names []string) bool {
+	if len(names) == 0 || len(names) > 4 {
+		return false
+	}
+	seen := map[string]bool{}
+	for _, n := range names {
+		switch n {
+		case "shell", "exec", "sftp", "direct-tcpip":
+		default:
+			return false
+		}
+		if seen[n] {
+			return false
+		}
+		seen[n] = true
+	}
+	return true
 }
 
 // validGateRegistration accepts a local registration, one that answers to no
@@ -288,6 +331,12 @@ func gateWithin(now, deadline time.Time) bool { return !now.After(deadline) }
 // sendGate permits only one in-flight control operation. Cancellation closes
 // the transport, releasing x/crypto's synchronous SendRequest wait.
 func sendGate(ctx context.Context, u *upstreamConn, name string, request proto.Message) ([]byte, error) {
+	return sendGateWithin(ctx, u, name, request, gateTimeout)
+}
+
+// sendGateWithin is sendGate with an answer in time at exactly within after
+// its request was sent, and late a nanosecond after.
+func sendGateWithin(ctx context.Context, u *upstreamConn, name string, request proto.Message, within time.Duration) ([]byte, error) {
 	if !u.gateBusy.CompareAndSwap(false, true) {
 		u.Close()
 		return nil, errGateRefused
@@ -298,8 +347,8 @@ func sendGate(ctx context.Context, u *upstreamConn, name string, request proto.M
 		return nil, errGateRefused
 	}
 	sent := u.gateNow()
-	deadline := sent.Add(gateTimeout)
-	call, cancel := context.WithTimeout(ctx, gateTimeout)
+	deadline := sent.Add(within)
+	call, cancel := context.WithTimeout(ctx, within)
 	defer cancel()
 	stop := context.AfterFunc(call, u.Close)
 	defer stop()
@@ -327,21 +376,56 @@ func (u *upstreamConn) gateNow() time.Time {
 	return time.Now()
 }
 
+// confirmTimeout bounds Home.Confirm's held check over a hop: an answer is in
+// time at exactly confirmTimeout after its request was sent, and late a
+// nanosecond after.
+const confirmTimeout = 2 * time.Second
+
 // remoteHome is a snapshot bound to one verified SSH transport: the
 // registration the home node answered with, held until that transport ends.
+// A held check confirms the same registration; it never grants or extends an
+// authority's permission.
 type remoteHome struct {
-	ref      RegistrationRef
-	nonce    []byte
-	upstream *upstreamConn
-	done     chan struct{}
-	once     sync.Once
-	alive    atomic.Bool
+	heldSequence atomic.Uint64
+	ref          RegistrationRef
+	nonce        []byte
+	upstream     *upstreamConn
+	done         chan struct{}
+	once         sync.Once
+	alive        atomic.Bool
+	admitted     atomic.Bool
 }
 
 func (h *remoteHome) Ref() RegistrationRef  { return h.ref.clone() }
 func (h *remoteHome) Held() bool            { return h.alive.Load() }
 func (h *remoteHome) Done() <-chan struct{} { return h.done }
 func (h *remoteHome) retire()               { h.once.Do(func() { h.alive.Store(false); close(h.done) }) }
+
+// Confirm asks the home over the hop whether it still holds the registration,
+// within confirmTimeout. The sequence it sends belongs to the hop, not to the
+// authority.
+func (h *remoteHome) Confirm(ctx context.Context) bool {
+	if !h.Held() {
+		return false
+	}
+	ctx, cancel := context.WithTimeout(ctx, confirmTimeout)
+	defer cancel()
+	return h.checkHeld(ctx, h.heldSequence.Add(1)+1, confirmTimeout) == nil
+}
+
+// checkHeld is one held check of sequence, answered within within. A check
+// that fails retires the home and closes its hop.
+func (h *remoteHome) checkHeld(ctx context.Context, sequence uint64, within time.Duration) error {
+	request := &GateHeldRequest{Protocol: 1, ModeNonce: bytes.Clone(h.nonce), Registration: gateRegistration(h.ref), Sequence: sequence}
+	body, err := sendGateWithin(ctx, h.upstream, upterm.GateHeldRequestType, request, within)
+	var reply GateHeldReply
+	if err != nil || decodeGate(body, &reply) != nil || !reply.Held || !proto.Equal(reply.Request, request) {
+		h.retire()
+		h.upstream.Close()
+		return errGateRefused
+	}
+	return nil
+}
 
 // negotiateHome runs the mode exchange over upstream, and binds the hop to the
 // registration the home answers with.
@@ -357,8 +441,34 @@ func negotiateHome(ctx context.Context, upstream *upstreamConn, request *GateMod
 	}
 	h := &remoteHome{ref: registrationRef(reply.Registration), nonce: bytes.Clone(request.Nonce), upstream: upstream, done: make(chan struct{})}
 	h.alive.Store(true)
+	upstream.home = h
 	go func() { _ = upstream.conn.Wait(); h.retire() }()
 	return h, nil
+}
+
+// assertHomeAdmission asserts admission to home, a delegated registration's
+// home over its hop, once: the home must echo it byte for byte while it still
+// holds the registration. Anything else retires the home and closes the hop.
+func assertHomeAdmission(ctx context.Context, home Home, admission *GateAdmission) error {
+	if home == nil || !home.Held() || home.Ref().Authority != AuthorityDelegated || !proto.Equal(gateRegistration(home.Ref()), admission.GetRegistration()) {
+		return errGateRefused
+	}
+	h, ok := home.(*remoteHome)
+	if !ok {
+		return errGateRefused
+	}
+	if !bytes.Equal(h.nonce, admission.ModeNonce) || !h.admitted.CompareAndSwap(false, true) {
+		return errGateRefused
+	}
+	body, err := sendGate(ctx, h.upstream, upterm.GateAdmitRequestType, admission)
+	want, _ := proto.Marshal(admission)
+	var echoed GateAdmission
+	if err != nil || decodeGate(body, &echoed) != nil || !bytes.Equal(body, want) || !h.Held() {
+		h.retire()
+		h.upstream.Close()
+		return errGateRefused
+	}
+	return nil
 }
 
 // hasGateCapability reports whether version, a peer's authenticated server
@@ -373,16 +483,20 @@ func hasGateCapability(version []byte) bool {
 }
 
 // hopGate holds all application traffic until the certified peer has named a
-// local registration.
+// local registration, and, for a delegated registration, asserted its
+// authority's admission.
 type hopGate struct {
-	auth     *AuthRequest
-	home     Home
-	lookup   homeLookup
-	nonce    []byte
-	deadline time.Time
-	mode     bool
-	admitted bool
-	now      func() time.Time
+	auth         *AuthRequest
+	key          ssh.PublicKey
+	home         Home
+	lookup       homeLookup
+	nonce        []byte
+	deadline     time.Time
+	mode         bool
+	admitted     bool
+	sequence     uint64
+	capabilities []string
+	now          func() time.Time
 }
 
 func (g *hopGate) held() bool {
@@ -416,13 +530,40 @@ func (g *hopGate) request(r *ssh.Request) (bool, []byte, error) {
 		if validGateRegistration(ref) != nil || !g.held() {
 			return false, nil, errGateRefused
 		}
-		// A delegated registration's guests are its authority's to admit,
-		// and this node admits none of them through the gate.
-		if ref.Mode != GateMode_GATE_MODE_LOCAL {
+		// A delegated registration's guest is admitted only from an SSH
+		// ingress that recorded where it came in, and only once the ingress
+		// asserts its authority's admission.
+		if ref.Mode == GateMode_GATE_MODE_DELEGATED && (g.auth.Ingress != Ingress_INGRESS_SSH || !gateID(g.auth.IngressNodeId) || !validUUID(g.auth.ConnectionId) || len(g.auth.IngressConnection) == 0 || !gateID(g.auth.IngressNode)) {
 			return false, nil, errGateRefused
 		}
-		g.admitted = true
+		if ref.Mode == GateMode_GATE_MODE_LOCAL {
+			g.admitted = true
+		}
 		b, _ := proto.Marshal(&GateModeReply{Protocol: 1, Nonce: g.nonce, Registration: ref})
+		return true, b, nil
+	case upterm.GateAdmitRequestType:
+		var request GateAdmission
+		if !g.mode || g.admitted || !gateWithin(g.now(), g.deadline) || !g.held() || g.home.Ref().Authority != AuthorityDelegated || decodeGate(r.Payload, &request) != nil {
+			return false, nil, errGateRefused
+		}
+		if !bytes.Equal(request.ModeNonce, g.nonce) || !proto.Equal(request.Registration, gateRegistration(g.home.Ref())) || request.IngressNodeId != g.auth.IngressNodeId || request.ConnectionId != g.auth.ConnectionId || !bytes.Equal(request.IngressSshSessionId, g.auth.IngressConnection) || request.KeyFingerprint != publicKeyFingerprint(g.key) || g.auth.Ingress != Ingress_INGRESS_SSH || !gateID(g.auth.IngressNode) {
+			return false, nil, errGateRefused
+		}
+		g.sequence = request.Sequence
+		g.capabilities = append([]string(nil), request.Capabilities...)
+		g.admitted = true
+		if !g.held() {
+			return false, nil, errGateRefused
+		}
+		return true, bytes.Clone(r.Payload), nil
+	case upterm.GateHeldRequestType:
+		var request GateHeldRequest
+		if !g.admitted || decodeGate(r.Payload, &request) != nil || request.Sequence < g.sequence || !bytes.Equal(request.ModeNonce, g.nonce) || !proto.Equal(request.Registration, gateRegistration(g.home.Ref())) {
+			return false, nil, errGateRefused
+		}
+		g.sequence = request.Sequence
+		held := g.held()
+		b, _ := proto.Marshal(&GateHeldReply{Request: &request, Held: held})
 		return true, b, nil
 	}
 	return false, nil, errGateRefused
@@ -430,11 +571,20 @@ func (g *hopGate) request(r *ssh.Request) (bool, []byte, error) {
 
 // serveHopGate serves a gate hop: it answers the ingress's mode exchange,
 // holding back the hop's channels and requests until then, and forwards the
-// hop to the registration it named only while this node still holds it, with
-// the guest's key checked against the keys that registration was adopted
-// with.
+// hop to the registration it named only while this node still holds it. A
+// local registration's guest is checked against the keys that registration
+// was adopted with. A delegated registration's waits for the ingress to
+// assert its authority's admission, once and in time, and is held to the
+// capabilities that admission named; it is delegated work, which a fence or
+// the drain latch refuses and a drain closes.
 func (p *SSHRouting) serveHopGate(ctx context.Context, peer sshPeer, auth *AuthRequest, key ssh.PublicKey, stage time.Duration, inst *routingInstruments) error {
-	g := &hopGate{auth: auth, lookup: p.Auth.authorities, now: time.Now}
+	g := &hopGate{auth: auth, key: key, lookup: p.Auth.authorities, now: time.Now}
+	var obligation *delegatedObligation
+	defer func() {
+		if obligation != nil {
+			obligation.end()
+		}
+	}()
 	preCtx, stopPreCtx := context.WithTimeout(ctx, stage)
 	defer stopPreCtx()
 	// Timers close the transport independently of the request loop: Reply
@@ -461,6 +611,14 @@ func (p *SSHRouting) serveHopGate(ctx context.Context, peer sshPeer, auth *AuthR
 				continue
 			}
 			ok, b, err := g.request(r)
+			if g.home != nil && g.home.Ref().Authority == AuthorityDelegated {
+				if obligation == nil {
+					obligation = p.Auth.delegated.beginGuest(func() { _ = peer.conn.Close() })
+				}
+				if obligation == nil || !obligation.publish(func() {}) {
+					return errGateRefused
+				}
+			}
 			_ = r.Reply(ok, b)
 			if err != nil {
 				return err
@@ -481,8 +639,21 @@ func (p *SSHRouting) serveHopGate(ctx context.Context, peer sshPeer, auth *AuthR
 		return errGateRefused
 	}
 	ref := g.home.Ref()
+	// A delegated registration's retirement interrupts even buffered output.
+	// A local one's keeps the stock forwarder's bounded drain after its
+	// upstream closes below.
 	heldCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
+	if ref.Authority == AuthorityDelegated {
+		go func() {
+			select {
+			case <-g.home.Done():
+				cancel()
+				_ = peer.conn.Close()
+			case <-heldCtx.Done():
+			}
+		}()
+	}
 	requests := make(chan *ssh.Request)
 	filtered := peer
 	filtered.requests = requests
@@ -579,6 +750,12 @@ func (p *SSHRouting) serveHopGate(ctx context.Context, peer sshPeer, auth *AuthR
 	defer upstream.Close()
 	if !g.held() {
 		return errGateRefused
+	}
+	if ref.Authority == AuthorityDelegated {
+		if obligation == nil || !obligation.publish(func() {}) {
+			return errGateRefused
+		}
+		return forwardSSHWithin(heldCtx, filtered, upstream.sshPeer, abortConnection, inst.stalledChannelAborts, nil, newGuestCapabilities(g.capabilities))
 	}
 	// A retired registration closes its host's upstream; the stock
 	// forwarder's bounded drain still delivers what the host already sent.
