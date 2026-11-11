@@ -111,6 +111,11 @@ func (p *SSHRouting) serveWaiting(g *guestConn, peer sshPeer, stage time.Duratio
 	ctx, stopWaiting := context.WithCancel(g.ctx)
 	_ = context.AfterFunc(ctx, func() { _ = peer.conn.Close() })
 	limit := time.AfterFunc(stage, stopWaiting)
+	// cutoff closes the guest's transport a grace after the screen expires,
+	// whether or not its shell has started, and however the screen is
+	// blocked: answering a guest that stopped reading can block it. Until a
+	// decision comes in time, the screen ends at the first of the two.
+	cutoff := time.AfterFunc(time.Until(waiting.Expires)+waitingGrace, g.forceClose)
 	var (
 		workers sync.WaitGroup
 		session *waitingSession
@@ -119,6 +124,7 @@ func (p *SSHRouting) serveWaiting(g *guestConn, peer sshPeer, stage time.Duratio
 	)
 	defer func() {
 		limit.Stop()
+		cutoff.Stop()
 		stopWaiting()
 		close(ended)
 		_ = peer.conn.Close()
@@ -184,16 +190,10 @@ func (p *SSHRouting) serveWaiting(g *guestConn, peer sshPeer, stage time.Duratio
 		decided  chan awaitResult
 		expires  <-chan time.Time
 	)
-	// cutoff closes the guest's transport a grace after the screen expires,
-	// however the loop below is blocked: answering a guest that stopped
-	// reading can block it.
-	var expiry, cutoff *time.Timer
+	var expiry *time.Timer
 	defer func() {
 		if expiry != nil {
 			expiry.Stop()
-		}
-		if cutoff != nil {
-			cutoff.Stop()
 		}
 	}()
 	for {
@@ -255,7 +255,6 @@ func (p *SSHRouting) serveWaiting(g *guestConn, peer sshPeer, stage time.Duratio
 				_, _ = session.channel.Write(termtext.Sanitize(g.admission.Message, terminal != nil))
 				// From now the screen's expiry is the bound.
 				limit.Stop()
-				cutoff = time.AfterFunc(time.Until(waiting.Expires)+waitingGrace, g.forceClose)
 				expiry = time.NewTimer(time.Until(waiting.Expires))
 				expires = expiry.C
 				decided = make(chan awaitResult, 1)

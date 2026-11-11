@@ -763,3 +763,36 @@ func TestWaitingScreenEndsWithPipelinedRequests(t *testing.T) {
 		})
 	}
 }
+
+// A waiting guest that never starts the screen's shell, with no session or
+// with a session that never asks for one, is cut off a grace after the
+// screen expires too, well before the handshake's stage would end it.
+func TestWaitingGuestWithoutAShellCutOffAtExpiry(t *testing.T) {
+	for _, opens := range []bool{false, true} {
+		t.Run(map[bool]string{false: "no session", true: "no shell"}[opens], func(t *testing.T) {
+			t.Parallel()
+			authority := &fakeAuthority{}
+			a := newApproval(time.Now().Add(time.Second))
+			authority.admitWith(waitingOn(waitingMessage, a))
+			ln := newStallingWrites(t)
+			// A stage of 10 s, far past the screen's expiry and grace.
+			proxy, addr, _, signer := stockTestProxyOn(t, ln, 20*time.Second, &stockTestDialer{}, enabledIngress(authority, nil))
+			guest, err := ssh.Dial("tcp", addr, &ssh.ClientConfig{User: waitingUser, Auth: []ssh.AuthMethod{ssh.PublicKeys(newProven(t).key)}, HostKeyCallback: ssh.FixedHostKey(signer.PublicKey()), Timeout: 5 * time.Second})
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = guest.Close() })
+			if opens {
+				sess, err := guest.NewSession()
+				require.NoError(t, err)
+				t.Cleanup(func() { _ = sess.Close() })
+			}
+			_, g := proxy.delegated.Counts()
+			require.Equal(t, 1, g, "a waiting guest isn't counted")
+			select {
+			case <-ln.closed:
+			case <-time.After(time.Until(a.expires) + waitingGrace + 2*time.Second):
+				t.Fatal("a waiting guest that started no shell outlived its screen's expiry")
+			}
+			require.Eventually(t, func() bool { _, g := proxy.delegated.Counts(); return g == 0 }, 2*time.Second, 10*time.Millisecond, "the cut-off guest is still counted")
+		})
+	}
+}
