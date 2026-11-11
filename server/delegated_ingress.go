@@ -270,8 +270,10 @@ func (p *SSHRouting) admitGuest(g *guestConn, meta ssh.ConnMetadata, offered ssh
 		}
 	}()
 	go func() { <-g.done; obligation.end() }()
+	// A verdict returned once Admit's context has ended is refused, whatever
+	// it is.
 	admission, err := a.authority.Admit(ctx, guest, GuestRequest{User: meta.User(), Home: home})
-	if err != nil || g.ctx.Err() != nil {
+	if err != nil || ctx.Err() != nil || g.ctx.Err() != nil {
 		return errGuestRefused
 	}
 	switch admission.Verdict {

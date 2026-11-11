@@ -1535,3 +1535,48 @@ func TestAllowWithoutASequenceIsRefused(t *testing.T) {
 		}
 	})
 }
+
+// A verdict Admit returns once its context has ended is refused, as a late
+// allow is, whatever it is: the guest is refused as any unknown key is, and
+// shown no message and no screen. The same verdicts returned in time are
+// shown.
+func TestLateVerdictIsRefused(t *testing.T) {
+	for _, verdict := range []string{"message", "waiting"} {
+		for _, late := range []bool{true, false} {
+			t.Run(verdict+map[bool]string{true: "/late", false: "/in time"}[late], func(t *testing.T) {
+				// A late verdict waits out Admit's 5 s, so the cases run
+				// side by side.
+				t.Parallel()
+				a := newApproval(time.Now().Add(time.Minute))
+				decide := showing("the session is reconnecting\n")
+				if verdict == "waiting" {
+					decide = waitingOn(waitingMessage, a)
+				}
+				authority := &fakeAuthority{}
+				authority.admitWith(func(ctx context.Context, g *Guest, req GuestRequest) (Admission, error) {
+					if late {
+						<-ctx.Done()
+					}
+					return decide(ctx, g, req)
+				})
+				// A handshake long enough that Admit's 5 s, not the
+				// handshake's budget, ends first.
+				ts := newDelegatedTestServer(t, authority, func(s *Server) { s.HandshakeTimeout = 12 * time.Second })
+				guest, banners, err := dialDelegatedGuestAs(t, ts.addr, waitingUser, openSSHVersion, newProven(t).key)
+				if late {
+					require.ErrorContains(t, err, "unable to authenticate", "a %s verdict returned after Admit's deadline let the guest in", verdict)
+					require.Empty(t, *banners)
+					return
+				}
+				require.NoError(t, err, "a %s verdict returned in time was refused", verdict)
+				if verdict == "waiting" {
+					startWaitingShell(t, guest, a, waitingMessage, nil, "")
+					return
+				}
+				stdout, _, err := runSession(t, guest, false, "")
+				requireExit(t, err, 1)
+				require.Equal(t, "the session is reconnecting\n", stdout)
+			})
+		}
+	}
+}
