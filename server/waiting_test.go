@@ -619,3 +619,84 @@ func TestWaitingScreenLastsAtMostTenMinutes(t *testing.T) {
 	require.False(t, deadline.Before(at.Add(10*time.Minute)) || deadline.After(after.Add(10*time.Minute)),
 		"the screen lasts %v from the verdict, not 10 minutes", deadline.Sub(at))
 }
+
+// stallingWrites is a listener whose connections stop sending once stalling
+// is set, as a guest's transport does when the guest stops reading and the
+// buffers between them fill: every write from then on blocks until the
+// connection is closed. stalled is closed once a write blocks, and closed
+// once the connection is.
+type stallingWrites struct {
+	net.Listener
+	stalling atomic.Bool
+	stalled  chan struct{}
+	closed   chan struct{}
+	once     sync.Once
+	stallOne sync.Once
+}
+
+func newStallingWrites(t *testing.T) *stallingWrites {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	return &stallingWrites{Listener: ln, stalled: make(chan struct{}), closed: make(chan struct{})}
+}
+
+func (l *stallingWrites) Accept() (net.Conn, error) {
+	c, err := l.Listener.Accept()
+	if err != nil {
+		return nil, err
+	}
+	return &stallingWritesConn{Conn: c, owner: l}, nil
+}
+
+type stallingWritesConn struct {
+	net.Conn
+	owner *stallingWrites
+}
+
+func (c *stallingWritesConn) Write(b []byte) (int, error) {
+	if c.owner.stalling.Load() {
+		c.owner.stallOne.Do(func() { close(c.owner.stalled) })
+		<-c.owner.closed
+		return 0, net.ErrClosed
+	}
+	return c.Conn.Write(b)
+}
+
+func (c *stallingWritesConn) Close() error {
+	c.owner.once.Do(func() { close(c.owner.closed) })
+	return c.Conn.Close()
+}
+
+// A waiting screen's guest that keeps asking and stops reading blocks the
+// screen as it answers. Its transport is still closed a grace after the
+// screen expires, and with it the guest's delegated work ends.
+func TestWaitingGuestCutOffAtExpiry(t *testing.T) {
+	authority := &fakeAuthority{}
+	a := newApproval(time.Now().Add(time.Second))
+	authority.admitWith(waitingOn(waitingMessage, a))
+	ln := newStallingWrites(t)
+	proxy, addr, _, signer := stockTestProxyOn(t, ln, 4*time.Second, &stockTestDialer{}, enabledIngress(authority, nil))
+	guest, err := ssh.Dial("tcp", addr, &ssh.ClientConfig{User: waitingUser, Auth: []ssh.AuthMethod{ssh.PublicKeys(newProven(t).key)}, HostKeyCallback: ssh.FixedHostKey(signer.PublicKey()), Timeout: 5 * time.Second})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = guest.Close() })
+	shell := startWaitingShell(t, guest, a, waitingMessage, ptyRequest(24, 80), "")
+	_, g := proxy.delegated.Counts()
+	require.Equal(t, 1, g, "a waiting guest isn't counted")
+
+	ln.stalling.Store(true)
+	go func() {
+		_, _ = shell.session.SendRequest("window-change", true, ssh.Marshal(&windowChangeMsg{Columns: 100, Rows: 30}))
+	}()
+	select {
+	case <-ln.stalled:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the screen never answered the guest")
+	}
+	select {
+	case <-ln.closed:
+	case <-time.After(time.Until(a.expires) + waitingGrace + 3*time.Second):
+		t.Fatal("a waiting guest that stopped reading outlived its screen's expiry")
+	}
+	require.Eventually(t, func() bool { _, g := proxy.delegated.Counts(); return g == 0 }, 5*time.Second, 10*time.Millisecond, "the cut-off guest is still counted")
+}

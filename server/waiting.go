@@ -16,6 +16,11 @@ import (
 // verdict that opened it.
 const maxWaiting = 10 * time.Minute
 
+// waitingGrace is how long past its screen's expiry a waiting guest is given
+// to be shown the expired text, before its transport is closed however the
+// screen is blocked.
+const waitingGrace = 2 * time.Second
+
 // WaitingScreen is a display-only screen for a claimed user, frozen once
 // Admit returns it: a binding of the authority's own, to an offer and an
 // attempt, of the user the guest typed and the key it proved. Leaving it
@@ -158,10 +163,16 @@ func (p *SSHRouting) serveWaiting(g *guestConn, peer sshPeer, stage time.Duratio
 		decided  chan awaitResult
 		expires  <-chan time.Time
 	)
-	var expiry *time.Timer
+	// cutoff closes the guest's transport a grace after the screen expires,
+	// however the loop below is blocked: answering a guest that stopped
+	// reading can block it.
+	var expiry, cutoff *time.Timer
 	defer func() {
 		if expiry != nil {
 			expiry.Stop()
+		}
+		if cutoff != nil {
+			cutoff.Stop()
 		}
 	}()
 	for {
@@ -181,6 +192,8 @@ func (p *SSHRouting) serveWaiting(g *guestConn, peer sshPeer, stage time.Duratio
 				exitShowing(session.channel, session.requests, session.channel, waiting.ExpiredMessage, terminal != nil)
 				return nil
 			}
+			// Decided in time, the screen ends within the stage.
+			cutoff.Stop()
 			if decision.err != nil {
 				logger.Info("a guest's wait ended", "error", decision.err)
 				var ended *WaitingEnded
@@ -221,6 +234,7 @@ func (p *SSHRouting) serveWaiting(g *guestConn, peer sshPeer, stage time.Duratio
 				_, _ = session.channel.Write(termtext.Sanitize(g.admission.Message, terminal != nil))
 				// From now the screen's expiry is the bound.
 				limit.Stop()
+				cutoff = time.AfterFunc(time.Until(waiting.Expires)+waitingGrace, g.forceClose)
 				expiry = time.NewTimer(time.Until(waiting.Expires))
 				expires = expiry.C
 				decided = make(chan awaitResult, 1)
