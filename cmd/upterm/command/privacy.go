@@ -48,7 +48,9 @@ func shouldHideClientIP() bool { return shouldHideClientIPFor(runningCmd) }
 // shouldHideClientIPFor is shouldHideClientIP for a run of cmd. The flag has a
 // value when Changed says so: the command line sets it, and so does an
 // environment variable or config key that bindFlagsToEnv applies. An empty
-// UPTERM_HIDE_CLIENT_IP gives it none.
+// UPTERM_HIDE_CLIENT_IP gives it none. In a delegated run's session process
+// the flags hold the parent's values without Changed, so that process reads
+// HostSettings.HideClientIP instead.
 func shouldHideClientIPFor(cmd *cobra.Command) bool {
 	if cmd != nil {
 		if f := cmd.Flag("hide-client-ip"); f != nil && f.Changed {

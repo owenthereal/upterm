@@ -22,15 +22,15 @@ import (
 // configCmd is upterm config. Its help lists the flags of the whole tree
 // that take values only from the command line, so Root sets its Long, with
 // configLong, once the tree is built.
-func configCmd() *cobra.Command {
+func configCmd(ext *Extension) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "config",
 		Short: "Manage upterm configuration",
 	}
 
 	cmd.AddCommand(configPathCmd())
-	cmd.AddCommand(configViewCmd())
-	cmd.AddCommand(configEditCmd())
+	cmd.AddCommand(configViewCmd(ext))
+	cmd.AddCommand(configEditCmd(ext))
 
 	return cmd
 }
@@ -79,7 +79,7 @@ Exit status: 0, or 1 on failure.`, configPath),
 	return cmd
 }
 
-func configViewCmd() *cobra.Command {
+func configViewCmd(ext *Extension) *cobra.Command {
 	configPath := utils.UptermConfigFilePath()
 	cmd := &cobra.Command{
 		Use:   "view",
@@ -96,13 +96,15 @@ Exit status: 0, or 1 on failure.`, configPath),
 
   # Keep a copy of it:
   upterm config view > upterm-config.yaml`,
-		RunE: configViewRunE,
+		RunE: func(c *cobra.Command, args []string) error {
+			return configViewRunE(c, ext, args)
+		},
 	}
 
 	return cmd
 }
 
-func configEditCmd() *cobra.Command {
+func configEditCmd(ext *Extension) *cobra.Command {
 	configPath := utils.UptermConfigFilePath()
 	cmd := &cobra.Command{
 		Use:   "edit",
@@ -128,7 +130,9 @@ Exit status: 0, or 1 on failure.`, configPath),
 
   # With an editor that needs an argument to wait:
   VISUAL='code --wait' upterm config edit`,
-		RunE: configEditRunE,
+		RunE: func(c *cobra.Command, args []string) error {
+			return configEditRunE(c, ext, args)
+		},
 	}
 
 	return cmd
@@ -140,7 +144,7 @@ func configPathRunE(c *cobra.Command, args []string) error {
 	return nil
 }
 
-func configViewRunE(c *cobra.Command, args []string) error {
+func configViewRunE(c *cobra.Command, ext *Extension, args []string) error {
 	configPath := utils.UptermConfigFilePath()
 
 	// Check if file exists
@@ -167,13 +171,17 @@ func configViewRunE(c *cobra.Command, args []string) error {
 	if err := v.ReadInConfig(); err != nil {
 		return nil
 	}
-	if names, err := extensionEntries(v); err == nil && len(names) > 0 {
+	names, err := extensionEntries(v)
+	if ext != nil {
+		names = slices.DeleteFunc(names, func(name string) bool { return name == ext.Name })
+	}
+	if err == nil && len(names) > 0 {
 		_, _ = fmt.Fprintf(c.ErrOrStderr(), "upterm: config.yaml holds settings for extensions this build doesn't have: %s\n", strings.Join(names, ", "))
 	}
 	return nil
 }
 
-func configEditRunE(c *cobra.Command, args []string) error {
+func configEditRunE(c *cobra.Command, ext *Extension, args []string) error {
 	configPath := utils.UptermConfigFilePath()
 	configDir := utils.UptermConfigDir()
 
@@ -212,7 +220,7 @@ func configEditRunE(c *cobra.Command, args []string) error {
 
 	// Check the file as commands will read it, and say everything wrong with
 	// it at once.
-	errs, deps := checkConfigFile(c.Root(), configPath)
+	errs, deps := checkConfigFileWith(c.Root(), configPath, ext)
 	warnDeprecations(c.ErrOrStderr(), deps)
 	if len(errs) > 0 {
 		return multierror.Append(nil, errs...)
@@ -331,6 +339,14 @@ func validateConfigFile(root *cobra.Command, path string) []error {
 
 // checkConfigFile also returns notices for config values commands ignore.
 func checkConfigFile(root *cobra.Command, path string) ([]error, []deprecation) {
+	return checkConfigFileWith(root, path, nil)
+}
+
+// checkConfigFileWith is checkConfigFile in a build with ext, whose entry of
+// the extensions mapping it checks too: each key must be one of ext's
+// HostFlags, a per-run one is noted as ignored, and each value must be one
+// the flag takes and its Validate accepts.
+func checkConfigFileWith(root *cobra.Command, path string, ext *Extension) ([]error, []deprecation) {
 	v, literalKeys := configViper()
 	v.SetConfigFile(path)
 	if err := v.ReadInConfig(); err != nil {
@@ -365,8 +381,11 @@ func checkConfigFile(root *cobra.Command, path string) ([]error, []deprecation) 
 		return inExtensions(key, literalKeys)
 	})
 	slices.Sort(keys)
+	var extDeps []deprecation
 	if _, err := extensionEntries(v); err != nil {
 		problem(extensionsKey, err.Error())
+	} else if ext != nil {
+		extDeps = checkExtensionEntry(v, path, ext, problem)
 	}
 	for _, key := range keys {
 		switch {
@@ -471,7 +490,52 @@ func checkConfigFile(root *cobra.Command, path string) ([]error, []deprecation) 
 		}
 		collect(root)
 	}
-	return errs, deps
+	return errs, append(deps, extDeps...)
+}
+
+// checkExtensionEntry checks ext's entry in v's extensions mapping, telling
+// problem what is wrong with each key, and returns a notice for each per-run
+// key, which commands ignore.
+func checkExtensionEntry(v *viper.Viper, path string, ext *Extension, problem func(key, what string)) []deprecation {
+	entry, err := extensionEntry(v, ext.Name)
+	if err != nil {
+		problem(extensionsKey, err.Error())
+		return nil
+	}
+	flags := make(map[string]HostFlag)
+	for _, hf := range ext.HostFlags {
+		flags[hf.Flag.Name] = hf
+	}
+	keys := make([]string, 0, len(entry))
+	for key := range entry {
+		keys = append(keys, key)
+	}
+	slices.Sort(keys)
+	var deps []deprecation
+	for _, key := range keys {
+		full := extensionKey(ext.Name, key)
+		hf, ok := flags[key]
+		val := entry[key]
+		switch {
+		case !ok:
+			problem(full, fmt.Sprintf("unknown key %q", full))
+		case hf.PerRun:
+			deps = append(deps, deprecation{Flag: key, Source: path, InConfig: true, Key: full})
+		case val == nil:
+			problem(full, full+": config key has no value")
+		default:
+			if err := setFlagsFromConfig([]*pflag.Flag{hf.Flag}, key, val); err != nil {
+				problem(full, full+": "+strings.TrimPrefix(err.Error(), key+": "))
+				continue
+			}
+			if hf.Validate != nil {
+				if err := hf.Validate(val); err != nil {
+					problem(full, full+": "+err.Error())
+				}
+			}
+		}
+	}
+	return deps
 }
 
 // setFlagsFromConfig sets each of flags, all named name, to val, a value from

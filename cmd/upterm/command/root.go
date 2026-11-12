@@ -8,6 +8,7 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -32,118 +33,104 @@ var suppliedFlags = map[string]bool{}
 // value from env or config is not (see validateGrants).
 var commandLineFlags = map[string]bool{}
 
-func Root() *cobra.Command {
-	rootCmd := &cobra.Command{
-		Use:   "upterm",
-		Short: "Instant Terminal Sharing",
-		Long: `Upterm shares a terminal session: you host a command, and guests join it
-from their own terminals, through a relay, with upterm join or plain ssh.
+// Root is the upterm command: RootWith(nil).
+func Root() *cobra.Command { return RootWith(nil) }
 
-Flags can also be set with UPTERM_ environment variables and the config
-file: see 'upterm config --help'.`,
-		Example: `  # Host $SHELL; upterm prints how guests join it:
-  upterm host
-
-  # A guest joins with the connect string the host shares:
-  upterm join ssh://ID@uptermd.upterm.dev
-
-  # Or with plain ssh:
-  ssh ID@uptermd.upterm.dev`,
-		// For every command: cobra checks the root's. Exit prints each error
-		// once, as one line, and never the usage; cobra would print
-		// "Error: ...", often the usage block too, and then main its own copy.
-		SilenceErrors: true,
-		SilenceUsage:  true,
-		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
-			// The root and the groups only print their help or name an
-			// unknown command (reportUnknownCommands), and read no config:
-			// a broken config file mustn't stop `upterm session` showing
-			// the help it showed when cobra couldn't run it.
-			if cmd.HasSubCommands() {
-				return nil
-			}
-
-			// What the command line set, before env and config set the rest.
-			commandLine := make(map[string]bool)
-			cmd.Flags().Visit(func(f *pflag.Flag) { commandLine[f.Name] = true })
-
-			// Bind all flags to environment variables with UPTERM_ prefix. A
-			// config or env error fails only a command that reads config, and never
-			// `upterm config`, which repairs the file.
-			supplied, deps, err := bindFlagsToEnv(cmd)
-			if err != nil && readsConfig(cmd) && !isConfigCommand(cmd) {
-				return err
-			}
-			suppliedFlags, commandLineFlags = supplied, commandLine
-			runningCmd = cmd
-			warnDeprecations(cmd.ErrOrStderr(), deps)
-
-			debug, _ := cmd.Flags().GetBool("debug")
-
-			logPath := utils.UptermLogFilePath()
-			logOptions := []logging.Option{logging.File(logPath)}
-			if debug {
-				logOptions = append(logOptions, logging.Debug())
-			}
-
-			// A log file that can't be opened fails nothing either: logging
-			// is off for the run, with one warning.
-			warning := &logWarning{w: cmd.ErrOrStderr()}
-			logger, err := logging.New(logOptions...)
-			if err != nil {
-				warning.warn(logPath, err)
-				logger = logging.Must(logging.Discard())
-			}
-
-			ctx := uptermctx.WithLogger(cmd.Context(), logger)
-			cmd.SetContext(context.WithValue(ctx, logWarningKey{}, warning))
-
-			return nil
-		},
-		PersistentPostRunE: func(cmd *cobra.Command, args []string) error {
-			if logger := uptermctx.Logger(cmd.Context()); logger != nil {
-				return logger.Close()
-			}
-
-			return nil
-		},
+// rootPreRun is the root's pre-run, for every command without commands of its
+// own: the run's flags take their values, from the command line, the
+// environment and the config file, and its logger is set up.
+//
+// The session process of a delegated run takes its values from its handoff
+// instead, and neither the environment nor the config file is read for them:
+// see takeHandoff and applySettings.
+func rootPreRun(cmd *cobra.Command) error {
+	// The root and the groups only print their help or name an
+	// unknown command (reportUnknownCommands), and read no config:
+	// a broken config file mustn't stop `upterm session` showing
+	// the help it showed when cobra couldn't run it.
+	if cmd.HasSubCommands() {
+		return nil
 	}
+
+	// Read, and unset, before anything else, so that nothing this process
+	// starts inherits it.
+	handoff := takeHandoff()
+	daemonHandoff = handoff
+
+	// What the command line set, before env and config set the rest.
+	commandLine := make(map[string]bool)
+	cmd.Flags().Visit(func(f *pflag.Flag) { commandLine[f.Name] = true })
+
+	supplied := make(map[string]bool)
+	if handoff == nil {
+		// Bind all flags to environment variables with UPTERM_ prefix. A
+		// config or env error fails only a command that reads config, and
+		// never `upterm config`, which repairs the file.
+		var (
+			deps []deprecation
+			err  error
+		)
+		supplied, deps, err = bindFlagsToEnv(cmd)
+		if err != nil && readsConfig(cmd) && !isConfigCommand(cmd) {
+			return err
+		}
+		warnDeprecations(cmd.ErrOrStderr(), deps)
+	} else {
+		bindDebug(cmd)
+	}
+	suppliedFlags, commandLineFlags = supplied, commandLine
+	runningCmd = cmd
+	// After the assignments above, which would otherwise overwrite what the
+	// parent resolved.
+	if handoff != nil && handoff.err == nil {
+		applySettings(handoff.h)
+		applyExtensionFlags(cmd, handoff)
+	}
+
+	debug, _ := cmd.Flags().GetBool("debug")
 
 	logPath := utils.UptermLogFilePath()
-	rootCmd.PersistentFlags().Bool("debug", os.Getenv("DEBUG") != "",
-		fmt.Sprintf("Enable debug logging (log file: %s). A non-empty DEBUG turns it on too.", logPath))
-
-	rootCmd.AddCommand(attachCmd())
-	rootCmd.AddCommand(configCmd())
-	rootCmd.AddCommand(hostCmd())
-	rootCmd.AddCommand(joinCmd())
-	rootCmd.AddCommand(proxyCmd())
-	rootCmd.AddCommand(sessionCmd())
-	rootCmd.AddCommand(upgradeCmd())
-	rootCmd.AddCommand(versionCmd())
-
-	reportUnknownCommands(rootCmd)
-	for _, c := range rootCmd.Commands() {
-		if c.HasSubCommands() {
-			reportUnknownCommands(c)
-		}
-	}
-	helpOnlyForKnownCommands(rootCmd)
-
-	// config's help lists the flags that take values only from the command
-	// line, which takes the whole tree.
-	if config, _, err := rootCmd.Find([]string{"config"}); err == nil {
-		config.Long = configLong(perRunHelp(rootCmd))
+	logOptions := []logging.Option{logging.File(logPath)}
+	if debug {
+		logOptions = append(logOptions, logging.Debug())
 	}
 
-	// The root and the groups run only to report an unknown command, so
-	// their usage shows the commands they hold and no run of their own:
-	// cobra's template, its runnable line kept for a command without
-	// subcommands.
-	rootCmd.SetUsageTemplate(strings.Replace(rootCmd.UsageTemplate(),
-		"{{if .Runnable}}", "{{if and .Runnable (not .HasSubCommands)}}", 1))
+	// A log file that can't be opened fails nothing either: logging
+	// is off for the run, with one warning.
+	warning := &logWarning{w: cmd.ErrOrStderr()}
+	logger, err := logging.New(logOptions...)
+	if err != nil {
+		warning.warn(logPath, err)
+		logger = logging.Must(logging.Discard())
+	}
 
-	return rootCmd
+	ctx := uptermctx.WithLogger(cmd.Context(), logger)
+	cmd.SetContext(context.WithValue(ctx, logWarningKey{}, warning))
+
+	return nil
+}
+
+// bindDebug gives --debug, which is no host setting, its value from
+// UPTERM_DEBUG or the config file as bindFlagsToEnv would, for a delegated
+// run's session process, which reads neither for anything else. A value it
+// can't use leaves the flag as it is: it decides only how much is logged.
+func bindDebug(cmd *cobra.Command) {
+	flag := cmd.Flags().Lookup("debug")
+	if flag == nil || flag.Changed {
+		return
+	}
+	if env := os.Getenv(envVarName("debug")); env != "" {
+		_ = cmd.Flags().Set("debug", env)
+		return
+	}
+	v, _ := configViper()
+	v.SetConfigFile(utils.UptermConfigFilePath())
+	if v.ReadInConfig() != nil || !v.IsSet("debug") {
+		return
+	}
+	if scalar, err := toScalarString("debug", v.Get("debug")); err == nil {
+		_ = cmd.Flags().Set("debug", scalar)
+	}
 }
 
 // annotationConfig set to "none" on a command says it reads no config.
@@ -380,8 +367,9 @@ func bindFlagsToEnv(cmd *cobra.Command) (supplied map[string]bool, deps []deprec
 		}
 	}
 
+	// An extension's flags are bound to its own entry, below.
 	cmd.Flags().VisitAll(func(flag *pflag.Flag) {
-		if flag.Name != "help" && !hasAnnotation(flag, annotationCLIOnly) {
+		if flag.Name != "help" && !hasAnnotation(flag, annotationCLIOnly) && !isExtensionFlag(flag) {
 			_ = v.BindPFlag(flag.Name, flag)
 		}
 	})
@@ -392,7 +380,7 @@ func bindFlagsToEnv(cmd *cobra.Command) (supplied map[string]bool, deps []deprec
 
 	var bindErr error
 	cmd.Flags().VisitAll(func(flag *pflag.Flag) {
-		if bindErr != nil || flag.Name == "help" || hasAnnotation(flag, annotationCLIOnly) {
+		if bindErr != nil || flag.Name == "help" || hasAnnotation(flag, annotationCLIOnly) || isExtensionFlag(flag) {
 			return
 		}
 
@@ -477,8 +465,137 @@ func bindFlagsToEnv(cmd *cobra.Command) (supplied map[string]bool, deps []deprec
 		}
 		supplied[flag.Name] = true
 	})
+	if bindErr != nil {
+		return supplied, deps, bindErr
+	}
 
-	return supplied, deps, bindErr
+	extDeps, err := bindExtensionFlags(cmd, v, configPath, supplied)
+	return supplied, append(deps, extDeps...), err
+}
+
+// extensionEntry is the settings the extension name's entry in v's extensions
+// mapping holds, by key: none when the file has no such entry, or its
+// extensions key isn't a mapping, which only config edit refuses. An entry
+// that isn't a mapping is an error.
+func extensionEntry(v *viper.Viper, name string) (map[string]any, error) {
+	entries, ok := v.Get(extensionsKey).(map[string]any)
+	if !ok {
+		return nil, nil
+	}
+	raw, ok := entries[name]
+	if !ok {
+		return nil, nil
+	}
+	if raw == nil {
+		return map[string]any{}, nil
+	}
+	settings, ok := raw.(map[string]any)
+	if !ok {
+		return nil, errExtensionsShape
+	}
+	return settings, nil
+}
+
+// extensionKey is the config key of an extension's flag: its key in the
+// extension's entry of the extensions mapping.
+func extensionKey(extName, flag string) string {
+	return extensionsKey + "." + extName + "." + flag
+}
+
+// bindExtensionFlags binds cmd's extension flags as bindFlagsToEnv binds
+// upterm's own, each to its UPTERM_ variable and to its key in its
+// extension's entry of the config file's extensions mapping, never to a
+// top-level key. A key in that entry that isn't one of the extension's flags
+// is refused, whichever command runs, as a top-level key with no flag is.
+func bindExtensionFlags(cmd *cobra.Command, v *viper.Viper, configPath string, supplied map[string]bool) (deps []deprecation, err error) {
+	name := extensionNameIn(cmd)
+	if name == "" {
+		return nil, nil
+	}
+	entry, err := extensionEntry(v, name)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", configPath, err)
+	}
+	flags := make(map[string]*pflag.Flag)
+	visitTreeFlags(cmd, func(f *pflag.Flag) {
+		if isExtensionFlag(f) {
+			flags[f.Name] = f
+		}
+	})
+	keys := make([]string, 0, len(entry))
+	for key := range entry {
+		keys = append(keys, key)
+	}
+	slices.Sort(keys)
+	for _, key := range keys {
+		if flags[key] == nil {
+			return nil, fmt.Errorf("unknown config key %q in %s; remove it or correct the spelling", extensionKey(name, key), configPath)
+		}
+	}
+
+	var bindErr error
+	cmd.Flags().VisitAll(func(flag *pflag.Flag) {
+		if bindErr != nil || !isExtensionFlag(flag) {
+			return
+		}
+		val, inConfig := entry[flag.Name]
+		if hasAnnotation(flag, annotationPerRun) {
+			if !flag.Changed {
+				for _, d := range perRunDeprecations(cmd, flag.Name, configPath, inConfig) {
+					if d.InConfig {
+						d.Key = extensionKey(name, flag.Name)
+					}
+					deps = append(deps, d)
+				}
+			}
+			return
+		}
+		if inConfig || envSupplied(flag.Name) {
+			supplied[flag.Name] = true
+		}
+		if flag.Changed {
+			return
+		}
+		switch env := os.Getenv(envVarName(flag.Name)); {
+		case env != "":
+			bindErr = setFlagValue(cmd, flag, env, envVarName(flag.Name))
+		case envSupplied(flag.Name) && !inConfig:
+			// As for upterm's own: an empty variable is an empty list.
+			if sv, ok := flag.Value.(pflag.SliceValue); ok {
+				if err := sv.Replace(nil); err != nil {
+					bindErr = bindSetError(flag.Name, "", envVarName(flag.Name), err)
+				}
+			}
+		case inConfig && val == nil:
+			bindErr = fmt.Errorf("%s: config key has no value; give it one or remove it", extensionKey(name, flag.Name))
+		case inConfig:
+			bindErr = setFlagValue(cmd, flag, val, configPath)
+		}
+	})
+	return deps, bindErr
+}
+
+// setFlagValue sets cmd's flag to val, a value from origin, converted as
+// bindFlagsToEnv converts one.
+func setFlagValue(cmd *cobra.Command, flag *pflag.Flag, val any, origin string) error {
+	if sv, ok := flag.Value.(pflag.SliceValue); ok {
+		elems, err := toStringSlice(flag.Name, val)
+		if err != nil {
+			return err
+		}
+		if err := sv.Replace(elems); err != nil {
+			return bindSetError(flag.Name, strings.Join(elems, ","), origin, err)
+		}
+		return nil
+	}
+	scalar, err := toScalarString(flag.Name, val)
+	if err != nil {
+		return err
+	}
+	if err := cmd.Flags().Set(flag.Name, scalar); err != nil {
+		return bindSetError(flag.Name, scalar, origin, err)
+	}
+	return nil
 }
 
 // envVarName returns the UPTERM_-prefixed environment variable name that
@@ -569,7 +686,7 @@ func configKeysForCommand(v *viper.Viper, cmd *cobra.Command, literalKeys map[st
 		}
 	}
 	visitTreeFlags(cmd, func(f *pflag.Flag) {
-		if !v.InConfig(f.Name) {
+		if isExtensionFlag(f) || !v.InConfig(f.Name) {
 			return
 		}
 		ignored := !boundElsewhere(cmd, f.Name)
@@ -619,10 +736,16 @@ func inExtensions(key string, literalKeys map[string]bool) bool {
 // otherwise be invisible when validating a config key from a sibling command
 // such as `upterm version`.
 //
-// A CLI-only flag's name is known too: another command may bind it.
+// A CLI-only flag's name is known too: another command may bind it. An
+// extension's flag's isn't: its key is in the extension's entry of the
+// extensions mapping, never at the top level.
 func knownFlagNames(cmd *cobra.Command) map[string]bool {
 	names := make(map[string]bool)
-	visitTreeFlags(cmd, func(f *pflag.Flag) { names[f.Name] = true })
+	visitTreeFlags(cmd, func(f *pflag.Flag) {
+		if !isExtensionFlag(f) {
+			names[f.Name] = true
+		}
+	})
 	return names
 }
 

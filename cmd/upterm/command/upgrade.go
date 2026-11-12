@@ -20,7 +20,11 @@ import (
 	"github.com/tj/go-update/progress"
 )
 
-func upgradeCmd() *cobra.Command {
+func upgradeCmd() *cobra.Command { return upgradeCmdWith(nil) }
+
+// upgradeCmdWith is upterm upgrade, which runs ext's Upgrade, when it has
+// one, in place of its own; its help is the same either way.
+func upgradeCmdWith(ext *Extension) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "upgrade [VERSION]",
 		Short: "Upgrade the CLI",
@@ -45,6 +49,9 @@ be, a package manager owns it, or its arguments are wrong.`,
 		// A broken config file doesn't stop it.
 		Annotations: map[string]string{annotationConfig: "none"},
 		RunE:        upgradeRunE,
+	}
+	if ext != nil && ext.Upgrade != nil {
+		cmd.RunE = func(c *cobra.Command, args []string) error { return ext.Upgrade(c) }
 	}
 
 	return cmd

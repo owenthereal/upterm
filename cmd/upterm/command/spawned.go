@@ -44,6 +44,9 @@ const defaultStartedWaitTimeout = 15 * time.Second
 // spawns the daemon, runs the exchange, and then either attaches its
 // terminal (foreground) or prints and leaves (--detach).
 type spawnedSession struct {
+	// handoff is the encoded handoff of a delegated run, the session process
+	// is started with; "" for an ordinary run.
+	handoff string
 	name    string
 	detach  bool
 	jsonOut bool
@@ -115,7 +118,7 @@ func (s *spawnedSession) runWithDetachContext(ctx context.Context, notify func(c
 
 	// A log the spawn can't open is warned about, and the daemon starts
 	// without it: nothing of this session is in it to point at.
-	conn, _, err := s.spawn(spawnOptions{name: s.name, logPath: s.logPath, logOff: func(err error) {
+	conn, _, err := s.spawn(spawnOptions{name: s.name, handoff: s.handoff, logPath: s.logPath, logOff: func(err error) {
 		s.logOff = true
 		s.logWarning.warn(s.logPath, err)
 	}})
