@@ -8,6 +8,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/owenthereal/upterm/host/sessiondir"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -755,4 +756,106 @@ func TestGuestToolPolicyRows(t *testing.T) {
 	require.NotContains(t, got, "exec: off")
 	require.NotContains(t, got, "shell: shared")
 	require.NotContains(t, got, "approval:")
+}
+
+// testDelegation is a delegated session's record as its host writes it.
+func testDelegation(authority string) *sessiondir.Delegation {
+	return &sessiondir.Delegation{
+		DelegationAssociation: sessiondir.DelegationAssociation{Service: "https://authority.example", Account: "a", Login: "l"},
+		DelegationDisplay: sessiondir.DelegationDisplay{
+			Authority: authority,
+			Links:     []sessiondir.DelegationLink{{Label: "Dashboard", URL: "https://authority.example/s"}, {Label: "Help", URL: "https://authority.example/help"}},
+			Notes:     []string{"Verify the relay key before connecting.", "Guests sign in first."},
+		},
+		ExternalSessionID: "33333333-3333-4333-8333-333333333333",
+		RoutingID:         "abcdefghijklmnopqrst",
+		Relay:             "relay.example.com:22",
+		GuestAddress:      "claim-work",
+	}
+}
+
+// A delegated session's view is titled with its guest address, says its
+// authority decides who joins, and offers the ssh command and URI alone,
+// then the authority's links and notes: no join line, no SFTP or SCP, no
+// ssh config, and nothing that says anyone with an ID can join.
+func TestDelegatedDetailRows(t *testing.T) {
+	detail := SessionDetail{
+		Name:             "work",
+		SessionID:        "abcdefghijklmnopqrst",
+		Command:          "bash",
+		Host:             "ssh://relay.example.com",
+		JoinCommand:      "upterm join ssh://claim-work@relay.example.com",
+		SSHCommand:       "ssh claim-work@relay.example.com",
+		URI:              "ssh://claim-work@relay.example.com",
+		SFTPEnabled:      true,
+		SFTPCommand:      "sftp claim-work@relay.example.com",
+		SCPUpload:        "scp <local> claim-work@relay.example.com:<remote>",
+		SSHConfig:        "Host work\n",
+		Access:           AccessDelegated,
+		ConnectedClients: []string{"guest 192.0.2.1 SSH-2.0-OpenSSH_9.9 SHA256:abc"},
+		Delegation:       testDelegation("Example Authority"),
+	}
+	assert.Equal(t, "Session: claim-work\n\n"+
+		row("Name:", "work")+
+		row("Command:", "bash")+
+		row("Relay:", "ssh://relay.example.com")+
+		row("Access:", "decided by Example Authority")+
+		"\n➤ SSH:\n    ssh claim-work@relay.example.com\n"+
+		"➤ URI:\n    ssh://claim-work@relay.example.com\n"+
+		"➤ Dashboard: https://authority.example/s\n"+
+		"➤ Help: https://authority.example/help\n"+
+		"Verify the relay key before connecting.\n"+
+		"Guests sign in first.\n"+
+		"\nConnected:\n  guest 192.0.2.1 SSH-2.0-OpenSSH_9.9 SHA256:abc\n",
+		renderSessionDetail(detail, 80))
+
+	// The authority's name may be empty: the view names it all the same.
+	detail.Delegation = testDelegation("")
+	assert.Contains(t, renderSessionDetail(detail, 80), row("Access:", "decided by the session's authority"))
+
+	// Not answering: no way in is offered, while the links and notes, which
+	// the record holds, still are.
+	detail.SSHCommand, detail.URI, detail.ConnectedClients = "", "", nil
+	got := renderSessionDetail(detail, 80)
+	assert.NotContains(t, got, "➤ SSH:")
+	assert.NotContains(t, got, "➤ URI:")
+	assert.Contains(t, got, "\n➤ Dashboard: https://authority.example/s\n")
+	assert.NotContains(t, got, "abcdefghijklmnopqrst", "the routing ID is in no line")
+}
+
+// Whatever a record from elsewhere holds, the authority's words are each one
+// line, with nothing in them that acts on a terminal.
+func TestDelegatedDetailKeepsTheAuthoritysWordsToALine(t *testing.T) {
+	d := testDelegation("Example\nAuthority\x1b[2J")
+	d.Links = []sessiondir.DelegationLink{{Label: "Dash\nboard", URL: "https://authority.example/\ns"}}
+	d.Notes = []string{"one\ntwo"}
+	got := renderSessionDetail(SessionDetail{Name: "work", Access: AccessDelegated, Delegation: d}, 80)
+	assert.Contains(t, got, row("Access:", "decided by Example�Authority�[2J"))
+	assert.Contains(t, got, "➤ Dash�board: https://authority.example/�s\n")
+	assert.Contains(t, got, "one�two\n")
+	assert.NotContains(t, got, "\x1b")
+}
+
+// The hints of the reasons an authority gives name it, with the session's
+// name where there is one; with no name for the authority, the phrase that
+// stands for it.
+func TestDelegatedStatusHints(t *testing.T) {
+	for _, tc := range []struct{ authority, mid, start string }{
+		{"Example Authority", "Example Authority", "Example Authority"},
+		{"", "the session's authority", "The session's authority"},
+	} {
+		d := testDelegation(tc.authority)
+		assert.Equal(t, "the relay refused this session's registration with "+tc.mid+"; upterm keeps retrying, slowly.",
+			StatusHint(SessionDetail{Status: "reconnecting", TunnelReason: "authority_refused", Delegation: d}))
+		assert.Equal(t, tc.start+" withdrew remote access. The command is still running locally.",
+			StatusHint(SessionDetail{Status: "disconnected", TunnelReason: "withdrawn", Delegation: d}))
+		assert.Equal(t, tc.start+" withdrew remote access. The command is still running locally as work. "+
+			"Use upterm attach work to return, or upterm session stop work to stop it.",
+			StatusHint(SessionDetail{Name: "work", Status: "disconnected", TunnelReason: "withdrawn", Delegation: d}))
+	}
+	// A reader without the record still names who decided, as the phrase.
+	assert.Equal(t, "the relay refused this session's registration with the session's authority; upterm keeps retrying, slowly.",
+		StatusHint(SessionDetail{Status: "reconnecting", TunnelReason: "authority_refused"}))
+	// Reserved, with no hint yet: none is guessed.
+	assert.Empty(t, StatusHint(SessionDetail{Status: "reconnecting", TunnelReason: "trust_lapsed", Delegation: testDelegation("")}))
 }

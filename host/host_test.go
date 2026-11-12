@@ -1826,6 +1826,8 @@ func TestGetSessionSaysWhetherTheSessionIsOpen(t *testing.T) {
 			sess, err := f.admin(t).GetSession(ctx, &api.GetSessionRequest{})
 			require.NoError(t, err)
 			require.Equal(t, tc.want, sess.GetOpen(), "the session as GetSession reports it")
+			require.Nil(t, f.created.DelegatedAddress, "a session that isn't delegated says nothing of an address")
+			require.Nil(t, sess.DelegatedAddress, "a session that isn't delegated says nothing of an address")
 
 			f.finish(t, "0")
 			require.NoError(t, f.result(t))

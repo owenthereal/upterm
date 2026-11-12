@@ -1025,6 +1025,11 @@ func (c *Host) Run(ctx context.Context) (runErr error) {
 		}
 	}
 	permissions.Report(session)
+	// A delegated session says it is one, at the address its record holds,
+	// so that a reader of both can tell they describe the same session.
+	if delegated != nil {
+		session.DelegatedAddress = proto.String(sshUser)
+	}
 	// The name the session holds, which is not c.Name when Run was handed a
 	// socket (the name is then ignored) or generated one (c.Name is empty).
 	var sessionName string

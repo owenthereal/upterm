@@ -10,6 +10,7 @@ import (
 	"github.com/muesli/reflow/wordwrap"
 	"github.com/muesli/reflow/wrap"
 	"github.com/owenthereal/upterm/host/sessiondir"
+	"github.com/owenthereal/upterm/internal/termtext"
 	uio "github.com/owenthereal/upterm/io"
 	"golang.org/x/term"
 )
@@ -98,6 +99,13 @@ type SessionDetail struct {
 	// known_hosts lines, each under a comment naming its file. Shown last
 	// among the commands when set, which the --detach banner of a door does.
 	SSHConfig string
+
+	// Delegation is a delegated session's, from its record; nil for every
+	// other session.
+	Delegation *sessiondir.Delegation
+	// URI is a delegated session's ssh:// URI, beside SSHCommand; empty for
+	// every other session.
+	URI string
 }
 
 // LabelWidth is the width of the label column, in the view and in any text
@@ -108,6 +116,7 @@ const LabelWidth = 18
 const (
 	AccessAnyone    = "anyone"
 	AccessAllowlist = "allowlist"
+	AccessDelegated = "delegated"
 )
 
 // The values of GuestPermissions.FileTransfer, as the admin API reports them.
@@ -242,12 +251,83 @@ func ClockTime(t time.Time) string { return t.Local().Format("15:04:05") }
 // have one: a reconnecting session, and a disconnected one, whose reason says
 // why it will not come back. Empty for every other status and for a reason
 // without a hint.
+//
+// The reasons a delegated session's authority gives name it, as its record
+// does, and a withdrawal names the session too where there is a name, since
+// it is how to return to it.
 func StatusHint(detail SessionDetail) string {
 	switch detail.Status {
 	case sessiondir.StatusReconnecting, sessiondir.StatusDisconnected:
+		switch detail.TunnelReason {
+		case sessiondir.TunnelReasonAuthorityRefused:
+			return "the relay refused this session's registration with " + Authority(detail.Delegation) + "; upterm keeps retrying, slowly."
+		case sessiondir.TunnelReasonWithdrawn:
+			if detail.Name != "" {
+				return strings.Join(WithdrawnNotice(detail.Delegation, detail.Name), " ")
+			}
+			return AuthorityAtStart(detail.Delegation) + " withdrew remote access. The command is still running locally."
+		}
 		return tunnelHints[detail.TunnelReason]
 	}
 	return ""
+}
+
+// authorityFallback is how the texts name a delegated session's authority
+// when its record gives no name for it, or isn't there to give one.
+const authorityFallback = "the session's authority"
+
+// Authority is how a text names the authority of a delegated session whose
+// record holds d, inside a sentence: its display name, on one line, or the
+// phrase that stands for it when there is none.
+func Authority(d *sessiondir.Delegation) string {
+	if d == nil || d.Authority == "" {
+		return authorityFallback
+	}
+	return SafeLine(d.Authority)
+}
+
+// AuthorityAtStart is Authority at the start of a sentence, where the phrase
+// that stands for a missing name is capitalized.
+func AuthorityAtStart(d *sessiondir.Delegation) string {
+	if d == nil || d.Authority == "" {
+		return "The" + strings.TrimPrefix(authorityFallback, "the")
+	}
+	return SafeLine(d.Authority)
+}
+
+// WithdrawnNotice is what upterm says when the authority of a delegated
+// session whose record holds d withdraws its remote access, while it goes on
+// running locally as name: two lines, the second how to return to it or stop
+// it.
+func WithdrawnNotice(d *sessiondir.Delegation, name string) []string {
+	return withdrawnLines(AuthorityAtStart(d), name)
+}
+
+// WithdrawnClause is WithdrawnNotice's first line where it goes on a line of
+// upterm's own, after the start of its sentence.
+func WithdrawnClause(d *sessiondir.Delegation, name string) string {
+	return withdrawnLines(Authority(d), name)[0]
+}
+
+func withdrawnLines(authority, name string) []string {
+	return []string{
+		authority + " withdrew remote access. The command is still running locally as " + name + ".",
+		"Use upterm attach " + name + " to return, or upterm session stop " + name + " to stop it.",
+	}
+}
+
+// StoppedNotice is what upterm says when the authority of a delegated
+// session whose record holds d stops it.
+func StoppedNotice(d *sessiondir.Delegation) string {
+	return AuthorityAtStart(d) + " stopped the session. Terminating the hosted command."
+}
+
+// SafeLine is text an authority chose, as a terminal may be given it inside
+// a line of upterm's own: one line, with nothing in it that acts on the
+// terminal. A record from another build may hold what this one's host would
+// have replaced.
+func SafeLine(s string) string {
+	return strings.ReplaceAll(string(termtext.Sanitize([]byte(s), false)), "\n", "�")
 }
 
 // ReconnectNote says the relay can't bring a dropped session back, from the
@@ -376,7 +456,14 @@ func renderSessionDetailAt(detail SessionDetail, width int, at time.Time) string
 	// heading with nothing after it says less than nothing — so it falls back
 	// to the name, which is what such a session was looked up by in the first
 	// place.
+	//
+	// A delegated session is titled with its guest address, which is what
+	// its guests reach it as: its session ID is a routing ID, which nobody
+	// joins by.
 	title := detail.SessionID
+	if detail.Delegation != nil {
+		title = SafeLine(detail.Delegation.GuestAddress)
+	}
 	if title == "" {
 		title = detail.Name
 	}
@@ -425,7 +512,11 @@ func renderSessionDetailAt(detail SessionDetail, width int, at time.Time) string
 	// Where the allowlist would be: its absence is what makes the session
 	// open, and nothing else on the screen says so. Whether the host was asked
 	// about the start doesn't change who can join, so it doesn't gate the row.
-	if detail.Access == AccessAnyone {
+	// A delegated session's guests are its authority's to decide.
+	switch {
+	case detail.Delegation != nil || detail.Access == AccessDelegated:
+		renderProseRow(&b, "Access:", "decided by "+Authority(detail.Delegation), labelWidth, valueWidth, ValueStyle)
+	case detail.Access == AccessAnyone:
 		renderProseRow(&b, "Access:", "open: anyone with the session ID can join", labelWidth, valueWidth, ValueStyle)
 	}
 	// What those who can join may do. A daemon that doesn't report it has no
@@ -454,6 +545,52 @@ func renderSessionDetailAt(detail SessionDetail, width int, at time.Time) string
 		writeWhole(&b, cmdIndent, CommandStyle, command)
 	}
 
+	if detail.Delegation != nil {
+		writeDelegated(&b, detail, writeCommand)
+	} else {
+		writeCommands(&b, detail, writeCommand)
+	}
+
+	// Connected clients, one per line. Each is printed as text: a guest's
+	// version string is theirs to choose, and their client sends whatever it
+	// likes there, escape sequences included. The view prints it the way ~?
+	// does; the JSON keeps it as the daemon reported it.
+	if len(detail.ConnectedClients) > 0 {
+		b.WriteString("\n")
+		b.WriteString(LabelStyle.Render("Connected:") + "\n")
+		for _, client := range detail.ConnectedClients {
+			writeWhole(&b, 2, ValueStyle, uio.PlainText(client))
+		}
+	}
+
+	return b.String()
+}
+
+// writeDelegated writes a delegated session's ways in, in place of the
+// commands: the ssh command and the ssh:// URI, which the caller leaves out
+// where the session can't be joined, then a row for each of the authority's
+// links and its note lines, which its record holds whatever the session is
+// doing. No join line, SFTP or SCP: its guests reach it as its authority
+// says.
+func writeDelegated(b *strings.Builder, detail SessionDetail, writeCommand func(label, command string)) {
+	d := detail.Delegation
+	if detail.SSHCommand != "" || detail.URI != "" || len(d.Links) > 0 || len(d.Notes) > 0 {
+		b.WriteString("\n")
+	}
+	writeCommand("➤ SSH:", detail.SSHCommand)
+	writeCommand("➤ URI:", detail.URI)
+	for _, l := range d.Links {
+		b.WriteString(LabelStyle.Render("➤ "+SafeLine(l.Label)+":") + " " + CommandStyle.Render(SafeLine(l.URL)) + "\n")
+	}
+	for _, n := range d.Notes {
+		b.WriteString(ValueStyle.Render(SafeLine(n)) + "\n")
+	}
+}
+
+// writeCommands writes the commands a guest joins a session with.
+func writeCommands(b *strings.Builder, detail SessionDetail, writeCommand func(label, command string)) {
+	const cmdIndent = 4
+
 	// SFTP and SCP commands (only shown if SFTP is enabled)
 	sftp := detail.SFTPEnabled && detail.SFTPCommand != ""
 	if detail.JoinCommand != "" || detail.SSHCommand != "" || sftp || detail.SSHConfig != "" {
@@ -469,24 +606,10 @@ func renderSessionDetailAt(detail SessionDetail, width int, at time.Time) string
 		if detail.SCPUpload != "" || detail.SCPDownload != "" {
 			b.WriteString(LabelStyle.Render("➤ SCP:") + "\n")
 			for _, cmd := range []string{detail.SCPUpload, detail.SCPDownload} {
-				writeWhole(&b, cmdIndent, CommandStyle, cmd)
+				writeWhole(b, cmdIndent, CommandStyle, cmd)
 			}
 		}
 	}
 	// Each line whole and at its own indentation, as the files take it.
 	writeCommand("➤ SSH config:", strings.TrimSuffix(detail.SSHConfig, "\n"))
-
-	// Connected clients, one per line. Each is printed as text: a guest's
-	// version string is theirs to choose, and their client sends whatever it
-	// likes there, escape sequences included. The view prints it the way ~?
-	// does; the JSON keeps it as the daemon reported it.
-	if len(detail.ConnectedClients) > 0 {
-		b.WriteString("\n")
-		b.WriteString(LabelStyle.Render("Connected:") + "\n")
-		for _, client := range detail.ConnectedClients {
-			writeWhole(&b, 2, ValueStyle, uio.PlainText(client))
-		}
-	}
-
-	return b.String()
 }

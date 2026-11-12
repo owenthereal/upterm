@@ -89,6 +89,9 @@ type statusView struct {
 	NextAt       time.Time
 	Reason       string
 	Join         string // how guests join; empty when it isn't worth showing
+	// Delegation is the session's, from its record, for a delegated session
+	// whose daemon's answer confirms it; nil for every other.
+	Delegation *sessiondir.Delegation
 }
 
 // statusLines is ~?'s text: the session's status from its record (the relay)
@@ -178,7 +181,9 @@ func lookupStatus(ctx context.Context, src statusSource) (statusView, error) {
 		v.CanReconnect = true
 		v.LostAt, v.NextAt, v.Reason = rec.TunnelLostAt, rec.NextAttemptAt, rec.TunnelReason
 	case sessiondir.StatusDisconnected:
-		// Down for good: a relay that can't reconnect.
+		// Down for good: a relay that can't reconnect, or the authority's
+		// withdrawal of the session's remote access.
+		v.Reason = rec.TunnelReason
 	default:
 		// Starting or ending: neither says what the relay is doing for
 		// guests, and a status this upterm doesn't know isn't guessed at.
@@ -191,8 +196,24 @@ func lookupStatus(ctx context.Context, src statusSource) (statusView, error) {
 		}
 	}
 	// The connect string only while it is one guests can act on, now or once
-	// the relay is back: a disconnected session's cannot connect.
-	if joinable(rec.Status) {
+	// the relay is back: a disconnected session's cannot connect. A delegated
+	// session's is its record's ssh command, once its daemon confirms it, and
+	// none otherwise: its guests don't join by its ID. Its record's
+	// delegation is not used at all where the daemon's answer disagrees with
+	// it.
+	delegated := isDelegated(sess, rec.Delegation)
+	if delegated && confirmsDelegation(sess, rec.Delegation) {
+		v.Delegation = rec.Delegation
+	}
+	switch {
+	case !joinable(rec.Status):
+	case delegated:
+		if v.Delegation != nil {
+			// A line of the terminal's, as withDelegation writes it.
+			sshCommand, _ := delegatedConnect(v.Delegation)
+			v.Join = tui.SafeLine(sshCommand)
+		}
+	default:
 		if detail, err := buildSessionDetail(sess); err == nil {
 			v.Join = detail.JoinCommand
 			if v.Join == "" {
@@ -247,6 +268,10 @@ func renderStatus(v statusView, escape byte, suspend bool) []string {
 			next += fmt.Sprintf("; next try in %d s", int(math.Ceil(wait.Seconds())))
 		}
 		lines = append(lines, line, next)
+	case v.Reason == sessiondir.TunnelReasonWithdrawn:
+		// The authority's word, with how to return to the session that goes
+		// on running here.
+		lines = append(lines, head+tui.WithdrawnClause(v.Delegation, v.Name), "upterm: "+tui.WithdrawnNotice(v.Delegation, v.Name)[1])
 	default:
 		lines = append(lines, head+"the relay connection is lost, and this relay can't reconnect; restart the session to share it again")
 	}

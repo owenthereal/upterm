@@ -29,7 +29,8 @@ ConnectedClients, LaunchID, Open, JoinStateSource, JoinTimeout, JoinDeadline,
 FirstGuestJoinedAt, Name, Status, Reconnect, TunnelReason, TunnelLostAt,
 NextAttemptAt, StartConfirmed, ReadOnly, FileTransfer,
 FileTransferApprovalRequired, LocalForwarding, GuestShell, Execution, TCPForwarding,
-ApprovalMethod, KnownHosts, RelayKeyTrust, SSHCommand, JoinCommand and SSHConfig.
+ApprovalMethod, KnownHosts, RelayKeyTrust, SSHCommand, JoinCommand, SSHConfig
+and Delegation (a delegated session's; nil for every other).
 From LaunchID on, a variable the session's upterm doesn't report is empty,
 false, nil or a zero time (0001-01-01 ...), so test it first:
 {{with .Name}}{{.}}{{end}}, or {{if not .TunnelLostAt.IsZero}}...{{end}}.

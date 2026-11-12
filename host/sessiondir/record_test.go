@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
@@ -550,6 +551,171 @@ func TestRecordJSONNames(t *testing.T) {
 	}, fields)
 	require.Equal(t, "stopped", DecisionStopped)
 	require.Equal(t, "withdrawn", DecisionWithdrawn)
+}
+
+// masterRecord is Record as a build without delegations has it, copied from
+// that build: what an upterm before them, or one without them, decodes a
+// record into.
+type masterRecord struct {
+	Name               string        `json:"name"`
+	LaunchID           string        `json:"launch_id"`
+	AdminSocket        string        `json:"admin_socket,omitempty"`
+	AttachSocket       string        `json:"attach_socket,omitempty"`
+	HostKeys           []string      `json:"host_keys,omitempty"`
+	SessionID          string        `json:"session_id,omitempty"`
+	Command            []string      `json:"command,omitempty"`
+	ForceCommand       []string      `json:"force_command,omitempty"`
+	LoginCommand       []string      `json:"login_command,omitempty"`
+	StartedAt          time.Time     `json:"started_at"`
+	UpdatedAt          time.Time     `json:"updated_at"`
+	FinishedAt         time.Time     `json:"finished_at,omitzero"`
+	FirstGuestJoinedAt time.Time     `json:"first_guest_joined_at,omitzero"`
+	JoinTimeout        time.Duration `json:"join_timeout,omitempty"`
+	JoinDeadline       time.Time     `json:"join_deadline,omitzero"`
+	Status             string        `json:"status"`
+	Reason             string        `json:"reason"`
+	Reconnect          string        `json:"reconnect,omitempty"`
+	TunnelLostAt       time.Time     `json:"tunnel_lost_at,omitzero"`
+	TunnelReason       string        `json:"tunnel_reason,omitempty"`
+	TunnelError        string        `json:"tunnel_error,omitempty"`
+	NextAttemptAt      time.Time     `json:"next_attempt_at,omitzero"`
+	ExitCode           *int          `json:"exit_code,omitempty"`
+	Signal             string        `json:"signal,omitempty"`
+	SignalNumber       *int          `json:"signal_number,omitempty"`
+	Pid                int           `json:"pid,omitempty"`
+	LogPath            string        `json:"log_path,omitempty"`
+}
+
+// A delegated session's record is one a build without delegations reads as
+// it reads any other: its decoder isn't strict, so the delegation is passed
+// over and every other field comes through as it was written.
+func TestRecordWithDelegationReadsInABuildWithoutIt(t *testing.T) {
+	runtimeRoot, stateRoot := roots(t)
+	d, err := claim(t, runtimeRoot, stateRoot, "work")
+	require.NoError(t, err)
+	defer func() { _ = d.Release(context.Background()) }()
+	require.NoError(t, d.Update(func(r *Record) {
+		r.Status = StatusDisconnected
+		r.SessionID = "abcdefghijklmnopqrst"
+		r.TunnelReason = TunnelReasonWithdrawn
+		r.Delegation = &Delegation{
+			DelegationAssociation: DelegationAssociation{Service: testDelegationService, Account: testDelegationAccount, Login: "l"},
+			DelegationDisplay:     DelegationDisplay{Authority: "Example Authority", Links: []DelegationLink{{Label: "Dashboard", URL: "https://authority.example/s"}}, Notes: []string{"a note"}},
+			ExternalSessionID:     "33333333-3333-4333-8333-333333333333", RoutingID: "abcdefghijklmnopqrst",
+			Relay: "relay.example:22", GuestAddress: "claim-work", Decision: DecisionWithdrawn,
+		}
+	}))
+	raw, err := os.ReadFile(d.RecordPath())
+	require.NoError(t, err)
+	require.Contains(t, string(raw), `"delegation"`)
+
+	var old masterRecord
+	require.NoError(t, json.Unmarshal(raw, &old))
+	rec := d.Record()
+	require.Equal(t, masterRecord{
+		Name: rec.Name, LaunchID: rec.LaunchID, AdminSocket: rec.AdminSocket, AttachSocket: rec.AttachSocket,
+		SessionID: rec.SessionID, Command: rec.Command, StartedAt: rec.StartedAt, UpdatedAt: rec.UpdatedAt,
+		Status: StatusDisconnected, Reason: rec.Reason, TunnelReason: TunnelReasonWithdrawn, Pid: rec.Pid,
+	}, old)
+}
+
+// The running delegated sessions are those whose results lock is held,
+// whatever any record says: a session killed with its record saying ready,
+// under a pid that is alive (this process's own), is not one, nor is one
+// that ended, and a running session that isn't delegated is left out.
+func TestLiveDelegatedSessionsAreTheHeldOnes(t *testing.T) {
+	runtimeRoot, stateRoot := roots(t)
+	ctx := context.Background()
+	publish := func(d *Dir, status string) {
+		t.Helper()
+		require.NoError(t, d.Update(func(r *Record) {
+			r.Status = status
+			r.Delegation = &Delegation{
+				DelegationAssociation: DelegationAssociation{Service: testDelegationService, Account: testDelegationAccount},
+				ExternalSessionID:     d.Name(),
+				GuestAddress:          "claim-work",
+			}
+		}))
+	}
+
+	running, err := claim(t, runtimeRoot, stateRoot, "running")
+	require.NoError(t, err)
+	defer func() { _ = running.Release(ctx) }()
+	publish(running, StatusReady)
+
+	reconnecting, err := claim(t, runtimeRoot, stateRoot, "reconnecting")
+	require.NoError(t, err)
+	defer func() { _ = reconnecting.Release(ctx) }()
+	publish(reconnecting, StatusReconnecting)
+
+	standalone, err := claim(t, runtimeRoot, stateRoot, "standalone")
+	require.NoError(t, err)
+	defer func() { _ = standalone.Release(ctx) }()
+
+	killed, err := claim(t, runtimeRoot, stateRoot, "killed")
+	require.NoError(t, err)
+	publish(killed, StatusReady)
+	require.NoError(t, killed.releaseKeepingDir())
+
+	ended, err := claim(t, runtimeRoot, stateRoot, "ended")
+	require.NoError(t, err)
+	publish(ended, StatusEnding)
+	require.NoError(t, ended.Release(ctx))
+
+	// Nobody holds it, so nothing about it is read: a record that can't be
+	// parsed is a dead session's all the same.
+	damaged, err := claim(t, runtimeRoot, stateRoot, "damaged")
+	require.NoError(t, err)
+	require.NoError(t, damaged.releaseKeepingDir())
+	require.NoError(t, os.WriteFile(damaged.RecordPath(), []byte("{not json"), 0o600))
+
+	live, err := LiveDelegatedSessions(ctx, stateRoot)
+	require.NoError(t, err)
+	var names []string
+	for _, rec := range live {
+		names = append(names, rec.Name)
+		require.NotNil(t, rec.Delegation)
+	}
+	require.Equal(t, []string{"reconnecting", "running"}, names)
+}
+
+// A running session this can't read the record of, or whose lock it can't
+// test, may be any name's, so the look fails and says which session it
+// couldn't tell about, rather than leave it out.
+func TestLiveDelegatedSessionsFailWhereTheyCantTell(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		damage func(t *testing.T, d *Dir)
+	}{
+		{"a record that can't be parsed", func(t *testing.T, d *Dir) {
+			require.NoError(t, os.WriteFile(d.RecordPath(), []byte("{not json"), 0o600))
+		}},
+		{"a record that is gone", func(t *testing.T, d *Dir) {
+			require.NoError(t, os.Remove(d.RecordPath()))
+		}},
+		{"a lock that can't be opened", func(t *testing.T, d *Dir) {
+			if runtime.GOOS == "windows" {
+				t.Skip("file modes don't refuse an open on Windows")
+			}
+			lock := filepath.Join(filepath.Dir(d.RecordPath()), resultLockFile)
+			require.NoError(t, os.Chmod(lock, 0))
+			t.Cleanup(func() { _ = os.Chmod(lock, 0o600) })
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			runtimeRoot, stateRoot := roots(t)
+			ctx := context.Background()
+			d, err := claim(t, runtimeRoot, stateRoot, "unreadable")
+			require.NoError(t, err)
+			defer func() { _ = d.Release(ctx) }()
+			tc.damage(t, d)
+
+			live, err := LiveDelegatedSessions(ctx, stateRoot)
+			require.Error(t, err)
+			require.Contains(t, err.Error(), "unreadable")
+			require.Nil(t, live)
+		})
+	}
 }
 
 // Dropping LoginCommand during record decoding or claim publication loses the

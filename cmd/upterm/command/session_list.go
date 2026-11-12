@@ -21,15 +21,21 @@ type sessionRow struct {
 
 // sessionRows are the rows of the listing's sessions, in its order. A
 // reconnecting session's status is its word alone: why and since when is what
-// `session info` is for.
+// `session info` is for. A delegated session's ID column is its guest
+// address, from its record: its session ID is a routing ID, which nobody
+// joins by.
 func sessionRows(sessions []tui.SessionDetail) []sessionRow {
 	rows := make([]sessionRow, len(sessions))
 	for i, s := range sessions {
+		id := s.SessionID
+		if s.Delegation != nil {
+			id = s.Delegation.GuestAddress
+		}
 		rows[i] = sessionRow{
 			Current:   s.IsCurrent,
 			Name:      s.Name,
 			Status:    s.Status,
-			SessionID: s.SessionID,
+			SessionID: id,
 			Command:   s.Command,
 			Relay:     s.Host,
 		}

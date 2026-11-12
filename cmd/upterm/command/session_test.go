@@ -3792,7 +3792,7 @@ func TestGuestPolicyOptionalFieldsRemainIndependent(t *testing.T) {
 			raw, err := json.Marshal(map[string]string{key: value})
 			require.NoError(t, err)
 			require.NoError(t, json.Unmarshal(raw, response))
-			info := currentInfoFrom(response)
+			info := currentInfoFrom(response, nil)
 			raw, err = json.Marshal(info)
 			require.NoError(t, err)
 			var got map[string]any
