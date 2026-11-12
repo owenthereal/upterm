@@ -1133,6 +1133,16 @@ func displaySession(ctx context.Context, session *api.GetSessionResponse, name s
 			detail.SSHConfig = text
 		}
 	}
+	// A delegated session's banner is its record's: its guest address, who
+	// decides its guests, how they reach it, and what its authority says
+	// about it. A record that can't be read in time, or doesn't confirm the
+	// session, has none of that to show, so the banner is titled with the
+	// session's name and offers no way in, and the session starts all the
+	// same: `session info` says the rest once the record can be read.
+	if isDelegated(session, nil) {
+		d := bannerDelegation(ctx, session, name)
+		detail = withDelegation(detail, d, d != nil)
+	}
 
 	// The logger root.go put in the context: it writes to upterm's log
 	// file, which is where an operator goes to find out what became of a
@@ -1158,6 +1168,28 @@ func displaySession(ctx context.Context, session *api.GetSessionResponse, name s
 	p := tea.NewProgram(model, tea.WithContext(ctx))
 
 	return confirmationOutcome(p.Run())
+}
+
+// bannerReadTimeout bounds the record read behind a delegated session's
+// banner, as statusHintTimeout bounds --detach's: a registry slow to answer
+// costs the banner its delegation, not the start. A variable so that a test
+// can wait less on a registry it holds.
+var bannerReadTimeout = statusHintTimeout
+
+// bannerDelegation is the delegation the record of name holds for the
+// delegated session sess describes, read within bannerReadTimeout: nil when
+// it can't be read, or doesn't confirm sess by its routing ID, which no other
+// run has, and its guest address. The daemon that sent sess holds the name
+// while it waits on this display.
+func bannerDelegation(ctx context.Context, sess *api.GetSessionResponse, name string) *sessiondir.Delegation {
+	ctx, cancel := context.WithTimeout(ctx, bannerReadTimeout)
+	defer cancel()
+	rec, held, err := sessiondir.Inspect(ctx, utils.UptermStateDir(), name)
+	if err != nil || !held || rec == nil || rec.Delegation == nil || rec.Delegation.RoutingID != sess.GetSessionId() ||
+		!confirmsDelegation(sess, rec.Delegation) {
+		return nil
+	}
+	return rec.Delegation
 }
 
 // confirmationOutcome is what displaySession makes of how the prompt ended:

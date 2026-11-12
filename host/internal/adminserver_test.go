@@ -476,6 +476,16 @@ func TestGetSessionReportsTheRelayKeyTheHostTrusted(t *testing.T) {
 	require.Equal(t, "prompted", resp.GetRelayKeyTrust())
 }
 
+// A delegated session's guest address is in the startup snapshot, and every
+// answer carries it; any other session's leaves the field unset.
+func TestGetSessionReportsADelegatedSessionsAddress(t *testing.T) {
+	srv := newAdminServer(t, adminServerOptions{})
+	require.Nil(t, getSession(t, srv).DelegatedAddress)
+
+	srv.Session.DelegatedAddress = proto.String("claim-work")
+	require.Equal(t, "claim-work", getSession(t, srv).GetDelegatedAddress())
+}
+
 func TestAnOlderDaemonsAnswerIsUnknownNotFalse(t *testing.T) {
 	var old api.GetSessionResponse // as a daemon from before the fields
 	require.Nil(t, old.Name)

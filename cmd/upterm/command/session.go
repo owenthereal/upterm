@@ -7,8 +7,10 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/netip"
 	"net/url"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 	"text/template"
@@ -311,12 +313,20 @@ type currentInfo struct {
 	SSHCommand  string `json:"sshCommand,omitempty"`
 	JoinCommand string `json:"joinCommand,omitempty"`
 	SSHConfig   string `json:"sshConfig,omitempty"`
+
+	// Delegation is a delegated session's, from its record, as `session
+	// info` reports it; absent for every other session, and when the record
+	// doesn't confirm the daemon's answer.
+	Delegation *delegationInfo `json:"delegation,omitempty"`
 }
 
-// currentInfoFrom builds currentInfo from the daemon's answer alone. The
-// join fields are read as `session info` reads a live answer
+// currentInfoFrom builds currentInfo from the daemon's answer, and, for a
+// delegated session, from the delegation its record holds, which is nil for
+// every other session and for one whose record doesn't confirm the answer.
+// The join fields are read as `session info` reads a live answer
 // (withLiveJoinState), the claim rule included.
-func currentInfoFrom(sess *api.GetSessionResponse) currentInfo {
+func currentInfoFrom(sess *api.GetSessionResponse, d *sessiondir.Delegation) currentInfo {
+	delegated := isDelegated(sess, d)
 	info := currentInfo{
 		SessionID:    sess.GetSessionId(),
 		ClientCount:  len(sess.GetConnectedClients()),
@@ -327,10 +337,10 @@ func currentInfoFrom(sess *api.GetSessionResponse) currentInfo {
 
 		GuestCount:  countGuests(sess.GetConnectedClients()),
 		CountsKnown: true,
-		Access:      accessOf(sess.GetAuthorizedKeys()),
+		Access:      accessOf(sess.GetAuthorizedKeys(), delegated),
 
 		LaunchID: sess.GetLaunchId(),
-		Open:     sess.GetOpen(),
+		Open:     sess.GetOpen() && !delegated,
 
 		Name:                         sess.GetName(),
 		Status:                       sess.GetStatus(),
@@ -361,7 +371,9 @@ func currentInfoFrom(sess *api.GetSessionResponse) currentInfo {
 	report := withSessionReport(sessionInfo{}, sess)
 	info.KnownHosts, info.RelayKeyTrust = report.KnownHosts, report.RelayKeyTrust
 
-	if joinable(info.Status) {
+	// A delegated session that no record confirms has no way in to offer,
+	// the daemon's own included.
+	if joinable(info.Status) && (!delegated || d != nil) {
 		// A host URL that won't parse costs the connect strings, not the
 		// answer: the rest of it is still the daemon's.
 		if detail, err := buildSessionDetail(sess); err == nil {
@@ -376,6 +388,7 @@ func currentInfoFrom(sess *api.GetSessionResponse) currentInfo {
 			info.SSHConfig = block
 		}
 	}
+	info.Delegation = delegationInfoOf(d, joinable(info.Status))
 	return info
 }
 
@@ -1092,7 +1105,8 @@ ConnectedClients, LaunchID, Open, JoinStateSource, JoinTimeout, JoinDeadline,
 FirstGuestJoinedAt, Name, Status, Reconnect, TunnelReason, TunnelLostAt,
 NextAttemptAt, StartConfirmed, ReadOnly, FileTransfer,
 FileTransferApprovalRequired, LocalForwarding, GuestShell, Execution, TCPForwarding,
-ApprovalMethod, KnownHosts, RelayKeyTrust, SSHCommand, JoinCommand and SSHConfig.
+ApprovalMethod, KnownHosts, RelayKeyTrust, SSHCommand, JoinCommand, SSHConfig
+and Delegation (a delegated session's; nil for every other).
 From LaunchID on, a variable the session's upterm doesn't report is empty,
 false, nil or a zero time (0001-01-01 ...), so test it first:
 {{with .Name}}{{.}}{{end}}, or {{if not .TunnelLostAt.IsZero}}...{{end}}.
@@ -1329,6 +1343,20 @@ type sessionInfo struct {
 	TunnelReason  string    `json:"tunnelReason,omitempty"`
 	TunnelError   string    `json:"tunnelError,omitempty"`
 	NextAttemptAt time.Time `json:"nextAttemptAt,omitzero"`
+	// Delegation is a delegated session's, from its record, live or not;
+	// absent for every other session, and for one whose daemon answered for
+	// this launch with an address its record doesn't hold. Its connect
+	// strings are there only when the top-level ones are: when the daemon
+	// answered for this launch, with its address, and the session is
+	// joinable.
+	Delegation *delegationInfo `json:"delegation,omitempty"`
+	// delegation is the record's, for the human views, nil where Delegation
+	// is; not part of the JSON, which has Delegation.
+	delegation *sessiondir.Delegation
+	// delegated is true for a delegated session, by its record or its
+	// daemon's answer, whether or not the two agree; not part of the JSON,
+	// which says it with access.
+	delegated bool
 	// joinCaveat is why a held session's join fields came from the record,
 	// for the human line; not part of the JSON.
 	joinCaveat string
@@ -1447,6 +1475,16 @@ func heldInfo(ctx context.Context, runtimeRoot string, rec *sessiondir.Record) (
 		info.notAnswering = true
 		return info, nil, nil
 	}
+	// A delegated session's record speaks for it only where its daemon's
+	// answer for this launch agrees, by the guest address both give. One
+	// that doesn't leaves no address, and no way in, that both confirm, so
+	// the session is shown by its name, with neither.
+	if isDelegated(sess, rec.Delegation) {
+		info.delegated = true
+		if !confirmsDelegation(sess, rec.Delegation) {
+			info.delegation, info.Delegation = nil, nil
+		}
+	}
 	info = withLiveJoinState(info, sess)
 	info = withSessionReport(info, sess)
 
@@ -1459,7 +1497,17 @@ func heldInfo(ctx context.Context, runtimeRoot string, rec *sessiondir.Record) (
 	if !joinable(rec.Status) {
 		return info, nil, nil
 	}
-	return withLiveDetail(info, sess), sess, nil
+	info = withLiveDetail(info, sess)
+	// A delegated session's connect strings are its record's, offered only
+	// once its daemon confirms the address the record holds; where it
+	// doesn't, there are none, the daemon's own included.
+	switch {
+	case info.delegation != nil:
+		info.Delegation = delegationInfoOf(info.delegation, true)
+	case info.delegated:
+		info.SSHCommand, info.JoinCommand, info.SSHConfig = "", "", ""
+	}
+	return info, sess, nil
 }
 
 // joinable reports whether a session with this status has a connect string
@@ -1515,7 +1563,7 @@ func withLiveJoinState(info sessionInfo, sess *api.GetSessionResponse) sessionIn
 // leaves them unknown rather than false.
 func withSessionReport(info sessionInfo, sess *api.GetSessionResponse) sessionInfo {
 	info.Host = sess.GetHost()
-	info.Access = accessOf(sess.GetAuthorizedKeys())
+	info.Access = accessOf(sess.GetAuthorizedKeys(), info.delegated || isDelegated(sess, info.delegation))
 	info.StartConfirmed = sess.StartConfirmed
 	info.ReadOnly = sess.ReadOnly
 	info.FileTransfer = sess.GetFileTransfer()
@@ -1532,8 +1580,12 @@ func withSessionReport(info sessionInfo, sess *api.GetSessionResponse) sessionIn
 }
 
 // accessOf is who can join a session with these authorized keys: anyone with
-// the session ID when there are none, else the allowlist.
-func accessOf(keys []*api.AuthorizedKey) string {
+// the session ID when there are none, else the allowlist. A delegated
+// session's guests are its authority's to decide, whatever its keys.
+func accessOf(keys []*api.AuthorizedKey, delegated bool) string {
+	if delegated {
+		return tui.AccessDelegated
+	}
 	if len(keys) == 0 {
 		return tui.AccessAnyone
 	}
@@ -1567,6 +1619,10 @@ func infoFromRecord(rec *sessiondir.Record, status string) sessionInfo {
 	info.JoinDeadline = rec.JoinDeadline.UTC()
 	info = withClaimRule(info)
 	info.JoinStateSource = joinStateFromRecord
+	// Without its connect strings until a daemon confirms them: see heldInfo.
+	info.delegation = rec.Delegation
+	info.Delegation = delegationInfoOf(rec.Delegation, false)
+	info.delegated = rec.Delegation != nil
 	return info
 }
 
@@ -1699,7 +1755,8 @@ func withLiveDetail(info sessionInfo, sess *api.GetSessionResponse) sessionInfo 
 	info.ClientCount = len(sess.GetConnectedClients())
 	info.GuestCount = countGuests(sess.GetConnectedClients())
 	info.CountsKnown = true
-	info.Open = sess.GetOpen()
+	// Nobody joins a delegated session with its ID, whatever --accept said.
+	info.Open = sess.GetOpen() && !info.delegated && !isDelegated(sess, info.delegation)
 
 	if detail, err := buildSessionDetail(sess); err == nil {
 		info.SSHCommand = detail.SSHCommand
@@ -1797,6 +1854,11 @@ func infoRunE(c *cobra.Command, args []string) error {
 			// And the tunnel's state, which is the record's too.
 			detail = withTunnelState(detail, info)
 			detail.JoinLabel, detail.JoinValue = joinTimeoutRow(info)
+			// And a delegated session's, from its record, which the lookup
+			// kept only where this answer confirms it.
+			if info.delegated {
+				detail = withDelegation(detail, info.delegation, info.delegation != nil)
+			}
 			tui.PrintSessionDetail(detail)
 			return nil
 		}
@@ -1828,7 +1890,13 @@ func printSessionSummary(info sessionInfo) {
 func writeSessionSummary(w io.Writer, info sessionInfo, valueWidth int) {
 	// The status, hint and relay note are the detail view's, so the two never
 	// word the same outage differently.
+	//
+	// A delegated session's hint names its authority, and, once its remote
+	// access is withdrawn, the session, which is how to return to it.
 	detail := withTunnelState(tui.SessionDetail{Status: info.Status}, info)
+	if info.delegated {
+		detail.Name, detail.Delegation = info.Name, info.delegation
+	}
 
 	name := info.Name
 	if info.nameLabel != "" {
@@ -1847,6 +1915,11 @@ func writeSessionSummary(w io.Writer, info sessionInfo, valueWidth int) {
 	}
 	if note := tui.ReconnectNote(detail); note != "" {
 		writeSummaryRow(w, "Reconnect:", note, 0)
+	}
+	// Who decides its guests, which its record says whether or not it
+	// answers.
+	if info.delegated {
+		writeSummaryRow(w, "Access:", "decided by "+tui.Authority(info.delegation), valueWidth)
 	}
 	// Only a session that has ended has an outcome. Until then the record
 	// holds the placeholder it was claimed with, and publishing that teardown
@@ -1903,7 +1976,7 @@ func currentRunE(c *cobra.Command, args []string) error {
 	// config is reported outside a session too. Behind the quiet path it would
 	// go unnoticed for as long as nobody happened to be sharing.
 	quiet := flagOutput != ""
-	var render func(io.Writer, *api.GetSessionResponse) error
+	var render func(io.Writer, *api.GetSessionResponse, *sessiondir.Delegation) error
 	if quiet {
 		var err error
 		render, err = sessionOutput(flagOutput)
@@ -1949,8 +2022,12 @@ func currentRunE(c *cobra.Command, args []string) error {
 		return ExitCodeError{Code: 1, Err: fmt.Errorf("failed to get session at %s: %w", flagAdminSocket, err)}
 	}
 
+	// A delegated session's delegation is its record's, which the daemon's
+	// answer is checked against.
+	delegation := currentDelegation(ctx, sess)
+
 	if render != nil {
-		if err := render(os.Stdout, sess); err != nil {
+		if err := render(os.Stdout, sess, delegation); err != nil {
 			return ExitCodeError{Code: 1, Err: err}
 		}
 		return nil
@@ -1961,8 +2038,30 @@ func currentRunE(c *cobra.Command, args []string) error {
 		return ExitCodeError{Code: 1, Err: err}
 	}
 
-	tui.PrintSessionDetail(withReportedState(detail, sess))
+	detail = withReportedState(detail, sess)
+	if isDelegated(sess, delegation) {
+		// Its ways in only where guests can use them, as for any session,
+		// and only from a record that confirms the answer.
+		st := sess.GetStatus()
+		detail = withDelegation(detail, delegation, delegation != nil && (st == "" || joinable(st)))
+	}
+	tui.PrintSessionDetail(detail)
 	return nil
+}
+
+// currentDelegation is the delegation the record of the delegated session
+// sess describes holds, read by the name and launch the daemon gave: nil for
+// any other session, and when the record can't be read or doesn't confirm
+// the answer, by its launch and its guest address.
+func currentDelegation(ctx context.Context, sess *api.GetSessionResponse) *sessiondir.Delegation {
+	if sess.GetDelegatedAddress() == "" || sessiondir.ValidateName(sess.GetName()) != nil || sess.GetLaunchId() == "" {
+		return nil
+	}
+	rec, _, err := sessiondir.Inspect(ctx, utils.UptermStateDir(), sess.GetName())
+	if err != nil || rec == nil || rec.LaunchID != sess.GetLaunchId() || !confirmsDelegation(sess, rec.Delegation) {
+		return nil
+	}
+	return rec.Delegation
 }
 
 // withReportedState adds to detail what the daemon says of itself: its name,
@@ -2009,16 +2108,16 @@ func notInSession(quiet bool, why string) error {
 // sessionOutput builds the renderer for -o/--output, or the error that says why
 // the format or the template is not one. It runs before any socket work so
 // that a malformed format is reported the same wherever the command is run.
-func sessionOutput(format string) (func(io.Writer, *api.GetSessionResponse) error, error) {
+func sessionOutput(format string) (func(io.Writer, *api.GetSessionResponse, *sessiondir.Delegation) error, error) {
 	if format != "json" && !strings.HasPrefix(format, "go-template=") {
 		return nil, fmt.Errorf("invalid output format %q: must be 'json' or 'go-template=<template>'", format)
 	}
 
 	if format == "json" {
-		return func(w io.Writer, sess *api.GetSessionResponse) error {
+		return func(w io.Writer, sess *api.GetSessionResponse, d *sessiondir.Delegation) error {
 			enc := json.NewEncoder(w)
 			enc.SetIndent("", "  ")
-			return enc.Encode(currentInfoFrom(sess))
+			return enc.Encode(currentInfoFrom(sess, d))
 		}, nil
 	}
 
@@ -2031,8 +2130,8 @@ func sessionOutput(format string) (func(io.Writer, *api.GetSessionResponse) erro
 		return nil, fmt.Errorf("invalid template: %w", err)
 	}
 
-	return func(w io.Writer, sess *api.GetSessionResponse) error {
-		return tmpl.Execute(w, currentInfoFrom(sess))
+	return func(w io.Writer, sess *api.GetSessionResponse, d *sessiondir.Delegation) error {
+		return tmpl.Execute(w, currentInfoFrom(sess, d))
 	}, nil
 }
 
@@ -2076,6 +2175,9 @@ func listSessions(ctx context.Context, runtimeRoot, stateRoot string) ([]tui.Ses
 			Command:      strings.Join(rec.Command, " "),
 			ForceCommand: strings.Join(rec.ForceCommand, " "),
 			LoginCommand: strings.Join(rec.LoginCommand, " "),
+			// A delegated session is named by its guest address, which its
+			// record holds whether or not anything answers.
+			Delegation: rec.Delegation,
 		}
 
 		if live, ok := liveDetail(ctx, runtimeRoot, rec); ok {
@@ -2085,6 +2187,11 @@ func listSessions(ctx context.Context, runtimeRoot, stateRoot string) ([]tui.Ses
 			live.Status = rec.Status
 			live.IsCurrent = live.AdminSocket == currentAdminSocket
 			detail = live
+		} else if rec.Delegation != nil && !joinable(rec.Status) && disagreesWithRecord(ctx, runtimeRoot, rec) {
+			// Not joinable, so nothing above asked the daemon; but its
+			// record speaks for it only where the daemon doesn't disagree,
+			// as `session info` has it, whatever the status.
+			detail = withDelegation(detail, nil, false)
 		}
 
 		// The tunnel is the record's to describe, in the row built from the
@@ -2145,7 +2252,31 @@ func liveDetail(ctx context.Context, runtimeRoot string, rec sessiondir.Record) 
 	}
 
 	detail.AdminSocket = adminSocket
+	// A delegated session's row is its record's where the answer agrees with
+	// it, and its name's alone where it doesn't, as `session info` has it.
+	if isDelegated(sess, rec.Delegation) {
+		var d *sessiondir.Delegation
+		if confirmsDelegation(sess, rec.Delegation) {
+			d = rec.Delegation
+		}
+		detail = withDelegation(detail, d, d != nil)
+	}
 	return detail, true
+}
+
+// disagreesWithRecord reports whether the daemon of rec, a delegated
+// session's record, answers for rec's launch with a guest address other than
+// the one rec holds. The answer is tied to the launch, as heldInfo ties it,
+// rather than to the session ID, which a starting record doesn't have yet. A
+// daemon that doesn't answer, or answers for another launch, disagrees with
+// nothing.
+func disagreesWithRecord(ctx context.Context, runtimeRoot string, rec sessiondir.Record) bool {
+	adminSocket, err := adminSocketFor(runtimeRoot, &rec)
+	if err != nil {
+		return false
+	}
+	sess, err := sessionWithTimeout(ctx, adminSocket)
+	return err == nil && sameLaunch(&rec, sess) && !confirmsDelegation(sess, rec.Delegation)
 }
 
 func parseURL(str string) (u *url.URL, scheme string, host string, port string, err error) {
@@ -2255,10 +2386,198 @@ func buildSessionDetail(sess *api.GetSessionResponse) (tui.SessionDetail, error)
 		SCPDownload:      scpDownload,
 		AuthorizedKeys:   displayAuthorizedKeys(sess.AuthorizedKeys),
 		ConnectedClients: clients,
-		Open:             sess.GetOpen(),
-		Access:           accessOf(sess.AuthorizedKeys),
+		Open:             sess.GetOpen() && !isDelegated(sess, nil),
+		Access:           accessOf(sess.AuthorizedKeys, isDelegated(sess, nil)),
 		Guests:           guestPermissions(sess),
 	}, nil
+}
+
+// delegationInfo is what the JSON says of a delegated session, every value
+// from its record. The connect strings are left out where the session's
+// top-level ones are, and the session it superseded and the decision until
+// there is one. Links and notes are always lists.
+type delegationInfo struct {
+	Authority           string           `json:"authority"`
+	Service             string           `json:"service"`
+	Account             string           `json:"account"`
+	Login               string           `json:"login"`
+	ExternalSessionID   string           `json:"externalSessionId"`
+	GuestAddress        string           `json:"guestAddress"`
+	SSHCommand          string           `json:"sshCommand,omitempty"`
+	URI                 string           `json:"uri,omitempty"`
+	Links               []delegationLink `json:"links"`
+	Notes               []string         `json:"notes"`
+	SupersededSessionID string           `json:"supersededSessionId,omitempty"`
+	Decision            string           `json:"decision,omitempty"`
+}
+
+// delegationLink is one of the authority's links.
+type delegationLink struct {
+	Label string `json:"label"`
+	URL   string `json:"url"`
+}
+
+// delegationInfoOf is d as the JSON says it, with its connect strings when
+// connect is set; nil for a nil d, a session that isn't delegated.
+func delegationInfoOf(d *sessiondir.Delegation, connect bool) *delegationInfo {
+	if d == nil {
+		return nil
+	}
+	info := &delegationInfo{
+		Authority:           d.Authority,
+		Service:             d.Service,
+		Account:             d.Account,
+		Login:               d.Login,
+		ExternalSessionID:   d.ExternalSessionID,
+		GuestAddress:        d.GuestAddress,
+		Links:               make([]delegationLink, 0, len(d.Links)),
+		Notes:               append([]string{}, d.Notes...),
+		SupersededSessionID: d.SupersededSessionID,
+		Decision:            d.Decision,
+	}
+	for _, l := range d.Links {
+		info.Links = append(info.Links, delegationLink(l))
+	}
+	if connect {
+		info.SSHCommand, info.URI = delegatedConnect(d)
+	}
+	return info
+}
+
+// delegatedConnect is how guests reach the delegated session d describes:
+// the ssh command and the ssh:// URI, at the relay its record holds, as its
+// guest address. Each carries the relay's port only when it isn't 22. Both
+// are empty unless the guest address and the relay are ones the host would
+// have taken from a placement: a record from another build may hold others,
+// which a pasted ssh command could read as options.
+func delegatedConnect(d *sessiondir.Delegation) (sshCommand, uri string) {
+	if !delegatedGuestAddressRe.MatchString(d.GuestAddress) || !validDelegatedRelay(d.Relay) {
+		return "", ""
+	}
+	host, port, _ := net.SplitHostPort(d.Relay)
+	sshCommand = "ssh " + d.GuestAddress + "@" + host
+	address := host
+	if strings.Contains(host, ":") {
+		address = "[" + host + "]"
+	}
+	if port != "22" {
+		sshCommand += " -p " + port
+		address = net.JoinHostPort(host, port)
+	}
+	return sshCommand, "ssh://" + uriUser(d.GuestAddress) + "@" + address
+}
+
+// delegatedGuestAddressRe, validDelegatedRelay and canonicalRelayHost mirror
+// the checks the host makes of a placement's guest address and relay before
+// it records them, so that only what such a host would have recorded is
+// offered as a way in.
+//
+// The guest address is the SSH user of the ssh command guests paste, which
+// then needs no quoting and can't be read as an option.
+var delegatedGuestAddressRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._+-]{0,254}$`)
+
+// validDelegatedRelay reports whether s is a host:port to dial, written as it
+// is meant: an IP literal without a zone, in its canonical form, or a
+// lowercase DNS name of letters, digits and inner hyphens, and a decimal port
+// from 1 to 65535 with no leading zero.
+func validDelegatedRelay(s string) bool {
+	host, port, err := net.SplitHostPort(s)
+	if err != nil {
+		return false
+	}
+	n, err := strconv.ParseUint(port, 10, 16)
+	if err != nil || n == 0 || strconv.FormatUint(n, 10) != port {
+		return false
+	}
+	if !canonicalRelayHost(host) {
+		return false
+	}
+	return net.JoinHostPort(host, port) == s
+}
+
+// canonicalRelayHost reports whether host is an IP literal without a zone, in
+// its canonical form, or a lowercase DNS name of letters, digits and inner
+// hyphens whose last label isn't all digits.
+func canonicalRelayHost(host string) bool {
+	if addr, err := netip.ParseAddr(host); err == nil {
+		return addr.Zone() == "" && addr.String() == host
+	}
+	if host == "" || len(host) > 253 {
+		return false
+	}
+	labels := strings.Split(host, ".")
+	for _, label := range labels {
+		if label == "" || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
+			return false
+		}
+		for _, r := range label {
+			if (r < 'a' || r > 'z') && (r < '0' || r > '9') && r != '-' {
+				return false
+			}
+		}
+	}
+	return strings.Trim(labels[len(labels)-1], "0123456789") != ""
+}
+
+// uriUser is user as an ssh:// URI's userinfo carries it: every byte outside
+// RFC 3986's unreserved set percent-encoded. RFC 3986 lets a '+' stand in
+// userinfo, but OpenSSH decodes one there as a space, so it is %2B.
+func uriUser(user string) string {
+	const hex = "0123456789ABCDEF"
+	var b strings.Builder
+	for i := 0; i < len(user); i++ {
+		c := user[i]
+		switch {
+		case 'A' <= c && c <= 'Z', 'a' <= c && c <= 'z', '0' <= c && c <= '9', c == '-', c == '.', c == '_', c == '~':
+			b.WriteByte(c)
+		default:
+			b.WriteByte('%')
+			b.WriteByte(hex[c>>4])
+			b.WriteByte(hex[c&0xf])
+		}
+	}
+	return b.String()
+}
+
+// isDelegated says whether sess, or the record that holds d, describes a
+// delegated session: the daemon says so with the address it reports, the
+// record with its delegation. Either is enough to say nobody joins it by its
+// ID; only the record says how it is joined.
+func isDelegated(sess *api.GetSessionResponse, d *sessiondir.Delegation) bool {
+	return d != nil || sess.GetDelegatedAddress() != ""
+}
+
+// confirmsDelegation says whether the daemon's answer sess confirms the
+// delegation d a record holds, by the guest address both give: only then are
+// the record's connect strings the session's.
+func confirmsDelegation(sess *api.GetSessionResponse, d *sessiondir.Delegation) bool {
+	return d != nil && sess.GetDelegatedAddress() != "" && sess.GetDelegatedAddress() == d.GuestAddress
+}
+
+// withDelegation is detail for a delegated session whose record holds d, nil
+// when none confirms it: who decides its guests, and, when connect is set,
+// the ssh command and URI its record gives in place of every way in its
+// daemon's answer would offer. A session no record confirms has no address to
+// be named by, and its routing ID names nothing a person joins by, so the
+// view falls back to its name.
+func withDelegation(detail tui.SessionDetail, d *sessiondir.Delegation, connect bool) tui.SessionDetail {
+	detail.Delegation = d
+	detail.Access = tui.AccessDelegated
+	detail.Open = false
+	detail.JoinCommand, detail.SSHCommand, detail.URI, detail.SSHConfig = "", "", "", ""
+	detail.SFTPEnabled, detail.SFTPCommand, detail.SCPUpload, detail.SCPDownload = false, "", "", ""
+	if d == nil {
+		detail.SessionID = ""
+		return detail
+	}
+	if connect {
+		// One safe line each already, since delegatedConnect offers only
+		// what a placement could hold; kept so that loosening that grammar
+		// can't put a record's bytes on a terminal.
+		sshCommand, uri := delegatedConnect(d)
+		detail.SSHCommand, detail.URI = tui.SafeLine(sshCommand), tui.SafeLine(uri)
+	}
+	return detail
 }
 
 // sshUser is the user guests connect to the session as: the daemon's, or for

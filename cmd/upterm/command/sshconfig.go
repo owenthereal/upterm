@@ -99,6 +99,11 @@ func sshConfigRunE(ctx context.Context, arg, alias string) error {
 	if live == nil {
 		return unreachable(r, info)
 	}
+	// A delegated session whose record and daemon disagree has no way in
+	// that both confirm, the daemon's own Host block included.
+	if info.delegated && info.delegation == nil {
+		return fmt.Errorf("session %s's record and its process give different guest addresses, so upterm won't write an ssh config for it", arg)
+	}
 
 	if alias == "" {
 		alias = r.Name

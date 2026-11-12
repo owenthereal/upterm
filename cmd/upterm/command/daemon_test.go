@@ -666,7 +666,8 @@ func TestAnAuthoritysNameNeverStartsALine(t *testing.T) {
 			return host.Placement{
 				RoutingID: run.RoutingID, Relay: fake.Addr, Trust: host.InitialTrust{Keys: [][]byte{pin.Marshal()}},
 				Protocol: "test_v1", ExternalID: "33333333-3333-4333-8333-333333333333", GuestAddress: "work",
-				Display: sessiondir.DelegationDisplay{Authority: authority},
+				Association: sessiondir.DelegationAssociation{Service: "https://authority.test", Account: "a", Login: "l"},
+				Display:     sessiondir.DelegationDisplay{Authority: authority},
 			}, nil
 		})
 	}
@@ -683,6 +684,41 @@ func TestAnAuthoritysNameNeverStartsALine(t *testing.T) {
 		requireEveryLineIsUpterms(t, out)
 		require.Contains(t, out, " is not one "+shown+" listed for this relay")
 	})
+}
+
+// Once its session's name is claimed, the daemon tells the desktop what the
+// authority decided by the name the record gives the authority.
+func TestDaemonNamesTheAuthorityItsClaimedRecordHolds(t *testing.T) {
+	hostCmd()
+	daemonTestRoots(t)
+	titles := make(chan string, 1)
+	swapNotify(t, func(title, _ string, _ any) error { titles <- title; return nil })
+	a, b := net.Pipe()
+	t.Cleanup(func() { _ = a.Close() })
+	// A parent that is gone: what the claim tells it is lost, and nothing
+	// waits on it.
+	_ = b.Close()
+	child := bootstrap.NewChild(a, nil)
+	t.Cleanup(func() { _ = child.Close() })
+	h, err := buildDaemonHost(context.Background(), "d", testHostOptions(), child, discardLogger())
+	require.NoError(t, err)
+
+	dir, err := sessiondir.Claim(context.Background(), sessiondir.ClaimOptions{
+		RuntimeRoot: utils.UptermRuntimeDir(), StateRoot: utils.UptermStateDir(), Name: "d", Command: []string{"bash"},
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = dir.Release(context.Background()) })
+	require.NoError(t, dir.Update(func(r *sessiondir.Record) {
+		r.Delegation = &sessiondir.Delegation{DelegationDisplay: sessiondir.DelegationDisplay{Authority: "Example Authority"}}
+	}))
+	h.SessionClaimedCallback(dir)
+	h.DecisionCallback(host.DecisionStopped)
+	select {
+	case title := <-titles:
+		require.Equal(t, "Example Authority stopped the session", title)
+	case <-time.After(5 * time.Second):
+		t.Fatal("the desktop was never told")
+	}
 }
 
 // A broker's error, whatever it says, reaches the operator's terminal with

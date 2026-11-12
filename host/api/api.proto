@@ -105,6 +105,10 @@ message GetSessionResponse {
   // built.
   optional string relay_known_hosts = 29;
   optional string relay_key_trust = 30;
+  // delegated_address is the guest address of a delegated session, one an
+  // external authority decides: the SSH user guests reach it as. Unset for
+  // every other session.
+  optional string delegated_address = 31;
 }
 
 message AuthorizedKey {

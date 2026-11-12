@@ -183,7 +183,9 @@ func (s *spawnedSession) runWithDetachContext(ctx context.Context, notify func(c
 			// that terminal: hintOut, where whoever is at the keyboard is
 			// told things, is stderr exactly when stderr is a terminal.
 			stderrHandedOver := displayErr == nil && !s.detach && s.attachClient != nil && s.hintOut == s.stderr
-			if displayErr == nil && sess.GetOpen() {
+			// Nobody joins a delegated session with its ID, whatever the
+			// answer says: its authority decides its guests.
+			if displayErr == nil && sess.GetOpen() && !isDelegated(sess, nil) {
 				// On stderr whatever the display was, the banner or nothing at
 				// all: stdout may be the JSON a script is reading.
 				//
@@ -325,33 +327,85 @@ func (s *spawnedSession) runWithDetachContext(ctx context.Context, notify func(c
 	if out.err != nil {
 		return fmt.Errorf("could not attach the local terminal to session %s: %w", s.name, out.err)
 	}
+	// The launch this process started, which the name may no longer be: the
+	// advice the lines give is only for the session this terminal was
+	// attached to.
+	var launchID string
+	if claimed != nil {
+		launchID = claimed.LaunchId
+	}
+	// What the record confirms the authority of a delegated launch decided:
+	// there is no telling an attached terminal while it is attached, so it is
+	// told here, as it lets go.
+	var withdrawn []string
+	var stopped string
+	if isDelegated(created, nil) {
+		withdrawn, stopped = delegatedEndLines(ctx, created, s.name, launchID)
+	}
 	// Each line is the whole story, so the error carries only the script
 	// exit code: an ExitCodeError with no message, for which Exit prints
 	// nothing.
 	switch out.res.Reason {
 	case attach.Detached:
-		s.writeEndLine(detachedLine(s.name))
+		s.writeEndLines(append([]string{detachedLine(s.name)}, withdrawn...))
 		return nil
 	case attach.Exited:
 		// No line for an exit of 0, nor for a join timeout, whose notice
 		// the daemon has already put in the stream.
-		s.writeEndLine(endLine(endedFromResult(out.res), false))
+		e := endedFromResult(out.res)
+		line := endLine(e, false)
+		if e.outcome() == outcomeStopped && stopped != "" {
+			line = stopped
+		}
+		s.writeEndLine(line)
 		if out.res.Status == 0 {
 			return nil
 		}
 		return ExitCodeError{Code: out.res.Status}
 	case attach.Disconnected:
-		// The launch this process started, which the name may no longer
-		// be: the reattach advice is only for the session this terminal was
-		// attached to.
-		var launchID string
-		if claimed != nil {
-			launchID = claimed.LaunchId
+		after := checkAfterDisconnect(ctx, s.name, launchID)
+		lines := []string{disconnectLine(s.name, s.loggedTo(), after)}
+		if after == stillRunning {
+			lines = append(lines, withdrawn...)
 		}
-		s.writeEndLine(disconnectLine(s.name, s.loggedTo(), checkAfterDisconnect(ctx, s.name, launchID)))
+		s.writeEndLines(lines)
 		return ExitCodeError{Code: exitDisconnected}
 	}
 	return nil
+}
+
+// delegatedEndLines is what a foreground delegated host says of its launch
+// as its terminal lets go, beyond the line it says for any session, from
+// what the record of the launch confirms: that the authority withdrew the
+// remote access of a session still running, for a terminal that leaves it
+// running. stopped is the line said in place of the generic stopped one when
+// the record says it was the authority's stop. Nothing is said that the
+// record, read within disconnectCheckTimeout, doesn't confirm. The record
+// names the authority only where created, the daemon's answer as it created
+// the session, agrees with it, by the guest address both give; where it
+// doesn't, the authority is "the session's authority", as ~? has it.
+func delegatedEndLines(ctx context.Context, created *api.GetSessionResponse, name, launchID string) (withdrawn []string, stopped string) {
+	if launchID == "" {
+		return nil, ""
+	}
+	ctx, cancel := context.WithTimeout(ctx, disconnectCheckTimeout)
+	defer cancel()
+	rec, held, err := sessiondir.Inspect(ctx, utils.UptermStateDir(), name)
+	if err != nil || rec == nil || rec.LaunchID != launchID || rec.Delegation == nil {
+		return nil, ""
+	}
+	named := rec.Delegation
+	if !confirmsDelegation(created, rec.Delegation) {
+		named = nil
+	}
+	if rec.Delegation.Decision == sessiondir.DecisionStopped {
+		stopped = "upterm: " + tui.StoppedNotice(named)
+	}
+	if held && rec.Status == sessiondir.StatusDisconnected && rec.TunnelReason == sessiondir.TunnelReasonWithdrawn {
+		withdrawn = tui.WithdrawnNotice(named, name)
+		withdrawn[0] = "upterm: " + withdrawn[0]
+	}
+	return withdrawn, stopped
 }
 
 // writeEndLine writes the session's last line, if there is one, after raw mode
@@ -362,6 +416,11 @@ func (s *spawnedSession) writeEndLine(line string) {
 		return
 	}
 	logging.WriteWithin(s.stderr, logging.LogBound, "\r\n"+line+"\r\n")
+}
+
+// writeEndLines is writeEndLine for a last line with more after it.
+func (s *spawnedSession) writeEndLines(lines []string) {
+	s.writeEndLine(strings.Join(lines, "\r\n"))
 }
 
 // drainClient waits for the attach client to finish and reports how it did.
@@ -474,8 +533,8 @@ func (s *spawnedSession) printStarted(ctx context.Context, claimed *api.Claimed,
 		// Hint row would say about that goes right after it, as a sentence
 		// of its own.
 		if st.GetStatus() != sessiondir.StatusReady {
-			if hint := recordedStatusHint(ctx, s.name, claimed.LaunchId); hint != "" {
-				line += " " + capitalized(hint)
+			if hint := recordedStatusHint(ctx, s.name, claimed.LaunchId, sess); hint != "" {
+				line += " " + hint
 			}
 		}
 		line += fmt.Sprintf(" Attach with upterm attach %s; stop it with upterm session stop %s.\n", s.name, s.name)
@@ -546,13 +605,33 @@ func (s *spawnedSession) printStarted(ctx context.Context, claimed *api.Claimed,
 	// back since leaves it out rather than set beside a status it doesn't
 	// describe. Whether the relay reconnects never changes once known, so
 	// any record of this launch has it.
-	if rec := launchRecord(ctx, claimed.Name, claimed.LaunchId); rec != nil {
+	rec := launchRecord(ctx, claimed.Name, claimed.LaunchId)
+	if rec != nil {
 		if rec.Status == st.Status {
 			info = withRecordedTunnel(info, rec)
 		} else {
 			info.Reconnect = rec.Reconnect
 		}
 	}
+	// A delegated session's delegation is its record's, published before its
+	// relay was dialled, with its connect strings where the daemon's answer
+	// confirms them, as the top-level ones are there whenever it answered.
+	// Nobody joins it with its ID. An answer that disagrees with the record
+	// leaves no address, and no way in, that both confirm, as `session info`
+	// has it: neither the record's delegation nor the daemon's connect
+	// strings are printed.
+	var delegation *sessiondir.Delegation
+	if rec != nil {
+		delegation = rec.Delegation
+	}
+	if sess != nil && isDelegated(sess, delegation) {
+		info.Open, info.Access = false, tui.AccessDelegated
+		if !confirmsDelegation(sess, delegation) {
+			delegation = nil
+			info.SSHCommand, info.JoinCommand, info.SSHConfig = "", "", ""
+		}
+	}
+	info.Delegation = delegationInfoOf(delegation, sess != nil && confirmsDelegation(sess, delegation))
 	enc := json.NewEncoder(s.stdout)
 	enc.SetIndent("", "  ")
 	return enc.Encode(info)
@@ -576,15 +655,28 @@ func launchRecord(ctx context.Context, name, launchID string) *sessiondir.Record
 }
 
 // recordedStatusHint is the view's Hint for launchID's status as its record
-// has it now: the record has the reason the tunnel is down, which the daemon's
-// report doesn't carry. "" when the record can't be read in time, is another
-// launch's, or doesn't say.
-func recordedStatusHint(ctx context.Context, name, launchID string) string {
+// has it now, as a sentence of its own: the record has the reason the tunnel
+// is down, which the daemon's report doesn't carry. The record names a
+// delegated session's authority only where sess, the daemon's answer as it
+// created the session, confirms it; where it doesn't, or there is none, the
+// authority is "the session's authority". "" when the record can't be read in
+// time, is another launch's, or doesn't say.
+func recordedStatusHint(ctx context.Context, name, launchID string, sess *api.GetSessionResponse) string {
 	rec := launchRecord(ctx, name, launchID)
 	if rec == nil {
 		return ""
 	}
-	return tui.StatusHint(tui.SessionDetail{Status: rec.Status, TunnelReason: rec.TunnelReason})
+	named := rec.Delegation
+	if !confirmsDelegation(sess, named) {
+		named = nil
+	}
+	hint := tui.StatusHint(tui.SessionDetail{Status: rec.Status, TunnelReason: rec.TunnelReason, Delegation: named})
+	if rec.TunnelReason == sessiondir.TunnelReasonWithdrawn {
+		// Already a sentence's start: the authority's name as it is
+		// given, or the capitalized phrase that stands for it.
+		return hint
+	}
+	return capitalized(hint)
 }
 
 // capitalized is s with its first letter in upper case. The view's hints are

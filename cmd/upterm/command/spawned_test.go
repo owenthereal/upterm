@@ -42,8 +42,12 @@ type scriptedDaemon struct {
 	// launchID is the launch the daemon claims, "launch-1" unless a case
 	// about the record sets it before startup.
 	launchID string
-	ready    chan struct{} // closed once spawn has built the child
-	gone     chan struct{} // closed when the child's watcher fires (parent left while armed)
+	// sessionID is the ID the daemon creates the session under and reports
+	// as it starts, as a real daemon reports the one the relay gave it:
+	// "sid-1" unless a case about the ID sets it before startup.
+	sessionID string
+	ready     chan struct{} // closed once spawn has built the child
+	gone      chan struct{} // closed when the child's watcher fires (parent left while armed)
 
 	// amend, when set, adds to the session the daemon reports as created,
 	// for a case about what a daemon reports beyond the basics.
@@ -52,7 +56,7 @@ type scriptedDaemon struct {
 
 func newScriptedDaemon(t *testing.T) (spawnFunc, *scriptedDaemon) {
 	t.Helper()
-	d := &scriptedDaemon{launchID: "launch-1", ready: make(chan struct{}), gone: make(chan struct{})}
+	d := &scriptedDaemon{launchID: "launch-1", sessionID: "sid-1", ready: make(chan struct{}), gone: make(chan struct{})}
 	spawn := func(opts spawnOptions) (net.Conn, *os.Process, error) {
 		require.NotEmpty(t, opts.name)
 		require.NotEmpty(t, opts.logPath)
@@ -87,7 +91,7 @@ func (d *scriptedDaemon) startup(t *testing.T, name string) <-chan api.Accept_De
 	go func() {
 		child := d.await()
 		_ = child.Claimed(&api.Claimed{Name: name, LaunchId: d.launchID, AdminSocket: "/run/a.sock", AttachSocket: "/run/t.sock", LogPath: "/var/log/upterm.log", Pid: 4242})
-		created := &api.GetSessionResponse{SessionId: "sid-1", Host: "ssh://127.0.0.1:2222", NodeAddr: "127.0.0.1:2222", SshUser: "u", Command: []string{"bash"}, Open: d.open}
+		created := &api.GetSessionResponse{SessionId: d.sessionID, Host: "ssh://127.0.0.1:2222", NodeAddr: "127.0.0.1:2222", SshUser: "u", Command: []string{"bash"}, Open: d.open}
 		if d.amend != nil {
 			d.amend(created)
 		}
@@ -118,7 +122,7 @@ func (d *scriptedDaemon) startWith(status string) {
 func (d *scriptedDaemon) startWithJoinState(status string, js *api.JoinState) {
 	child := d.await()
 	child.Disarm()
-	_ = child.Started("sid-1", status, js)
+	_ = child.Started(d.sessionID, status, js)
 }
 
 func newSession(t *testing.T, spawn spawnFunc, client clientFunc, stdout, stderr *bytes.Buffer) *spawnedSession {

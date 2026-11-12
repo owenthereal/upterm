@@ -3,6 +3,7 @@ package sessiondir
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"time"
@@ -329,6 +330,58 @@ func Prune(ctx context.Context, stateRoot string, olderThan time.Duration) error
 	}
 
 	return nil
+}
+
+// LiveDelegatedSessions returns the record of every running session that is
+// a delegated one, in name order.
+//
+// Running is what ListLive means by it: the results lock is held, whatever
+// the record says, so a session killed with -9 or gone with a reboot is not
+// one, however current its status reads and whoever has its pid now; and one
+// reconnecting to its relay is.
+//
+// Unlike ListLive, nothing held is skipped. A caller asks this before it
+// replaces a delegated session no running session here is, and a held name
+// whose record can't be read, or a lock that can't be tested, may be that
+// session: either is an error, naming the session. A name nobody holds is
+// not read at all, since nothing it says could make it running.
+func LiveDelegatedSessions(ctx context.Context, stateRoot string) ([]Record, error) {
+	resRoot := resultsRoot(stateRoot)
+	resReg, err := lockRegistry(ctx, resRoot)
+	if err != nil {
+		return nil, err
+	}
+	defer releaseRegistry(resReg)
+
+	entries, err := os.ReadDir(resRoot)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+
+	var live []Record
+	for _, e := range entries {
+		if !e.IsDir() || ValidateName(e.Name()) != nil {
+			continue
+		}
+		held, err := lockIsHeld(filepath.Join(resRoot, e.Name(), resultLockFile))
+		if err != nil {
+			return nil, fmt.Errorf("session %s: %w", e.Name(), err)
+		}
+		if !held {
+			continue
+		}
+		rec, err := readRecordLocked(stateRoot, e.Name())
+		if err != nil {
+			return nil, fmt.Errorf("session %s: %w", e.Name(), err)
+		}
+		if rec.Delegation != nil {
+			live = append(live, *rec)
+		}
+	}
+	return live, nil
 }
 
 // writeJSONAtomic publishes by rename, so a reader never sees a half-written

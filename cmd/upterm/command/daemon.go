@@ -7,12 +7,15 @@ import (
 	"log/slog"
 	"net"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/owenthereal/upterm/cmd/upterm/command/internal/bootstrap"
+	"github.com/owenthereal/upterm/cmd/upterm/command/internal/tui"
 	"github.com/owenthereal/upterm/host"
 	"github.com/owenthereal/upterm/host/api"
 	"github.com/owenthereal/upterm/host/sessiondir"
+	"github.com/owenthereal/upterm/icon"
 	"github.com/owenthereal/upterm/internal/termtext"
 	"github.com/owenthereal/upterm/internal/version"
 	"github.com/owenthereal/upterm/utils"
@@ -215,6 +218,15 @@ func buildDaemonHost(ctx context.Context, name string, opts hostOptions, child *
 	// The daemon is the one that knows what became of the session, so it is
 	// the one that tells the operator, by the session's name.
 	guests := guestNotifier(name)
+	// The session's directory, once claimed: what its authority decided is
+	// told as its record names the authority.
+	var claimedDir atomic.Pointer[sessiondir.Dir]
+	delegation := func() *sessiondir.Delegation {
+		if dir := claimedDir.Load(); dir != nil {
+			return dir.Record().Delegation
+		}
+		return nil
+	}
 
 	var sessionID string
 	// A variable rather than a bare return, so the ready callback can ask the
@@ -243,6 +255,7 @@ func buildDaemonHost(ctx context.Context, name string, opts hostOptions, child *
 		KeepAliveDuration: 50 * time.Second,
 		ProxyURL:          opts.proxyURL,
 		SessionClaimedCallback: func(dir *sessiondir.Dir) {
+			claimedDir.Store(dir)
 			logPath := utils.UptermLogFilePath()
 			if err := dir.Update(func(r *sessiondir.Record) { r.LogPath = logPath }); err != nil {
 				logger.Warn("failed to publish the log path", "error", err)
@@ -271,6 +284,7 @@ func buildDaemonHost(ctx context.Context, name string, opts hostOptions, child *
 		ClientJoinedCallback:       guests.joined,
 		ClientLeftCallback:         guests.left,
 		TunnelCallback:             tunnelNotifier(name),
+		DecisionCallback:           decisionNotifier(name, delegation, logger),
 		Logger:                     logger,
 		ReadOnly:                   flagReadOnly,
 		AllowLocalTCPForwarding:    flagAllowForwarding == forwardAny || flagAllowLocalTCPForwarding,
@@ -326,6 +340,40 @@ func buildDaemonHost(ctx context.Context, name string, opts hostOptions, child *
 		},
 	}
 	return h, nil
+}
+
+// decisionNotice is the desktop notification for the authority of the
+// delegated session name, whose record holds d, stopping or withdrawing it:
+// the notice's first sentence as its title, and the rest as its body. The
+// sentence ends at the first ". " after the authority's name, which may hold
+// full stops of its own.
+func decisionNotice(d *sessiondir.Delegation, name string, dec host.Decision) notification {
+	firstSentence := func(text string) (title, body string) {
+		authority := tui.AuthorityAtStart(d)
+		title, body, _ = strings.Cut(strings.TrimPrefix(text, authority), ". ")
+		return authority + title, body
+	}
+	if dec == host.DecisionStopped {
+		title, body := firstSentence(tui.StoppedNotice(d))
+		return notification{title, body}
+	}
+	lines := tui.WithdrawnNotice(d, name)
+	title, body := firstSentence(lines[0])
+	return notification{title, body + "\n" + lines[1]}
+}
+
+// decisionNotifier says what the authority decided about the delegated
+// session name where its daemon can: in its log, and as a desktop
+// notification, on a goroutine of its own, since a desktop may take as long
+// as it likes, or forever where there is none. The daemon has no terminal of
+// its own; a terminal attached to the session is told as it lets go (see
+// delegatedEndLines). delegation reads the session's from its record.
+func decisionNotifier(name string, delegation func() *sessiondir.Delegation, logger *slog.Logger) func(host.Decision) {
+	return func(dec host.Decision) {
+		n := decisionNotice(delegation(), name, dec)
+		logger.Warn(n.Title + ". " + n.Body)
+		go func() { _ = notify(n.Title, n.Body, icon.Upterm) }()
+	}
 }
 
 // versionWarning is what upterm host says when the relay's version doesn't

@@ -340,6 +340,9 @@ func (s *adminServiceServer) GetSession(ctx context.Context, in *api.GetSessionR
 		// it, so it is the session's for its life.
 		RelayKnownHosts: s.Session.RelayKnownHosts,
 		RelayKeyTrust:   s.Session.RelayKeyTrust,
+
+		// And, for a delegated session, the address guests reach it at.
+		DelegatedAddress: s.Session.DelegatedAddress,
 	}
 	DescribeSession(resp, s.Name, s.State)
 	return resp, nil

@@ -32,7 +32,10 @@
 //   - [DecisionStopped] and [DecisionWithdrawn], the values of
 //     Delegation.Decision;
 //   - [TunnelReasonAuthorityRefused], [TunnelReasonWithdrawn] and
-//     [TunnelReasonTrustLapsed].
+//     [TunnelReasonTrustLapsed];
+//   - [LiveDelegatedSessions], the delegated sessions running here;
+//   - [LockDelegatedStart] and [StartLock], which keep two starts of one
+//     delegated name apart.
 //
 // This API may change in any minor release, and each change is listed in the
 // release notes.
@@ -736,27 +739,34 @@ func lockRegistry(ctx context.Context, root string) (*os.File, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Named: this guards both the sessions and the results registry, and a
+	// caller timing out needs to know which one is contended rather than a
+	// fixed phrase that is wrong for half its callers.
+	if err := waitLock(ctx, f, "the registry lock "+path); err != nil {
+		_ = f.Close()
+		return nil, err
+	}
+	return f, nil
+}
 
+// waitLock takes f's lock, backing off while someone else holds it, until ctx
+// ends; what names the lock in the error that ends the wait.
+func waitLock(ctx context.Context, f *os.File, what string) error {
 	wait := registryWaitInitial
 	for {
 		ok, err := tryLock(f)
 		if err != nil {
-			_ = f.Close()
-			return nil, err
+			return err
 		}
 		if ok {
-			return f, nil
+			return nil
 		}
 
 		timer := time.NewTimer(wait)
 		select {
 		case <-ctx.Done():
 			timer.Stop()
-			_ = f.Close()
-			// Named: this guards both the sessions and the results registry,
-			// and a caller timing out needs to know which one is contended
-			// rather than a fixed phrase that is wrong for half its callers.
-			return nil, fmt.Errorf("waiting for the registry lock %s: %w", path, ctx.Err())
+			return fmt.Errorf("waiting for %s: %w", what, ctx.Err())
 		case <-timer.C:
 		}
 

@@ -14,6 +14,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/owenthereal/upterm/host/api"
 	"github.com/owenthereal/upterm/host/internal"
@@ -77,11 +79,17 @@ type Placement struct {
 	// '-', starting with a letter or digit.
 	GuestAddress string
 	// Association and Display are what the session record shows about the
-	// delegation. Display's name is at most 64 bytes; it has at most 8 links,
-	// each with a label of at most 64 bytes and an https URL of at most 2048
-	// bytes, and at most 16 notes of at most 256 bytes each, all measured
-	// once their text is made safe for a terminal. The name, the labels and
-	// the notes are one line each: a line feed in them is replaced.
+	// delegation. Association's fields are identifiers, recorded as given or
+	// refused, never made safe: the service is an https URL of at most 2048
+	// bytes, with a host name and no userinfo; the account and the login are
+	// 1 to 256 bytes each; all three are UTF-8 with no control character, a
+	// line feed included; and the superseded session ID is empty or a
+	// canonical UUID.
+	// Display's name is at most 64 bytes; it has at most 8 links, each with a
+	// label of at most 64 bytes and an https URL of at most 2048 bytes, and
+	// at most 16 notes of at most 256 bytes each, all measured once their
+	// text is made safe for a terminal. The name, the labels and the notes
+	// are one line each: a line feed in them is replaced.
 	Association sessiondir.DelegationAssociation
 	Display     sessiondir.DelegationDisplay
 	// Published, if set, is called once, on Run's goroutine, when Run is
@@ -160,6 +168,9 @@ const (
 	maxLinkURL       = 2048
 	maxNotes         = 16
 	maxNote          = 256
+	maxService       = 2048
+	maxAccount       = 256
+	maxLogin         = 256
 )
 
 var (
@@ -356,10 +367,47 @@ func checkPlacement(run Run, p Placement) (*url.URL, internal.RelayPins, error) 
 	if !guestAddressRe.MatchString(p.GuestAddress) {
 		return invalid("the guest address is not 1 to 255 letters, digits, '.', '_', '+' or '-', starting with a letter or digit")
 	}
+	if reason := associationProblem(p.Association); reason != "" {
+		return invalid(reason)
+	}
 	if reason := displayProblem(p.Display); reason != "" {
 		return invalid(reason)
 	}
 	return &url.URL{Scheme: "ssh", Host: p.Relay}, pins, nil
+}
+
+// associationProblem is why a can't be recorded, or "" when it can. Its
+// fields are identifiers, so one that isn't well formed is refused, never
+// made safe.
+func associationProblem(a sessiondir.DelegationAssociation) string {
+	// No userinfo: a placement carries no credential, and a password is one.
+	if u, err := url.Parse(a.Service); len(a.Service) > maxService || !controlFree(a.Service) || err != nil || u.Scheme != "https" || u.Hostname() == "" || u.User != nil {
+		return "the service is not an https URL of at most 2048 bytes, with no userinfo or control characters"
+	}
+	if len(a.Account) < 1 || len(a.Account) > maxAccount || !controlFree(a.Account) {
+		return "the account is not 1 to 256 bytes of UTF-8 with no control characters"
+	}
+	if len(a.Login) < 1 || len(a.Login) > maxLogin || !controlFree(a.Login) {
+		return "the login is not 1 to 256 bytes of UTF-8 with no control characters"
+	}
+	if a.SupersededSessionID != "" && !internal.ValidUUID(a.SupersededSessionID) {
+		return "the superseded session ID is not a canonical UUID"
+	}
+	return ""
+}
+
+// controlFree reports whether s is UTF-8 with no control character in it, a
+// line feed included.
+func controlFree(s string) bool {
+	if !utf8.ValidString(s) {
+		return false
+	}
+	for _, r := range s {
+		if unicode.IsControl(r) {
+			return false
+		}
+	}
+	return true
 }
 
 // displayProblem is why d, already sanitized, can't be shown, or "" when it

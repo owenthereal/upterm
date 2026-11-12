@@ -521,8 +521,12 @@ type GetSessionResponse struct {
 	// built.
 	RelayKnownHosts *string `protobuf:"bytes,29,opt,name=relay_known_hosts,json=relayKnownHosts,proto3,oneof" json:"relay_known_hosts,omitempty"`
 	RelayKeyTrust   *string `protobuf:"bytes,30,opt,name=relay_key_trust,json=relayKeyTrust,proto3,oneof" json:"relay_key_trust,omitempty"`
-	unknownFields   protoimpl.UnknownFields
-	sizeCache       protoimpl.SizeCache
+	// delegated_address is the guest address of a delegated session, one an
+	// external authority decides: the SSH user guests reach it as. Unset for
+	// every other session.
+	DelegatedAddress *string `protobuf:"bytes,31,opt,name=delegated_address,json=delegatedAddress,proto3,oneof" json:"delegated_address,omitempty"`
+	unknownFields    protoimpl.UnknownFields
+	sizeCache        protoimpl.SizeCache
 }
 
 func (x *GetSessionResponse) Reset() {
@@ -765,6 +769,13 @@ func (x *GetSessionResponse) GetRelayKeyTrust() string {
 	return ""
 }
 
+func (x *GetSessionResponse) GetDelegatedAddress() string {
+	if x != nil && x.DelegatedAddress != nil {
+		return *x.DelegatedAddress
+	}
+	return ""
+}
+
 type AuthorizedKey struct {
 	state                 protoimpl.MessageState `protogen:"open.v1"`
 	PublicKeyFingerprints []string               `protobuf:"bytes,1,rep,name=public_key_fingerprints,json=publicKeyFingerprints,proto3" json:"public_key_fingerprints,omitempty"`
@@ -1001,7 +1012,7 @@ const file_api_proto_rawDesc = "" +
 	"\tJoinState\x12#\n" +
 	"\rtimeout_nanos\x18\x01 \x01(\x03R\ftimeoutNanos\x12,\n" +
 	"\x12deadline_unix_nano\x18\x02 \x01(\x03R\x10deadlineUnixNano\x12>\n" +
-	"\x1cfirst_guest_joined_unix_nano\x18\x03 \x01(\x03R\x18firstGuestJoinedUnixNano\"\xa0\f\n" +
+	"\x1cfirst_guest_joined_unix_nano\x18\x03 \x01(\x03R\x18firstGuestJoinedUnixNano\"\xe8\f\n" +
 	"\x12GetSessionResponse\x12\x1d\n" +
 	"\n" +
 	"session_id\x18\x01 \x01(\tR\tsessionId\x12\x18\n" +
@@ -1037,7 +1048,8 @@ const file_api_proto_rawDesc = "" +
 	"\x0etcp_forwarding\x18\x1b \x01(\tH\rR\rtcpForwarding\x88\x01\x01\x12,\n" +
 	"\x0fapproval_method\x18\x1c \x01(\tH\x0eR\x0eapprovalMethod\x88\x01\x01\x12/\n" +
 	"\x11relay_known_hosts\x18\x1d \x01(\tH\x0fR\x0frelayKnownHosts\x88\x01\x01\x12+\n" +
-	"\x0frelay_key_trust\x18\x1e \x01(\tH\x10R\rrelayKeyTrust\x88\x01\x01B\a\n" +
+	"\x0frelay_key_trust\x18\x1e \x01(\tH\x10R\rrelayKeyTrust\x88\x01\x01\x120\n" +
+	"\x11delegated_address\x18\x1f \x01(\tH\x11R\x10delegatedAddress\x88\x01\x01B\a\n" +
 	"\x05_nameB\t\n" +
 	"\a_statusB\f\n" +
 	"\n" +
@@ -1057,7 +1069,8 @@ const file_api_proto_rawDesc = "" +
 	"\x0f_tcp_forwardingB\x12\n" +
 	"\x10_approval_methodB\x14\n" +
 	"\x12_relay_known_hostsB\x12\n" +
-	"\x10_relay_key_trust\"a\n" +
+	"\x10_relay_key_trustB\x14\n" +
+	"\x12_delegated_address\"a\n" +
 	"\rAuthorizedKey\x126\n" +
 	"\x17public_key_fingerprints\x18\x01 \x03(\tR\x15publicKeyFingerprints\x12\x18\n" +
 	"\acomment\x18\x02 \x01(\tR\acomment\"\xac\x02\n" +

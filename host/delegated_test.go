@@ -451,6 +451,7 @@ func TestStartRelayTrustFromThePlacement(t *testing.T) {
 	require.Equal(t, "ssh://"+f.fwd.Addr(), created.GetHost(), "the session is described at the relay it was placed on")
 	require.Equal(t, testGuestAddress, created.GetSshUser(), "guests reach a delegated session at its guest address")
 	require.False(t, created.GetOpen(), "a delegated session is not open to anyone with its ID")
+	require.Equal(t, testGuestAddress, created.GetDelegatedAddress(), "a delegated session says it is one, at its guest address")
 	f.awaitReady(t)
 
 	run, places := f.placed()
@@ -1302,6 +1303,50 @@ func placementChecks() []placementCheck {
 			func(_ Run, p *Placement) { p.GuestAddress = "wörk" },
 			func(_ Run, p *Placement) { p.GuestAddress = strings.Repeat("w", 256) },
 		}},
+		{"the service is not an https URL of at most 2048 bytes, with no userinfo or control characters", []func(Run, *Placement){
+			func(_ Run, p *Placement) { p.Association.Service = "http://authority.test" },
+			func(_ Run, p *Placement) { p.Association.Service = "https:///s" },
+			func(_ Run, p *Placement) { p.Association.Service = "https://:443/" },
+			func(_ Run, p *Placement) {
+				p.Association.Service = "https://authority.test/" + strings.Repeat("s", 2049-len("https://authority.test/"))
+			},
+			// Bytes, not runes: 1036 of them.
+			func(_ Run, p *Placement) {
+				p.Association.Service = "https://authority.test/" + strings.Repeat("é", (2049-len("https://authority.test/"))/2)
+			},
+			// A placement carries no credential, and a password is one.
+			func(_ Run, p *Placement) { p.Association.Service = "https://user:secret@authority.test/" },
+			func(_ Run, p *Placement) { p.Association.Service = "https://user@authority.test/" },
+			func(_ Run, p *Placement) { p.Association.Service = "https://@authority.test/" },
+			func(_ Run, p *Placement) { p.Association.Service = "https://authority.test/s\x1b" },
+			// url.Parse takes U+009B in a host or a path: only the
+			// control-character test refuses it.
+			func(_ Run, p *Placement) { p.Association.Service = "https://author\u009bity.test" },
+			func(_ Run, p *Placement) { p.Association.Service = "https://authority.test/s\u009b" },
+			func(_ Run, p *Placement) { p.Association.Service = "https://authority.test/s\n" },
+			func(_ Run, p *Placement) { p.Association.Service = "https://authority.test/s\xff" },
+		}},
+		{"the account is not 1 to 256 bytes of UTF-8 with no control characters", []func(Run, *Placement){
+			func(_ Run, p *Placement) { p.Association.Account = "" },
+			func(_ Run, p *Placement) { p.Association.Account = strings.Repeat("a", 257) },
+			func(_ Run, p *Placement) { p.Association.Account = strings.Repeat("é", 129) },
+			func(_ Run, p *Placement) { p.Association.Account = "acc\xffount" },
+			func(_ Run, p *Placement) { p.Association.Account = "acc\u009bount" },
+			func(_ Run, p *Placement) { p.Association.Account = "acc\nount" },
+		}},
+		{"the login is not 1 to 256 bytes of UTF-8 with no control characters", []func(Run, *Placement){
+			func(_ Run, p *Placement) { p.Association.Login = "" },
+			func(_ Run, p *Placement) { p.Association.Login = strings.Repeat("l", 257) },
+			func(_ Run, p *Placement) { p.Association.Login = strings.Repeat("é", 129) },
+			func(_ Run, p *Placement) { p.Association.Login = "log\xffin" },
+			func(_ Run, p *Placement) { p.Association.Login = "log\u009bin" },
+			func(_ Run, p *Placement) { p.Association.Login = "log\nin" },
+		}},
+		{"the superseded session ID is not a canonical UUID", []func(Run, *Placement){
+			func(_ Run, p *Placement) { p.Association.SupersededSessionID = "not-a-uuid" },
+			func(_ Run, p *Placement) { p.Association.SupersededSessionID = "0123ABCD-4567-89EF-0123-456789ABCDEF" },
+			func(_ Run, p *Placement) { p.Association.SupersededSessionID = "00000000-0000-0000-0000-000000000000" },
+		}},
 		{"the authority's name is longer than 64 bytes", []func(Run, *Placement){
 			func(_ Run, p *Placement) { p.Display.Authority = strings.Repeat("a", 65) },
 			// Sanitized first: one control byte becomes three.
@@ -1350,6 +1395,9 @@ func TestPlacementChecksEndTheRunInOrder(t *testing.T) {
 				require.EqualError(t, err, "the placement for this run is invalid: "+check.reason)
 				require.Zero(t, p.fake.Connections(), "a refused placement was dialled")
 				require.Equal(t, int32(1), p.published.Load(), "the broker was not told exactly once")
+				rec, err := sessiondir.ReadRecord(p.stateRoot, p.h.Name)
+				require.NoError(t, err)
+				require.Nil(t, rec.Delegation, "a refused placement was recorded")
 			})
 		}
 	}
@@ -1374,10 +1422,25 @@ func TestPlacementChecksEndTheRunInOrder(t *testing.T) {
 		"16 notes of 256 bytes": {func(_ Run, p *Placement) { p.Display.Notes = notes(16, 256) }, true},
 		"an IPv6 relay":         {func(_ Run, p *Placement) { p.Relay = "[::1]:" + portOf(t, p.Relay) }, false},
 		"a named relay":         {func(_ Run, p *Placement) { p.Relay = "localhost:" + portOf(t, p.Relay) }, false},
+		"a 2048-byte service": {func(_ Run, p *Placement) {
+			p.Association.Service = "https://a.test/" + strings.Repeat("s", 2048-len("https://a.test/"))
+		}, true},
+		"a 256-byte account":           {func(_ Run, p *Placement) { p.Association.Account = strings.Repeat("a", 256) }, true},
+		"a 256-byte login":             {func(_ Run, p *Placement) { p.Association.Login = strings.Repeat("l", 256) }, true},
+		"a 256-byte non-ASCII account": {func(_ Run, p *Placement) { p.Association.Account = strings.Repeat("é", 128) }, true},
+		"a 256-byte non-ASCII login":   {func(_ Run, p *Placement) { p.Association.Login = strings.Repeat("é", 128) }, true},
+		"a non-ASCII service":          {func(_ Run, p *Placement) { p.Association.Service = "https://authority.test/é" }, true},
+		"a non-ASCII account":          {func(_ Run, p *Placement) { p.Association.Account = "compte-é" }, true},
+		"a non-ASCII login":            {func(_ Run, p *Placement) { p.Association.Login = "用户" }, true},
+		"a superseded session":         {func(_ Run, p *Placement) { p.Association.SupersededSessionID = "77777777-7777-4777-8777-777777777777" }, true},
 	} {
 		t.Run("allowed/"+name, func(t *testing.T) {
 			p := newPlacedHost(t)
-			err := p.run(t, tc.mutate)
+			var given sessiondir.DelegationAssociation
+			err := p.run(t, func(run Run, pl *Placement) {
+				tc.mutate(run, pl)
+				given = pl.Association
+			})
 			require.Error(t, err, "the fake relay acknowledges no delegated registration")
 			require.NotContains(t, err.Error(), "the placement for this run is invalid")
 			if tc.dials {
@@ -1385,6 +1448,10 @@ func TestPlacementChecksEndTheRunInOrder(t *testing.T) {
 				require.NotZero(t, p.fake.Connections(), "an allowed placement was never dialled")
 			}
 			require.Equal(t, int32(1), p.published.Load())
+			rec, err := sessiondir.ReadRecord(p.stateRoot, p.h.Name)
+			require.NoError(t, err)
+			require.NotNil(t, rec.Delegation, "an allowed placement was not recorded")
+			require.Equal(t, given, rec.Delegation.DelegationAssociation, "the association was not recorded as given")
 		})
 	}
 }
