@@ -9,6 +9,10 @@
 //
 //   - [GateModeRequestType], which asks the node a hop reached which
 //     registration it holds for a routing ID;
+//   - [GateAdmitRequestType], which asserts to a delegated registration's
+//     home that its authority admitted the hop's guest;
+//   - [GateHeldRequestType], which asks that home whether it still holds the
+//     registration;
 //   - [ServerDelegatedControlRequestType], a host's report on its own
 //     delegated registration;
 //   - [HostDelegatedDecisionRequestType], a decision about a host's

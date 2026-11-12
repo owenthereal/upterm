@@ -19,14 +19,21 @@ import (
 
 // Authority decides delegated registrations: the runs whose registration, and
 // whose guests, an authority outside the relay decides. A host asks for one
-// by setting delegated_session in its request. A local registration never
-// reaches the authority.
+// by setting delegated_session in its request. A local registration, and a
+// local session's guest, never reach the authority.
 //
 // Register and Control run on the host connection's request goroutine, so
 // they hold up that connection's other requests; ctx ends with the
 // connection. Refusing with a *DelegatedRefusedError sends the host its code.
 // Any other error is DELEGATED_UNAVAILABLE, which the host retries and never
 // takes as a decision.
+//
+// A guest whose SSH user is a relay session ID, the 20 letters and digits the
+// relay names a session by, optionally followed by a colon and a node
+// address in base64url, which may be empty, is a session's guest: it reaches
+// Admit only once its home reports a delegated registration. Any other user
+// is offered to Claims, and only a user the authority claims reaches Admit. A
+// dark authority is asked neither.
 type Authority interface {
 	// Register decides a delegated registration once its request is well
 	// formed, its proof has verified, and its host came in by the public SSH
@@ -35,6 +42,25 @@ type Authority interface {
 	// Control records a report from the host of a registration Register
 	// accepted, on that registration's connection, and answers it.
 	Control(ctx context.Context, r Report) (*DelegatedControlReply, error)
+	// Claims reports whether user is one of the authority's own, which it
+	// decides the guests of. It looks at user alone and does no I/O, since it
+	// also answers guests that haven't signed yet. It is never asked about a
+	// relay session ID.
+	Claims(user string) bool
+	// Admit decides a guest once it has signed with its key, and before
+	// anything is looked up for a claimed user. ctx lasts at most 5 seconds,
+	// and no longer than what is left of the handshake's budget for a claimed
+	// user, or, for a session ID, of the time its home was given to be
+	// reached: half the handshake timeout from when the guest signed. It ends
+	// once the relay has finished admitting the guest, after Admit returns.
+	Admit(ctx context.Context, g *Guest, req GuestRequest) (Admission, error)
+	// Unreachable is the text a guest Admit allowed is shown instead of its
+	// target, when the relay holds no connection to that target as it serves
+	// the guest. No admission the relay accepts ends that way today: a guest
+	// whose allowed target can't be reached is refused as it authenticates,
+	// so the relay never calls Unreachable. ctx would end as Admit's does, or
+	// after half the handshake's budget, whichever is first.
+	Unreachable(ctx context.Context, g *Guest, t Target) []byte
 }
 
 // Lifecycle is what an extension runs beside a serving relay.
@@ -56,14 +82,18 @@ type Runtime interface {
 	// Fence returns the fence called name, the same one each time.
 	Fence(name string) Fence
 	// Drain raises the drain latch, then closes every delegated registration,
-	// without calling the authority. It returns nil once Counts is (0, 0), or
-	// ctx's error once ctx ends.
+	// hop and guest, without calling the authority. It returns nil once
+	// Counts is (0, 0), or ctx's error once ctx ends.
 	Drain(ctx context.Context) error
 	// Resume clears the drain latch, and no fence.
 	Resume()
 	// Counts is the delegated work in progress: the registrations, those the
 	// authority is still deciding and those whose host's raw transport is
-	// still open among them, and the guests.
+	// still open among them, and the guests, those still being decided and
+	// the hops this node serves to its delegated registrations among them.
+	// A connection whose delegated registration has a final decision, and
+	// which holds a local registration too, is a local session's: it is not
+	// counted, and Drain leaves it open.
 	Counts() (registrations, guests int)
 	// PushDecision sends d to the host connection that registered d's
 	// external session at d's generation on this relay, and returns the
@@ -81,9 +111,9 @@ type Runtime interface {
 	Identity() (nodeID, bootID, nodeAddr string)
 }
 
-// Fence refuses new delegated registrations while it is set; one already
-// adopted is left alone. Neither Set nor Clear does I/O or waits on the
-// authority.
+// Fence refuses new delegated work while it is set: registrations, guests and
+// the hops to delegated registrations. Work already adopted or admitted is
+// left alone. Neither Set nor Clear does I/O or waits on the authority.
 type Fence interface {
 	Set()
 	Clear()
@@ -292,10 +322,37 @@ type delegatedHost struct {
 	// releases the route's store entry, which can be slow. Both are nil for a
 	// registration that published none.
 	fence, release func()
+	// obligation is the connection's delegated work.
+	obligation *delegatedObligation
 
 	mu sync.Mutex
-	// retired is set once a final decision withdrew the route.
+	// retired is set once a final decision withdrew the route, and from the
+	// start for a registration accepted with a final decision, which has none.
 	retired bool
+	// local is set once the connection holds a local registration as well.
+	local bool
+}
+
+// registeredLocally is told that the connection now holds a local
+// registration.
+func (h *delegatedHost) registeredLocally() {
+	h.mu.Lock()
+	h.local = true
+	h.mu.Unlock()
+	h.settle()
+}
+
+// settle ends the connection's delegated work once its registration has a
+// final decision and the connection holds a local registration, in either
+// order: the connection is then a local session's, which isn't counted, and
+// which a drain leaves alone. Until both hold, it is delegated work.
+func (h *delegatedHost) settle() {
+	h.mu.Lock()
+	settled := h.retired && h.local
+	h.mu.Unlock()
+	if settled {
+		h.obligation.end()
+	}
 }
 
 // retire is what a final decision does to a registration whose connection is
@@ -323,6 +380,7 @@ func (h *delegatedHost) withdraw() (release func()) {
 	if fence != nil {
 		fence()
 	}
+	h.settle()
 	return release
 }
 
@@ -429,7 +487,14 @@ func (m *delegatedHosts) Resume() {
 func (m *delegatedHosts) Counts() (registrations, guests int) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return len(m.work), 0
+	for w := range m.work {
+		if w.guest {
+			guests++
+		} else {
+			registrations++
+		}
+	}
+	return registrations, guests
 }
 
 // Drain raises the latch before it enumerates the work. The closes run
@@ -472,24 +537,39 @@ func (m *delegatedHosts) Identity() (nodeID, bootID, nodeAddr string) {
 
 // delegatedObligation is one piece of delegated work, from before the
 // authority is asked until its connection ends. epoch is the runtime's when
-// the work began; close ends its raw transports; fence, once its home exists,
-// retires that home.
+// the work began; guest marks a guest's or a hop's; close ends its raw
+// transports; fence, once its home exists, retires that home.
 type delegatedObligation struct {
 	owner *delegatedHosts
 	epoch uint64
+	guest bool
 	close func()
 	fence func()
 }
 
-// begin takes an obligation for new work, unless a fence or the latch
-// refuses it, when it returns nil.
+// begin takes an obligation for a new registration, unless a fence or the
+// latch refuses it, when it returns nil.
 func (m *delegatedHosts) begin(close func()) *delegatedObligation {
+	return m.take(false, close)
+}
+
+// beginGuest takes an obligation for a new guest, or a hop to a delegated
+// registration, as begin does a registration's. Without a runtime there is
+// none to take.
+func (m *delegatedHosts) beginGuest(close func()) *delegatedObligation {
+	if m == nil {
+		return nil
+	}
+	return m.take(true, close)
+}
+
+func (m *delegatedHosts) take(guest bool, close func()) *delegatedObligation {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.refusedLocked() {
 		return nil
 	}
-	w := &delegatedObligation{owner: m, epoch: m.epoch, close: close}
+	w := &delegatedObligation{owner: m, epoch: m.epoch, guest: guest, close: close}
 	m.work[w] = struct{}{}
 	return w
 }
@@ -660,7 +740,7 @@ func (s *sshd) createDelegatedSession(work *sshWorkRef, ctx ssh.Context, conn *g
 		return delegatedRefusal(DelegatedErrorCode_DELEGATED_UNAVAILABLE)
 	}
 
-	host := &delegatedHost{registration: reg, conn: conn}
+	host := &delegatedHost{registration: reg, conn: conn, obligation: obligation, retired: result.Disposition != DelegatedDisposition_DELEGATED_CURRENT}
 	if published := ownedRegistration(ctx, sessionID); result.Disposition == DelegatedDisposition_DELEGATED_CURRENT && published != nil {
 		host.fence = func() {
 			// The home goes first, and the listener with it; the forward that
@@ -693,6 +773,12 @@ func (s *sshd) createDelegatedSession(work *sshWorkRef, ctx ssh.Context, conn *g
 		return delegatedRefusal(DelegatedErrorCode_DELEGATED_UNAVAILABLE)
 	}
 	context.AfterFunc(ctx, obligation.end)
+	// Only now: a decision pushed before publication must not end the
+	// obligation publication needs. The connection's requests are served one
+	// at a time, so no local registration is made meanwhile.
+	if madeLocalRegistration(ctx) {
+		host.registeredLocally()
+	}
 	// A current registration's connection is pinged once it is adopted. A
 	// final one is kept only for the host's final reports, and is pinged
 	// alike, so a host that falls silent while its connection stays open

@@ -2,6 +2,7 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"slices"
 	"sync/atomic"
 )
@@ -38,10 +39,22 @@ type RegistrationRef struct {
 // doesn't, Done is closed, and neither changes again. A home is retired before
 // its route is released and before its host connection is closed, so nothing
 // that finds it held can outlive that.
+//
+// Confirm checks, within ctx, that the registration is still held: a home on
+// this node answers as Held does, and a home on another node is asked over
+// the hop, within 2 seconds. A home that fails the check over the hop is
+// retired, and its hop closed.
+//
+// Over the hop, Confirm is answered only once the guest's allow has been
+// asserted, so it fails for the home a GuestRequest carries while Admit is
+// still deciding. A check that fails, ctx ending first included, retires the
+// home and closes its hop, and with it the guest. One check runs at a time:
+// a second begun before the first has answered fails both.
 type Home interface {
 	Ref() RegistrationRef
 	Held() bool
 	Done() <-chan struct{}
+	Confirm(ctx context.Context) bool
 }
 
 func (r RegistrationRef) clone() RegistrationRef {

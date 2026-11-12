@@ -44,16 +44,25 @@ func (d *stockTestDialer) DialContext(ctx context.Context, id *api.Identifier) (
 
 func stockTestProxy(t *testing.T, timeout time.Duration, dialer connDialer, options ...func(*sshProxy)) (*sshProxy, string, *prometheus.Registry, ssh.Signer) {
 	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	return stockTestProxyOn(t, ln, timeout, dialer, options...)
+}
+
+// stockTestProxyOn is stockTestProxy serving ln.
+func stockTestProxyOn(t *testing.T, ln net.Listener, timeout time.Duration, dialer connDialer, options ...func(*sshProxy)) (*sshProxy, string, *prometheus.Registry, ssh.Signer) {
+	t.Helper()
 	signer, err := ssh.ParsePrivateKey([]byte(TestPrivateKeyContent))
 	require.NoError(t, err)
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	mp, reg := newTestMetrics(t)
 	proxy := &sshProxy{HandshakeTimeout: timeout, HostSigners: []ssh.Signer{signer}, Signers: []ssh.Signer{signer}, SessionManager: newEmbeddedSessionManager(logger), NodeAddr: "127.0.0.1:2222", ConnDialer: dialer, Logger: logger, MetricsProvider: mp}
+	// The delegated work a relay serves with: its fences, its drain latch and
+	// its counts. It holds nothing until a test composes an authority.
+	proxy.delegated = newDelegatedHosts("", "", "")
 	for _, option := range options {
 		option(proxy)
 	}
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	require.NoError(t, err)
 	done := make(chan error, 1)
 	go func() { done <- proxy.Serve(ln) }()
 	require.Eventually(t, func() bool {
@@ -61,7 +70,16 @@ func stockTestProxy(t *testing.T, timeout time.Duration, dialer connDialer, opti
 		return ok
 	}, time.Second, time.Millisecond)
 	t.Cleanup(func() {
-		_ = proxy.Shutdown()
+		// Bounded, so that a connection the proxy can't join fails the test
+		// rather than hanging it.
+		stopped := make(chan struct{})
+		go func() { _ = proxy.Shutdown(); close(stopped) }()
+		select {
+		case <-stopped:
+		case <-time.After(10 * time.Second):
+			t.Error("proxy did not stop: a connection never ended")
+			return
+		}
 		select {
 		case err := <-done:
 			require.True(t, isRequestedStop(err), "Serve after Shutdown must report the stop it was asked for, got %v", err)

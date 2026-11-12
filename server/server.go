@@ -544,6 +544,10 @@ type Server struct {
 	// Lifecycle is started with, and daemon the sshd it serves with.
 	delegated *delegatedHosts
 	daemon    *sshd
+
+	// beforeGuestForward is a test hook each SSH proxy runs as an allowed
+	// delegated guest's forwarding is about to begin.
+	beforeGuestForward func()
 }
 
 // serverServeStopResult belongs to one Serve invocation. Shutdown retains the
@@ -881,6 +885,10 @@ func (s *Server) ServeListeners(ctx context.Context, ls Listeners) error {
 				AuthorityComposed: s.Extensions.Authority != nil,
 				NodeID:            s.NodeID,
 				authorities:       daemon,
+				authority:         s.Extensions.Authority,
+				AuthorityEnabled:  s.Extensions.Enabled,
+				delegated:         delegated,
+				beforeForward:     s.beforeGuestForward,
 			}
 			g.Add(func() error {
 				return sp.Serve(l.ln)

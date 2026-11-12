@@ -119,6 +119,27 @@ var errSSHChannelDrainStalled = errors.New("ssh: channel drain stalled after sou
 // requests and writes. rewrite, which may be nil, words the upstream's
 // rejections of the downstream's opens as the downstream is sent them.
 func forwardSSH(ctx context.Context, downstream, upstream sshPeer, scope sshAbortScope, aborts metrics.Counter, rewrite rejectionRewrite) error {
+	return forwardSSHWithin(ctx, downstream, upstream, scope, aborts, rewrite, nil)
+}
+
+// forwardPolicy narrows what a downstream may ask of its upstream: the
+// channels it may open, and the requests it may make, globally and on each
+// channel it opened. Whatever it refuses is refused in its turn, so replies
+// keep their order. A downstream held to one is opened no channel by the
+// upstream either.
+type forwardPolicy interface {
+	OpenChannel(channelType string) bool
+	// Request reports whether r may go on: made on a channel of channelType,
+	// or globally when channelType is "".
+	Request(channelType string, r *ssh.Request) bool
+}
+
+// errNotPermitted is the rejection of a channel a forwardPolicy refuses.
+const errNotPermitted = "not permitted on this connection"
+
+// forwardSSHWithin is forwardSSH holding the downstream to policy, which may
+// be nil for none.
+func forwardSSHWithin(ctx context.Context, downstream, upstream sshPeer, scope sshAbortScope, aborts metrics.Counter, rewrite rejectionRewrite, policy forwardPolicy) error {
 	ctx, cancel := context.WithCancelCause(ctx)
 	defer cancel(nil)
 	draining := make(chan struct{})
@@ -152,6 +173,13 @@ func forwardSSH(ctx context.Context, downstream, upstream sshPeer, scope sshAbor
 			// A gate request is a node's, over its hop: a downstream's of its
 			// own is answered false here, and reaches no one.
 			global.mayRequest = func(r *ssh.Request) bool { return !gateName(r.Type) }
+			if policy != nil {
+				opens.mayOpen = policy.OpenChannel
+				opens.policy = policy
+				global.mayRequest = func(r *ssh.Request) bool { return !gateName(r.Type) && policy.Request("", r) }
+			}
+		} else if policy != nil {
+			opens.mayOpen = func(string) bool { return false }
 		}
 		workers.Go(func() { exited <- peerExit{i, source.conn.Wait()} })
 		workers.Go(func() {
@@ -240,9 +268,12 @@ type sshForwarder struct {
 	// it. Nil passes every one on as it is.
 	rewrite rejectionRewrite
 
-	// mayRequest, when set, decides which of the source's requests go on;
-	// nil passes all.
+	// mayOpen, when set, decides which channels the source may open, and
+	// mayRequest which of its requests go on; nil allows all. policy, when
+	// set, is the source's, and holds its requests on each channel it opens.
+	mayOpen    func(channelType string) bool
 	mayRequest func(*ssh.Request) bool
+	policy     forwardPolicy
 }
 
 // A peer can pipeline channel opens without waiting for confirmation, and each
@@ -287,6 +318,10 @@ func (f sshForwarder) channels(destination ssh.Conn, channels <-chan ssh.NewChan
 				workers.Go(settle)
 				finish()
 				return
+			}
+			if f.mayOpen != nil && !f.mayOpen(channel.ChannelType()) {
+				_ = channel.Reject(ssh.Prohibited, errNotPermitted)
+				continue
 			}
 			select {
 			case opens <- struct{}{}:
@@ -364,9 +399,17 @@ func (f sshForwarder) channel(destination ssh.Conn, incoming ssh.NewChannel, acc
 	openDone() // established: the channel itself holds no permit
 	localEndpoint := &sshForwardChannel{Channel: local}
 	remoteEndpoint := &sshForwardChannel{Channel: remote}
+	// Only the source's own requests are held to its policy; what the
+	// destination sends back on the channel, its exit status say, is not.
+	toSource, toDestination := f, f
+	toSource.mayRequest, toDestination.mayRequest = nil, nil
+	if f.policy != nil {
+		channelType := incoming.ChannelType()
+		toDestination.mayRequest = func(r *ssh.Request) bool { return f.policy.Request(channelType, r) }
+	}
 	var workers sync.WaitGroup
-	workers.Go(func() { f.channelDirection(localEndpoint, remoteEndpoint, remoteRequests) })
-	workers.Go(func() { f.channelDirection(remoteEndpoint, localEndpoint, localRequests) })
+	workers.Go(func() { toSource.channelDirection(localEndpoint, remoteEndpoint, remoteRequests) })
+	workers.Go(func() { toDestination.channelDirection(remoteEndpoint, localEndpoint, localRequests) })
 	workers.Wait()
 }
 

@@ -16,13 +16,14 @@
 //   - [SessionAuthority], what a registration answers to, with
 //     [AuthorityLocal] and [AuthorityDelegated];
 //   - [RegistrationRef], which identifies one adopted registration;
-//   - [Home], a registration as the node that adopted it holds it;
+//   - [Home], a registration as the node that adopted it holds it, and its
+//     Confirm, which checks it is still held;
 //   - [Session.AuthorityHint];
 //   - [Opt.RefuseLegacyHops] and [Server.RefuseLegacyHops];
-//   - [Authority], which decides delegated registrations;
+//   - [Authority], which decides delegated registrations and their guests;
 //   - [Lifecycle], what an extension runs beside a serving relay;
 //   - [Runtime], the extension's control over the relay's delegated work;
-//   - [Fence], which refuses new delegated registrations while it is set;
+//   - [Fence], which refuses new delegated work while it is set;
 //   - [DelegatedRegistration], a delegated registration as the relay
 //     verified it;
 //   - [RegistrationResult], an Authority's decision on one;
@@ -32,7 +33,16 @@
 //   - [DecodeDelegatedError], which reads a refused delegated request's body;
 //   - [ValidDelegatedDisposition], which reports whether a disposition is a
 //     decision with a revision that can order it;
-//   - [ErrDelegatedHostNotFound].
+//   - [ErrDelegatedHostNotFound];
+//   - [Guest], a guest's connection as the relay authenticated it, which the
+//     authority decides and can close;
+//   - [GuestRequest], what a guest asked for;
+//   - [Admission], an Authority's decision on a guest, with its [Verdict]:
+//     [VerdictDeny], [VerdictAllow], [VerdictMessage] or [VerdictWaiting];
+//   - [Target], the one delegated registration an allow admits a guest to;
+//   - [WaitingScreen], a display-only screen a claimed user waits on;
+//   - [WaitingEnded], which ends a waiting screen with a text of the
+//     authority's.
 //
 // This API may change in any minor release, and each change is listed in the
 // release notes.

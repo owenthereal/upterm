@@ -36,9 +36,11 @@ const (
 )
 
 // fakeAuthority records every call and answers with register and control,
-// or with a current decision at revision 1 when they are nil. A call it is
-// told to hold, by gate or hang, waits there until released, or until its
-// context ends.
+// or with a current decision at revision 1 when they are nil. A call to
+// Register or Control it is told to hold, by gate or hang, waits there until
+// released, or until its context ends. It claims the users that start with
+// claimPrefix, answers Admit with admit, or a refusal when that is nil, and
+// Unreachable with unreachable, or a fixed line.
 type fakeAuthority struct {
 	mu            sync.Mutex
 	registrations []DelegatedRegistration
@@ -47,6 +49,100 @@ type fakeAuthority struct {
 	control       func(Report) (*DelegatedControlReply, error)
 	gates         []*fakeGate
 	hang          bool
+
+	claimed     []string
+	admissions  []admitCall
+	unreached   []Target
+	admit       func(context.Context, *Guest, GuestRequest) (Admission, error)
+	unreachable func(*Guest, Target) []byte
+	// asIs leaves an allow's sequence and allowance as admit gave them.
+	asIs bool
+}
+
+// claimPrefix starts every user fakeAuthority claims.
+const claimPrefix = "claim-"
+
+// admitCall is one question Admit was asked.
+type admitCall struct {
+	guest   *Guest
+	request GuestRequest
+}
+
+func (f *fakeAuthority) Claims(user string) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.claimed = append(f.claimed, user)
+	return strings.HasPrefix(user, claimPrefix)
+}
+
+// Admit fills in an allow's binding when admit leaves it out: a sequence and
+// an allowance, unless asIs is set, and the registration the target's routing
+// ID registered.
+func (f *fakeAuthority) Admit(ctx context.Context, g *Guest, req GuestRequest) (Admission, error) {
+	f.mu.Lock()
+	f.admissions = append(f.admissions, admitCall{g, req})
+	answer, asIs := f.admit, f.asIs
+	f.mu.Unlock()
+	if answer == nil {
+		return Admission{}, nil
+	}
+	admission, err := answer(ctx, g, req)
+	if admission.Verdict == VerdictAllow {
+		if admission.Sequence == 0 && !asIs {
+			admission.Sequence = 1
+			admission.AllowUntil = time.Now().Add(45 * time.Second)
+		}
+		if admission.Target.Registration.Authority == "" {
+			f.mu.Lock()
+			for _, reg := range f.registrations {
+				if reg.RoutingID == admission.Target.RoutingID {
+					target := admission.Target
+					var keys [][]byte
+					if target.RunPublicKey != nil {
+						keys = [][]byte{target.RunPublicKey.Marshal()}
+					}
+					admission.Target.Registration = RegistrationRef{Authority: AuthorityDelegated, AccountID: target.AccountID, SessionID: target.SessionID, Generation: reg.Generation, RoutingID: target.RoutingID, RunPublicKeys: keys, RegistrationID: reg.RegistrationID, HomeNode: reg.HomeNode, HomeNodeID: reg.HomeNodeID, HomeBootID: reg.HomeBootID}
+				}
+			}
+			f.mu.Unlock()
+		}
+	}
+	return admission, err
+}
+
+// unreachableLine is what fakeAuthority shows a guest whose allowed target
+// the relay couldn't reach.
+const unreachableLine = "the session is unreachable\n"
+
+func (f *fakeAuthority) Unreachable(_ context.Context, g *Guest, t Target) []byte {
+	f.mu.Lock()
+	f.unreached = append(f.unreached, t)
+	answer := f.unreachable
+	f.mu.Unlock()
+	if answer == nil {
+		return []byte(unreachableLine)
+	}
+	return answer(g, t)
+}
+
+func (f *fakeAuthority) admitWith(fn func(context.Context, *Guest, GuestRequest) (Admission, error)) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.admit = fn
+}
+
+// guests is every question Admit was asked, and every target Unreachable was.
+func (f *fakeAuthority) guests() ([]admitCall, []Target) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]admitCall(nil), f.admissions...), append([]Target(nil), f.unreached...)
+}
+
+// claims is every user Claims was asked about, in order.
+func (f *fakeAuthority) claims() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.claimed...)
 }
 
 type fakeGate struct {
@@ -136,10 +232,11 @@ func (f *fakeAuthority) seen() ([]DelegatedRegistration, []Report) {
 	return append([]DelegatedRegistration(nil), f.registrations...), append([]Report(nil), f.controls...)
 }
 
-// calls is how many calls the authority was asked, of either method.
+// calls is how many calls the authority was asked, of any method.
 func (f *fakeAuthority) calls() int {
 	r, c := f.seen()
-	return len(r) + len(c)
+	admitted, unreached := f.guests()
+	return len(r) + len(c) + len(f.claims()) + len(admitted) + len(unreached)
 }
 
 func decided(d DelegatedDisposition, revision uint64) func(DelegatedRegistration) (RegistrationResult, error) {

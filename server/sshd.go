@@ -580,6 +580,20 @@ func ownedRegistration(ctx ssh.Context, sessionID string) *Registration {
 	return owned[sessionID]
 }
 
+// madeLocalRegistration reports whether a local registration was made on
+// this connection.
+func madeLocalRegistration(ctx ssh.Context) bool {
+	ctx.Lock()
+	defer ctx.Unlock()
+	owned, _ := ctx.Value(contextKeyOwnedSessions{}).(map[string]*Registration)
+	for _, reg := range owned {
+		if reg.obligation == nil {
+			return true
+		}
+	}
+	return false
+}
+
 func (s *sshd) Shutdown() error {
 	s.mux.Lock()
 	s.stopped = true
@@ -926,6 +940,9 @@ func (s *sshd) handleCreateSession(work *sshWorkRef, ctx ssh.Context, srv *ssh.S
 	sessResp, refusal := s.register(work, ctx, conn, &sessReq, sessionID, generation, nil, nil)
 	if sessResp == nil {
 		return false, refusal
+	}
+	if host := delegatedHostOf(ctx); host != nil {
+		host.registeredLocally()
 	}
 
 	b, err := proto.Marshal(sessResp)

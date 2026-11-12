@@ -19,7 +19,15 @@ const (
 	// server
 	// GateModeRequestType asks the node a hop reached which registration it
 	// holds for a routing ID: GateModeRequest, answered by GateModeReply.
-	GateModeRequestType            = "gate-mode@upterm.dev"
+	GateModeRequestType = "gate-mode@upterm.dev"
+	// GateAdmitRequestType asserts to a delegated registration's home, over
+	// the hop, that its authority admitted the hop's guest: GateAdmission,
+	// answered by the same GateAdmission, byte for byte.
+	GateAdmitRequestType = "gate-admit@upterm.dev"
+	// GateHeldRequestType asks a delegated registration's home, over an
+	// admitted hop, whether it still holds the registration: GateHeldRequest,
+	// answered by GateHeldReply.
+	GateHeldRequestType            = "gate-held@upterm.dev"
 	ServerSSHServerVersion         = "SSH-2.0-uptermd"
 	ServerServerInfoRequestType    = "upterm-server-info@upterm.dev"
 	ServerCreateSessionRequestType = "upterm-create-session@upterm.dev"

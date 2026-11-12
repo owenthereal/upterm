@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/owenthereal/upterm/routing"
 	"github.com/owenthereal/upterm/upterm"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/crypto/ssh"
@@ -24,8 +25,7 @@ func TestHopGateNegativeReasons(t *testing.T) {
 		require.Nil(t, h)
 		require.ErrorIs(t, err, errUpstreamNoHost)
 		require.Equal(t, errUpstreamNoHost, upstreamFailureReason(err))
-		_, _, err = u.conn.OpenChannel("session", nil)
-		require.Error(t, err, "negative mode reply must close the attempt")
+		requireHopClosed(t, u, "negative mode reply must close the attempt")
 		require.Zero(t, f.dialer.calls.Load())
 	})
 	t.Run("refused_original_key", func(t *testing.T) {
@@ -120,9 +120,26 @@ func TestHopGateNegativeReplyControls(t *testing.T) {
 			} else {
 				require.ErrorIs(t, err, errGateRefused)
 			}
-			_, _, err = u.conn.OpenChannel("session", nil)
-			require.Error(t, err)
+			requireHopClosed(t, u, "a refused gate exchange left the hop open")
 		})
+	}
+}
+
+// requireHopClosed waits, within a bound, for u's connection to end. Opening a
+// channel to find out is no test: on a connection that is being torn down,
+// x/crypto can take the open as sent and then wait for an answer that never
+// comes.
+func requireHopClosed(t *testing.T, u *upstreamConn, msg string) {
+	t.Helper()
+	ended := make(chan struct{})
+	go func() {
+		_ = u.conn.Wait()
+		close(ended)
+	}()
+	select {
+	case <-ended:
+	case <-time.After(5 * time.Second):
+		t.Fatal(msg)
 	}
 }
 
@@ -144,5 +161,43 @@ func TestHopGateAbsentHomeRequiresValidTarget(t *testing.T) {
 		}
 		require.False(t, g.mode)
 		require.False(t, g.admitted)
+	}
+}
+
+// A delegated guest whose home holds no registration any more is refused as
+// any unknown key is, by its session ID or by a user the authority claims:
+// no banner, and nothing of the home's verdict. The ingress tries the home
+// once, and never falls back to a legacy hop.
+func TestHopGateDelegatedMissingHomeStaysGeneric(t *testing.T) {
+	for _, claimed := range []bool{false, true} {
+		name := "encoded"
+		if claimed {
+			name = "claimed"
+		}
+		t.Run(name, func(t *testing.T) {
+			home := delegatedGateHome(t)
+			allow := homeAllow(home, time.Now().Add(45*time.Second))
+			home.registry.current.Store(nil)
+			authority := &fakeAuthority{}
+			authority.admitWith(func(context.Context, *Guest, GuestRequest) (Admission, error) { return allow, nil })
+			dialer := &stockTestDialer{addr: home.addr}
+			_, addr, _, signer := stockTestProxy(t, 4*time.Second, dialer, enabledIngress(authority, home))
+			user := routing.NewEncodeDecoder(routing.ModeEmbedded).Encode(sessionRoute, "home:2222")
+			if claimed {
+				user = claimPrefix + "session"
+			}
+			var banner string
+			c, err := ssh.Dial("tcp", addr, &ssh.ClientConfig{User: user, Auth: []ssh.AuthMethod{ssh.PublicKeys(home.guest)}, HostKeyCallback: ssh.FixedHostKey(signer.PublicKey()), BannerCallback: func(s string) error { banner += s; return nil }, Timeout: 5 * time.Second})
+			if c != nil {
+				_ = c.Close()
+			}
+			require.Error(t, err)
+			require.True(t, strings.Contains(err.Error(), "unable to authenticate") || err.Error() == "ssh: handshake failed: EOF", "unexpected delegated refusal: %v", err)
+			require.NotContains(t, err.Error()+banner, upterm.UpstreamNoHost)
+			require.NotContains(t, err.Error()+banner, upterm.UpstreamKeyRefused)
+			require.Empty(t, banner)
+			require.EqualValues(t, 1, dialer.calls.Load(), "a home without the registration was tried again, or by a legacy hop")
+			require.Zero(t, home.dialer.calls.Load())
+		})
 	}
 }
