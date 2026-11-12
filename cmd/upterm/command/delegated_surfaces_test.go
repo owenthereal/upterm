@@ -349,10 +349,18 @@ func TestDelegatedURIEncodesTheUser(t *testing.T) {
 
 // normalizedJSON is out with what changes from run to run put back to fixed
 // values: the launch, the directory the session's sockets are in, and the pid.
+// A path under that directory is matched as JSON quotes it, which on Windows
+// doubles every backslash, and written back as /ROOT and the rest of the path
+// with '/' between its parts, as the goldens have it on every platform.
 func normalizedJSON(t *testing.T, out, launchID string) string {
 	t.Helper()
 	out = strings.ReplaceAll(out, launchID, "LAUNCH")
-	out = strings.ReplaceAll(out, os.Getenv("XDG_RUNTIME_DIR"), "/ROOT")
+	quoted, err := json.Marshal(os.Getenv("XDG_RUNTIME_DIR"))
+	require.NoError(t, err)
+	root := strings.Trim(string(quoted), `"`)
+	out = regexp.MustCompile(regexp.QuoteMeta(root)+`[^"]*`).ReplaceAllStringFunc(out, func(path string) string {
+		return "/ROOT" + strings.ReplaceAll(strings.TrimPrefix(path, root), `\\`, "/")
+	})
 	return regexp.MustCompile(`"pid": [0-9]+`).ReplaceAllString(out, `"pid": 1`)
 }
 
