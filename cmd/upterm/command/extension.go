@@ -367,7 +367,8 @@ func Logger(ctx context.Context) *slog.Logger {
 // its comment, and the entry is written after them. A file is written through
 // a link to it, and replaced whole: by a file of mode 0600 written beside it
 // and renamed into its place. A file of more than one YAML document is
-// refused.
+// refused, and so is one where the extensions mapping, the entry or the value
+// being replaced has a YAML anchor or is an alias.
 //
 // Before anything is written, value is set as the config file would set it
 // on a copy of the flag, for a flag of pflag's own types or one whose value
@@ -445,6 +446,9 @@ func WriteConfigValue(ext *Extension, key string, value any) error {
 	}
 	if top.Kind != yaml.MappingNode {
 		return fmt.Errorf("%s: the file isn't a mapping of keys to values; %s", path, fixConfig)
+	}
+	if err := anchorOnTheWay(top, extensionsKey, ext.Name, key); err != nil {
+		return fmt.Errorf("%s: %w; %s", path, err, fixConfig)
 	}
 	extensions, err := mappingEntry(top, extensionsKey)
 	if err != nil {
@@ -580,6 +584,36 @@ func followLinks(path string) string {
 		path = target
 	}
 	return path
+}
+
+// anchorOnTheWay is an error naming the first of the values the keys lead
+// to, from m, that has a YAML anchor or is an alias. Writing there would
+// drop an anchor that an alias elsewhere may name, or write into what an
+// alias shares; keeping either would change what the rest of the file says,
+// unannounced.
+func anchorOnTheWay(m *yaml.Node, keys ...string) error {
+	var path []string
+	for _, key := range keys {
+		var v *yaml.Node
+		for i := 0; m.Kind == yaml.MappingNode && i+1 < len(m.Content); i += 2 {
+			if m.Content[i].Value == key {
+				v = m.Content[i+1]
+				break
+			}
+		}
+		if v == nil {
+			return nil
+		}
+		path = append(path, key)
+		switch {
+		case v.Kind == yaml.AliasNode:
+			return fmt.Errorf("%s is the YAML alias *%s, which upterm can't write through", strings.Join(path, "."), v.Value)
+		case v.Anchor != "":
+			return fmt.Errorf("%s has the YAML anchor &%s, which upterm can't keep when it writes there", strings.Join(path, "."), v.Anchor)
+		}
+		m = v
+	}
+	return nil
 }
 
 // mappingEntry is the mapping key holds in m, added to m, empty, when m has

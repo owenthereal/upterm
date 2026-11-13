@@ -699,6 +699,65 @@ func TestWriteConfigValueRefusesSeveralDocuments(t *testing.T) {
 	require.Equal(t, before, string(content), "a refused file was changed")
 }
 
+// A write through a YAML anchor or alias on its way is refused, and the file
+// left as it was: the rewrite would drop an anchor an alias elsewhere names,
+// or change what an alias shares. Commands read such a file, and config
+// edit takes it, so it can be fixed there.
+func TestWriteConfigValueRefusesAnchorsAndAliases(t *testing.T) {
+	fix := "; " + fixConfig
+	for name, tc := range map[string]struct{ before, want string }{
+		"an anchored value an alias names": {
+			"extensions:\n  test:\n    test-service: &svc old\n  other:\n    anything: *svc\n",
+			"extensions.test.test-service has the YAML anchor &svc, which upterm can't keep when it writes there",
+		},
+		"an anchored value": {
+			"extensions:\n  test:\n    test-service: &svc old\n",
+			"extensions.test.test-service has the YAML anchor &svc, which upterm can't keep when it writes there",
+		},
+		"an aliased entry": {
+			"extensions:\n  other: &base\n    test-service: old\n  test: *base\n",
+			"extensions.test is the YAML alias *base, which upterm can't write through",
+		},
+		"an anchored entry": {
+			"extensions:\n  test: &t\n    test-service: old\n",
+			"extensions.test has the YAML anchor &t, which upterm can't keep when it writes there",
+		},
+		"an anchored extensions mapping": {
+			"extensions: &e\n  test:\n    test-service: old\n",
+			"extensions has the YAML anchor &e, which upterm can't keep when it writes there",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			restoreFlags(t)
+			inProcessHostEnv(t)
+			withConfig(t, tc.before)
+			path := utils.UptermConfigFilePath()
+
+			// A run reads the file, and config edit's check passes it.
+			var got HostOptions
+			_, stderr, _ := runCLIWith(t, testExtension(preparedWith(&got)), "host", "--detach", "--accept", "--", "true")
+			require.Equal(t, "upterm: "+errStop.Error()+"\n", stderr)
+			require.Equal(t, FlagValue{Value: "old", Source: SourceConfig}, got.Extension["test-service"])
+			errs, _ := checkConfigFileWith(RootWith(testExtension(nil)), path, testExtension(nil))
+			require.Empty(t, errs)
+
+			require.EqualError(t, WriteConfigValue(testExtension(nil), "test-service", "new"), path+": "+tc.want+fix)
+			content, err := os.ReadFile(path)
+			require.NoError(t, err)
+			require.Equal(t, tc.before, string(content), "a refused write changed the file")
+		})
+	}
+
+	// An anchor elsewhere is no matter.
+	restoreFlags(t)
+	inProcessHostEnv(t)
+	withConfig(t, "extensions:\n  other: &o\n    anything: 1\n  test:\n    test-service: old\n")
+	require.NoError(t, WriteConfigValue(testExtension(nil), "test-service", "new"))
+	content, err := os.ReadFile(utils.UptermConfigFilePath())
+	require.NoError(t, err)
+	require.Equal(t, "extensions:\n  other: &o\n    anything: 1\n  test:\n    test-service: new\n", string(content))
+}
+
 // A value the flag itself refuses is never written, whatever Validate says.
 func TestWriteConfigValueChecksTheFlagsType(t *testing.T) {
 	restoreFlags(t)
