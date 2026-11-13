@@ -280,6 +280,10 @@ read-only: true
 	path := utils.UptermConfigFilePath()
 	old, err := os.Stat(path)
 	require.NoError(t, err)
+	// On Windows a FileInfo's file ID is read by its path the first time
+	// SameFile needs it, so old's is read now, before the file is replaced:
+	// read later, it would be the replacement's.
+	require.True(t, os.SameFile(old, old))
 
 	ext := testExtension(nil)
 	require.NoError(t, WriteConfigValue(ext, "test-service", "new"))
