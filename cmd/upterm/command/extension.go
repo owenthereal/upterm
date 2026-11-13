@@ -381,9 +381,10 @@ func Logger(ctx context.Context) *slog.Logger {
 // being replaced has a YAML anchor or is an alias.
 //
 // Before anything is written, value is set as the config file would set it
-// on a copy of the flag, for a flag of pflag's own types or one whose value
-// isn't a struct, and the HostFlag's Validate, if any, checks it. A value
-// that would be written as null, such as nil, is refused: no run takes it.
+// on a copy of the flag, as a run reads it back from the file, for a flag of
+// pflag's own types or one whose value isn't a struct, and the HostFlag's
+// Validate, if any, checks value as given. A value that would be written as
+// null, such as nil, is refused: no run takes it.
 //
 // It takes no lock. Of two calls at once, each can read the file before the
 // other replaces it, and the last to replace it wins: the other's value is
@@ -410,10 +411,15 @@ func WriteConfigValue(ext *Extension, key string, value any) error {
 		return fmt.Errorf("%s: config key has no value", extensionKey(ext.Name, key))
 	}
 	// Set as the config file would set it, on a copy of the flag, so that a
-	// value commands would refuse as the flag's is not written. A flag of a
-	// type the copy can't be made of, or whose copy panics, is checked by
-	// Validate alone.
-	if err := tryValue(flag.Flag.Value, key, value); err != nil {
+	// value commands would refuse as the flag's is not written: as a run
+	// reads it back from the file, which isn't always the value as given. A
+	// flag of a type the copy can't be made of, or whose copy panics, is
+	// checked by Validate alone.
+	read, err := readBack(ext.Name, key, &v)
+	if err != nil {
+		return err
+	}
+	if err := tryValue(flag.Flag.Value, key, read); err != nil {
 		return err
 	}
 	if flag.Validate != nil {
@@ -480,6 +486,33 @@ func WriteConfigValue(ext *Extension, key string, value any) error {
 		return err
 	}
 	return replaceFile(path, out.Bytes())
+}
+
+// readBack is v, written as key's value in the extension extName's entry, as
+// a run reads it back from the config file.
+func readBack(extName, key string, v *yaml.Node) (any, error) {
+	str := func(s string) *yaml.Node { return &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: s} }
+	mapping := func(k string, v *yaml.Node) *yaml.Node {
+		return &yaml.Node{Kind: yaml.MappingNode, Tag: "!!map", Content: []*yaml.Node{str(k), v}}
+	}
+	b, err := yaml.Marshal(mapping(extensionsKey, mapping(extName, mapping(key, v))))
+	if err != nil {
+		return nil, fmt.Errorf("can't write %s's value: %w", key, err)
+	}
+	vp, _ := configViper()
+	vp.SetConfigType("yaml")
+	if err := vp.ReadConfig(bytes.NewReader(b)); err != nil {
+		return nil, fmt.Errorf("can't write %s's value: %w", key, err)
+	}
+	entry, err := extensionEntry(vp, extName)
+	if err != nil {
+		return nil, err
+	}
+	read, ok := entry[key]
+	if !ok {
+		return nil, fmt.Errorf("%s: a run can't read this key back from the config file", extensionKey(extName, key))
+	}
+	return read, nil
 }
 
 // emptyDocument is content without its null, when content is a document

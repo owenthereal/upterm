@@ -19,6 +19,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/owenthereal/upterm/cmd/upterm/command/internal/bootstrap"
 	"github.com/owenthereal/upterm/host"
@@ -28,6 +29,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 	"github.com/stretchr/testify/require"
+	"go.yaml.in/yaml/v3"
 )
 
 // testExtension is an extension with three host flags: test-service, bound,
@@ -1069,6 +1071,116 @@ func TestAnEmptyNameIsNoName(t *testing.T) {
 			require.True(t, runs[0].NameGenerated, "the Broker was told the name was given")
 		})
 	}
+}
+
+// everyKind is an extension with a host flag of each kind a setting can
+// be, test-<kind>, and prepare as its Prepare.
+func everyKind(prepare func(context.Context, HostOptions) (Prepared, error)) *Extension {
+	fs := pflag.NewFlagSet("test", pflag.ContinueOnError)
+	fs.String("test-string", "", "")
+	fs.Bool("test-bool", false, "")
+	fs.Int("test-int", 0, "")
+	fs.Float64("test-float", 0, "")
+	fs.Duration("test-duration", 0, "")
+	fs.StringSlice("test-slice", nil, "")
+	fs.StringArray("test-array", nil, "")
+	fs.IntSlice("test-ints", nil, "")
+	fs.StringToString("test-map", nil, "")
+	fs.StringToInt("test-intmap", nil, "")
+	ext := &Extension{Name: "test", Prepare: prepare}
+	fs.VisitAll(func(f *pflag.Flag) { ext.HostFlags = append(ext.HostFlags, HostFlag{Flag: f}) })
+	return ext
+}
+
+// hostReads is what a run of upterm host prints when it reads config.yaml as
+// it is: "upterm: " and errStop when the file is one it takes.
+func hostReads(t *testing.T) string {
+	t.Helper()
+	var got HostOptions
+	_, stderr, _ := runCLIWith(t, everyKind(preparedWith(&got)), "host", "--detach", "--accept", "--", "true")
+	return stderr
+}
+
+// A list WriteConfigValue writes is checked as a run reads it back from the
+// file, where an empty element is refused.
+func TestWriteConfigValueRefusesWhatARunWouldRefuse(t *testing.T) {
+	const before = "read-only: true\n"
+	for _, key := range []string{"test-slice", "test-array"} {
+		for _, elems := range [][]string{{""}, {" "}, {"a", ""}} {
+			t.Run(fmt.Sprintf("%s %q", key, elems), func(t *testing.T) {
+				restoreFlags(t)
+				inProcessHostEnv(t)
+				// What a run says of the file the write would leave.
+				var file strings.Builder
+				enc := yaml.NewEncoder(&file)
+				enc.SetIndent(2)
+				require.NoError(t, enc.Encode(map[string]any{"read-only": true, "extensions": map[string]any{"test": map[string]any{key: elems}}}))
+				withConfig(t, file.String())
+				stderr := hostReads(t)
+				require.NotEqual(t, "upterm: "+errStop.Error()+"\n", stderr, "the run took the file")
+
+				withConfig(t, before)
+				err := WriteConfigValue(everyKind(nil), key, elems)
+				require.EqualError(t, err, strings.TrimSuffix(strings.TrimPrefix(stderr, "upterm: "), "\n"))
+				content, rerr := os.ReadFile(utils.UptermConfigFilePath())
+				require.NoError(t, rerr)
+				require.Equal(t, before, string(content), "a refused value changed the file")
+			})
+		}
+	}
+
+	restoreFlags(t)
+	inProcessHostEnv(t)
+	withConfig(t, before)
+	require.NoError(t, WriteConfigValue(everyKind(nil), "test-slice", []string{"a", "b"}))
+	var got HostOptions
+	_, stderr, _ := runCLIWith(t, everyKind(preparedWith(&got)), "host", "--detach", "--accept", "--", "true")
+	require.Equal(t, "upterm: "+errStop.Error()+"\n", stderr)
+	require.Equal(t, FlagValue{Value: "[a,b]", Source: SourceConfig}, got.Extension["test-slice"])
+
+	// A flag whose name has a capital: the file's keys are read in lower
+	// case, so a run would find no such setting, and refuses the key.
+	fs := pflag.NewFlagSet("test", pflag.ContinueOnError)
+	fs.String("test-Level", "", "")
+	upper := &Extension{Name: "test", HostFlags: []HostFlag{{Flag: fs.Lookup("test-Level")}}}
+	withConfig(t, before)
+	require.EqualError(t, WriteConfigValue(upper, "test-Level", "x"), "extensions.test.test-Level: a run can't read this key back from the config file")
+	content, err := os.ReadFile(utils.UptermConfigFilePath())
+	require.NoError(t, err)
+	require.Equal(t, before, string(content), "a refused value changed the file")
+}
+
+// Whatever WriteConfigValue writes, a run reads back: for each kind of
+// setting, a value is either refused, the file left as it was, or written
+// and taken by upterm host.
+func TestWriteConfigValueWritesOnlyWhatARunReads(t *testing.T) {
+	const before = "read-only: true\n"
+	values := []any{
+		"x", "", " ", "a,b", `"q"`, "yes", "1h", "8080", "0.1", "a=1,b=2", "true",
+		true, false, 8080, -1, int64(1) << 40, 0.1, 1e-9, time.Second,
+		[]string{"a", "b"}, []string{}, []string{"a,b"}, []string{" a"}, []any{"a", 1}, []int{1, 2},
+		map[string]string{"a": "b"}, map[string]any{"a": 1}, map[string]int{"a": 1},
+	}
+	keys := []string{"test-string", "test-bool", "test-int", "test-float", "test-duration", "test-slice", "test-array", "test-ints", "test-map", "test-intmap"}
+	accepted := 0
+	for _, key := range keys {
+		for _, value := range values {
+			t.Run(fmt.Sprintf("%s %T %v", key, value, value), func(t *testing.T) {
+				restoreFlags(t)
+				inProcessHostEnv(t)
+				withConfig(t, before)
+				if err := WriteConfigValue(everyKind(nil), key, value); err != nil {
+					content, rerr := os.ReadFile(utils.UptermConfigFilePath())
+					require.NoError(t, rerr)
+					require.Equal(t, before, string(content), "a refused value changed the file")
+					return
+				}
+				accepted++
+				require.Equal(t, "upterm: "+errStop.Error()+"\n", hostReads(t), "a run refused what was written")
+			})
+		}
+	}
+	require.NotZero(t, accepted)
 }
 
 // pflag's own struct-backed types are checked as the scalar ones are.
