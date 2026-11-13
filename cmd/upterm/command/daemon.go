@@ -61,12 +61,8 @@ func runDaemon(ctx context.Context, logger *slog.Logger, ext *Extension, d *daem
 		reportDaemonFailure(conn, bootstrap.Failure{Text: failureText(errNoBroker)})
 		return errNoBroker
 	}
-	broker, err := ext.Broker(ctx, d.h)
-	if err != nil {
-		reportDaemonFailure(conn, verbatimFailure(err))
-		return err
-	}
-	return runDaemonWith(ctx, logger, d.h.Settings, verbatimBroker{broker}, opts, conn, name, run)
+	newBroker := func(ctx context.Context) (host.Broker, error) { return ext.Broker(ctx, d.h) }
+	return runDaemonWith(ctx, logger, d.h.Settings, newBroker, opts, conn, name, run)
 }
 
 // errNoBroker is a delegated run in a build whose extension has no Broker to
@@ -169,13 +165,24 @@ func runDaemonProcess(ctx context.Context, logger *slog.Logger, opts hostOptions
 }
 
 // runDaemonWith is runDaemonProcess for a host built from s, and placed by
-// broker when it isn't nil.
-func runDaemonWith(ctx context.Context, logger *slog.Logger, s HostSettings, broker host.Broker, opts hostOptions, conn net.Conn, name string, run func(context.Context, *host.Host) error) error {
+// the Broker newBroker makes when newBroker isn't nil. newBroker is called
+// once the parent's departure is watched for, with a context that ends with
+// it, and its error is told the parent as it is.
+func runDaemonWith(ctx context.Context, logger *slog.Logger, s HostSettings, newBroker func(context.Context) (host.Broker, error), opts hostOptions, conn net.Conn, name string, run func(context.Context, *host.Host) error) error {
 	ctx, cancel := context.WithCancelCause(ctx)
 	defer cancel(nil)
 	child := bootstrap.NewChild(conn, func() { cancel(host.ErrSessionAbandoned) })
 	defer func() { _ = child.Close() }()
 
+	var broker host.Broker
+	if newBroker != nil {
+		b, err := newBroker(ctx)
+		if err != nil {
+			child.Failed(verbatimFailure(err))
+			return err
+		}
+		broker = verbatimBroker{b}
+	}
 	h, err := buildDaemonHost(ctx, s, name, opts, child, logger)
 	if err != nil {
 		child.Failed(bootstrap.Failure{Text: failureText(err)})

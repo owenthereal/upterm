@@ -638,3 +638,38 @@ func TestHandoffCapIsTheMostItTakes(t *testing.T) {
 	_, err = encodeHandoff(sized(fill+1), nil)
 	require.EqualError(t, err, "this run's settings take 30002 bytes, more than the 30000 a session process can be handed; shorten its flag values, such as --force-command")
 }
+
+// The Broker factory is given a context that ends when the parent goes:
+// one that waits on it doesn't keep the session process running after the
+// operator has given up on the run.
+func TestTheBrokerFactoryEndsWhenTheParentGoes(t *testing.T) {
+	entered, stop := make(chan struct{}), make(chan struct{})
+	t.Cleanup(func() { close(stop) })
+	ext := &Extension{Name: "test", Broker: func(ctx context.Context, _ Handoff) (host.Broker, error) {
+		close(entered)
+		select {
+		case <-ctx.Done():
+			return nil, context.Cause(ctx)
+		case <-stop:
+			return nil, errors.New("the test ended first")
+		}
+	}}
+	a, b := net.Pipe()
+	t.Cleanup(func() { _ = a.Close() })
+	done := make(chan error, 1)
+	go func() {
+		done <- runDaemon(context.Background(), discardLogger(), ext, &daemonHandoffState{h: Handoff{Name: "gone"}}, []string{"sh"}, a, "gone")
+	}()
+	select {
+	case <-entered:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the factory wasn't called")
+	}
+	require.NoError(t, b.Close())
+	select {
+	case err := <-done:
+		require.ErrorIs(t, err, host.ErrSessionAbandoned)
+	case <-time.After(10 * time.Second):
+		t.Fatal("the factory's context didn't end when the parent went")
+	}
+}
