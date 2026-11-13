@@ -234,11 +234,19 @@ file: see 'upterm config --help'.`,
 		addExtensionCommands(rootCmd, ext.Commands())
 	}
 
+	// cobra's usage template, before the root's is changed below.
+	usage := rootCmd.UsageTemplate()
 	reportUnknownCommands(rootCmd)
-	// A group: upterm's own, or an extension's that runs nothing itself.
 	for _, c := range rootCmd.Commands() {
-		if c.HasSubCommands() && c.Run == nil && c.RunE == nil {
+		switch {
+		case !c.HasSubCommands():
+		// A group: upterm's own, or an extension's that runs nothing itself.
+		case c.Run == nil && c.RunE == nil:
 			reportUnknownCommands(c)
+		// An extension's command that runs as well: its usage keeps the line
+		// that says how to run it.
+		default:
+			c.SetUsageTemplate(usage)
 		}
 	}
 	helpOnlyForKnownCommands(rootCmd)
@@ -252,7 +260,8 @@ file: see 'upterm config --help'.`,
 	// The root and the groups run only to report an unknown command, so
 	// their usage shows the commands they hold and no run of their own:
 	// cobra's template, its runnable line kept for a command without
-	// subcommands.
+	// subcommands. An extension's command that runs and has subcommands
+	// keeps cobra's own, set above.
 	rootCmd.SetUsageTemplate(strings.Replace(rootCmd.UsageTemplate(),
 		"{{if .Runnable}}", "{{if and .Runnable (not .HasSubCommands)}}", 1))
 

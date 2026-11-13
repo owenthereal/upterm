@@ -115,11 +115,12 @@ func warnDeprecations(w io.Writer, deps []deprecation) {
 // values only from the command line, for config's help: the command's path
 // below root, then those flags in the order they were registered, wrapped at
 // 80 columns. The commands come depth first, each one's subcommands by name.
+// The root and the groups, which run nothing of their own, have no line.
 func perRunHelp(root *cobra.Command) string {
 	var b strings.Builder
 	var walk func(c *cobra.Command)
 	walk = func(c *cobra.Command) {
-		if !c.HasSubCommands() {
+		if !isGroup(c) {
 			var names []string
 			seen := make(map[string]bool)
 			for _, fs := range []*pflag.FlagSet{c.PersistentFlags(), c.Flags()} {

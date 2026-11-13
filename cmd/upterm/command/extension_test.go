@@ -664,6 +664,69 @@ func TestAnExtensionsCommandsWithCommandsOfTheirOwn(t *testing.T) {
 	require.Empty(t, ran)
 }
 
+// An extension's command that runs, and has commands of its own, gets the
+// pre-run every runnable command gets: its flags from the config file and
+// the environment, and the run's logger. A group that runs nothing itself
+// still reads no config, so a broken file doesn't stop its help.
+func TestAnExtensionsRunnableCommandWithCommandsGetsThePreRun(t *testing.T) {
+	newExt := func(level *string, logged *[]bool) *Extension {
+		return &Extension{Name: "test", Commands: func() []*cobra.Command {
+			runnable := &cobra.Command{Use: "test-run", RunE: func(c *cobra.Command, _ []string) error {
+				*logged = append(*logged, uptermctx.Logger(c.Context()) != nil)
+				Logger(c.Context()).Error("test-run ran", "level", *level)
+				return nil
+			}}
+			runnable.Flags().StringVar(level, "test-level", "default", "")
+			runnable.AddCommand(&cobra.Command{Use: "sub", RunE: func(*cobra.Command, []string) error { return nil }})
+			group := &cobra.Command{Use: "test-group"}
+			group.AddCommand(&cobra.Command{Use: "sub", RunE: func(*cobra.Command, []string) error { return nil }})
+			return []*cobra.Command{runnable, group}
+		}}
+	}
+	for name, tc := range map[string]struct{ config, env, want string }{
+		"config": {config: "test-level: from-config\n", want: "from-config"},
+		"env":    {env: "from-env", want: "from-env"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			setupSessionRoots(t)
+			withConfig(t, tc.config)
+			if tc.env != "" {
+				t.Setenv("UPTERM_TEST_LEVEL", tc.env)
+			}
+			var level string
+			var logged []bool
+			_, stderr, code := runCLIWith(t, newExt(&level, &logged), "test-run")
+			require.Equal(t, 0, code, stderr)
+			require.Equal(t, tc.want, level)
+			require.Equal(t, []bool{true}, logged, "the command ran with no logger of the run's")
+			content, err := os.ReadFile(utils.UptermLogFilePath())
+			require.NoError(t, err)
+			require.Contains(t, string(content), "test-run ran")
+			require.Contains(t, string(content), tc.want)
+		})
+	}
+
+	t.Run("its usage", func(t *testing.T) {
+		setupSessionRoots(t)
+		withConfig(t, "")
+		var level string
+		var logged []bool
+		stdout, stderr, code := runCLIWith(t, newExt(&level, &logged), "test-run", "--help")
+		require.Equal(t, 0, code, stderr)
+		require.Contains(t, stdout, "upterm test-run [flags]\n  upterm test-run [command]")
+	})
+
+	t.Run("a group", func(t *testing.T) {
+		setupSessionRoots(t)
+		withConfig(t, "read-only: [nope\n")
+		var level string
+		var logged []bool
+		stdout, stderr, code := runCLIWith(t, newExt(&level, &logged), "test-group")
+		require.Equal(t, 0, code, stderr)
+		require.Contains(t, stdout, "upterm test-group [command]")
+	})
+}
+
 func TestUpgradeIsTheExtensions(t *testing.T) {
 	setupSessionRoots(t)
 	withConfig(t, "")

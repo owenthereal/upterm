@@ -48,8 +48,9 @@ func rootPreRun(cmd *cobra.Command) error {
 	// The root and the groups only print their help or name an
 	// unknown command (reportUnknownCommands), and read no config:
 	// a broken config file mustn't stop `upterm session` showing
-	// the help it showed when cobra couldn't run it.
-	if cmd.HasSubCommands() {
+	// the help it showed when cobra couldn't run it. A command that runs
+	// as well as holding commands is no group, and gets the pre-run.
+	if isGroup(cmd) {
 		return nil
 	}
 
