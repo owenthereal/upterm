@@ -425,6 +425,48 @@ func TestADelegatedRunSkipsOnlyTheRelaysChecks(t *testing.T) {
 	require.Contains(t, stderr, "can't find your home directory for the default --known-hosts")
 }
 
+// A --name that NormalizeName makes no session name, empty included, is
+// refused as a drawn one would be, before a name is drawn or anything
+// started; a session name it makes is claimed.
+func TestANormalizedNameMustBeASessionName(t *testing.T) {
+	run := func(t *testing.T, normalized string) (stderr string, code, draws int, claimed []string) {
+		t.Helper()
+		restoreFlags(t)
+		inProcessHostEnv(t)
+		origDraw := drawName
+		t.Cleanup(func() { drawName = origDraw })
+		drawName = func(command []string) string {
+			draws++
+			return origDraw(command)
+		}
+		origSpawn := hostSpawn
+		t.Cleanup(func() { hostSpawn = origSpawn })
+		hostSpawn = func(so spawnOptions) (net.Conn, *os.Process, error) {
+			claimed = append(claimed, so.name)
+			return nil, nil, errors.New("no session process in this test")
+		}
+		ext := testExtension(func(context.Context, HostOptions) (Prepared, error) {
+			return Prepared{NormalizeName: func(string) (string, error) { return normalized, nil }}, nil
+		})
+		_, stderr, code = runCLIWith(t, ext, "host", "--detach", "--accept", "--server", "ssh://127.0.0.1:1", "--name", "Work", "--", "true")
+		return stderr, code, draws, claimed
+	}
+
+	for _, normalized := range []string{"", "wo rk"} {
+		t.Run(fmt.Sprintf("%q", normalized), func(t *testing.T) {
+			stderr, code, draws, claimed := run(t, normalized)
+			require.Equal(t, 1, code)
+			require.Equal(t, "upterm: "+sessiondir.ValidateName(normalized).Error()+"\n", stderr)
+			require.Zero(t, draws, "a name was drawn")
+			require.Empty(t, claimed, "a session process was started")
+		})
+	}
+
+	_, _, draws, claimed := run(t, "work")
+	require.Zero(t, draws)
+	require.Equal(t, []string{"work"}, claimed)
+}
+
 func TestNormalizedNamesAreClaimed(t *testing.T) {
 	normalize := func(name string) (string, error) {
 		if strings.HasPrefix(name, "Refused") {

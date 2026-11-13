@@ -735,6 +735,11 @@ func hostPreRunE(ext *Extension) func(*cobra.Command, []string) error {
 			if err != nil {
 				return verbatimError{text: safeText(err.Error())}
 			}
+			// Checked as a drawn one is: an empty one would have a name
+			// drawn in its place.
+			if err := sessiondir.ValidateName(name); err != nil {
+				return err
+			}
 			flagName = name
 		}
 		c.SetContext(context.WithValue(c.Context(), hostRunKey{}, &hostRun{prepared: p, options: opts}))
