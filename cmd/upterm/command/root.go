@@ -8,6 +8,7 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -217,13 +218,24 @@ func logOpenReason(path string, err error) error {
 // cobra, a typo under a group printed the group's help and exited 0, and an
 // unknown command printed a block of suggestions.
 func reportUnknownCommands(c *cobra.Command) {
-	c.Args = cobra.ArbitraryArgs
+	c.Args = groupArgs
 	c.RunE = func(c *cobra.Command, args []string) error {
 		if len(args) == 0 {
 			return c.Help()
 		}
 		return unknownCommandError(c, args[0])
 	}
+}
+
+// groupArgs is the Args of the root and the groups reportUnknownCommands
+// makes runnable: any, for their run to answer.
+func groupArgs(*cobra.Command, []string) error { return nil }
+
+// isGroup reports whether c is the root or a group reportUnknownCommands made
+// runnable, whose arguments name its commands, rather than a command that
+// runs as well as holding commands, whose arguments are its own.
+func isGroup(c *cobra.Command) bool {
+	return c.Args != nil && reflect.ValueOf(c.Args).Pointer() == reflect.ValueOf(groupArgs).Pointer()
 }
 
 // helpOnlyForKnownCommands makes help for an unknown command the error that
@@ -268,17 +280,18 @@ func helpOnlyForKnownCommands(root *cobra.Command) {
 }
 
 // unknownCommand walks args down the command tree from c: while the command
-// it is at has commands and words remain, a word naming one of them (an alias
-// included) goes into it. The first word that names none is unknown, and
-// unknownCommand returns it with the command it was looked up in, which is
-// what unknownCommandError names; what follows a command with no commands of
-// its own is that command's arguments.
+// it is at is a group and words remain, a word naming one of its commands
+// (an alias included) goes into it. The first word that names none is
+// unknown, and unknownCommand returns it with the command it was looked up
+// in, which is what unknownCommandError names; what follows a command with no
+// commands of its own, or one that runs as well as holding commands, is that
+// command's arguments.
 //
 // A typo can follow a known command: in `upterm --help session lsit` cobra's
 // lookup takes session for --help's value and leaves "session lsit" at the
 // root, so checking the first word alone would find session known.
 func unknownCommand(c *cobra.Command, args []string) (at *cobra.Command, word string, unknown bool) {
-	for len(args) > 0 && c.HasSubCommands() {
+	for len(args) > 0 && c.HasSubCommands() && isGroup(c) {
 		sub, _, err := c.Find(args[:1])
 		if err != nil || sub == c {
 			return c, args[0], true

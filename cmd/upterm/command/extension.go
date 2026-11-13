@@ -235,8 +235,9 @@ file: see 'upterm config --help'.`,
 	}
 
 	reportUnknownCommands(rootCmd)
+	// A group: upterm's own, or an extension's that runs nothing itself.
 	for _, c := range rootCmd.Commands() {
-		if c.HasSubCommands() {
+		if c.HasSubCommands() && c.Run == nil && c.RunE == nil {
 			reportUnknownCommands(c)
 		}
 	}

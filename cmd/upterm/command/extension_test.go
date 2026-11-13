@@ -577,6 +577,51 @@ func TestExtensionCodeGetsTheCommandsContext(t *testing.T) {
 	require.Len(t, seen, 2)
 }
 
+// An extension's command that runs, and has commands of its own, still runs
+// its own handler; one that only groups its commands answers an unknown one
+// as upterm's groups do.
+func TestAnExtensionsCommandsWithCommandsOfTheirOwn(t *testing.T) {
+	setupSessionRoots(t)
+	withConfig(t, "")
+	var ran [][]string
+	ext := &Extension{Name: "test", Commands: func() []*cobra.Command {
+		runnable := &cobra.Command{Use: "test-run", Args: cobra.MaximumNArgs(1), RunE: func(_ *cobra.Command, args []string) error {
+			ran = append(ran, append([]string{"test-run"}, args...))
+			return nil
+		}}
+		group := &cobra.Command{Use: "test-group"}
+		for _, parent := range []*cobra.Command{runnable, group} {
+			parent.AddCommand(&cobra.Command{Use: "sub", RunE: func(c *cobra.Command, _ []string) error {
+				ran = append(ran, []string{c.Parent().Name(), "sub"})
+				return nil
+			}})
+		}
+		return []*cobra.Command{runnable, group}
+	}}
+
+	for _, args := range [][]string{{"test-run"}, {"test-run", "x"}, {"test-run", "sub"}, {"test-group", "sub"}} {
+		ran = nil
+		_, stderr, code := runCLIWith(t, ext, args...)
+		require.Equal(t, 0, code, stderr)
+		require.Equal(t, [][]string{args}, ran)
+	}
+	ran = nil
+	_, stderr, code := runCLIWith(t, ext, "test-run", "x", "y")
+	require.Equal(t, 1, code)
+	require.Contains(t, stderr, "accepts at most 1 arg(s), received 2")
+	require.Empty(t, ran)
+	stdout, stderr, code := runCLIWith(t, ext, "test-run", "x", "--help")
+	require.Equal(t, 0, code, stderr)
+	require.Contains(t, stdout, "upterm test-run [command]")
+
+	// The group, as upterm session does.
+	_, want, wantCode := runCLIWith(t, ext, "session", "nope")
+	_, stderr, code = runCLIWith(t, ext, "test-group", "nope")
+	require.Equal(t, wantCode, code)
+	require.Equal(t, strings.ReplaceAll(want, "session", "test-group"), stderr)
+	require.Empty(t, ran)
+}
+
 func TestUpgradeIsTheExtensions(t *testing.T) {
 	setupSessionRoots(t)
 	withConfig(t, "")
