@@ -1278,7 +1278,62 @@ func Test_sshd_ReleasesAGuestThatLeftWhileItsHostStays(t *testing.T) {
 		require.ErrorIs(t, err, io.EOF)
 		synctest.Wait()
 		require.Zero(t, goroutinesIn(tunnel), "the guest left, but its tunnel is held until its host disconnects")
+
+		// Releasing the guest left its host connected: the next guest's
+		// tunnel still reaches it.
+		openGuestTunnel(t, s, incoming, sessionID)
 	})
+}
+
+// A host can close a guest's tunnel channel and stay connected, so the guest's
+// connection and what served its tunnel must end with the channel, not with
+// the host's connection.
+func Test_sshd_ReleasesAGuestWhoseChannelItsHostClosed(t *testing.T) {
+	const tunnel = "(*streamlocalForwardHandler).handleConnection"
+	synctest.Test(t, func(t *testing.T) {
+		s := newBubbleSSHD(t)
+		client := s.dial(t)
+		incoming := client.HandleChannelOpen(forwardedStreamlocalChannelType)
+		sessionID := s.createSession(t, client)
+		ok, body := forwardRequest(t, client, streamlocalForwardChannelType, sessionID)
+		require.True(t, ok, body)
+
+		guest, ch := openGuestTunnel(t, s, incoming, sessionID)
+		synctest.Wait()
+		require.Positive(t, goroutinesIn(tunnel), "the guest's tunnel isn't running, so its absence below would prove nothing")
+
+		require.NoError(t, ch.Close())
+		synctest.Wait()
+		require.Zero(t, goroutinesIn(tunnel), "the host closed the guest's channel, but its tunnel is held until its host disconnects")
+		_, err := guest.Read(make([]byte, 1))
+		require.ErrorIs(t, err, io.EOF, "the host closed the guest's channel, but the guest's connection stayed open")
+
+		// Releasing the guest left its host connected: the next guest's
+		// tunnel still reaches it.
+		openGuestTunnel(t, s, incoming, sessionID)
+	})
+}
+
+// openGuestTunnel has a guest dial sessionID and returns the guest's
+// connection and the tunnel channel its host accepted, once the guest's bytes
+// have crossed it.
+func openGuestTunnel(t *testing.T, s *testSSHD, incoming <-chan ssh.NewChannel, sessionID string) (net.Conn, ssh.Channel) {
+	t.Helper()
+	guest, err := s.network.Session().Dial(sessionID)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = guest.Close() })
+	ch, reqs, err := (<-incoming).Accept()
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = ch.Close() })
+	go ssh.DiscardRequests(reqs)
+
+	_, err = guest.Write([]byte("guest"))
+	require.NoError(t, err)
+	got := make([]byte, len("guest"))
+	_, err = io.ReadFull(ch, got)
+	require.NoError(t, err)
+	require.Equal(t, "guest", string(got))
+	return guest, ch
 }
 
 // A host that cancels its tunnel can stay connected, so what served the tunnel

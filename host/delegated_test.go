@@ -763,6 +763,7 @@ func TestWithdrawnKeepsCommandAndLocalAttach(t *testing.T) {
 	sess, err := f.admin(t).GetSession(ctx, &api.GetSessionRequest{})
 	require.NoError(t, err)
 	require.Equal(t, sessiondir.StatusDisconnected, sess.GetStatus())
+	require.Equal(t, testGuestAddress, sess.GetDelegatedAddress(), "a withdrawn session still says it is delegated, at its guest address")
 	select {
 	case err := <-f.done:
 		t.Fatalf("Host.Run returned after a withdrawal: %v", err)

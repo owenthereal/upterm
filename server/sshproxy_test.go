@@ -9,19 +9,17 @@ import (
 	"net"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
-	"github.com/go-kit/kit/metrics/provider"
 	"github.com/owenthereal/upterm/host/api"
 	"github.com/owenthereal/upterm/internal/logging"
 	"github.com/owenthereal/upterm/routing"
 	"github.com/owenthereal/upterm/upterm"
 	"github.com/owenthereal/upterm/utils"
-	"github.com/rs/xid"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/crypto/ssh"
+	"google.golang.org/protobuf/proto"
 )
 
 const (
@@ -35,90 +33,43 @@ NJfaS/+gkyZ99aR/65uzAAAAAAECAwQF
 -----END OPENSSH PRIVATE KEY-----`
 )
 
+// A guest reaches a registered host through two relay nodes: it enters at one,
+// which hops to the node the host registered with. What the host answers
+// reaches the guest as the host gave it, and the host is told who the guest
+// is and where it entered.
 func Test_sshProxy_dialUpstream(t *testing.T) {
-	logger := logging.Must(logging.Console(), logging.Debug()).Logger
-
 	signer, err := ssh.ParsePrivateKey([]byte(TestPrivateKeyContent))
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	cs := HostCertSigner{
-		Hostnames: []string{"127.0.0.1"},
-	}
-	hostSigner, err := cs.SignCert(signer)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	proxyLn, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() {
-		_ = proxyLn.Close()
-	}()
-
-	proxyAddr := proxyLn.Addr().String()
+	require.NoError(t, err)
 	mp, reg := newTestMetrics(t)
-	cd := sidewayConnDialer{
-		NodeAddr:        proxyAddr,
-		NeighbourDialer: tcpConnDialer{},
-		Logger:          logger,
-	}
-	proxy := &sshProxy{
-		HostSigners:     []ssh.Signer{hostSigner},
-		Signers:         []ssh.Signer{signer},
-		SessionManager:  newEmbeddedSessionManager(logger),
-		NodeAddr:        proxyAddr,
-		ConnDialer:      cd,
-		Logger:          logger,
-		MetricsProvider: mp,
-	}
-
-	go func() {
-		_ = proxy.Serve(proxyLn)
-	}()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	if err := utils.WaitForServer(ctx, proxyAddr); err != nil {
-		t.Fatal(err)
-	}
-
-	sshLn, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() {
-		_ = sshLn.Close()
-	}()
-
-	sshdAddr := sshLn.Addr().String()
-	sshd := &sshd{
-		SessionManager:  newEmbeddedSessionManager(logger),
-		HostSigners:     []ssh.Signer{signer},
-		Signers:         []ssh.Signer{signer},
-		NodeAddr:        sshdAddr,
-		MetricsProvider: provider.NewDiscardProvider(),
-		Logger:          logger,
-	}
-
-	go func() {
-		_ = sshd.Serve(sshLn)
-	}()
-
-	if err := utils.WaitForServer(ctx, sshdAddr); err != nil {
-		t.Fatal(err)
-	}
-
-	encoder := routing.NewEncodeDecoder(routing.ModeEmbedded)
-	user := encoder.Encode(xid.New().String(), sshdAddr)
-	ucs, err := testCertSigner(user, signer)
-	if err != nil {
-		t.Fatal(err)
-	}
+	// The entry node's host key is a certificate, as a relay's is, and the
+	// host's node presents the key itself: the hop is verified by the key,
+	// not by its encoding.
+	hostCert, err := (&HostCertSigner{Hostnames: []string{"127.0.0.1"}}).SignCert(signer)
+	require.NoError(t, err)
+	entryln := listenLoopback(t)
+	serveListeners(t, Listeners{SSH: entryln}, func(s *Server) {
+		s.MetricsProvider = mp
+		s.HostSigners = []ssh.Signer{hostCert}
+	})
+	proxyAddr := entryln.Addr().String()
+	homeln := listenLoopback(t)
+	home := serveListeners(t, Listeners{SSH: homeln})
+	hostKey := certTestSigner(t)
+	// The guest's key is its own, and no relay's: what the host is told is
+	// then the guest's key, not the key of a node that carried it.
+	guestKey := certTestSigner(t)
+	host := dialHost(t, homeln.Addr().String(), hostKey, nil)
+	ok, body := sendCreate(t, host, &CreateSessionRequest{HostUser: "host", HostPublicKeys: [][]byte{ssh.MarshalAuthorizedKey(hostKey.PublicKey())}, ClientAuthorizedKeys: [][]byte{ssh.MarshalAuthorizedKey(guestKey.PublicKey())}})
+	require.True(t, ok, "the host's registration was refused: %s", body)
+	var registered CreateSessionResponse
+	require.NoError(t, proto.Unmarshal(body, &registered))
+	endpoint := newGuestHost(t, host, hostKey, registered.SessionID, home.Signers[0].PublicKey())
+	user := registered.SshUser
+	// A user certificate for the guest's key, signed by the relay's key as before.
+	cert := &ssh.Certificate{Key: guestKey.PublicKey(), CertType: ssh.UserCert, KeyId: "1234", ValidPrincipals: []string{user}, ValidBefore: ssh.CertTimeInfinity}
+	require.NoError(t, cert.SignCert(rand.Reader, signer))
+	ucs, err := ssh.NewCertSigner(cert, guestKey)
+	require.NoError(t, err)
 
 	cases := []struct {
 		Name   string
@@ -126,7 +77,7 @@ func Test_sshProxy_dialUpstream(t *testing.T) {
 	}{
 		{
 			Name:   "public-key auth",
-			Signer: signer,
+			Signer: guestKey,
 		},
 		{
 			Name:   "public-key user cert auth",
@@ -143,14 +94,22 @@ func Test_sshProxy_dialUpstream(t *testing.T) {
 				Auth:            []ssh.AuthMethod{ssh.PublicKeys(cc.Signer)},
 				HostKeyCallback: ssh.InsecureIgnoreHostKey(),
 			}
-			client, err := ssh.Dial("tcp", proxyAddr, config) // proxy to sshd
+			client, err := ssh.Dial("tcp", proxyAddr, config) // entry node, hopping to the host's node
 			if err != nil {
 				t.Fatal(err)
 			}
-			_, err = client.NewSession()
-			if err == nil || !strings.Contains(err.Error(), "unsupported channel type") {
-				t.Fatalf("expect unsupported channel type error but got %v", err)
-			}
+			defer func() { _ = client.Close() }()
+			_, _, err = client.OpenChannel("unsupported@upterm.test", nil)
+			var rejected *ssh.OpenChannelError
+			require.ErrorAs(t, err, &rejected)
+			require.Equal(t, ssh.Prohibited, rejected.Reason)
+			require.Equal(t, "no", rejected.Message, "the host's own channel refusal did not reach the guest")
+			seen := endpoint.guests()
+			require.NotEmpty(t, seen)
+			guest := seen[len(seen)-1]
+			require.Equal(t, ssh.MarshalAuthorizedKey(guestKey.PublicKey()), guest.AuthorizedKey, "the host is not told the guest's key")
+			require.Equal(t, client.LocalAddr().String(), guest.RemoteAddr, "the host is not told the guest's own address")
+			require.Equal(t, proxyAddr, guest.LocalAddr, "the host is not told the node the guest entered at")
 		})
 	}
 
@@ -168,7 +127,7 @@ func Test_sshProxy_dialUpstream(t *testing.T) {
 	// PublicKeyCallback yet fails authentication; it must not be counted.
 	_, err = ssh.Dial("tcp", proxyAddr, &ssh.ClientConfig{
 		User:            user,
-		Auth:            []ssh.AuthMethod{ssh.PublicKeys(refusingSigner{signer})},
+		Auth:            []ssh.AuthMethod{ssh.PublicKeys(refusingSigner{guestKey})},
 		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
 	})
 	require.Error(t, err)

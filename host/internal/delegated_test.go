@@ -559,6 +559,10 @@ func TestDelegatedDecisionPush(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, proto.Equal(acked(3), ack))
 	requireTerminal(t, &decisions, server.DelegatedDisposition_DELEGATED_STOPPED, 3)
+	ack, err = push(server.DelegatedDisposition_DELEGATED_CURRENT, 4)
+	require.NoError(t, err, "a decision after a final one is still received")
+	require.True(t, proto.Equal(acked(4), ack))
+	requireTerminal(t, &decisions, server.DelegatedDisposition_DELEGATED_STOPPED, 3)
 }
 
 // What no ordering can place is refused, and changes nothing: bytes that are
