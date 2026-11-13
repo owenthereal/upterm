@@ -124,7 +124,7 @@ func hostedSession(t *testing.T, relay *fakerelay.Relay, stdin io.Reader, config
 		parentDone <- err
 	}()
 	child := bootstrap.NewChild(a, nil)
-	h, err := buildDaemonHost(ctx, "grants", opts, child, discardLogger())
+	h, err := buildDaemonHost(ctx, hostSettingsFromFlags(), "grants", opts, child, discardLogger())
 	require.NoError(t, err)
 	require.ErrorAs(t, h.Run(ctx), new(UserDiscardedError))
 	require.NoError(t, child.Close())

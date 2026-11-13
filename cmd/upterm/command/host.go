@@ -33,6 +33,7 @@ import (
 	uio "github.com/owenthereal/upterm/io"
 	"github.com/owenthereal/upterm/utils"
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/term"
 )
@@ -153,7 +154,11 @@ func (g *forwardingGrant) String() string { return string(*g) }
 // Type is the placeholder --help shows for the value.
 func (g *forwardingGrant) Type() string { return "loopback|any" }
 
-func hostCmd() *cobra.Command {
+func hostCmd() *cobra.Command { return hostCmdWith(nil) }
+
+// hostCmdWith is upterm host, with ext's HostFlags, and ext's Prepare before
+// the run when it has one.
+func hostCmdWith(ext *Extension) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "host [flags] [-- COMMAND [ARGS...]]",
 		Short: "Host a terminal session",
@@ -246,8 +251,10 @@ reports the command's status.`,
   # On a CI runner, with nobody there to ask: a session alice can open in
   # VS Code (Remote-SSH), which runs its server and forwards to its port:
   upterm host --detach --accept --authorized-user github:alice --allow-exec --allow-forwarding=loopback`,
-		PreRunE: validateShareRequiredFlags,
-		RunE:    shareRunE,
+		PreRunE: hostPreRunE(ext),
+		RunE: func(c *cobra.Command, args []string) error {
+			return shareRunE(c, ext, args)
+		},
 	}
 
 	cmd.PersistentFlags().StringVarP(&flagServer, "server", "", "ssh://uptermd.upterm.dev:22", "Relay to host the session on: ssh://HOST[:PORT], ws://HOST[:PORT] or wss://HOST[:PORT]. Without a port, ssh uses 22, ws 80 and wss 443.")
@@ -336,6 +343,8 @@ reports the command's status.`,
 		_ = cmd.PersistentFlags().MarkHidden(lf.flag)
 	}
 
+	addHostFlags(cmd, ext)
+
 	return cmd
 }
 
@@ -402,8 +411,12 @@ const maxGeneratedNameAttempts = 5
 //
 // A nil logger means the package default rather than silence.
 func runWithGeneratedNameRetry(logger *slog.Logger, explicit string, command []string, run func(name string) error) error {
-	return runWithNameRetry(logger, explicit, func() string { return sessiondir.GenerateName(command) }, run)
+	return runWithNameRetry(logger, explicit, func() string { return drawName(command) }, run)
 }
+
+// drawName draws a session name for command. A var so a test can see whether
+// a name was drawn.
+var drawName = sessiondir.GenerateName
 
 // runWithNameRetry is runWithGeneratedNameRetry with the source of generated
 // names as an argument, so a test can spell out the draws instead of taking
@@ -414,6 +427,14 @@ func runWithGeneratedNameRetry(logger *slog.Logger, explicit string, command []s
 // once in 22,000 such runs — a property of the generator, not of the retry the
 // test is about, and one that has already been read as a regression (#574).
 func runWithNameRetry(logger *slog.Logger, explicit string, newName func() string, run func(name string) error) error {
+	return runWithNormalizedNames(logger, explicit, newName, nil, run)
+}
+
+// runWithNormalizedNames is runWithNameRetry with each name drawn passed
+// through normalize, when it is set, whose result must be a valid session
+// name: its error ends the run, as it is, as an invalid result's does. An
+// explicit name is the caller's to normalize.
+func runWithNormalizedNames(logger *slog.Logger, explicit string, newName func() string, normalize func(string) (string, error), run func(name string) error) error {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -421,6 +442,14 @@ func runWithNameRetry(logger *slog.Logger, explicit string, newName func() strin
 	var err error
 	for attempt := 0; attempt < maxGeneratedNameAttempts; attempt++ {
 		name := resolveSessionName(explicit, newName)
+		if explicit == "" && normalize != nil {
+			if name, err = normalize(name); err != nil {
+				return verbatimError{text: safeText(err.Error())}
+			}
+			if err := sessiondir.ValidateName(name); err != nil {
+				return err
+			}
+		}
 		err = run(name)
 		if err == nil {
 			return nil
@@ -641,6 +670,153 @@ func withDefaultPort(raw string) string {
 }
 
 func validateShareRequiredFlags(c *cobra.Command, args []string) error {
+	return validateHostFlags(c, false)
+}
+
+// hostRun is what upterm host's pre-run decided about the run, for its run:
+// the extension's answer and the options it was asked with.
+type hostRun struct {
+	prepared Prepared
+	options  HostOptions
+}
+
+// hostRunKey holds the run's *hostRun in the command's context.
+type hostRunKey struct{}
+
+// hostRunFrom is the run's *hostRun, or nil when no extension's Prepare was
+// asked about it.
+func hostRunFrom(ctx context.Context) *hostRun {
+	if ctx == nil {
+		return nil
+	}
+	r, _ := ctx.Value(hostRunKey{}).(*hostRun)
+	return r
+}
+
+// delegated reports whether r is a delegated run.
+func (r *hostRun) delegated() bool { return r != nil && r.prepared.Delegated }
+
+// hostPreRunE is upterm host's pre-run. In the process an operator runs it
+// in, ext's Prepare, if it has one, is asked about the run first, before
+// anything else upterm host checks or does, and its NormalizeName is applied
+// to --name. Then the flags are checked, as validateShareRequiredFlags checks
+// them, except that a delegated run's --server and default --known-hosts
+// aren't: the run doesn't use them. A delegated run's session process skips
+// the same checks; one whose handoff couldn't be read checks nothing, so
+// that its run can say why. An ordinary run's session process checks the
+// name its parent handed it, which may be --name normalized.
+func hostPreRunE(ext *Extension) func(*cobra.Command, []string) error {
+	return func(c *cobra.Command, args []string) error {
+		if isDaemonProcess() {
+			if daemonHandoff != nil && daemonHandoff.err != nil {
+				return nil
+			}
+			if name := os.Getenv(daemonNameEnv); daemonHandoff == nil && flagName != "" && name != "" {
+				flagName = name
+			}
+			return validateHostFlags(c, daemonHandoff != nil)
+		}
+		if ext == nil || ext.Prepare == nil {
+			return validateHostFlags(c, false)
+		}
+		opts, err := buildHostOptions(c)
+		if err != nil {
+			return err
+		}
+		p, err := ext.Prepare(c.Context(), opts)
+		if err != nil {
+			return verbatimError{text: safeText(err.Error())}
+		}
+		if p.Delegated && ext.Broker == nil {
+			return errNoBroker
+		}
+		if opts.NameGiven && p.NormalizeName != nil {
+			name, err := p.NormalizeName(flagName)
+			if err != nil {
+				return verbatimError{text: safeText(err.Error())}
+			}
+			// Checked as a drawn one is: an empty one would have a name
+			// drawn in its place.
+			if err := sessiondir.ValidateName(name); err != nil {
+				return err
+			}
+			flagName = name
+		}
+		c.SetContext(context.WithValue(c.Context(), hostRunKey{}, &hostRun{prepared: p, options: opts}))
+		return validateHostFlags(c, p.Delegated)
+	}
+}
+
+// buildHostOptions is this run of upterm host, c, as an extension's Prepare
+// is told it: each flag's value and where it came from, the authorized_keys
+// file read, and the users the user flags name, parsed but not looked up.
+func buildHostOptions(c *cobra.Command) (HostOptions, error) {
+	opts := HostOptions{
+		Name: flagName,
+		// An empty --name names nothing: upterm draws the name, as it does
+		// with no --name.
+		NameGiven: commandLineFlags["name"] && flagName != "",
+		Flags:     make(map[string]FlagValue),
+		Extension: make(map[string]FlagValue),
+	}
+	c.LocalFlags().VisitAll(func(f *pflag.Flag) {
+		if f.Name == "help" {
+			return
+		}
+		fv := FlagValue{Value: f.Value.String(), Source: flagSourceOf(f.Name)}
+		if isExtensionFlag(f) {
+			opts.Extension[f.Name] = fv
+			return
+		}
+		// A proxy's URL can hold its credentials.
+		if f.Name == "proxy" {
+			fv.Value = ""
+		}
+		opts.Flags[f.Name] = fv
+	})
+	if flagAuthorizedKeys != "" {
+		file, err := readAuthorizedKeyFile(flagAuthorizedKeys)
+		if err != nil {
+			return HostOptions{}, err
+		}
+		opts.AuthorizedKeys = []AuthorizedKeyFile{file}
+	}
+	var errs error
+	for _, flag := range userSpecs() {
+		for _, s := range flag.specs {
+			ref, err := host.ParseUserRef(s)
+			if err != nil {
+				errs = multierror.Append(errs, err)
+				continue
+			}
+			opts.UserRefs = append(opts.UserRefs, UserRef{Flag: "--" + flag.flag, Ref: ref})
+		}
+	}
+	if errs != nil {
+		return HostOptions{}, errs
+	}
+	return opts, nil
+}
+
+// flagSourceOf is where this run's value of the flag name came from: the
+// command line, else its UPTERM_ variable, else the config file, else its
+// default.
+func flagSourceOf(name string) FlagSource {
+	switch {
+	case commandLineFlags[name]:
+		return SourceCommandLine
+	case !suppliedFlags[name]:
+		return SourceDefault
+	case envSupplied(name):
+		return SourceEnv
+	}
+	return SourceConfig
+}
+
+// validateHostFlags checks upterm host's flags before it runs. A delegated
+// run's relay is its placement's, so --server and the default --known-hosts
+// aren't checked for one.
+func validateHostFlags(c *cobra.Command, delegated bool) error {
 	var result error
 	if err := validateJoinTimeout(flagJoinTimeout); err != nil {
 		result = multierror.Append(result, err)
@@ -678,14 +854,16 @@ func validateShareRequiredFlags(c *cobra.Command, args []string) error {
 		result = multierror.Append(result, fmt.Errorf("invalid output format %q: must be 'json'", flagHostOutput))
 	}
 
-	if err := validateServer(flagServer); err != nil {
-		result = multierror.Append(result, err)
-	} else {
-		flagServer = withDefaultPort(flagServer)
-	}
+	if !delegated {
+		if err := validateServer(flagServer); err != nil {
+			result = multierror.Append(result, err)
+		} else {
+			flagServer = withDefaultPort(flagServer)
+		}
 
-	if err := homeDefaultError(); err != nil {
-		result = multierror.Append(result, err)
+		if err := homeDefaultError(); err != nil {
+			result = multierror.Append(result, err)
+		}
 	}
 
 	if _, err := parseGuestCommands(c); err != nil {
@@ -736,18 +914,35 @@ type hostOptions struct {
 	ptySize      termsize.Size
 	term         string
 	escape       byte
+	// authorizationRequested says the run asked to restrict who may join,
+	// from any origin, and nameGenerated that no --name named it.
+	authorizationRequested bool
+	nameGenerated          bool
+	// delegated says the run is a delegated one, whose placement says where
+	// it registers and which relay keys it trusts there.
+	delegated bool
 }
 
 func parseHostOptions(args []string) (hostOptions, error) {
-	var opts hostOptions
+	return parseHostOptionsFor(args, false)
+}
+
+// parseHostOptionsFor is parseHostOptions for a run that is delegated or
+// not. A delegated run dials no proxy, so --proxy isn't read for one.
+func parseHostOptionsFor(args []string, delegated bool) (hostOptions, error) {
+	opts := hostOptions{delegated: delegated}
 	var err error
 	opts.commandDir, err = filepath.Abs("")
 	if err != nil {
 		return opts, err
 	}
-	if opts.proxyURL, err = parseProxyURL(flagProxy); err != nil {
-		return opts, err
+	if !delegated {
+		if opts.proxyURL, err = parseProxyURL(flagProxy); err != nil {
+			return opts, err
+		}
 	}
+	opts.authorizationRequested = authorizationRequested()
+	opts.nameGenerated = flagName == ""
 	opts.joinTimeout = flagJoinTimeout
 	opts.command = args
 	if len(opts.command) == 0 {
@@ -820,12 +1015,18 @@ func parseGuestCommands(cmd *cobra.Command) ([]string, error) {
 // referenced user's keys, and refuses to start unrestricted when a
 // restriction was asked for.
 func resolveAuthorizedKeys(ctx context.Context, opts hostOptions, logger *slog.Logger) ([]*host.AuthorizedKey, error) {
+	return resolveAuthorizedKeysFrom(ctx, flagAuthorizedKeys, authorizationRequested(), opts, logger)
+}
+
+// resolveAuthorizedKeysFrom is resolveAuthorizedKeys for the authorized_keys
+// file path, "" for none, in a run that requested a restriction or not.
+func resolveAuthorizedKeysFrom(ctx context.Context, path string, requested bool, opts hostOptions, logger *slog.Logger) ([]*host.AuthorizedKey, error) {
 	var authorizedKeys []*host.AuthorizedKey
-	if flagAuthorizedKeys != "" {
+	if path != "" {
 		// Not wrapped: AuthorizedKeysFromFile already names both the action and
 		// the file, so a wrap here reads "error reading authorized keys: error
 		// reading authorized keys file /typo: ...".
-		aks, err := host.AuthorizedKeysFromFile(flagAuthorizedKeys)
+		aks, err := host.AuthorizedKeysFromFile(path)
 		if err != nil {
 			return nil, err
 		}
@@ -840,13 +1041,13 @@ func resolveAuthorizedKeys(ctx context.Context, opts hostOptions, logger *slog.L
 	}
 	// An empty authorized-key set means "allow anyone with the session token"
 	// downstream. If the user asked for a restriction, never fall back to that.
-	if authorizationRequested() && countKeys(authorizedKeys) == 0 {
+	if requested && countKeys(authorizedKeys) == 0 {
 		return nil, fmt.Errorf("authorization was requested but no public keys were resolved; refusing to start a session that would accept any client")
 	}
 	return authorizedKeys, nil
 }
 
-func shareRunE(c *cobra.Command, args []string) error {
+func shareRunE(c *cobra.Command, ext *Extension, args []string) error {
 	logger := uptermctx.Logger(c.Context())
 	if logger == nil {
 		return fmt.Errorf("logger not available")
@@ -859,7 +1060,7 @@ func shareRunE(c *cobra.Command, args []string) error {
 		return err
 	}
 	if conn != nil {
-		return mapUserAction(c, runDaemon(c.Context(), logger.Logger, args, conn, daemonName))
+		return mapUserAction(c, runDaemon(c.Context(), logger.Logger, ext, daemonHandoff, args, conn, daemonName))
 	}
 
 	// Refuse before anything is claimed or connected: a session that reaches
@@ -869,11 +1070,12 @@ func shareRunE(c *cobra.Command, args []string) error {
 		return SilentError{Err: err}
 	}
 
-	opts, err := parseHostOptions(args)
+	run := hostRunFrom(c.Context())
+	opts, err := parseHostOptionsFor(args, run.delegated())
 	if err != nil {
 		return err
 	}
-	return runHostParent(c, logger.Logger, opts)
+	return runHostParent(c, logger.Logger, opts, run)
 }
 
 // hostSpawn is how runHostParent starts the daemon.
@@ -911,7 +1113,21 @@ func guardedSpawn(so spawnOptions) (net.Conn, *os.Process, error) {
 
 // runHostParent is upterm host on a platform that spawns: the daemon is a
 // child, this process is its operator's terminal.
-func runHostParent(c *cobra.Command, logger *slog.Logger, opts hostOptions) error {
+func runHostParent(c *cobra.Command, logger *slog.Logger, opts hostOptions, run *hostRun) error {
+	// A delegated run's session process is handed the settings this one
+	// resolved, the same for every name it tries; an ordinary run's reads
+	// its own.
+	var (
+		settings  HostSettings
+		normalize func(string) (string, error)
+	)
+	if run.delegated() {
+		settings = hostSettingsFromFlags()
+		settings.Proxy = ""
+	}
+	if run != nil {
+		normalize = run.prepared.NormalizeName
+	}
 	display := displaySession
 	if flagDetach && flagHostOutput == "json" && flagAccept {
 		// stdout is the JSON, and nobody is asked: the banner would be noise
@@ -933,8 +1149,16 @@ func runHostParent(c *cobra.Command, logger *slog.Logger, opts hostOptions) erro
 		hint = hostKeyHint(classifyTerminal(os.Stdin, os.Stdout, tty.Owned, opts.term), opts.escape, os.Getenv("SSH_TTY") != "")
 	}
 	warning := logWarningFor(c.Context())
-	err := runWithGeneratedNameRetry(logger, flagName, opts.command, func(name string) error {
+	err := runWithNormalizedNames(logger, flagName, func() string { return drawName(opts.command) }, normalize, func(name string) error {
+		var handoff string
+		if run.delegated() {
+			var err error
+			if handoff, err = encodeHandoff(Handoff{Name: name, Settings: settings, Options: run.options, Payload: run.prepared.Payload}, exactValues(c)); err != nil {
+				return err
+			}
+		}
 		s := &spawnedSession{
+			handoff:      handoff,
 			name:         name,
 			detach:       flagDetach,
 			jsonOut:      flagHostOutput == "json",
@@ -1008,8 +1232,12 @@ type notification struct{ Title, Body string }
 
 // guestNotifier raises the desktop notifications for guests joining and
 // leaving the session it names. An operator may have several sessions
-// running, so each notification says which one it is about.
-type guestNotifier string
+// running, so each notification says which one it is about. hide hides
+// guests' addresses in them, as --hide-client-ip does.
+type guestNotifier struct {
+	name string
+	hide bool
+}
 
 func (n guestNotifier) joined(c *api.Client) {
 	// The host's own terminal is a client of the session now, and notifying
@@ -1017,14 +1245,14 @@ func (n guestNotifier) joined(c *api.Client) {
 	if !shouldNotifyClient(c) {
 		return
 	}
-	_ = notify("A guest joined "+string(n), clientDesc(c), icon.Upterm)
+	_ = notify("A guest joined "+n.name, clientDescHiding(c, n.hide), icon.Upterm)
 }
 
 func (n guestNotifier) left(c *api.Client) {
 	if !shouldNotifyClient(c) {
 		return
 	}
-	_ = notify("A guest left "+string(n), clientDesc(c), icon.Upterm)
+	_ = notify("A guest left "+n.name, clientDescHiding(c, n.hide), icon.Upterm)
 }
 
 // tunnelNotification is the notification for a change in the session's

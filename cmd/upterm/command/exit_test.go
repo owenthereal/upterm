@@ -38,6 +38,19 @@ func runCLI(t *testing.T, args ...string) (stdout, stderr string, code int) {
 // runCLICmd is runCLI, and the command that ran.
 func runCLICmd(t *testing.T, args ...string) (stdout, stderr string, code int, cmd *cobra.Command) {
 	t.Helper()
+	return runCLIRoot(t, cliRoot, args...)
+}
+
+// runCLIWith is runCLI for the command composed with ext.
+func runCLIWith(t *testing.T, ext *Extension, args ...string) (stdout, stderr string, code int) {
+	t.Helper()
+	stdout, stderr, code, _ = runCLIRoot(t, func() *cobra.Command { return cliRootWith(ext) }, args...)
+	return stdout, stderr, code
+}
+
+// runCLIRoot is runCLICmd for the tree newRoot builds.
+func runCLIRoot(t *testing.T, newRoot func() *cobra.Command, args ...string) (stdout, stderr string, code int, cmd *cobra.Command) {
+	t.Helper()
 
 	// The real binary exits with the parsed flags and command metadata.
 	// Restore the incoming values when this fixture ends, so direct readers
@@ -76,7 +89,7 @@ func runCLICmd(t *testing.T, args ...string) (stdout, stderr string, code int, c
 
 	// Built after the swap: cobra's completion command keeps the stdout it
 	// was created with.
-	root := cliRoot()
+	root := newRoot()
 	// Never nil: cobra reads nil as "take os.Args", the test binary's.
 	root.SetArgs(append([]string{}, args...))
 	cmd, err = execute(root)
@@ -490,8 +503,8 @@ func TestMainInstallsTheSignalPolicyFirst(t *testing.T) {
 	origPolicy, origRoot := installSignalPolicy, mainRoot
 	t.Cleanup(func() { installSignalPolicy, mainRoot = origPolicy, origRoot })
 	installSignalPolicy = func() { calls = append(calls, "policy") }
-	mainRoot = func() *cobra.Command {
-		root := origRoot()
+	mainRoot = func(ext *Extension) *cobra.Command {
+		root := origRoot(ext)
 		version, _, err := root.Find([]string{"version"})
 		require.NoError(t, err)
 		run := version.RunE

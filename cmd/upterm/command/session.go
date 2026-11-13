@@ -2694,8 +2694,10 @@ func quoteShellArg(s string) string {
 // A jump ends with where it goes. Its destinations say as much about the
 // host's network as an address says about the guest, so they are hidden
 // whenever addresses are.
-func clientDesc(c *api.Client) string {
-	hide := shouldHideClientIP()
+func clientDesc(c *api.Client) string { return clientDescHiding(c, shouldHideClientIP()) }
+
+// clientDescHiding is clientDesc, with addresses hidden or not as hide says.
+func clientDescHiding(c *api.Client, hide bool) string {
 	addr := c.GetAddr()
 	if hide {
 		addr = "[redacted]"

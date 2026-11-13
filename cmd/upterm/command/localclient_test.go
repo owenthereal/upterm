@@ -35,7 +35,7 @@ func TestNotificationsNameTheSessionAndSayGuest(t *testing.T) {
 
 	var titles []string
 	swapNotify(t, func(title, _ string, _ any) error { titles = append(titles, title); return nil })
-	cb := guestNotifier("build")
+	cb := guestNotifier{name: "build", hide: shouldHideClientIP()}
 
 	cb.joined(&api.Client{Kind: api.Client_HOST})
 	cb.left(&api.Client{Kind: api.Client_HOST})
@@ -52,8 +52,8 @@ func TestGuestNotificationsCarryTheClientRow(t *testing.T) {
 	swapNotify(t, func(_, body string, _ any) error { bodies = append(bodies, body); return nil })
 	c := &api.Client{Kind: api.Client_GUEST, Addr: "198.51.100.7:4242", Version: "SSH-2.0-OpenSSH_9.9", PublicKeyFingerprint: "SHA256:abc"}
 
-	guestNotifier("build").joined(c)
-	guestNotifier("build").left(c)
+	guestNotifier{name: "build", hide: shouldHideClientIP()}.joined(c)
+	guestNotifier{name: "build", hide: shouldHideClientIP()}.left(c)
 	require.Equal(t, []string{clientDesc(c), clientDesc(c)}, bodies)
 }
 

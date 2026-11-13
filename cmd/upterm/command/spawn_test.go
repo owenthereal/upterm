@@ -37,6 +37,7 @@ func TestSpawnHelperProcess(t *testing.T) {
 	// it is the platform's business: a descriptor number on one side, a
 	// socket path whose directory must already be gone on the other.
 	report("handoff", os.Getenv(daemonHandoffEnv))
+	report("settings", strconv.Quote(os.Getenv(handoffEnv)))
 	conn, name, err := bootstrapConn()
 	if err != nil || conn == nil {
 		report("bootstrap", fmt.Sprintf("err=%v nil=%v", err, conn == nil))

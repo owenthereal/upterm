@@ -48,6 +48,9 @@ type deprecation struct {
 	Flag, Source string
 	InConfig     bool
 	Command      string
+	// Key is the config key when it isn't the flag's name: an extension's
+	// flag's key in its entry of the extensions mapping.
+	Key string
 }
 
 // perRunDeprecations is a deprecation for each value env and config hold for
@@ -84,7 +87,11 @@ func boundElsewhere(cmd *cobra.Command, name string) bool {
 func (d deprecation) ignoredLine() string {
 	what := d.Source
 	if d.InConfig {
-		what = fmt.Sprintf("the %s key in %s", d.Flag, d.Source)
+		key := d.Flag
+		if d.Key != "" {
+			key = d.Key
+		}
+		what = fmt.Sprintf("the %s key in %s", key, d.Source)
 	}
 	if d.Command != "" {
 		what += " for " + d.Command
@@ -108,11 +115,12 @@ func warnDeprecations(w io.Writer, deps []deprecation) {
 // values only from the command line, for config's help: the command's path
 // below root, then those flags in the order they were registered, wrapped at
 // 80 columns. The commands come depth first, each one's subcommands by name.
+// The root and the groups, which run nothing of their own, have no line.
 func perRunHelp(root *cobra.Command) string {
 	var b strings.Builder
 	var walk func(c *cobra.Command)
 	walk = func(c *cobra.Command) {
-		if !c.HasSubCommands() {
+		if !isGroup(c) {
 			var names []string
 			seen := make(map[string]bool)
 			for _, fs := range []*pflag.FlagSet{c.PersistentFlags(), c.Flags()} {

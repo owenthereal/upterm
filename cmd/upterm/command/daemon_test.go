@@ -279,7 +279,7 @@ func TestRunDaemonReportsAnArgumentItCannotParse(t *testing.T) {
 	parent := bootstrap.NewParent(b, nil, io.Discard, nil)
 	done := make(chan error, 1)
 	go func() {
-		err := runDaemon(context.Background(), discardLogger(), []string{"sh"}, a, "bad-args")
+		err := runDaemon(context.Background(), discardLogger(), nil, nil, []string{"sh"}, a, "bad-args")
 		// A real daemon's process exits here, and that is what closes its end
 		// of the channel. net.Pipe has to be told, and it matters: without
 		// it, a daemon that sent nothing leaves the parent waiting on a
@@ -425,7 +425,7 @@ func TestBuildDaemonHostRefusesAnEmptyName(t *testing.T) {
 	t.Cleanup(func() { _ = a.Close(); _ = b.Close() })
 	child := bootstrap.NewChild(a, nil)
 	t.Cleanup(func() { _ = child.Close() })
-	_, err := buildDaemonHost(context.Background(), "", testHostOptions(), child, discardLogger())
+	_, err := buildDaemonHost(context.Background(), hostSettingsFromFlags(), "", testHostOptions(), child, discardLogger())
 	require.ErrorContains(t, err, "without a session name")
 }
 
@@ -441,7 +441,7 @@ func TestBuildDaemonHostNotifiesByName(t *testing.T) {
 	t.Cleanup(func() { _ = a.Close(); _ = b.Close() })
 	child := bootstrap.NewChild(a, nil)
 	t.Cleanup(func() { _ = child.Close() })
-	h, err := buildDaemonHost(context.Background(), "build", testHostOptions(), child, discardLogger())
+	h, err := buildDaemonHost(context.Background(), hostSettingsFromFlags(), "build", testHostOptions(), child, discardLogger())
 	require.NoError(t, err)
 
 	guest := &api.Client{Kind: api.Client_GUEST}
@@ -464,7 +464,7 @@ func TestBuildDaemonHostTellsGuestsWhereItsLogIs(t *testing.T) {
 	t.Cleanup(func() { _ = a.Close(); _ = b.Close() })
 	child := bootstrap.NewChild(a, nil)
 	t.Cleanup(func() { _ = child.Close() })
-	h, err := buildDaemonHost(context.Background(), "log", testHostOptions(), child, discardLogger())
+	h, err := buildDaemonHost(context.Background(), hostSettingsFromFlags(), "log", testHostOptions(), child, discardLogger())
 	require.NoError(t, err)
 	require.Equal(t, utils.UptermLogFilePath(), h.LogPath)
 }
@@ -498,7 +498,7 @@ func TestBuildDaemonHostHidesClientIPs(t *testing.T) {
 			t.Cleanup(func() { _ = a.Close(); _ = b.Close() })
 			child := bootstrap.NewChild(a, nil)
 			t.Cleanup(func() { _ = child.Close() })
-			h, err := buildDaemonHost(context.Background(), "d", testHostOptions(), child, discardLogger())
+			h, err := buildDaemonHost(context.Background(), hostSettingsFromFlags(), "d", testHostOptions(), child, discardLogger())
 			require.NoError(t, err)
 			require.Equal(t, tc.hidden, h.HideClientIP)
 		})
@@ -520,7 +520,7 @@ func TestDaemonConsentConfiguration(t *testing.T) {
 			t.Cleanup(func() { _ = a.Close(); _ = b.Close() })
 			child := bootstrap.NewChild(a, nil)
 			t.Cleanup(func() { _ = child.Close() })
-			h, err := buildDaemonHost(context.Background(), "d", testHostOptions(), child, discardLogger())
+			h, err := buildDaemonHost(context.Background(), hostSettingsFromFlags(), "d", testHostOptions(), child, discardLogger())
 			require.NoError(t, err)
 			require.Equal(t, accept, h.AutoAccept)
 			require.Equal(t, accept, h.SFTPAutoAccept, "--accept grants file transfers")
@@ -700,7 +700,7 @@ func TestDaemonNamesTheAuthorityItsClaimedRecordHolds(t *testing.T) {
 	_ = b.Close()
 	child := bootstrap.NewChild(a, nil)
 	t.Cleanup(func() { _ = child.Close() })
-	h, err := buildDaemonHost(context.Background(), "d", testHostOptions(), child, discardLogger())
+	h, err := buildDaemonHost(context.Background(), hostSettingsFromFlags(), "d", testHostOptions(), child, discardLogger())
 	require.NoError(t, err)
 
 	dir, err := sessiondir.Claim(context.Background(), sessiondir.ClaimOptions{
@@ -807,7 +807,7 @@ func TestBuildDaemonHostReportsAnUnusableKnownHostsFile(t *testing.T) {
 	t.Cleanup(func() { _ = a.Close(); _ = b.Close() })
 	child := bootstrap.NewChild(a, nil)
 	t.Cleanup(func() { _ = child.Close() })
-	_, err := buildDaemonHost(context.Background(), "kh", testHostOptions(), child, discardLogger())
+	_, err := buildDaemonHost(context.Background(), hostSettingsFromFlags(), "kh", testHostOptions(), child, discardLogger())
 	require.Error(t, err)
 	require.Contains(t, err.Error(), file, "the error names the path that could not be used")
 }
@@ -830,7 +830,7 @@ func TestJoinTimeoutReachesTheDaemonHost(t *testing.T) {
 	t.Cleanup(func() { _ = child.Close() })
 	opts := testHostOptions()
 	opts.joinTimeout = 7 * time.Minute
-	h, err := buildDaemonHost(context.Background(), "n", opts, child, discardLogger())
+	h, err := buildDaemonHost(context.Background(), hostSettingsFromFlags(), "n", opts, child, discardLogger())
 	require.NoError(t, err)
 	require.Equal(t, 7*time.Minute, h.JoinTimeout)
 }
@@ -866,7 +866,7 @@ func TestBuildDaemonHostSetsIdentitiesOnlyFromPrivateKey(t *testing.T) {
 			t.Cleanup(func() { _ = a.Close(); _ = b.Close() })
 			child := bootstrap.NewChild(a, nil)
 			t.Cleanup(func() { _ = child.Close() })
-			h, err := buildDaemonHost(context.Background(), "ids", testHostOptions(), child, discardLogger())
+			h, err := buildDaemonHost(context.Background(), hostSettingsFromFlags(), "ids", testHostOptions(), child, discardLogger())
 			require.NoError(t, err)
 			require.Equal(t, named, h.IdentitiesOnly)
 		})
@@ -917,7 +917,7 @@ func TestBuildDaemonHostTellsTheParentWhichPrivateKeyItSkipped(t *testing.T) {
 	}()
 
 	child := bootstrap.NewChild(a, nil)
-	_, err := buildDaemonHost(context.Background(), "skip", testHostOptions(), child, discardLogger())
+	_, err := buildDaemonHost(context.Background(), hostSettingsFromFlags(), "skip", testHostOptions(), child, discardLogger())
 	// Closing the child ends the exchange, so the parent's Run returns and
 	// everything it printed is in the builder.
 	require.NoError(t, child.Close())
@@ -944,7 +944,7 @@ func daemonPrints(t *testing.T, name string, use func(*host.Host)) string {
 	}()
 
 	child := bootstrap.NewChild(a, nil)
-	h, err := buildDaemonHost(context.Background(), name, testHostOptions(), child, discardLogger())
+	h, err := buildDaemonHost(context.Background(), hostSettingsFromFlags(), name, testHostOptions(), child, discardLogger())
 	require.NoError(t, err)
 	use(h)
 	// Closing the child ends the exchange, so the parent's Run returns and
@@ -1054,7 +1054,7 @@ func runDaemonAgainstUnsupportedRelay(t *testing.T) string {
 	}()
 
 	child := bootstrap.NewChild(a, nil)
-	h, err := buildDaemonHost(ctx, "relaywarn", testHostOptions(), child, discardLogger())
+	h, err := buildDaemonHost(ctx, hostSettingsFromFlags(), "relaywarn", testHostOptions(), child, discardLogger())
 	require.NoError(t, err)
 	require.ErrorAs(t, h.Run(ctx), new(UserDiscardedError))
 	require.NoError(t, child.Close())
@@ -1072,7 +1072,7 @@ func TestDaemonGuestCommandConfiguration(t *testing.T) {
 	t.Cleanup(func() { _ = a.Close(); _ = b.Close() })
 	child := bootstrap.NewChild(a, nil)
 	t.Cleanup(func() { _ = child.Close() })
-	h, err := buildDaemonHost(context.Background(), "guest-options", opts, child, discardLogger())
+	h, err := buildDaemonHost(context.Background(), hostSettingsFromFlags(), "guest-options", opts, child, discardLogger())
 	require.NoError(t, err)
 	require.Equal(t, []string{"tool", "a b"}, h.LoginCommand)
 	require.True(t, h.AcceptExec)
@@ -1094,7 +1094,7 @@ func TestForwardingDaemonConfiguration(t *testing.T) {
 	t.Cleanup(func() { _ = a.Close(); _ = b.Close() })
 	child := bootstrap.NewChild(a, nil)
 	t.Cleanup(func() { _ = child.Close() })
-	h, err := buildDaemonHost(context.Background(), "forward-options", opts, child, discardLogger())
+	h, err := buildDaemonHost(context.Background(), hostSettingsFromFlags(), "forward-options", opts, child, discardLogger())
 	require.NoError(t, err)
 	require.True(t, h.AllowLoopbackTCPForwarding)
 	require.False(t, h.ForwardingDisabled)

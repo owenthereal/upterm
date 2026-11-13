@@ -30,7 +30,11 @@ type spawnOptions struct {
 	args       []string
 	env        []string
 	name       string
-	logPath    string
+	// handoff is the child's handoffEnv: a delegated run's encoded handoff,
+	// or "" for an ordinary run. It is set either way, so the child never
+	// inherits this process's.
+	handoff string
+	logPath string
 	// logOff, if set, is told why the log couldn't be opened; the child
 	// then starts with its stdout and stderr on the null device.
 	logOff func(err error)
@@ -117,9 +121,11 @@ func spawnDaemon(opts spawnOptions) (net.Conn, *os.Process, error) {
 	}
 
 	cmd := exec.Command(executable, args...)
+	// Last, so these win over any of the same names env holds.
 	cmd.Env = append(append([]string{}, env...),
 		daemonFDEnv+"="+strconv.Itoa(3), // ExtraFiles[0]
-		daemonNameEnv+"="+opts.name)
+		daemonNameEnv+"="+opts.name,
+		handoffEnv+"="+opts.handoff)
 	cmd.Stdin = devnull
 	if logFile != nil { // otherwise exec's null device
 		cmd.Stdout = logFile

@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
 	"slices"
 	"strconv"
 	"strings"
@@ -23,21 +22,12 @@ const failureCodeAnnotation = "upterm/failure-code"
 // call it.
 var installSignalPolicy = InstallSignalPolicy
 
-// mainRoot is the command tree Main runs; a var so a test can see what runs
-// after the signal policy.
-var mainRoot = cliRoot
+// mainRoot is the command tree MainWith runs; a var so a test can see what
+// runs after the signal policy.
+var mainRoot = cliRootWith
 
-// Main is the whole of main: the signal policy, the command, the exit status.
-//
-// The signal policy comes first and belongs to this process, not only to the
-// daemon's Host.Run: the foreground host and attach hold the terminal here,
-// and need SIGPIPE protection and the job-control dispositions before any of
-// it is touched.
-func Main() int {
-	installSignalPolicy()
-	cmd, err := execute(mainRoot())
-	return Exit(cmd, err, os.Stderr)
-}
+// Main is the whole of main: MainWith(nil).
+func Main() int { return MainWith(nil) }
 
 // execute runs root as ExecuteC does, and help asked for an unknown command
 // fails as running it does: cobra prints help instead of returning an error,
@@ -56,8 +46,11 @@ func execute(root *cobra.Command) (*cobra.Command, error) {
 // ExecuteC, too late for Root to make it runnable like the other groups, so
 // it is added here first, and ExecuteC finds it there. Root itself goes
 // without: cmd/gendoc writes a man page for every command Root has.
-func cliRoot() *cobra.Command {
-	root := Root()
+func cliRoot() *cobra.Command { return cliRootWith(nil) }
+
+// cliRootWith is RootWith(ext) as MainWith runs it, as cliRoot is Root.
+func cliRootWith(ext *Extension) *cobra.Command {
+	root := RootWith(ext)
 	root.InitDefaultCompletionCmd()
 	for _, c := range root.Commands() {
 		if c.Name() == "completion" {

@@ -32,29 +32,75 @@ import (
 // useless. It is unreachable in practice, since the parent parsed the same
 // argv before it spawned anything, but the shape of a failure should not
 // depend on that: the one message a daemon owes its parent is the reason.
-func runDaemon(ctx context.Context, logger *slog.Logger, args []string, conn net.Conn, name string) error {
-	opts, err := parseHostOptions(args)
+//
+// A delegated run, d, is hosted as its handoff says, and placed by the Broker
+// ext's factory makes from it. A handoff that couldn't be read, and the
+// factory's error, are told the parent as they are.
+func runDaemon(ctx context.Context, logger *slog.Logger, ext *Extension, d *daemonHandoffState, args []string, conn net.Conn, name string) error {
+	run := func(ctx context.Context, h *host.Host) error { return h.Run(ctx) }
+	if d == nil {
+		opts, err := parseHostOptions(args)
+		if err != nil {
+			reportDaemonFailure(conn, bootstrap.Failure{Text: failureText(err)})
+			return err
+		}
+		return runDaemonProcess(ctx, logger, opts, conn, name, run)
+	}
+	if d.err != nil {
+		reportDaemonFailure(conn, verbatimFailure(d.err))
+		return d.err
+	}
+	opts, err := parseHostOptionsFor(args, true)
 	if err != nil {
-		reportDaemonFailure(conn, err)
+		reportDaemonFailure(conn, bootstrap.Failure{Text: failureText(err)})
 		return err
 	}
-	return runDaemonProcess(ctx, logger, opts, conn, name,
-		func(ctx context.Context, h *host.Host) error { return h.Run(ctx) })
+	// The parent refuses such a run before it starts this process; this is
+	// for a handoff that reached a build with no Broker some other way.
+	if ext == nil || ext.Broker == nil {
+		reportDaemonFailure(conn, bootstrap.Failure{Text: failureText(errNoBroker)})
+		return errNoBroker
+	}
+	newBroker := func(ctx context.Context) (host.Broker, error) { return ext.Broker(ctx, d.h) }
+	return runDaemonWith(ctx, logger, d.h.Settings, newBroker, opts, conn, name, run)
 }
 
-// reportDaemonFailure tells the parent why this daemon is not starting, for
-// a failure that happens before runDaemonProcess has taken the connection
-// over, and closes as soon as the message is on the wire.
+// errNoBroker is a delegated run in a build whose extension has no Broker to
+// place it.
+var errNoBroker = errors.New("this upterm can't host a delegated run")
+
+// verbatimFailure is err told the parent as it is, made safe for a terminal.
+func verbatimFailure(err error) bootstrap.Failure {
+	return bootstrap.Failure{Text: safeText(err.Error()), Verbatim: true}
+}
+
+// verbatimBroker is a Broker whose Place errors are told the parent as they
+// are: a name taken where the run was placed as a *host.NameTakenError, and
+// any other error as a verbatimError.
+type verbatimBroker struct{ host.Broker }
+
+func (b verbatimBroker) Place(ctx context.Context, run host.Run) (host.Placement, error) {
+	p, err := b.Broker.Place(ctx, run)
+	var taken *host.NameTakenError
+	if err != nil && !errors.As(err, &taken) {
+		err = verbatimError{text: err.Error()}
+	}
+	return p, err
+}
+
+// reportDaemonFailure tells the parent why this daemon is not starting, f,
+// for a failure that happens before runDaemonProcess has taken the
+// connection over, and closes as soon as the message is on the wire.
 //
 // The Child is armed, as every Child is, but with no onParentGone to call:
 // there is no session here to abandon, and the parent leaving first only
 // means nobody is left to read the reason. Anyone who later passes a
 // callback here should know that the arming is real and it is the nil
 // callback that makes the departure a no-op.
-func reportDaemonFailure(conn net.Conn, err error) {
+func reportDaemonFailure(conn net.Conn, f bootstrap.Failure) {
 	child := bootstrap.NewChild(conn, nil)
 	defer func() { _ = child.Close() }()
-	child.Failed(bootstrap.Failure{Text: failureText(err)})
+	child.Failed(f)
 }
 
 // failureText is err as the daemon tells its parent, which prints it on
@@ -96,7 +142,7 @@ func failureOf(err error) bootstrap.Failure {
 	var taken *host.NameTakenError
 	if errors.As(err, &taken) {
 		f.Text, f.Verbatim, f.NameTaken = safeText(taken.Text), true, true
-	} else if verbatim, ok := err.(verbatimError); ok {
+	} else if verbatim := (verbatimError{}); errors.As(err, &verbatim) {
 		f.Text, f.Verbatim, f.NameTaken = safeText(verbatim.text), true, verbatim.nameTaken
 	}
 	return f
@@ -115,16 +161,34 @@ func safeText(text string) string { return string(termtext.Sanitize([]byte(text)
 // cause and records startup_abandoned. Once the command has started the
 // parent's departure is expected and means nothing.
 func runDaemonProcess(ctx context.Context, logger *slog.Logger, opts hostOptions, conn net.Conn, name string, run func(context.Context, *host.Host) error) error {
+	return runDaemonWith(ctx, logger, hostSettingsFromFlags(), nil, opts, conn, name, run)
+}
+
+// runDaemonWith is runDaemonProcess for a host built from s, and placed by
+// the Broker newBroker makes when newBroker isn't nil. newBroker is called
+// once the parent's departure is watched for, with a context that ends with
+// it, and its error is told the parent as it is.
+func runDaemonWith(ctx context.Context, logger *slog.Logger, s HostSettings, newBroker func(context.Context) (host.Broker, error), opts hostOptions, conn net.Conn, name string, run func(context.Context, *host.Host) error) error {
 	ctx, cancel := context.WithCancelCause(ctx)
 	defer cancel(nil)
 	child := bootstrap.NewChild(conn, func() { cancel(host.ErrSessionAbandoned) })
 	defer func() { _ = child.Close() }()
 
-	h, err := buildDaemonHost(ctx, name, opts, child, logger)
+	var broker host.Broker
+	if newBroker != nil {
+		b, err := newBroker(ctx)
+		if err != nil {
+			child.Failed(verbatimFailure(err))
+			return err
+		}
+		broker = verbatimBroker{b}
+	}
+	h, err := buildDaemonHost(ctx, s, name, opts, child, logger)
 	if err != nil {
 		child.Failed(bootstrap.Failure{Text: failureText(err)})
 		return err
 	}
+	h.Broker = broker
 	err = run(ctx, h)
 	if err != nil {
 		f := failureOf(err)
@@ -144,23 +208,60 @@ func runDaemonProcess(ctx context.Context, logger *slog.Logger, opts hostOptions
 	return err
 }
 
-// buildDaemonHost is the Host the foreground built, with every place it
-// touched a terminal wired to the exchange instead.
-func buildDaemonHost(ctx context.Context, name string, opts hostOptions, child *bootstrap.Child, logger *slog.Logger) (*host.Host, error) {
+// hostSettingsFromFlags is what this run's flags say the host is built from.
+func hostSettingsFromFlags() HostSettings {
+	return HostSettings{
+		Server:                  flagServer,
+		KnownHosts:              flagKnownHostsFilename,
+		Proxy:                   flagProxy,
+		PrivateKeys:             flagPrivateKeys,
+		IdentitiesOnly:          identitiesOnlyRequested(),
+		SkipHostKeyCheck:        flagSkipHostKeyCheck,
+		ForceCommand:            flagForceCommand,
+		LoginCommand:            flagLoginCommand,
+		Accept:                  flagAccept,
+		AllowExec:               flagAllowExec,
+		NoExec:                  flagNoExec,
+		HideClientIP:            shouldHideClientIP(),
+		ReadOnly:                flagReadOnly,
+		AllowSFTP:               flagAllowSFTP,
+		NoSFTP:                  flagNoSFTP,
+		NoForwarding:            flagNoForwarding,
+		AllowForwarding:         string(flagAllowForwarding),
+		AllowLocalTCPForwarding: flagAllowLocalTCPForwarding,
+		FullAccess:              flagFullAccess,
+		Detach:                  flagDetach,
+		PtySize:                 flagPtySize,
+		Term:                    flagTerm,
+		EscapeChar:              flagHostEscapeChar,
+		JoinTimeout:             flagJoinTimeout,
+		AuthorizedKeys:          flagAuthorizedKeys,
+	}
+}
+
+// buildDaemonHost is the Host the foreground built, from s, with every place
+// it touched a terminal wired to the exchange instead. A delegated run's
+// placement says which relay it registers with and which keys it trusts
+// there, and its authority decides its guests: it resolves no keys, and has
+// no host key callback.
+func buildDaemonHost(ctx context.Context, s HostSettings, name string, opts hostOptions, child *bootstrap.Child, logger *slog.Logger) (*host.Host, error) {
 	if name == "" {
 		return nil, errors.New("the daemon was started without a session name")
 	}
-	authorizedKeys, err := resolveAuthorizedKeys(ctx, opts, logger)
-	if err != nil {
-		return nil, err
+	var authorizedKeys []*host.AuthorizedKey
+	if !opts.delegated {
+		var err error
+		if authorizedKeys, err = resolveAuthorizedKeysFrom(ctx, s.AuthorizedKeys, opts.authorizationRequested, opts, logger); err != nil {
+			return nil, err
+		}
 	}
 
 	signers, cleanup, err := host.SignersWith(host.SignerOptions{
-		PrivateKeys: flagPrivateKeys,
+		PrivateKeys: s.PrivateKeys,
 		// Read here, not inherited: the daemon is a re-exec of this argv, so
 		// it parses the same flags from the same origins and must read
 		// --private-key the same way the foreground does.
-		IdentitiesOnly: identitiesOnlyRequested(),
+		IdentitiesOnly: s.IdentitiesOnly,
 		Passphrase: func(file string) ([]byte, error) {
 			return child.ReadSecret(fmt.Sprintf("Enter passphrase for key '%s': ", file))
 		},
@@ -186,22 +287,29 @@ func buildDaemonHost(ctx context.Context, name string, opts hostOptions, child *
 	// A check that remembers how it trusted the relay's key, so the session
 	// can tell guests which key to pin, and whether a line already in the
 	// known_hosts file matched it.
-	var relayKey *host.RelayKeyCheck
-	if flagSkipHostKeyCheck {
-		relayKey, err = host.NewAutoAcceptingRelayKeyCheck(child.Writer(), flagKnownHostsFilename)
-	} else {
-		relayKey, err = host.NewPromptingRelayKeyCheck(child.Reader(), child.Writer(), flagKnownHostsFilename, connectionIsProxied(flagServer, opts.proxyURL))
-	}
-	if err != nil {
-		return nil, err
+	var (
+		hostKeyCallback ssh.HostKeyCallback
+		relayKeyTrusted func() (host.TrustedRelayKey, bool)
+	)
+	if !opts.delegated {
+		var relayKey *host.RelayKeyCheck
+		if s.SkipHostKeyCheck {
+			relayKey, err = host.NewAutoAcceptingRelayKeyCheck(child.Writer(), s.KnownHosts)
+		} else {
+			relayKey, err = host.NewPromptingRelayKeyCheck(child.Reader(), child.Writer(), s.KnownHosts, connectionIsProxied(s.Server, opts.proxyURL))
+		}
+		if err != nil {
+			return nil, err
+		}
+		hostKeyCallback, relayKeyTrusted = relayKey.HostKeyCallback, relayKey.Trusted
 	}
 
 	// --full-access is --allow-exec, --allow-sftp and
 	// --allow-forwarding=loopback. --accept grants file transfers too, as
 	// well as a start nobody is asked about.
-	allowExec := flagAllowExec || flagFullAccess
-	allowSFTP := flagAllowSFTP || flagFullAccess || flagAccept
-	allowLoopback := flagAllowForwarding == forwardLoopback || flagFullAccess
+	allowExec := s.AllowExec || s.FullAccess
+	allowSFTP := s.AllowSFTP || s.FullAccess || s.Accept
+	allowLoopback := forwardingGrant(s.AllowForwarding) == forwardLoopback || s.FullAccess
 
 	// Generated here rather than left to Run: the parent pins the door's keys
 	// from what Listening reports, and it must be this run's session host
@@ -217,7 +325,7 @@ func buildDaemonHost(ctx context.Context, name string, opts hostOptions, child *
 
 	// The daemon is the one that knows what became of the session, so it is
 	// the one that tells the operator, by the session's name.
-	guests := guestNotifier(name)
+	guests := guestNotifier{name: name, hide: s.HideClientIP}
 	// The session's directory, once claimed: what its authority decided is
 	// told as its record names the authority.
 	var claimedDir atomic.Pointer[sessiondir.Dir]
@@ -233,24 +341,25 @@ func buildDaemonHost(ctx context.Context, name string, opts hostOptions, child *
 	// Host it belongs to for its join state.
 	var h *host.Host
 	h = &host.Host{
-		Host:              flagServer,
+		Host:              s.Server,
 		Name:              name,
+		NameGenerated:     opts.nameGenerated,
 		Command:           opts.command,
 		JoinTimeout:       opts.joinTimeout,
 		ForceCommand:      opts.forceCommand,
 		LoginCommand:      opts.loginCommand,
 		CommandDir:        opts.commandDir,
 		AcceptExec:        allowExec,
-		ExecDisabled:      flagNoExec,
-		HideClientIP:      shouldHideClientIP(),
+		ExecDisabled:      s.NoExec,
+		HideClientIP:      s.HideClientIP,
 		LogPath:           utils.UptermLogFilePath(),
 		Signers:           signers,
-		IdentitiesOnly:    identitiesOnlyRequested(),
+		IdentitiesOnly:    s.IdentitiesOnly,
 		HostKey:           hostKey,
-		HostKeyCallback:   relayKey.HostKeyCallback,
-		RelayKeyTrusted:   relayKey.Trusted,
+		HostKeyCallback:   hostKeyCallback,
+		RelayKeyTrusted:   relayKeyTrusted,
 		AuthorizedKeys:    authorizedKeys,
-		AutoAccept:        flagAccept,
+		AutoAccept:        s.Accept,
 		SFTPAutoAccept:    allowSFTP,
 		KeepAliveDuration: 50 * time.Second,
 		ProxyURL:          opts.proxyURL,
@@ -286,21 +395,21 @@ func buildDaemonHost(ctx context.Context, name string, opts hostOptions, child *
 		TunnelCallback:             tunnelNotifier(name),
 		DecisionCallback:           decisionNotifier(name, delegation, logger),
 		Logger:                     logger,
-		ReadOnly:                   flagReadOnly,
-		AllowLocalTCPForwarding:    flagAllowForwarding == forwardAny || flagAllowLocalTCPForwarding,
+		ReadOnly:                   s.ReadOnly,
+		AllowLocalTCPForwarding:    forwardingGrant(s.AllowForwarding) == forwardAny || s.AllowLocalTCPForwarding,
 		AllowLoopbackTCPForwarding: allowLoopback,
-		ForwardingDisabled:         flagNoForwarding,
+		ForwardingDisabled:         s.NoForwarding,
 		PtySize:                    opts.ptySize,
-		PinPtySize:                 flagPtySize != "",
+		PinPtySize:                 s.PtySize != "",
 		Term:                       opts.term,
-		SFTPDisabled:               flagNoSFTP,
+		SFTPDisabled:               s.NoSFTP,
 		TerminalConsent:            true,
 		// Set alongside terminal consent, so that what readers are told is
 		// what a guest's transfer will do.
 		FileTransferApprovalRequired: !allowSFTP,
 		// A foreground parent attaches before the command starts; a detached
 		// one has nothing to attach.
-		AwaitInitialClient: !flagDetach,
+		AwaitInitialClient: !s.Detach,
 		AttachListeningCallback: func(socket string) {
 			_ = child.Listening(socket, hostKeys)
 		},
