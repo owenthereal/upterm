@@ -498,8 +498,7 @@ func inProcessDelegatedDaemons(t *testing.T, ext *Extension, command []string) {
 	hostSpawn = func(so spawnOptions) (net.Conn, *os.Process, error) {
 		var d *daemonHandoffState
 		if so.handoff != "" {
-			h, err := decodeHandoff(so.handoff)
-			d = &daemonHandoffState{h: h, err: err}
+			d = readHandoff(so.handoff)
 		}
 		a, b := net.Pipe()
 		t.Cleanup(func() { _ = a.Close(); _ = b.Close() })

@@ -1148,7 +1148,7 @@ func runHostParent(c *cobra.Command, logger *slog.Logger, opts hostOptions, run 
 		var handoff string
 		if run.delegated() {
 			var err error
-			if handoff, err = encodeHandoff(Handoff{Name: name, Settings: settings, Options: run.options, Payload: run.prepared.Payload}); err != nil {
+			if handoff, err = encodeHandoff(Handoff{Name: name, Settings: settings, Options: run.options, Payload: run.prepared.Payload}, exactValues(c)); err != nil {
 				return err
 			}
 		}

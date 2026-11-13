@@ -4,12 +4,17 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/csv"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
+	"reflect"
+	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/owenthereal/upterm/host"
@@ -57,6 +62,9 @@ func (e handoffTooLargeError) Error() string {
 type daemonHandoffState struct {
 	h   Handoff
 	err error
+	// exact is the extension's flags' values as exactValues took them in
+	// the parent, by name.
+	exact map[string]exactValue
 }
 
 // daemonHandoff is this process's handoff, when it is a delegated run's
@@ -75,8 +83,7 @@ func takeHandoff() *daemonHandoffState {
 	if v == "" {
 		return nil
 	}
-	h, err := decodeHandoff(v)
-	return &daemonHandoffState{h: h, err: err}
+	return readHandoff(v)
 }
 
 // The handoff's encoding: unpadded base64url of this JSON.
@@ -99,6 +106,10 @@ type (
 	flagWire struct {
 		Value  string     `json:"value"`
 		Source FlagSource `json:"source"`
+		// An extension's slice flag's elements, and its map flag's entries:
+		// see exactValue.
+		Elems   *[]string         `json:"elems,omitempty"`
+		Entries map[string]string `json:"entries,omitempty"`
 	}
 	authorizedKeysWire struct {
 		Path   string `json:"path"`
@@ -111,11 +122,12 @@ type (
 	}
 )
 
-// encodeHandoff is h as a session process is handed it. Key files travel as
-// their path, digest and key count, never their keys, and the proxy, which
-// can hold a credential, as "". An encoding over maxHandoffBytes is a
-// handoffTooLargeError.
-func encodeHandoff(h Handoff) (string, error) {
+// encodeHandoff is h as a session process is handed it, with exact, the
+// values of the extension's flags that their string forms don't say exactly.
+// Key files travel as their path, digest and key count, never their keys,
+// and the proxy, which can hold a credential, as "". An encoding over
+// maxHandoffBytes is a handoffTooLargeError.
+func encodeHandoff(h Handoff, exact map[string]exactValue) (string, error) {
 	w := handoffWire{V: handoffVersion, Name: h.Name, Settings: h.Settings, Payload: h.Payload}
 	w.Settings.Proxy = ""
 	o := h.Options
@@ -123,6 +135,12 @@ func encodeHandoff(h Handoff) (string, error) {
 	if fv, ok := w.Options.Flags["proxy"]; ok {
 		fv.Value = ""
 		w.Options.Flags["proxy"] = fv
+	}
+	for name, x := range exact {
+		if fv, ok := w.Options.Extension[name]; ok {
+			fv.Elems, fv.Entries = x.elems, x.entries
+			w.Options.Extension[name] = fv
+		}
 	}
 	for _, f := range o.AuthorizedKeys {
 		w.Options.AuthorizedKeyFiles = append(w.Options.AuthorizedKeyFiles, authorizedKeysWire{Path: f.Path, SHA256: hex.EncodeToString(f.SHA256[:]), Count: len(f.Keys)})
@@ -147,7 +165,7 @@ func flagsWire(flags map[string]FlagValue) map[string]flagWire {
 	}
 	out := make(map[string]flagWire, len(flags))
 	for name, fv := range flags {
-		out[name] = flagWire(fv)
+		out[name] = flagWire{Value: fv.Value, Source: fv.Source}
 	}
 	return out
 }
@@ -156,32 +174,47 @@ func flagsWire(flags map[string]FlagValue) map[string]flagWire {
 // naming a key file whose bytes aren't the ones the parent read, or
 // errHandoffUnreadable for anything else that is wrong with it.
 func decodeHandoff(s string) (Handoff, error) {
+	d := readHandoff(s)
+	return d.h, d.err
+}
+
+// readHandoff is the handoff s encodes, as decodeHandoff reads it, with the
+// exact values of the extension's flags.
+func readHandoff(s string) *daemonHandoffState {
+	h, exact, err := decodeHandoffWire(s)
+	if err != nil {
+		return &daemonHandoffState{err: err}
+	}
+	return &daemonHandoffState{h: h, exact: exact}
+}
+
+func decodeHandoffWire(s string) (Handoff, map[string]exactValue, error) {
 	b, err := base64.RawURLEncoding.DecodeString(s)
 	if err != nil {
-		return Handoff{}, errHandoffUnreadable
+		return Handoff{}, nil, errHandoffUnreadable
 	}
 	dec := json.NewDecoder(bytes.NewReader(b))
 	dec.DisallowUnknownFields()
 	var w handoffWire
 	if err := dec.Decode(&w); err != nil || dec.More() || w.V != handoffVersion {
-		return Handoff{}, errHandoffUnreadable
+		return Handoff{}, nil, errHandoffUnreadable
 	}
 	if sessiondir.ValidateName(w.Name) != nil {
-		return Handoff{}, errHandoffUnreadable
+		return Handoff{}, nil, errHandoffUnreadable
 	}
 	switch forwardingGrant(w.Settings.AllowForwarding) {
 	case "", forwardLoopback, forwardAny:
 	default:
-		return Handoff{}, errHandoffUnreadable
+		return Handoff{}, nil, errHandoffUnreadable
 	}
 	h := Handoff{Name: w.Name, Settings: w.Settings, Payload: w.Payload}
 	o := w.Options
 	h.Options = HostOptions{Name: o.Name, NameGiven: o.NameGiven}
 	if h.Options.Flags, err = flagsOf(o.Flags); err != nil {
-		return Handoff{}, err
+		return Handoff{}, nil, err
 	}
 	if h.Options.Extension, err = flagsOf(o.Extension); err != nil {
-		return Handoff{}, err
+		return Handoff{}, nil, err
 	}
 	userFlags := make(map[string]bool)
 	for _, spec := range userSpecs() {
@@ -190,22 +223,26 @@ func decodeHandoff(s string) (Handoff, error) {
 	for _, r := range o.UserRefs {
 		ref, err := host.ParseUserRef(r.Ref)
 		if err != nil || !userFlags[r.Flag] {
-			return Handoff{}, errHandoffUnreadable
+			return Handoff{}, nil, errHandoffUnreadable
 		}
 		h.Options.UserRefs = append(h.Options.UserRefs, UserRef{Flag: r.Flag, Ref: ref})
 	}
 	for _, f := range o.AuthorizedKeyFiles {
 		digest, err := hex.DecodeString(f.SHA256)
 		if err != nil || len(digest) != sha256.Size || !filepath.IsAbs(f.Path) {
-			return Handoff{}, errHandoffUnreadable
+			return Handoff{}, nil, errHandoffUnreadable
 		}
 		file, err := readAuthorizedKeyFile(f.Path)
 		if err != nil || !bytes.Equal(file.SHA256[:], digest) || len(file.Keys) != f.Count {
-			return Handoff{}, keyFileChangedError{path: f.Path}
+			return Handoff{}, nil, keyFileChangedError{path: f.Path}
 		}
 		h.Options.AuthorizedKeys = append(h.Options.AuthorizedKeys, file)
 	}
-	return h, nil
+	exact := make(map[string]exactValue)
+	for name, fv := range o.Extension {
+		exact[name] = exactValue{elems: fv.Elems, entries: fv.Entries}
+	}
+	return h, exact, nil
 }
 
 func flagsOf(flags map[string]flagWire) (map[string]FlagValue, error) {
@@ -219,7 +256,7 @@ func flagsOf(flags map[string]flagWire) (map[string]FlagValue, error) {
 		default:
 			return nil, errHandoffUnreadable
 		}
-		out[name] = FlagValue(fv)
+		out[name] = FlagValue{Value: fv.Value, Source: fv.Source}
 	}
 	return out, nil
 }
@@ -326,17 +363,152 @@ func applyExtensionFlags(cmd *cobra.Command, d *daemonHandoffState) {
 		if !ok || !isExtensionFlag(f) || d.err != nil {
 			return
 		}
-		var err error
-		if sv, isSlice := f.Value.(pflag.SliceValue); isSlice {
-			var elems []string
-			if elems, err = splitCSV(f.Name, strings.TrimSuffix(strings.TrimPrefix(fv.Value, "["), "]")); err == nil {
-				err = sv.Replace(elems)
-			}
-		} else {
-			err = f.Value.Set(fv.Value)
-		}
-		if err != nil {
+		if err := restoreValue(f.Value, fv.Value, d.exact[f.Name]); err != nil {
 			d.err = errHandoffUnreadable
 		}
 	})
+}
+
+// exactValue is an extension flag's value where its string form doesn't say
+// it exactly: a slice flag's elements, as sliceElems gives them, or the
+// entries of a map flag of pflag's, with an int written in decimal. Neither
+// is set for any other flag, whose string form is its value.
+type exactValue struct {
+	elems   *[]string
+	entries map[string]string
+}
+
+// exactValues is the exact value of each of c's extension flags that has one.
+func exactValues(c *cobra.Command) map[string]exactValue {
+	out := make(map[string]exactValue)
+	c.LocalFlags().VisitAll(func(f *pflag.Flag) {
+		if !isExtensionFlag(f) {
+			return
+		}
+		if sv, ok := f.Value.(pflag.SliceValue); ok {
+			elems := sliceElems(f.Value, sv)
+			out[f.Name] = exactValue{elems: &elems}
+		} else if entries, ok := mapEntries(f.Value); ok {
+			out[f.Name] = exactValue{entries: entries}
+		}
+	})
+	return out
+}
+
+// restoreValue gives v, a flag's value, what the parent's flag of the same
+// type held: x's elements or entries, or s, the string form of any other.
+// A value that already holds it is left as it is: one at its default, which
+// the parent's had too, can have a string form its Set doesn't take.
+func restoreValue(v pflag.Value, s string, x exactValue) error {
+	if sv, ok := v.(pflag.SliceValue); ok {
+		var elems []string
+		if x.elems != nil {
+			elems = *x.elems
+		}
+		if have := sliceElems(v, sv); slices.Equal(have, elems) && (have == nil) == (elems == nil) {
+			return nil
+		}
+		return sv.Replace(elems)
+	}
+	if have, ok := mapEntries(v); ok {
+		if maps.Equal(have, x.entries) {
+			return nil
+		}
+		// The first Set of a map flag still at its default replaces it, and
+		// each one after adds to it.
+		for _, k := range slices.Sorted(maps.Keys(x.entries)) {
+			if err := v.Set(mapEntryInput(v.Type(), k, x.entries[k])); err != nil {
+				return err
+			}
+		}
+		if have, _ := mapEntries(v); !maps.Equal(have, x.entries) {
+			return fmt.Errorf("a map's entries can't be set to %v", x.entries)
+		}
+		return nil
+	}
+	if v.String() == s {
+		return nil
+	}
+	return v.Set(s)
+}
+
+// mapEntryInput is the entry k=v as Set takes it alone, for a map flag of
+// pflag's type typ. Set takes an entry with no other "=" as it is, less the
+// quotes at its ends, and reads any other as CSV: that one is written as
+// CSV, twice, which is still the one entry.
+func mapEntryInput(typ, k, v string) string {
+	entry := k + "=" + v
+	if typ != "stringToString" || !strings.Contains(v, "=") && !strings.HasPrefix(entry, `"`) && !strings.HasSuffix(entry, `"`) {
+		return entry
+	}
+	var b strings.Builder
+	w := csv.NewWriter(&b)
+	_ = w.Write([]string{entry, entry})
+	w.Flush()
+	return strings.TrimSuffix(b.String(), "\n")
+}
+
+// sliceElems is the elements of sv, which is v, as its Replace takes them.
+// pflag's float slices give theirs to six decimal places, so theirs are read
+// from the slice each holds.
+func sliceElems(v pflag.Value, sv pflag.SliceValue) []string {
+	if v.Type() != "float32Slice" && v.Type() != "float64Slice" {
+		return sv.GetSlice()
+	}
+	held, ok := heldValue(v, reflect.Slice)
+	if !ok {
+		return sv.GetSlice()
+	}
+	out := make([]string, held.Len())
+	for i := range out {
+		f := held.Index(i)
+		if f.Kind() != reflect.Float32 && f.Kind() != reflect.Float64 {
+			return sv.GetSlice()
+		}
+		out[i] = strconv.FormatFloat(f.Float(), 'g', -1, f.Type().Bits())
+	}
+	return out
+}
+
+// mapEntries is the entries of v, a value of one of pflag's map types, with
+// an int written in decimal; false for any other value. Their string forms
+// can't be read back exactly, and they give their entries no other way, so
+// they are read from the map each holds.
+func mapEntries(v pflag.Value) (map[string]string, bool) {
+	switch v.Type() {
+	case "stringToString", "stringToInt", "stringToInt64":
+	default:
+		return nil, false
+	}
+	held, ok := heldValue(v, reflect.Map)
+	if !ok || held.Type().Key().Kind() != reflect.String {
+		return nil, false
+	}
+	out := make(map[string]string, held.Len())
+	for it := held.MapRange(); it.Next(); {
+		switch val := it.Value(); val.Kind() {
+		case reflect.String:
+			out[it.Key().String()] = val.String()
+		case reflect.Int, reflect.Int64:
+			out[it.Key().String()] = strconv.FormatInt(val.Int(), 10)
+		default:
+			return nil, false
+		}
+	}
+	return out, true
+}
+
+// heldValue is what v, a value of one of pflag's types, holds, as each of
+// those holds it: through a pointer in its first field. False when v isn't
+// so made, or what it holds isn't of kind.
+func heldValue(v pflag.Value, kind reflect.Kind) (reflect.Value, bool) {
+	rv := reflect.ValueOf(v)
+	if rv.Kind() != reflect.Pointer || rv.IsNil() || rv.Elem().Kind() != reflect.Struct || rv.Elem().NumField() == 0 {
+		return reflect.Value{}, false
+	}
+	p := rv.Elem().Field(0)
+	if p.Kind() != reflect.Pointer || p.IsNil() || p.Elem().Kind() != kind {
+		return reflect.Value{}, false
+	}
+	return p.Elem(), true
 }

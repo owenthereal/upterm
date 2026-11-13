@@ -133,7 +133,7 @@ func TestHandoffRoundTripAndRedaction(t *testing.T) {
 		Payload: []byte("opaque\x00bytes"),
 	}
 
-	enc, err := encodeHandoff(h)
+	enc, err := encodeHandoff(h, nil)
 	require.NoError(t, err)
 	text := handoffJSON(t, enc)
 	require.NotContains(t, text, "hunter2", "the proxy's credential travels in the handoff")
@@ -152,7 +152,7 @@ func TestHandoffRoundTripAndRedaction(t *testing.T) {
 	require.Empty(t, got.Options.Flags["proxy"].Value)
 
 	// What decodes encodes the same.
-	again, err := encodeHandoff(got)
+	again, err := encodeHandoff(got, nil)
 	require.NoError(t, err)
 	require.Equal(t, enc, again)
 
@@ -180,7 +180,7 @@ func TestHandoffFitsEveryPlatformOrRefusesBeforeSpawn(t *testing.T) {
 		require.NoError(t, err)
 		require.Len(t, file.Keys, 1000)
 
-		enc, err := encodeHandoff(Handoff{Name: "big", Settings: everySetting(t), Options: HostOptions{AuthorizedKeys: []AuthorizedKeyFile{file}}})
+		enc, err := encodeHandoff(Handoff{Name: "big", Settings: everySetting(t), Options: HostOptions{AuthorizedKeys: []AuthorizedKeyFile{file}}}, nil)
 		require.NoError(t, err)
 		require.Less(t, len(enc), maxHandoffBytes)
 		content, err := os.ReadFile(path)
@@ -254,7 +254,7 @@ func TestKeyFileChangedBetweenParentAndDaemon(t *testing.T) {
 	path := writeKeyFile(t, "", 2)
 	file, err := readAuthorizedKeyFile(path)
 	require.NoError(t, err)
-	enc, err := encodeHandoff(Handoff{Name: "kf", Options: HostOptions{AuthorizedKeys: []AuthorizedKeyFile{file}}})
+	enc, err := encodeHandoff(Handoff{Name: "kf", Options: HostOptions{AuthorizedKeys: []AuthorizedKeyFile{file}}}, nil)
 	require.NoError(t, err)
 
 	// Rewritten between the parent's read and the session process's.
@@ -286,7 +286,7 @@ func TestKeyFileChangedBetweenParentAndDaemon(t *testing.T) {
 
 func TestAHandoffThatDoesntDecodeIsSaid(t *testing.T) {
 	const want = "the settings this run was started with can't be read; start it again"
-	good, err := encodeHandoff(Handoff{Name: "ok"})
+	good, err := encodeHandoff(Handoff{Name: "ok"}, nil)
 	require.NoError(t, err)
 	wire := func(mutate func(map[string]any)) string {
 		var m map[string]any
@@ -428,7 +428,7 @@ func TestADelegatedSessionProcessStillReadsDebug(t *testing.T) {
 			if tc.env != "" {
 				t.Setenv("UPTERM_DEBUG", tc.env)
 			}
-			enc, err := encodeHandoff(Handoff{Name: "d"})
+			enc, err := encodeHandoff(Handoff{Name: "d"}, nil)
 			require.NoError(t, err)
 			asDaemon(t)
 			t.Setenv(handoffEnv, enc)
@@ -626,15 +626,15 @@ func TestHandoffCapIsTheMostItTakes(t *testing.T) {
 	sized := func(n int) Handoff {
 		return Handoff{Name: "cap", Settings: HostSettings{ForceCommand: strings.Repeat("x", n)}}
 	}
-	enc, err := encodeHandoff(sized(0))
+	enc, err := encodeHandoff(sized(0), nil)
 	require.NoError(t, err)
 	// 22,500 bytes of JSON are 30,000 of unpadded base64.
 	fill := 22500 - len(handoffJSON(t, enc))
 
-	enc, err = encodeHandoff(sized(fill))
+	enc, err = encodeHandoff(sized(fill), nil)
 	require.NoError(t, err)
 	require.Len(t, enc, 30000)
 
-	_, err = encodeHandoff(sized(fill + 1))
+	_, err = encodeHandoff(sized(fill+1), nil)
 	require.EqualError(t, err, "this run's settings take 30002 bytes, more than the 30000 a session process can be handed; shorten its flag values, such as --force-command")
 }

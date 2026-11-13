@@ -55,7 +55,8 @@ type Extension struct {
 // HostFlag is a flag an extension adds to upterm host. A delegated run's
 // session process is handed every HostFlag's value in its environment,
 // which other processes of the same user can read, so a HostFlag must not
-// carry a secret.
+// carry a secret. A value of one of pflag's types reaches that process as it
+// was; one of any other type reaches it as its Set takes its String().
 type HostFlag struct {
 	Flag *pflag.Flag
 	// PerRun takes the flag's value from the command line only: a value for
