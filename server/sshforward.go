@@ -114,9 +114,10 @@ var errSSHChannelDrainStalled = errors.New("ssh: channel drain stalled after sou
 
 // forwardSSH owns both authenticated connections and joins all workers before
 // returning. Ordinary transport completion first drains received channel data,
-// answers to channel opens and request tails toward the surviving peer; forced
-// cancellation closes both transports immediately to release blocked opens,
-// requests and writes. rewrite, which may be nil, words the upstream's
+// answers to channel opens and request tails toward the surviving peer, and
+// the reply to a global request the surviving peer sent the one that left;
+// forced cancellation closes both transports immediately to release blocked
+// opens, requests and writes. rewrite, which may be nil, words the upstream's
 // rejections of the downstream's opens as the downstream is sent them.
 func forwardSSH(ctx context.Context, downstream, upstream sshPeer, scope sshAbortScope, aborts metrics.Counter, rewrite rejectionRewrite) error {
 	return forwardSSHWithin(ctx, downstream, upstream, scope, aborts, rewrite, nil)
@@ -161,6 +162,7 @@ func forwardSSHWithin(ctx context.Context, downstream, upstream sshPeer, scope s
 	channelsDone := [2]chan struct{}{make(chan struct{}), make(chan struct{})}
 	opensDone := [2]chan struct{}{make(chan struct{}), make(chan struct{})}
 	requestsDone := [2]chan struct{}{make(chan struct{}), make(chan struct{})}
+	var inFlight [2]sshRequestInFlight
 	peers := []sshPeer{downstream, upstream}
 	for i, source := range peers {
 		destination := peers[1-i]
@@ -168,6 +170,7 @@ func forwardSSHWithin(ctx context.Context, downstream, upstream sshPeer, scope s
 		// downstream's rejections of the upstream's opens pass on as they are.
 		opens := forwarder
 		global := forwarder
+		global.inFlight = &inFlight[i]
 		if i == 0 {
 			opens.rewrite = rewrite
 			// A gate request is a node's, over its hop: a downstream's of its
@@ -214,8 +217,16 @@ func forwardSSHWithin(ctx context.Context, downstream, upstream sshPeer, scope s
 		// closes: another relay node's rejectSSHChannels rejects an open and
 		// disconnects in one go.
 		survivorOpens := opensDone[1-closedPeer]
+		// The global request the surviving peer sent toward the one that left,
+		// if it awaits a reply. That peer answered it before it left or never
+		// will, so it resolves at once, but the answer, or the false a failed
+		// send becomes, still has to reach the survivor before its transport
+		// closes: a host answers a request that ends its session and
+		// disconnects in one go. One sent on from here on reached a peer
+		// already gone, so it has no answer to wait for.
+		survivorRequest := inFlight[1-closedPeer].pending()
 	drain:
-		for firstChannels != nil || secondChannels != nil || sourceRequests != nil || survivorOpens != nil {
+		for firstChannels != nil || secondChannels != nil || sourceRequests != nil || survivorOpens != nil || survivorRequest != nil {
 			select {
 			case <-firstChannels:
 				firstChannels = nil
@@ -225,6 +236,8 @@ func forwardSSHWithin(ctx context.Context, downstream, upstream sshPeer, scope s
 				sourceRequests = nil
 			case <-survivorOpens:
 				survivorOpens = nil
+			case <-survivorRequest:
+				survivorRequest = nil
 			case <-ctx.Done():
 				err = context.Cause(ctx)
 				break drain
@@ -274,6 +287,44 @@ type sshForwarder struct {
 	mayOpen    func(channelType string) bool
 	mayRequest func(*ssh.Request) bool
 	policy     forwardPolicy
+
+	// inFlight, when set, follows the request awaiting a reply, from before
+	// it is sent on until its reply has been relayed back to the source.
+	// forwardSSH sets it on its global directions only: once a peer leaves,
+	// its drain waits on the survivor's.
+	inFlight *sshRequestInFlight
+}
+
+// sshRequestInFlight follows the one request a serial sender has in flight
+// that awaits a reply. Each request gets a channel of its own, closed once,
+// so a drain that took one from pending is never held by a request sent on
+// later.
+type sshRequestInFlight struct {
+	mu      sync.Mutex
+	relayed chan struct{} // nil when no request is in flight
+}
+
+// start marks a request in flight, before it is sent on.
+func (r *sshRequestInFlight) start() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.relayed = make(chan struct{})
+}
+
+// finish marks its reply relayed back to the source, or never to be.
+func (r *sshRequestInFlight) finish() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	close(r.relayed)
+	r.relayed = nil
+}
+
+// pending returns a channel that closes once the request in flight now has
+// had its reply relayed, or nil when none is in flight.
+func (r *sshRequestInFlight) pending() <-chan struct{} {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.relayed
 }
 
 // A peer can pipeline channel opens without waiting for confirmation, and each
@@ -664,6 +715,13 @@ func (f sshForwarder) requests(destination sshRequestSender, incoming <-chan *ss
 		defer close(senderDone)
 		for job := range jobs {
 			request := job.request
+			// In flight before the send starts, so that a request the
+			// destination could answer is in flight by the time forwardSSH
+			// learns that the destination left.
+			tracked := job.awaitReply && f.inFlight != nil
+			if tracked {
+				f.inFlight.start()
+			}
 			locked := job.awaitReply && replies != nil
 			if locked {
 				replies.Lock()
@@ -688,6 +746,9 @@ func (f sshForwarder) requests(destination sshRequestSender, incoming <-chan *ss
 			// is no answer to pass back and nobody left to receive one.
 			if job.awaitReply {
 				_ = request.Reply(ok, payload)
+			}
+			if tracked {
+				f.inFlight.finish()
 			}
 			if locked {
 				replies.Unlock()

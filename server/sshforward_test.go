@@ -21,6 +21,7 @@ import (
 	"github.com/owenthereal/upterm/upterm"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/crypto/ssh"
+	"google.golang.org/grpc/test/bufconn"
 )
 
 // These endpoints use only the stock connection API, including reverse opens.
@@ -864,16 +865,27 @@ type forwardTestPeer struct {
 	rejection error
 	answered  chan struct{}
 
+	// reply, set before the first global request, answers every one sent
+	// toward this peer: true, with reply as its payload. It is handed back
+	// once answered closes, as a rejection is. With no reply a request is
+	// unanswered, and fails once the transport ends, as x/crypto's mux fails
+	// a request still waiting for its answer when it closes.
+	reply []byte
+
 	// opened closes when the first channel open reaches this peer.
 	opened     chan struct{}
 	markOpened func()
+	// asked closes when the first global request reaches this peer.
+	asked     chan struct{}
+	markAsked func()
 	// waitGate, if not nil, holds Wait past the end until it closes: the
 	// transport has ended, and forwardSSH, which learns from Wait that a peer
 	// has left, hasn't learned it yet.
 	waitGate chan struct{}
-	// failGate, if not nil, holds an unanswered open past the end until it
-	// closes: the mux has failed the open, and the goroutine that passes the
-	// failure on hasn't run yet. failing closes when an open reaches it.
+	// failGate, if not nil, holds an unanswered open or global request past
+	// the end until it closes: the mux has failed it, and the goroutine that
+	// passes the failure on hasn't run yet. failing closes when one reaches
+	// it.
 	failGate    chan struct{}
 	failing     chan struct{}
 	markFailing func()
@@ -886,10 +898,12 @@ func newForwardTestPeer() *forwardTestPeer {
 		ended:    make(chan struct{}),
 		answered: make(chan struct{}),
 		opened:   make(chan struct{}),
+		asked:    make(chan struct{}),
 		failing:  make(chan struct{}),
 	}
 	p.end = sync.OnceFunc(func() { close(p.ended); close(p.channels); close(p.requests) })
 	p.markOpened = sync.OnceFunc(func() { close(p.opened) })
+	p.markAsked = sync.OnceFunc(func() { close(p.asked) })
 	p.markFailing = sync.OnceFunc(func() { close(p.failing) })
 	return p
 }
@@ -911,6 +925,23 @@ func (p *forwardTestPeer) OpenChannel(string, []byte) (ssh.Channel, <-chan *ssh.
 		<-p.failGate
 	}
 	return nil, nil, errors.New("ssh: unexpected packet in response to channel open: <nil>")
+}
+
+// SendRequest follows x/crypto's mux as OpenChannel does: an answer that
+// arrived is handed back even after the transport ended, and a request still
+// waiting for one fails with EOF when it ends.
+func (p *forwardTestPeer) SendRequest(string, bool, []byte) (bool, []byte, error) {
+	p.markAsked()
+	if p.reply != nil {
+		<-p.answered
+		return true, p.reply, nil
+	}
+	<-p.ended
+	if p.failGate != nil {
+		p.markFailing()
+		<-p.failGate
+	}
+	return false, nil, io.EOF
 }
 
 func (p *forwardTestPeer) Close() error {
@@ -980,8 +1011,11 @@ type forwardOrder struct {
 	guest, node *forwardTestPeer
 	answer      func() // R: hands the node's rejection back; idempotent
 	release     func() // lets what the row held go on; idempotent
-	done        chan error
+	forwardRun
 }
+
+// forwardRun is where a row's forwardSSH returns.
+type forwardRun chan error
 
 // newForwardOrder starts forwardSSH, with the guest downstream. rejection, if
 // not nil, is the node's answer to the guest's open; nil leaves it unanswered.
@@ -993,11 +1027,11 @@ func newForwardOrder(t *testing.T, rejection *ssh.OpenChannelError, hold forward
 		node.rejection = rejection
 	}
 	f := &forwardOrder{
-		guest:   guest,
-		node:    node,
-		answer:  sync.OnceFunc(func() { close(node.answered) }),
-		release: func() {},
-		done:    make(chan error, 1),
+		guest:      guest,
+		node:       node,
+		answer:     sync.OnceFunc(func() { close(node.answered) }),
+		release:    func() {},
+		forwardRun: make(forwardRun, 1),
 	}
 	gate := make(chan struct{})
 	switch hold {
@@ -1023,7 +1057,7 @@ func newForwardOrder(t *testing.T, rejection *ssh.OpenChannelError, hold forward
 		node.end()
 	})
 	go func() {
-		f.done <- forwardSSH(t.Context(), guest.sshPeer(), node.sshPeer(), abortConnection, discardCounter, nil)
+		f.forwardRun <- forwardSSH(t.Context(), guest.sshPeer(), node.sshPeer(), abortConnection, discardCounter, nil)
 	}()
 	return f
 }
@@ -1039,10 +1073,10 @@ func (f *forwardOrder) open(t *testing.T, stalled bool) <-chan *ssh.OpenChannelE
 }
 
 // requireRunning fails the row if forwardSSH has returned.
-func (f *forwardOrder) requireRunning(t *testing.T, msg string) {
+func (r forwardRun) requireRunning(t *testing.T, msg string) {
 	t.Helper()
 	select {
-	case err := <-f.done:
+	case err := <-r:
 		t.Fatalf("%s: forwardSSH returned %v", msg, err)
 	default:
 	}
@@ -1050,10 +1084,10 @@ func (f *forwardOrder) requireRunning(t *testing.T, msg string) {
 
 // requireReturned fails the row unless forwardSSH has returned, and gives
 // what it returned.
-func (f *forwardOrder) requireReturned(t *testing.T, msg string) error {
+func (r forwardRun) requireReturned(t *testing.T, msg string) error {
 	t.Helper()
 	select {
-	case err := <-f.done:
+	case err := <-r:
 		return err
 	default:
 		t.Fatal(msg)
@@ -1230,6 +1264,395 @@ func TestSSHForwardARejectionFromAPeerThatLeftInEveryOrder(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
 				row.run(t, newForwardOrder(t, row.answer, row.hold))
 			})
+		})
+	}
+}
+
+// forwardRequestOrder runs forwardSSH between a host, a forwardTestPeer, and a
+// relay node, a real x/crypto peer, for one row of the table below. The node
+// is real because its request reaches forwardSSH as an *ssh.Request, which
+// only a real mux can take a reply to.
+type forwardRequestOrder struct {
+	host    *forwardTestPeer
+	node    ssh.Conn
+	answer  func() // A: hands the host's answer back; idempotent
+	release func() // lets what the row held go on; idempotent
+	// stall has the node stop reading: every write toward it blocks until
+	// resume, or until the relay's end of its transport closes.
+	stall     func()
+	resume    func()
+	nodeEnded chan struct{} // closes when the node's transport has ended
+	replied   chan forwardTestReply
+	forwardRun
+}
+
+// forwardTestReply is what the node's request returned.
+type forwardTestReply struct {
+	ok      bool
+	payload []byte
+	err     error
+}
+
+// stallableConn is the relay's end of the node's transport. Once stalled
+// closes, a write blocks until resumed or the conn closes, as a write toward
+// a peer that has stopped reading blocks once the buffers between them fill.
+type stallableConn struct {
+	net.Conn
+	stalled    chan struct{}
+	resumed    chan struct{}
+	closed     chan struct{}
+	markClosed func()
+}
+
+func (c *stallableConn) Write(p []byte) (int, error) {
+	select {
+	case <-c.stalled:
+		select {
+		case <-c.resumed:
+		case <-c.closed:
+			return 0, net.ErrClosed
+		}
+	default:
+	}
+	return c.Conn.Write(p)
+}
+
+func (c *stallableConn) Close() error {
+	c.markClosed()
+	return c.Conn.Close()
+}
+
+// forwardRequestDirection is which side of forwardSSH the host is on. The
+// node is on the other.
+type forwardRequestDirection string
+
+const (
+	// hostDownstream is a host reaching the relay: the node is the relay's
+	// own end, upstream.
+	hostDownstream forwardRequestDirection = "host downstream"
+	// hostUpstream swaps them, so that the peer that survives is the
+	// downstream.
+	hostUpstream forwardRequestDirection = "host upstream"
+)
+
+// newForwardRequestOrder starts forwardSSH, with the host on the side
+// direction names. reply, if not nil, is the host's answer to the node's
+// request; nil leaves it unanswered. hold is what the row holds past the
+// host's end, until release.
+func newForwardRequestOrder(t *testing.T, direction forwardRequestDirection, reply []byte, hold forwardHold) *forwardRequestOrder {
+	host := newForwardTestPeer()
+	// SendRequest reads it before it waits, so it is set before any request.
+	host.reply = reply
+	relayEnd := &stallableConn{stalled: make(chan struct{}), resumed: make(chan struct{}), closed: make(chan struct{})}
+	relayEnd.markClosed = sync.OnceFunc(func() { close(relayEnd.closed) })
+	listener := bufconn.Listen(256 * 1024)
+	node, relay := forwardTestPairOn(t, nil, nil, func(conn net.Conn) net.Conn {
+		relayEnd.Conn = conn
+		return relayEnd
+	}, listener, listener.DialContext)
+	f := &forwardRequestOrder{
+		host:       host,
+		node:       node.conn,
+		answer:     sync.OnceFunc(func() { close(host.answered) }),
+		release:    func() {},
+		stall:      sync.OnceFunc(func() { close(relayEnd.stalled) }),
+		resume:     sync.OnceFunc(func() { close(relayEnd.resumed) }),
+		nodeEnded:  make(chan struct{}),
+		replied:    make(chan forwardTestReply, 1),
+		forwardRun: make(forwardRun, 1),
+	}
+	gate := make(chan struct{})
+	switch hold {
+	case holdWait:
+		host.waitGate = gate
+		f.release = sync.OnceFunc(func() { close(gate) })
+	case holdFailure:
+		host.failGate = gate
+		f.release = sync.OnceFunc(func() { close(gate) })
+	}
+	// As newForwardOrder's: the gates open first, then the host ends, so
+	// forwardSSH can return. The pair's own cleanup, which runs after this
+	// one, closes the node's transport, which is what frees a write the
+	// stalled node never took.
+	t.Cleanup(func() {
+		if reply != nil {
+			f.answer()
+		}
+		f.release()
+		host.end()
+	})
+	go func() {
+		_ = node.conn.Wait()
+		close(f.nodeEnded)
+	}()
+	downstream, upstream := host.sshPeer(), relay
+	if direction == hostUpstream {
+		downstream, upstream = relay, host.sshPeer()
+	}
+	go func() {
+		f.forwardRun <- forwardSSH(t.Context(), downstream, upstream, abortChannel, discardCounter, nil)
+	}()
+	return f
+}
+
+// ask has the node send the host a global request that wants a reply, and
+// returns once it has reached the host (S).
+func (f *forwardRequestOrder) ask(t *testing.T) {
+	t.Helper()
+	go func() {
+		ok, payload, err := f.node.SendRequest("decision", true, []byte("stopped"))
+		f.replied <- forwardTestReply{ok, payload, err}
+	}()
+	synctest.Wait() // the request has reached the host, which holds it until it's answered or the host ends
+	require.True(t, isDone(f.host.asked), "the node's request didn't reach the host")
+}
+
+// requireNodeAnswered fails the row unless the node's request has returned
+// ok and payload with no error. A reply reaches the node only while its
+// transport is up, and forwardSSH closes that just before it returns, so one
+// that arrived came before C.
+func (f *forwardRequestOrder) requireNodeAnswered(t *testing.T, ok bool, payload []byte) {
+	t.Helper()
+	select {
+	case got := <-f.replied:
+		require.NoError(t, got.err, "the node's connection closed with its request unanswered")
+		require.Equal(t, ok, got.ok, "the node was sent another answer")
+		require.Equal(t, string(payload), string(got.payload), "the node was sent another answer")
+	default:
+		t.Fatal("the node's request is unanswered")
+	}
+}
+
+// requireNodeWaiting fails the row if the node's request has returned, or its
+// connection has closed.
+func (f *forwardRequestOrder) requireNodeWaiting(t *testing.T, msg string) {
+	t.Helper()
+	select {
+	case got := <-f.replied:
+		t.Fatalf("%s: ok=%v payload=%q err=%v", msg, got.ok, got.payload, got.err)
+	default:
+	}
+	require.False(t, isDone(f.nodeEnded), "forwardSSH closed the node's connection with its request unanswered")
+}
+
+// A relay node pushes a host a request that ends its session, and the host
+// acknowledges it and closes its transport at once. The relay has the answer
+// before it sees that transport end, but the goroutine that relays it can run
+// after: the node must still get the answer, not have its connection closed
+// with the request unanswered. This is the table above, for a global request
+// the survivor sent rather than a channel it opened. The rows take a node's
+// request through the forwarder's checkpoints, in the orders below, each with
+// the host downstream, as a host reaches the relay, and with it upstream, as
+// the drain waits for whichever peer survives:
+//
+//	S    The request reaches the host: the host's asked closes.
+//	A    The host's answer is handed back: answered closes. In rows 2, 3 and
+//	     5 the node has stopped reading by then, so relaying the answer
+//	     sticks in its write until the test resumes the node; in row 7 the
+//	     node never resumes.
+//	P    The node receives its answer: the host's, true with its payload,
+//	     or the forwarder's false for a request the host never answered. In
+//	     row 9 the host's end has failed the request, and failGate holds the
+//	     goroutine passing the failure on until the test releases it.
+//	E    The host ends: end(). In rows 2, 4, 5 and 8 waitGate holds its
+//	     Wait, so the transport has ended and forwardSSH, which learns it
+//	     from Wait, hasn't learned it yet.
+//	D C  forwardSSH drains and returns. Neither has an acknowledgement of
+//	     its own: forwardSSH returning is both. Where D comes before P, the
+//	     synctest.Wait after E, or after the release of Wait, settles
+//	     forwardSSH in its drain.
+//
+// The test takes a step only once the one before it is acknowledged, after a
+// synctest.Wait has settled it: S by asked, a held failure by failing, P by the
+// node's request returning, D C by forwardSSH returning. A, E, stalling and
+// resuming the node and releasing what a row held are the test's own acts.
+//
+// The answered rows run every order of A, P, E and D with A before P and E
+// before D. The orders the table doesn't run:
+//   - D before E: forwardSSH learns that the host left from its Wait, which
+//     returns only once the host has ended.
+//   - S after D: a request the node sends once forwardSSH is draining. The
+//     host has left and can't answer it, so the drain doesn't wait for it,
+//     and the node gets the forwarder's false or its connection's end,
+//     whichever comes first.
+//
+// With the request unanswered, x/crypto's mux fails it before its Wait
+// returns, but the goroutine passing the failure on can run before forwardSSH
+// learns that the host left (row 8) or after (row 9).
+//
+// No time passes in any row but row 7, so each sees forwardSSH return well
+// inside the drain's bound (5 s), or else it was waiting for something it
+// shouldn't. Row 7's node never reads, so only the bound ends the wait: the
+// bound (5 s) < the node's stall, which lasts until its transport closes,
+// and forwardSSH returns 5 s after the host left, not a nanosecond before.
+func TestSSHForwardAnAnswerFromAPeerThatLeftInEveryOrder(t *testing.T) {
+	ack := []byte("ack")
+	rows := []struct {
+		name  string
+		reply []byte // the host's answer to the node's request; nil leaves it unanswered
+		hold  forwardHold
+		run   func(t *testing.T, f *forwardRequestOrder)
+	}{
+		// Row 1: answered before the host leaves.
+		{"S A P E D C", ack, holdNothing, func(t *testing.T, f *forwardRequestOrder) {
+			f.ask(t)
+			f.answer()
+			synctest.Wait() // A P: the answer has been handed back and relayed
+			f.requireNodeAnswered(t, true, ack)
+			f.requireRunning(t, "both peers are up")
+			f.host.end()
+			synctest.Wait() // E D C: the host has ended, and forwardSSH has drained and returned
+			require.ErrorIs(t, f.requireReturned(t, "forwardSSH outlived the host's transport"), io.EOF)
+		}},
+		// Row 2: answered before the host leaves, and relayed after, before
+		// forwardSSH learns that it left.
+		{"S A E P D C", ack, holdWait, func(t *testing.T, f *forwardRequestOrder) {
+			f.ask(t)
+			f.stall()
+			f.answer()
+			synctest.Wait() // A: the answer has been handed back, and its relay is stuck in a write the node isn't taking
+			f.requireNodeWaiting(t, "a node that stopped reading was answered")
+			f.host.end()
+			synctest.Wait() // E: the host has ended, and its Wait is held, so forwardSSH hasn't learned it
+			f.requireRunning(t, "forwardSSH hadn't learned that the host left")
+			f.resume()
+			synctest.Wait() // P: the answer has been relayed
+			f.requireNodeAnswered(t, true, ack)
+			f.release()
+			synctest.Wait() // D C: forwardSSH has learned that the host left, drained and returned
+			require.ErrorIs(t, f.requireReturned(t, "forwardSSH outlived the host's transport"), io.EOF)
+		}},
+		// Row 3: the order outside a test. The answer arrives before the
+		// host's transport ends, but its relay runs only once forwardSSH is
+		// draining, and the drain waits for it.
+		{"S A E D P C", ack, holdNothing, func(t *testing.T, f *forwardRequestOrder) {
+			f.ask(t)
+			f.stall()
+			f.answer()
+			synctest.Wait() // A: the answer has been handed back, and its relay is stuck in a write the node isn't taking
+			f.requireNodeWaiting(t, "a node that stopped reading was answered")
+			f.host.end()
+			synctest.Wait() // E D: forwardSSH has learned that the host left, and done all it does before the answer is relayed
+			f.requireRunning(t, "forwardSSH closed with the answer's relay still in its write")
+			f.requireNodeWaiting(t, "a node that stopped reading was answered")
+			f.resume()
+			synctest.Wait() // P C: the answer has been relayed, and forwardSSH has returned
+			f.requireNodeAnswered(t, true, ack)
+			require.ErrorIs(t, f.requireReturned(t, "forwardSSH outlived the host's transport"), io.EOF)
+		}},
+		// Row 4: the host has ended, but forwardSSH hasn't learned it. An
+		// answer that arrived before the end is still handed back, as
+		// x/crypto's mux hands it back.
+		{"S E A P D C", ack, holdWait, func(t *testing.T, f *forwardRequestOrder) {
+			f.ask(t)
+			f.host.end()
+			synctest.Wait() // E: the host has ended, and its Wait is held, so forwardSSH hasn't learned it
+			f.requireRunning(t, "forwardSSH hadn't learned that the host left")
+			f.answer()
+			synctest.Wait() // A P: the answer has been handed back and relayed
+			f.requireNodeAnswered(t, true, ack)
+			f.release()
+			synctest.Wait() // D C: forwardSSH has learned that the host left, drained and returned
+			require.ErrorIs(t, f.requireReturned(t, "forwardSSH outlived the host's transport"), io.EOF)
+		}},
+		// Row 5: handed back before forwardSSH learns that the host left,
+		// and relayed only once it is draining.
+		{"S E A D P C", ack, holdWait, func(t *testing.T, f *forwardRequestOrder) {
+			f.ask(t)
+			f.stall()
+			f.host.end()
+			synctest.Wait() // E: the host has ended, and its Wait is held, so forwardSSH hasn't learned it
+			f.requireRunning(t, "forwardSSH hadn't learned that the host left")
+			f.answer()
+			synctest.Wait() // A: the answer has been handed back, and its relay is stuck in a write the node isn't taking
+			f.requireNodeWaiting(t, "a node that stopped reading was answered")
+			f.release()
+			synctest.Wait() // D: forwardSSH has learned that the host left, and done all it does before the answer is relayed
+			f.requireRunning(t, "forwardSSH closed with the answer's relay still in its write")
+			f.requireNodeWaiting(t, "a node that stopped reading was answered")
+			f.resume()
+			synctest.Wait() // P C: the answer has been relayed, and forwardSSH has returned
+			f.requireNodeAnswered(t, true, ack)
+			require.ErrorIs(t, f.requireReturned(t, "forwardSSH outlived the host's transport"), io.EOF)
+		}},
+		// Row 6: forwardSSH is draining when the answer is handed back, and
+		// waits for it to reach the node.
+		{"S E D A P C", ack, holdNothing, func(t *testing.T, f *forwardRequestOrder) {
+			f.ask(t)
+			f.host.end()
+			synctest.Wait() // E D: forwardSSH has learned that the host left, and done all it does before the answer is handed back
+			f.requireRunning(t, "the node's request is unanswered")
+			f.requireNodeWaiting(t, "the node was answered before the host's answer was handed back")
+			f.answer()
+			synctest.Wait() // A P C: the answer has been handed back and relayed, and forwardSSH has returned
+			f.requireNodeAnswered(t, true, ack)
+			require.ErrorIs(t, f.requireReturned(t, "forwardSSH outlived the host's transport"), io.EOF,
+				"forwardSSH ends with the host's transport ending")
+		}},
+		// Row 7: row 3 with a node that never resumes, so P never comes. A
+		// node can't hold its connection open by not taking the answer: the
+		// wait for it is bounded like the drain.
+		{"S A E D C, the node stalled", ack, holdNothing, func(t *testing.T, f *forwardRequestOrder) {
+			f.ask(t)
+			f.stall()
+			f.answer()
+			synctest.Wait() // A: the answer has been handed back, and its relay is stuck in a write the node isn't taking
+			f.requireNodeWaiting(t, "a node that stopped reading was answered")
+			f.host.end()
+			synctest.Wait() // E D: forwardSSH has learned that the host left, and is draining, its bound armed
+			time.Sleep(sshForwardDrainTimeout - time.Nanosecond)
+			synctest.Wait() // everything due before the drain's bound has run
+			f.requireRunning(t, "forwardSSH gave up on relaying the answer before the drain's bound")
+			time.Sleep(time.Nanosecond)
+			synctest.Wait() // the bound has expired, forwardSSH has returned, and the node's connection has closed
+			require.EqualError(t, f.requireReturned(t, "a node that stopped reading held its connection past the drain's bound"),
+				"ssh: buffered data drain timed out")
+			select {
+			case got := <-f.replied:
+				require.ErrorIs(t, got.err, io.EOF, "a node that stopped reading was answered")
+			default:
+				t.Fatal("the node's request outlived its connection")
+			}
+		}},
+		// Row 8: E with the request unanswered. It fails as the host's mux
+		// closes, and the node is sent the forwarder's false before C. The
+		// host's Wait is held so that P comes before D, as the row's name
+		// says.
+		{"S E P D C, unanswered", nil, holdWait, func(t *testing.T, f *forwardRequestOrder) {
+			f.ask(t)
+			f.host.end()
+			synctest.Wait() // E P: the request has failed with the host's end, and the node has been told; the host's Wait is held
+			f.requireNodeAnswered(t, false, nil)
+			f.requireRunning(t, "forwardSSH hadn't learned that the host left")
+			f.release()
+			synctest.Wait() // D C: forwardSSH has learned that the host left, drained and returned
+			require.ErrorIs(t, f.requireReturned(t, "forwardSSH outlived the host's transport"), io.EOF)
+		}},
+		// Row 9: E with the request unanswered, and the goroutine passing its
+		// failure on held until forwardSSH is draining. The drain waits for
+		// the forwarder's false to reach the node.
+		{"S E D P C, unanswered", nil, holdFailure, func(t *testing.T, f *forwardRequestOrder) {
+			f.ask(t)
+			f.host.end()
+			synctest.Wait() // E D: the request has failed with the host's end, the goroutine passing that on is held, and forwardSSH has learned that the host left and done all it does before the failure is passed on
+			require.True(t, isDone(f.host.failing), "the request's failure didn't reach the hold")
+			f.requireRunning(t, "the node's request is unanswered")
+			f.requireNodeWaiting(t, "the node was told before the failure was passed on")
+			f.release()
+			synctest.Wait() // P C: the failure has been passed on, and forwardSSH has returned
+			f.requireNodeAnswered(t, false, nil)
+			require.ErrorIs(t, f.requireReturned(t, "forwardSSH outlived the host's transport"), io.EOF)
+		}},
+	}
+	for _, direction := range []forwardRequestDirection{hostDownstream, hostUpstream} {
+		t.Run(string(direction), func(t *testing.T) {
+			for _, row := range rows {
+				t.Run(row.name, func(t *testing.T) {
+					synctest.Test(t, func(t *testing.T) {
+						row.run(t, newForwardRequestOrder(t, direction, row.reply, row.hold))
+					})
+				})
+			}
 		})
 	}
 }
