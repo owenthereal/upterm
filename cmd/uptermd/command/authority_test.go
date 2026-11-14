@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/owenthereal/upterm/internal/testhelpers/testauthority"
 	"github.com/owenthereal/upterm/server"
@@ -82,5 +83,41 @@ func TestLifecycleStartFailureNamesTheExtension(t *testing.T) {
 	require.ErrorIs(t, err, boom)
 	require.Equal(t, 1, lifecycle.started)
 	require.Equal(t, 1, lifecycle.stopped)
+	requireRefused(t, addr)
+}
+
+// endsOnStart is a Lifecycle that ends its run once it has started, keeping
+// the address of the relay whose Runtime it was given.
+type endsOnStart struct {
+	end      context.CancelFunc
+	nodeAddr string
+	started  int
+	stopped  int
+}
+
+func (l *endsOnStart) Start(_ context.Context, rt server.Runtime) error {
+	l.started++
+	_, _, l.nodeAddr = rt.Identity()
+	l.end()
+	return nil
+}
+
+func (l *endsOnStart) Stop() { l.stopped++ }
+
+// A composed uptermd starts its extension's Lifecycle on the relay it serves
+// and, when its run ends cleanly, stops it before returning.
+func TestLifecycleStartsAndStopsWithACleanRun(t *testing.T) {
+	resetUptermdEnv(t)
+	addr := freeAddr(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	lifecycle := &endsOnStart{end: cancel}
+	cmd := RootWith(&Extension{Name: "probe", New: func(context.Context, Config) (server.Extensions, error) {
+		return server.Extensions{Lifecycle: lifecycle}, nil
+	}})
+	require.NoError(t, execute(ctx, cmd, "--ssh-addr", addr, "--network", "mem"))
+	require.Equal(t, 1, lifecycle.started, "the extension's Lifecycle was not started")
+	require.Equal(t, addr, lifecycle.nodeAddr, "the Lifecycle was not given the serving relay's Runtime")
+	require.Equal(t, 1, lifecycle.stopped, "the extension's Lifecycle was not stopped before the run returned")
 	requireRefused(t, addr)
 }
