@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"strings"
 	"sync"
 	"testing"
@@ -209,8 +210,12 @@ func TestDelegatedWaitingScreen(t *testing.T) {
 		require.Equal(t, crlf(w.text()+waitingApproved), shell.out.String())
 		require.NotContains(t, shell.out.String(), "DELEGATED-TICK")
 
-		// The host and its command go on once the guest leaves.
-		require.NoError(t, guest.Close())
+		// The host and its command go on once the guest leaves. The waiting
+		// screen closes its connection when it ends, so the guest's own
+		// Close may find it already closed.
+		if err := guest.Close(); !errors.Is(err, net.ErrClosed) {
+			require.NoError(t, err)
+		}
 		select {
 		case err := <-r.done:
 			t.Fatalf("the guest leaving ended the host: %v", err)
