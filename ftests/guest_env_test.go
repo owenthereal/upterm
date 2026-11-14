@@ -18,8 +18,8 @@ import (
 // guest's forced command is told about the guest: SSH_CONNECTION and
 // SSH_CLIENT name the two ends of the guest's connection to the relay it
 // joined by -- the entry node, on a hop -- and SSH_TTY names the command's
-// own pty. Under --hide-client-ip the addresses are left out and the
-// terminal is not.
+// own pty, the terminal its stdin is on. Under --hide-client-ip the
+// addresses are left out and the terminal is not.
 func testForcedCommandSeesTheGuestsConnection(t *testing.T, hostShareURL, hostNodeAddr, clientJoinURL string) {
 	if runtime.GOOS == "windows" {
 		t.Skip("the forced command is a POSIX shell script, and a ConPTY has no tty name")
@@ -27,9 +27,12 @@ func testForcedCommandSeesTheGuestsConnection(t *testing.T, hostShareURL, hostNo
 
 	for _, hide := range []bool{false, true} {
 		t.Run(fmt.Sprintf("hideClientIP=%t", hide), func(t *testing.T) {
+			// The script compares SSH_TTY with its stdin rather than asking
+			// tty: on macOS, ttyname can miss the terminal's own /dev entry
+			// while other terminals close.
 			session := shareHost(t, &Host{
 				Command:                  getTestShell(),
-				ForceCommand:             []string{"sh", "-c", `printf 'CONNECTION=%s\nCLIENT=%s\nTTY=%s\nREAL=%s\n' "${SSH_CONNECTION-unset}" "${SSH_CLIENT-unset}" "${SSH_TTY-unset}" "$(tty)"; sleep 30`},
+				ForceCommand:             []string{"sh", "-c", `printf 'CONNECTION=%s\nCLIENT=%s\nTTY=%s\nREAL=%s\n' "${SSH_CONNECTION-unset}" "${SSH_CLIENT-unset}" "${SSH_TTY-unset}" "$(if [ -t 0 ] && [ /dev/stdin -ef "${SSH_TTY-unset}" ]; then echo own; else echo other; fi)"; sleep 30`},
 				PrivateKeys:              []string{HostPrivateKey},
 				AdminSocketFile:          setupAdminSocket(t),
 				PermittedClientPublicKey: ClientPublicKeyContent,
@@ -49,8 +52,8 @@ func testForcedCommandSeesTheGuestsConnection(t *testing.T, hostShareURL, hostNo
 				got[k] = v
 			}
 
-			assert.True(t, strings.HasPrefix(got["REAL"], "/dev/"), "the command's own terminal: %q", got["REAL"])
-			assert.Equal(t, got["REAL"], got["TTY"], "SSH_TTY")
+			assert.True(t, strings.HasPrefix(got["TTY"], "/dev/"), "SSH_TTY: %q", got["TTY"])
+			assert.Equal(t, "own", got["REAL"], "SSH_TTY names the terminal on the command's stdin")
 
 			if hide {
 				assert.Equal(t, "unset", got["CONNECTION"], "SSH_CONNECTION")
