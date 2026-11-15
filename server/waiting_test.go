@@ -549,14 +549,49 @@ func TestWaitingOfferBinding(t *testing.T) {
 	}
 }
 
-func TestWaitingExpiredBeforeShell(t *testing.T) {
-	client, peer := forwardTestPair(t, nil, nil)
+// waitingPair is a guest's SSH client and the relay's end of its connection,
+// which wrap wraps when it is set; raw is the relay's transport under it.
+func waitingPair(t *testing.T, wrap func(net.Conn) net.Conn) (*ssh.Client, sshPeer, net.Conn) {
+	t.Helper()
+	var raw net.Conn
+	client, peer := forwardTestPairWrapped(t, nil, nil, func(c net.Conn) net.Conn {
+		raw = c
+		if wrap != nil {
+			return wrap(c)
+		}
+		return c
+	})
 	guest := ssh.NewClient(client.conn, client.channels, client.requests)
 	t.Cleanup(func() { _ = guest.Close() })
+	return guest, peer, raw
+}
+
+// screenGuest is a guest on raw shown a's screen, which the relay can close
+// for good.
+func screenGuest(t *testing.T, raw net.Conn, id string, a *approval) *guestConn {
+	g := newGuestConn(t.Context(), raw)
+	g.guest = &Guest{ConnectionID: id}
+	g.admission = a.waiting(waitingMessage)
+	return g
+}
+
+// watchedWrites is a connection that calls watch before each write.
+type watchedWrites struct {
+	net.Conn
+	watch func()
+}
+
+func (c *watchedWrites) Write(b []byte) (int, error) {
+	c.watch()
+	return c.Conn.Write(b)
+}
+
+func TestWaitingExpiredBeforeShell(t *testing.T) {
+	guest, peer, raw := waitingPair(t, nil)
 	// Establish the real SSH transport first, then start the screen with an
 	// expired offer. Handshake and key generation speed can't decide expiry.
 	a := newApproval(time.Now().Add(-time.Second))
-	g := &guestConn{ctx: t.Context(), guest: &Guest{ConnectionID: "expired-screen"}, admission: a.waiting(waitingMessage)}
+	g := screenGuest(t, raw, "expired-screen", a)
 	ended := make(chan error, 1)
 	go func() { ended <- (&SSHRouting{}).serveWaiting(g, peer, 10*time.Second) }()
 	session, err := guest.NewSession()
@@ -570,6 +605,53 @@ func TestWaitingExpiredBeforeShell(t *testing.T) {
 	require.Equal(t, a.expired, string(output))
 	require.Empty(t, a.waits, "an expired screen started a wait")
 	require.NoError(t, <-ended)
+}
+
+// A screen that expires while its shell waits shows its expired text, and
+// the wait on it ends at its deadline: the authority is told the screen
+// expired, not that the guest left. The screen writes its expired text only
+// once the wait's context has ended with DeadlineExceeded; screens run side
+// by side, so one that wrote it while the wait was still live shows in a run.
+func TestWaitingExpiresWhileWaiting(t *testing.T) {
+	for i := range 16 {
+		t.Run(fmt.Sprint(i), func(t *testing.T) {
+			t.Parallel()
+			var (
+				wait atomic.Pointer[context.Context]
+				once sync.Once
+				// written is the wait's context's error as the relay first
+				// writes to the guest once the wait has begun.
+				written = make(chan error, 1)
+			)
+			guest, peer, raw := waitingPair(t, func(c net.Conn) net.Conn {
+				return &watchedWrites{Conn: c, watch: func() {
+					if ctx := wait.Load(); ctx != nil {
+						once.Do(func() { written <- (*ctx).Err() })
+					}
+				}}
+			})
+			a := newApproval(time.Now().Add(500 * time.Millisecond))
+			g := screenGuest(t, raw, "expiring-screen", a)
+			g.admission.Waiting.Await = func(ctx context.Context) (Target, error) {
+				wait.Store(&ctx)
+				return a.await(ctx)
+			}
+			ended := make(chan error, 1)
+			go func() { ended <- (&SSHRouting{}).serveWaiting(g, peer, 10*time.Second) }()
+			shell := startWaitingShell(t, guest, a, waitingMessage, nil, "")
+			rest, err := shell.rest(t)
+			requireExit(t, err, 1)
+			require.Equal(t, a.expired, rest)
+			select {
+			case err := <-written:
+				require.ErrorIs(t, err, context.DeadlineExceeded, "the screen expired while its wait went on")
+			default:
+				t.Fatal("the screen wrote nothing once its wait began")
+			}
+			require.ErrorIs(t, a.ended(t), context.DeadlineExceeded)
+			require.NoError(t, <-ended)
+		})
+	}
 }
 
 // A screen is taken until the moment it expires, and not at it; the relay
