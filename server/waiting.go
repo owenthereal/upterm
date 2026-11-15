@@ -44,7 +44,10 @@ type WaitingScreen struct {
 	// Expires is when the screen ends, at most 10 minutes after the verdict;
 	// a later one ends it then.
 	Expires time.Time
-	Await   func(ctx context.Context) (Target, error)
+	// Await's context ends with DeadlineExceeded when the screen expires
+	// while Await waits, and is canceled when the guest leaves or the screen
+	// otherwise ends.
+	Await func(ctx context.Context) (Target, error)
 }
 
 // WaitingEnded ends a waiting screen, showing the guest Text as a
@@ -188,12 +191,14 @@ func (p *SSHRouting) serveWaiting(g *guestConn, peer sshPeer, stage time.Duratio
 		// terminal is the latest the guest asked for, nil for none.
 		terminal *ptyRequestMsg
 		decided  chan awaitResult
-		expires  <-chan time.Time
+		// expires is the wait's end: its deadline, which is the screen's
+		// expiry, or ctx's end.
+		expires   <-chan struct{}
+		stopAwait context.CancelFunc
 	)
-	var expiry *time.Timer
 	defer func() {
-		if expiry != nil {
-			expiry.Stop()
+		if stopAwait != nil {
+			stopAwait()
 		}
 	}()
 	for {
@@ -201,6 +206,9 @@ func (p *SSHRouting) serveWaiting(g *guestConn, peer sshPeer, stage time.Duratio
 		case <-ctx.Done():
 			return nil
 		case <-expires:
+			if ctx.Err() != nil {
+				return nil
+			}
 			limit.Reset(stage)
 			exitShowing(session.channel, session.requests, session.channel, waiting.ExpiredMessage, terminal != nil)
 			return nil
@@ -253,14 +261,16 @@ func (p *SSHRouting) serveWaiting(g *guestConn, peer sshPeer, stage time.Duratio
 					return nil
 				}
 				_, _ = session.channel.Write(termtext.Sanitize(g.admission.Message, terminal != nil))
-				// From now the screen's expiry is the bound.
+				// From now the screen's expiry is the bound, and the wait's
+				// deadline is its only clock: the screen expires as the wait
+				// ends with DeadlineExceeded, which ctx ending after can't
+				// change.
 				limit.Stop()
-				expiry = time.NewTimer(time.Until(waiting.Expires))
-				expires = expiry.C
 				decided = make(chan awaitResult, 1)
 				awaitCtx, cancel := context.WithDeadline(ctx, waiting.Expires)
+				stopAwait = cancel
+				expires = awaitCtx.Done()
 				workers.Go(func() {
-					defer cancel()
 					_, err := waiting.Await(awaitCtx)
 					decided <- awaitResult{err}
 				})
