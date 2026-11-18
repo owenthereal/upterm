@@ -1,6 +1,16 @@
 # Upterm
 
-[Upterm](https://github.com/owenthereal/upterm) is an open-source tool enabling developers to share terminal sessions securely over the web. It’s perfect for remote pair programming, accessing computers behind NATs/firewalls, remote debugging, and more.
+[Upterm](https://github.com/owenthereal/upterm) lets you reach a terminal over SSH without opening an inbound port.
+
+- **Check on an AI agent from your phone.** Leave the agent running in Herdr on
+  your home machine. When it needs approval, connect through Upterm from your
+  phone or another laptop. Each connection opens its own Herdr client, and Herdr
+  keeps the agent running when you disconnect. [Set up remote access to Herdr][herdr-guide].
+- **Debug a failing test with a teammate.** Run `upterm host` and send your
+  teammate the join command. You can both type in the same terminal, rerun the
+  test, and inspect the failure together. [Share a terminal](https://github.com/owenthereal/upterm#wrench-basic-usage).
+
+[herdr-guide]: https://github.com/owenthereal/upterm/blob/master/guides/herdr.md
 
 This is a [blog post](https://owenou.com/upterm) to describe Upterm in depth.
 
@@ -93,7 +103,6 @@ go install ./cmd/upterm/...
 
 Dive into more commands and advanced usage in the [documentation](docs/upterm.md).
 To reach your own machine from a laptop or a phone with plain `ssh`, VS Code or `scp`, see [Reach your own machine](#reach-your-own-machine).
-To reach agents running in [Herdr](https://github.com/herdrdev/herdr) at home from a phone or another laptop, see [Reach your Herdr agents from anywhere](guides/herdr.md).
 Below are some notable highlights:
 
 ### Joining with `upterm join`
@@ -356,7 +365,7 @@ a port. Only your own keys get in:
      can, without asking you: run commands, transfer files, and forward
      ports to this machine's loopback addresses.
    - `--login-command herdr` is what plain `ssh home` opens: a
-     [Herdr](guides/herdr.md) client of its own for each guest. Without it,
+     [Herdr][herdr-guide] client of its own for each guest. Without it,
      plain `ssh home` shares the door's own terminal.
    - `--detach` asks before it starts the door, on this terminal, then
      leaves it running in the background.
@@ -377,7 +386,7 @@ a port. Only your own keys get in:
 
 The key `ssh home` offers has to be on your GitHub account, as it was when
 the door started: after you add, change or revoke one there, restart the
-door. [Reach your Herdr agents from anywhere](guides/herdr.md) covers the
+door. [Reach your Herdr agents from anywhere][herdr-guide] covers the
 rest: a phone, keeping the machine awake, and a jump to its own sshd.
 
 #### VS Code
