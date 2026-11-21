@@ -269,6 +269,12 @@ func (p *SSHRouting) stockConnection(ctx context.Context, accepted net.Conn, ins
 	stageDeadline := time.Now().Add(stage)
 	cfg := &ssh.ServerConfig{
 		ServerVersion: serverVersion(advertises),
+		// x/crypto gives refused public-key queries a separate allowance of
+		// MaxAuthTries before charging them to the authentication failure limit.
+		// Three preserves the disconnect after six ordinary refused key offers,
+		// including a usable sixth key after five refusals. Signed refusals have
+		// no extra allowance: three exhaust it, and mixed refusals allow 3–6.
+		MaxAuthTries: 3,
 		// Authorization only. x/crypto invokes this for unsigned public-key
 		// queries too, and a successful query takes `continue userAuthLoop`
 		// without incrementing authFailures, so MaxAuthTries does not bound it.

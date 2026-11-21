@@ -266,6 +266,55 @@ func TestStockSSHUnsignedQueryDoesNotDial(t *testing.T) {
 	require.Zero(t, value)
 }
 
+// A composed authority decides only after proof of possession. A key it
+// allows on the third signed attempt still works, but three refusals exhaust
+// the connection before another key can reach that policy.
+func TestStockSSHSignedGuestFailureLimit(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		refused int
+		allowed bool
+	}{
+		{"third signed key allowed", 2, true},
+		{"three signed keys refused", 3, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			authority := &fakeAuthority{}
+			ts := newDelegatedTestServer(t, authority)
+			host := registerDelegatedHost(t, ts, externalSessionID)
+			keys := make([]ssh.Signer, tc.refused+1)
+			for i := range keys {
+				keys[i] = newProven(t).key
+			}
+			allowed := keys[len(keys)-1].PublicKey()
+			authority.admitWith(func(_ context.Context, g *Guest, _ GuestRequest) (Admission, error) {
+				if sameKey(g.Key, allowed) {
+					return Admission{Verdict: VerdictAllow, Target: host.target("shell")}, nil
+				}
+				return Admission{}, nil
+			})
+			client, err := ssh.Dial("tcp", ts.addr, &ssh.ClientConfig{
+				User:            claimPrefix + "work",
+				Auth:            []ssh.AuthMethod{ssh.PublicKeys(keys...)},
+				HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+				Timeout:         10 * time.Second,
+			})
+			if tc.allowed {
+				require.NoError(t, err)
+				t.Cleanup(func() { _ = client.Close() })
+			} else {
+				if client != nil {
+					_ = client.Close()
+				}
+				require.ErrorContains(t, err, "too many authentication failures")
+			}
+			admissions, _ := authority.guests()
+			require.Len(t, admissions, 3, "only the first three signed keys reach the authority")
+			require.Equal(t, tc.allowed, sameKey(admissions[2].guest.Key, allowed))
+		})
+	}
+}
+
 func TestStockSSHUpstreamFailure(t *testing.T) {
 	for _, tc := range []struct {
 		name, key, reason string
