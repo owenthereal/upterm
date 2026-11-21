@@ -74,9 +74,10 @@ func (hostKeyChangedError) Unwrap() error   { return ErrHostKeyChanged }
 // directory, is an empty trust store. It returns nil when a key line or an
 // @cert-authority line trusts key, an error wrapping ErrUnknownHostKey when no
 // line names it, and an error wrapping ErrHostKeyChanged when a line for
-// hostname names a different key. A certificate that no @cert-authority line
-// trusts is checked by its own key, once its signer is found not revoked.
-// Anything else is as knownhosts returns it.
+// hostname names a different key. Host certificates with no principals are
+// always refused. A certificate that no @cert-authority line trusts is checked
+// by its own key, once its signer is found not revoked. Anything else is as
+// knownhosts returns it.
 func (k KnownHosts) Check(hostname string, remote net.Addr, key ssh.PublicKey) error {
 	_, err := k.check(hostname, remote, key)
 	return err
@@ -86,6 +87,10 @@ func (k KnownHosts) Check(hostname string, remote net.Addr, key ssh.PublicKey) e
 // with for hostname: pinLine's for an authority's certificate, and the plain
 // line for the key that matched otherwise, a certificate's own key included.
 func (k KnownHosts) check(hostname string, remote net.Addr, key ssh.PublicKey) (string, error) {
+	if err := checkHostCertificatePrincipals(key); err != nil {
+		return "", err
+	}
+
 	cb, err := knownhosts.New(k.File)
 	if errors.Is(err, fs.ErrNotExist) {
 		return "", ErrUnknownHostKey
@@ -138,6 +143,15 @@ func (k KnownHosts) check(hostname string, remote net.Addr, key ssh.PublicKey) (
 	return "", ErrUnknownHostKey
 }
 
+// checkHostCertificatePrincipals applies even before an authority is trusted:
+// a raw-key match or first-use acceptance cannot supply a certificate's names.
+func checkHostCertificatePrincipals(key ssh.PublicKey) error {
+	if cert, ok := key.(*ssh.Certificate); ok && cert.CertType == ssh.HostCert && len(cert.ValidPrincipals) == 0 {
+		return errors.New("ssh: host certificate has no valid principals")
+	}
+	return nil
+}
+
 // knownHostsLine is the known_hosts line that trusts key for hostname, as an
 // authority for its host certificates when authority is set.
 func knownHostsLine(hostname string, key ssh.PublicKey, authority bool) string {
@@ -152,10 +166,9 @@ func knownHostsLine(hostname string, key ssh.PublicKey, authority bool) string {
 // hostname, once a check has trusted it: the key itself, and for a
 // certificate, an @cert-authority line for its signer where ssh accepts one,
 // else the key it certifies. The key is what the relay proved it holds, and
-// ssh accepts a line for it whatever the certificate says: OpenSSH refuses a
-// host certificate that lists no principals (as an uptermd started without
-// --hostname presents) or doesn't list the host it dialled, and then checks
-// the certificate's key as a plain one.
+// ssh accepts a line for it even if the certificate doesn't list the host it
+// dialled: OpenSSH refuses the certificate, and then checks its key as a plain
+// one. Certificates with no principals have already been refused by Check.
 //
 // So the signer gets the line only when the certificate lists the host and
 // the signer is another key: every uptermd signs its certificate with the
@@ -188,7 +201,8 @@ func listsHost(cert *ssh.Certificate, address string) bool {
 // key's fingerprint or "no"; anything else asks again. It returns true after
 // recording the key, and false for "no". It returns (false, ctx.Err()) as soon
 // as ctx ends, and records nothing once it has: a ctx that is already done
-// gets no prompt and no read.
+// gets no prompt and no read. Host certificates with no principals are refused
+// without prompting or recording.
 //
 // Each line is read a byte at a time, on a goroutine of its own, so that
 // nothing typed after the answer is consumed. A read that is still blocked when
@@ -196,6 +210,9 @@ func listsHost(cert *ssh.Certificate, address string) bool {
 // cancelled, and ctx ending means the process is.
 func (k KnownHosts) Confirm(ctx context.Context, in io.Reader, hostname string, remote net.Addr, key ssh.PublicKey) (bool, error) {
 	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	if err := checkHostCertificatePrincipals(key); err != nil {
 		return false, err
 	}
 
@@ -280,8 +297,13 @@ func readLine(in io.Reader) (string, error) {
 // Record appends hostname's line to the file, first creating the file and its
 // directory (0700) if they don't exist, and ending the file's last line if it
 // has no newline. A certificate's signing key is recorded as an
-// @cert-authority line. announce prints the "Permanently added" warning.
+// @cert-authority line. Host certificates with no principals are refused
+// without writing or announcing. announce prints the "Permanently added" warning.
 func (k KnownHosts) Record(hostname string, key ssh.PublicKey, announce bool) error {
+	if err := checkHostCertificatePrincipals(key); err != nil {
+		return err
+	}
+
 	cert, isCert := key.(*ssh.Certificate)
 	if isCert {
 		key = cert.SignatureKey

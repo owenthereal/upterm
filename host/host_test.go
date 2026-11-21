@@ -261,15 +261,8 @@ func Test_hostKeyCallbackIPv6WithCertAuthority(t *testing.T) {
 	stdin := bytes.NewBufferString("yes\n")
 	stdout := bytes.NewBuffer(nil)
 
-	pk, _, _, _, err := ssh.ParseAuthorizedKey([]byte(testPublicKey))
-	require.NoError(t, err)
-
-	// Create a certificate
-	cert := &ssh.Certificate{
-		Key:          pk,
-		CertType:     ssh.HostCert,
-		SignatureKey: pk,
-	}
+	signer := newSigner(t)
+	cert := signHostCert(t, signer, signer.PublicKey(), "uptermd.upterm.dev")
 
 	cb, err := NewPromptingHostKeyCallback(stdin, stdout, tempfile, false)
 	require.NoError(t, err)
@@ -341,15 +334,8 @@ func Test_autoAcceptingHostKeyCallbackWithCertificate(t *testing.T) {
 
 	stdout := bytes.NewBuffer(nil)
 
-	pk, _, _, _, err := ssh.ParseAuthorizedKey([]byte(testPublicKey))
-	require.NoError(t, err)
-
-	// Create a certificate
-	cert := &ssh.Certificate{
-		Key:          pk,
-		CertType:     ssh.HostCert,
-		SignatureKey: pk,
-	}
+	signer := newSigner(t)
+	cert := signHostCert(t, signer, signer.PublicKey(), "uptermd.upterm.dev")
 
 	cb, err := NewAutoAcceptingHostKeyCallback(stdout, tempfile)
 	require.NoError(t, err)
