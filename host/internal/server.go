@@ -417,8 +417,26 @@ func (s *Server) ServeWithContext(ctx context.Context, guest, host net.Listener)
 			Handler:          sh.HandleSession,
 			Version:          upterm.HostSSHServerVersion,
 			PublicKeyHandler: ph.HandlePublicKey,
+			ServerConfigCallback: func(ctx gssh.Context) *ssh.ServerConfig {
+				conn := ctx.Value(guestAuthConnKey{}).(net.Conn)
+				failures := 0
+				return &ssh.ServerConfig{AuthLogCallback: func(_ ssh.ConnMetadata, method string, err error) {
+					// x/crypto gives unsigned public-key queries their own
+					// allowance. Keep the guest door's six-rejection bound,
+					// including repeated keys served from its auth cache.
+					// Accepted queries do not invoke this hook; a successful
+					// signature arrives with nil error and costs no failure.
+					if method == "publickey" && err != nil {
+						failures++
+						if failures >= 6 {
+							_ = conn.Close()
+						}
+					}
+				}}
+			},
 			ConnCallback: func(ctx gssh.Context, conn net.Conn) net.Conn {
 				// Installed before authentication or any concurrent channel handlers.
+				ctx.SetValue(guestAuthConnKey{}, conn)
 				ctx.SetValue(forwardingPresenceKey{}, &forwardingPresence{})
 				if permissionChecker != nil {
 					context.AfterFunc(ctx, func() {
@@ -968,6 +986,8 @@ type publicKeyHandler struct {
 }
 
 type authenticatedGuestKey struct{}
+
+type guestAuthConnKey struct{}
 
 type authenticatedGuest struct {
 	auth *server.AuthRequest

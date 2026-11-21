@@ -99,10 +99,9 @@ func TestGuestPlainPublicKeyIsRefused(t *testing.T) {
 	require.Error(t, err)
 }
 
-// The MaxAuthTries bound: x/crypto counts a *rejected* public-key query against
-// MaxAuthTries, which charm.land/ssh leaves at x/crypto's default of 6. A relay
-// offers one certificate per signing key, so the pinned key has to be among the
-// first six.
+// The guest door bounds rejected offers independently of x/crypto's allowance
+// for public-key queries. A relay offers one certificate per signing key, so
+// the pinned key has to be among the first six.
 func TestGuestSurvivesFiveRejectedOffersBeforeTheAcceptedOne(t *testing.T) {
 	authorized := testSigner(t)
 	h := startHost(t, &Server{
@@ -135,5 +134,22 @@ func TestGuestIsDisconnectedAfterSixRejectedOffers(t *testing.T) {
 	signers = append(signers, guestCert(t, h.relaySigner, authorized.PublicKey()))
 
 	_, _, _, err := h.dialGuest(t, withGuestSigners(signers...))
-	require.Error(t, err, "the sixth rejection hits MaxAuthTries, so the good offer is never reached")
+	require.Error(t, err, "the sixth rejection closes the connection, so the good offer is never reached")
+}
+
+func TestGuestRepeatedRejectedOffersCountTowardTheLimit(t *testing.T) {
+	authorized := testSigner(t)
+	h := startHost(t, &Server{
+		Command:        []string{"sh", "-c", "sleep 30"},
+		AuthorizedKeys: []ssh.PublicKey{authorized.PublicKey()},
+	})
+	refused := guestCert(t, testSigner(t), authorized.PublicKey())
+	good := guestCert(t, h.relaySigner, authorized.PublicKey())
+
+	_, _, _, err := h.dialGuest(t, withGuestSigners(refused, refused, refused, refused, refused, refused, good))
+	require.Error(t, err, "cached key refusals must still count toward the connection's limit")
+
+	// The exhausted budget belongs to that connection, not to the guest door.
+	_, _, _, err = h.dialGuest(t, withGuestSigners(good))
+	require.NoError(t, err)
 }
