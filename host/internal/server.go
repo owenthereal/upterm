@@ -419,20 +419,7 @@ func (s *Server) ServeWithContext(ctx context.Context, guest, host net.Listener)
 			PublicKeyHandler: ph.HandlePublicKey,
 			ServerConfigCallback: func(ctx gssh.Context) *ssh.ServerConfig {
 				conn := ctx.Value(guestAuthConnKey{}).(net.Conn)
-				failures := 0
-				return &ssh.ServerConfig{AuthLogCallback: func(_ ssh.ConnMetadata, method string, err error) {
-					// x/crypto gives unsigned public-key queries their own
-					// allowance. Keep the guest door's six-rejection bound,
-					// including repeated keys served from its auth cache.
-					// Accepted queries do not invoke this hook; a successful
-					// signature arrives with nil error and costs no failure.
-					if method == "publickey" && err != nil {
-						failures++
-						if failures >= 6 {
-							_ = conn.Close()
-						}
-					}
-				}}
+				return &ssh.ServerConfig{AuthLogCallback: guestAuthLog(conn.Close)}
 			},
 			ConnCallback: func(ctx gssh.Context, conn net.Conn) net.Conn {
 				// Installed before authentication or any concurrent channel handlers.
@@ -988,6 +975,26 @@ type publicKeyHandler struct {
 type authenticatedGuestKey struct{}
 
 type guestAuthConnKey struct{}
+
+// guestAuthLog belongs to one connection and runs on its authentication loop.
+// Rejected queries, including cached keys, arrive here; accepted queries do
+// not, and successful signed authentication arrives with nil error.
+// All methods share six failures, excluding the initial none discovery.
+func guestAuthLog(closeConn func() error) func(ssh.ConnMetadata, string, error) {
+	failures := 0
+	first := true
+	return func(_ ssh.ConnMetadata, method string, err error) {
+		discovery := first && method == "none"
+		first = false
+		if err == nil || discovery {
+			return
+		}
+		failures++
+		if failures >= 6 {
+			_ = closeConn()
+		}
+	}
+}
 
 type authenticatedGuest struct {
 	auth *server.AuthRequest
