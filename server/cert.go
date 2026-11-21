@@ -39,13 +39,12 @@ type UserCertChecker struct {
 	// mints upterm certificates. A host names the single relay key its host
 	// key callback accepted.
 	//
-	// A relay offers one certificate per signing key, and x/crypto counts a
-	// rejected public-key query against MaxAuthTries -- 6 by default, which
-	// charm.land/ssh does not change. So a host pinning one key survives five
-	// rejected offers and is disconnected on the sixth: the pinned key must be
-	// among the first six a relay offers. One key, or two through a rotation,
-	// is always fine. Raising the guest door's MaxAuthTries through a
-	// ServerConfigCallback is the escape hatch if that ever binds.
+	// A relay offers one certificate per signing key, in signer order. The
+	// host's guest door enforces six authentication failures per connection,
+	// excluding initial none discovery, independently of x/crypto's query
+	// allowance. Five rejected offers still permit the next certificate;
+	// the sixth rejection closes the connection. With no other failures,
+	// the certificate signed by the pinned key must be among the first six.
 	IsUserAuthority func(auth ssh.PublicKey) bool
 
 	UserKeyFallback func(user string, key ssh.PublicKey) (ssh.PublicKey, error)

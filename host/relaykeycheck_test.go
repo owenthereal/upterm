@@ -5,6 +5,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -47,7 +48,9 @@ func TestRelayKeyCheckSaysWhatItTrustedAndHow(t *testing.T) {
 	// Certificates another authority signs, which ssh accepts by it only for
 	// a host they list: none, other hosts, the host in capitals, the host
 	// among others, and an address.
-	noPrincipals := signHostCert(t, ca, hostKey.PublicKey())
+	noPrincipals := legacyHostCertificate(t)
+	legacyPlain := knownhosts.Line([]string{"relay.test"}, noPrincipals.Key)
+	legacyAuthority := authorityLine("relay.test", noPrincipals.SignatureKey)
 	otherHosts := signHostCert(t, ca, hostKey.PublicKey(), "other.test", "relay.test.example")
 	inCapitals := signHostCert(t, ca, hostKey.PublicKey(), "Relay.Test")
 	amongOthers := signHostCert(t, ca, hostKey.PublicKey(), "other.test", "relay.test")
@@ -79,13 +82,13 @@ func TestRelayKeyCheckSaysWhatItTrustedAndHow(t *testing.T) {
 		{"a self-signed certificate no line names", "", "relay.test:22", selfSigned, plain, false, ownAuthority},
 		{"a key on another port", "", "relay.test:2222", hostKey.PublicKey(),
 			knownhosts.Line([]string{"[relay.test]:2222"}, hostKey.PublicKey()), false, ""},
-		// ssh refuses a certificate that lists no names, or not the host it
-		// dialled, and then checks its key as a plain one: a guest pins that
-		// key, as for a self-signed certificate, while the host's own file
-		// keeps the authority. ssh lowercases the host it dials and compares
-		// the names letter for letter, so a name in capitals isn't the host.
-		{"a certificate that lists no names, its authority's line trusts", authority + "\n", "relay.test:22", noPrincipals, plain, true, ""},
-		{"a certificate that lists no names, no line names", "", "relay.test:22", noPrincipals, plain, false, authority},
+		// Certificates with no names are refused before trust is considered.
+		{"a certificate that lists no names with a known authority", legacyAuthority + "\n", "relay.test:22", noPrincipals, legacyPlain, true, ""},
+		{"a certificate that lists no names, no line names", "", "relay.test:22", noPrincipals, legacyPlain, false, legacyAuthority},
+		// ssh refuses a certificate that does not list the host it dialled,
+		// and then checks its key as a plain one: a guest pins that key, while
+		// the host's own file keeps the authority. ssh lowercases the host it
+		// dials and compares the names letter for letter.
 		{"a certificate for other hosts no line names", "", "relay.test:22", otherHosts, plain, false, authority},
 		{"a certificate for its host in capitals no line names", "", "relay.test:22", inCapitals, plain, false, authority},
 		// One that lists the host is pinned by its authority, for the host and
@@ -99,12 +102,28 @@ func TestRelayKeyCheckSaysWhatItTrustedAndHow(t *testing.T) {
 		for _, c := range relayKeyChecks {
 			t.Run(c.name+"/"+tc.name, func(t *testing.T) {
 				file := writeKnownHosts(t, tc.knownHosts)
-				check, err := c.new(strings.NewReader("yes\n"), io.Discard, file)
+				input := strings.NewReader("yes\n")
+				var output bytes.Buffer
+				check, err := c.new(input, &output, file)
 				require.NoError(t, err)
 				_, ok := check.Trusted()
 				require.False(t, ok, "nothing is trusted before a key is checked")
 
-				require.NoError(t, check.HostKeyCallback(tc.addr, fakeAddr, tc.key))
+				err = check.HostKeyCallback(tc.addr, fakeAddr, tc.key)
+				// Both check modes refuse a certificate with no hostnames,
+				// including first use, without prompting or recording.
+				if tc.key == noPrincipals {
+					require.ErrorContains(t, err, "valid principals")
+					_, ok := check.Trusted()
+					require.False(t, ok)
+					require.Empty(t, output.String())
+					require.Equal(t, len("yes\n"), input.Len())
+					content, err := os.ReadFile(file)
+					require.NoError(t, err)
+					require.Equal(t, tc.knownHosts, string(content))
+					return
+				}
+				require.NoError(t, err)
 
 				want := TrustedRelayKey{KnownHostsLine: tc.wantLine, Trust: RelayKeyKnown}
 				wantFile := tc.knownHosts
@@ -121,6 +140,39 @@ func TestRelayKeyCheckSaysWhatItTrustedAndHow(t *testing.T) {
 				content, err := os.ReadFile(file)
 				require.NoError(t, err)
 				require.Equal(t, wantFile, string(content), "what the file has afterwards")
+			})
+		}
+	}
+}
+
+func TestRelayKeyCheckRejectsHostCertificatesWithoutPrincipals(t *testing.T) {
+	cert := legacyHostCertificate(t)
+	for _, tc := range []struct {
+		name    string
+		content string
+		missing bool
+	}{
+		{name: "pinned raw key", content: knownhosts.Line([]string{"relay.test"}, cert.Key) + "\n"},
+		{name: "missing file", missing: true},
+	} {
+		for _, c := range relayKeyChecks {
+			t.Run(c.name+"/"+tc.name, func(t *testing.T) {
+				file := filepath.Join(t.TempDir(), "known_hosts")
+				if !tc.missing {
+					require.NoError(t, os.WriteFile(file, []byte(tc.content), 0o600))
+				}
+				in := strings.NewReader("yes\n")
+				var out bytes.Buffer
+				check, err := c.new(in, &out, file)
+				require.NoError(t, err)
+				require.ErrorContains(t, check.HostKeyCallback("relay.test:22", fakeAddr, cert), "valid principals")
+				_, trusted := check.Trusted()
+				require.False(t, trusted)
+				require.Empty(t, out.String())
+				require.Equal(t, len("yes\n"), in.Len())
+				content, err := os.ReadFile(file) // the constructor creates an empty file
+				require.NoError(t, err)
+				require.Equal(t, tc.content, string(content), "nothing recorded")
 			})
 		}
 	}

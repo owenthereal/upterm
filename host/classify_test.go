@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"net/url"
+	"sync"
 	"testing"
 	"time"
 
@@ -15,6 +16,7 @@ import (
 	"github.com/owenthereal/upterm/internal/httpproxy/httpproxytest"
 	"github.com/owenthereal/upterm/internal/registration"
 	"github.com/owenthereal/upterm/internal/testhelpers/fakerelay"
+	"github.com/owenthereal/upterm/internal/testhelpers/legacyssh"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/crypto/ssh"
 )
@@ -89,34 +91,31 @@ func freshSigners(t *testing.T, n int) []ssh.Signer {
 	return signers
 }
 
-// startRefusingServer is an x/crypto SSH server that refuses every key and
-// disconnects a client that has been refused maxTries times, as a relay with
-// that MaxAuthTries does.
+// startRefusingServer is a historical stock x/crypto SSH peer that refuses
+// every key and disconnects after maxTries refused offers. Newer relays may
+// allow more offers; the client must still classify this older peer's reply.
 func startRefusingServer(t *testing.T, maxTries int) *url.URL {
 	t.Helper()
-	hostKey, err := NewHostKey()
-	require.NoError(t, err)
-	config := &ssh.ServerConfig{
-		MaxAuthTries: maxTries,
-		PublicKeyCallback: func(ssh.ConnMetadata, ssh.PublicKey) (*ssh.Permissions, error) {
-			return nil, errors.New("key refused")
-		},
-	}
-	config.AddHostKey(hostKey)
+	peer := legacyssh.New(t)
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = ln.Close() })
+	var workers sync.WaitGroup
+	workers.Add(1)
+	t.Cleanup(func() {
+		_ = ln.Close()
+		workers.Wait()
+	})
 	go func() {
+		defer workers.Done()
 		for {
 			conn, err := ln.Accept()
 			if err != nil {
 				return
 			}
+			workers.Add(1)
 			go func() {
-				defer func() { _ = conn.Close() }()
-				if sconn, _, _, err := ssh.NewServerConn(conn, config); err == nil {
-					_ = sconn.Close()
-				}
+				defer workers.Done()
+				peer.Serve(conn, legacyssh.Config{MaxAuthTries: maxTries, RefuseAll: true}, nil)
 			}()
 		}
 	}()

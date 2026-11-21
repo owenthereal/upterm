@@ -110,7 +110,7 @@ var errNotTheRecordedKey = errors.New("ssh: host key is not the relay key this s
 //
 // It accepts exactly two things: the recorded key itself, and a host
 // certificate signed by it that verifies, is within its validity and names the
-// dialled hostname (its port dropped) or names none. Every refusal is a
+// dialled hostname (its port dropped). Every refusal is a
 // *RelayKeyChangedError wrapping the checker's reason, including a certificate
 // that merely certifies the recorded key: the comparison is IsUserAuthority's,
 // exact on the marshalled key, because utils.KeysEqual would unwrap it.
@@ -306,8 +306,7 @@ func (r *RelayAuthority) PinnedTo(pins RelayPins, authority string) ssh.HostKeyC
 	}
 	return r.Wrap(func(hostname string, remote net.Addr, key ssh.PublicKey) error {
 		err := checker.CheckHostKey(hostname, remote, key)
-		// The checker takes a certificate naming no host as one for every
-		// host. A relay's names its own.
+		// Require the certificate to name the relay explicitly.
 		if cert, ok := key.(*ssh.Certificate); ok && err == nil && len(cert.ValidPrincipals) == 0 {
 			err = errCertNamesNoHost
 		}

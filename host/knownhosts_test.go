@@ -50,6 +50,70 @@ func signHostCert(t *testing.T, ca ssh.Signer, key ssh.PublicKey, principals ...
 	return cert
 }
 
+// Current x/crypto cannot issue this shape. This inert public fixture was
+// issued by OpenSSH without -n; no private key is needed to check it.
+func legacyHostCertificate(t *testing.T) *ssh.Certificate {
+	t.Helper()
+	data, err := os.ReadFile("internal/testdata/legacy-host-no-principals.pub")
+	require.NoError(t, err)
+	key, _, _, _, err := ssh.ParseAuthorizedKey(data)
+	require.NoError(t, err)
+	cert, ok := key.(*ssh.Certificate)
+	require.True(t, ok)
+	require.Equal(t, uint32(ssh.HostCert), cert.CertType)
+	require.Empty(t, cert.ValidPrincipals)
+	return cert
+}
+
+func TestKnownHostsRejectsHostCertificatesWithoutPrincipals(t *testing.T) {
+	cert := legacyHostCertificate(t)
+	for _, tc := range []struct {
+		name    string
+		content string
+		missing bool
+	}{
+		{name: "known authority", content: authorityLine("relay.test", cert.SignatureKey) + "\n"},
+		{name: "pinned raw key", content: knownhosts.Line([]string{"relay.test"}, cert.Key) + "\n"},
+		{name: "empty file"},
+		{name: "missing file", missing: true},
+	} {
+		for _, operation := range []string{"check", "confirm", "record"} {
+			t.Run(tc.name+"/"+operation, func(t *testing.T) {
+				file := filepath.Join(t.TempDir(), "known_hosts")
+				if !tc.missing {
+					require.NoError(t, os.WriteFile(file, []byte(tc.content), 0o600))
+				}
+				in := strings.NewReader("yes\n")
+				var out bytes.Buffer
+				kh := KnownHosts{File: file, Stdout: &out}
+				var err error
+				switch operation {
+				case "check":
+					err = kh.Check("relay.test:22", fakeAddr, cert)
+				case "confirm":
+					var accepted bool
+					accepted, err = kh.Confirm(context.Background(), in, "relay.test:22", fakeAddr, cert)
+					require.False(t, accepted)
+				case "record":
+					err = kh.Record("relay.test:22", cert, true)
+				}
+				require.ErrorContains(t, err, "valid principals")
+				require.NotErrorIs(t, err, ErrUnknownHostKey)
+				require.NotErrorIs(t, err, ErrHostKeyChanged)
+				require.Empty(t, out.String(), "no prompt or acceptance warning")
+				require.Equal(t, len("yes\n"), in.Len(), "no input consumed")
+				if tc.missing {
+					require.NoFileExists(t, file)
+				} else {
+					content, err := os.ReadFile(file)
+					require.NoError(t, err)
+					require.Equal(t, tc.content, string(content), "nothing recorded")
+				}
+			})
+		}
+	}
+}
+
 func TestCheckTrustsACertAuthorityLine(t *testing.T) {
 	ca, hostKey := newSigner(t), newSigner(t)
 	cert := signHostCert(t, ca, hostKey.PublicKey(), "relay.test")

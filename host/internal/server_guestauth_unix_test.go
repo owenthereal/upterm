@@ -3,12 +3,55 @@
 package internal
 
 import (
+	"errors"
 	"testing"
 
 	"github.com/owenthereal/upterm/server"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/crypto/ssh"
 )
+
+func TestGuestAuthenticationFailuresShareOneBudget(t *testing.T) {
+	refused := errors.New("authentication refused")
+	type event struct {
+		method string
+		err    error
+	}
+	for _, tc := range []struct {
+		name   string
+		events []event
+		closed bool
+	}{
+		{"mixed methods exhaust six failures", []event{
+			{"none", refused}, {"publickey", refused}, {"password", refused},
+			{"keyboard-interactive", refused}, {"publickey", refused}, {"none", refused}, {"publickey", refused},
+		}, true},
+		{"successful sixth attempt", []event{
+			{"none", refused}, {"password", refused}, {"publickey", refused},
+			{"keyboard-interactive", refused}, {"none", refused}, {"publickey", refused}, {"publickey", nil},
+		}, false},
+		{"only initial none discovery is free", []event{
+			{"none", refused}, {"none", refused}, {"none", refused}, {"none", refused},
+			{"none", refused}, {"none", refused}, {"none", refused},
+		}, true},
+		{"none after another failure is charged", []event{
+			{"publickey", refused}, {"none", refused}, {"publickey", refused},
+			{"publickey", refused}, {"publickey", refused}, {"publickey", refused},
+		}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			closed := false
+			log := guestAuthLog(func() error { closed = true; return nil })
+			for i, ev := range tc.events {
+				log(nil, ev.method, ev.err)
+				if i < len(tc.events)-1 {
+					require.False(t, closed, "connection closed before its sixth failure")
+				}
+			}
+			require.Equal(t, tc.closed, closed)
+		})
+	}
+}
 
 // testSigner comes from relayauthority_test.go, which carries no build tag, so
 // it is available here.
@@ -99,10 +142,9 @@ func TestGuestPlainPublicKeyIsRefused(t *testing.T) {
 	require.Error(t, err)
 }
 
-// The MaxAuthTries bound: x/crypto counts a *rejected* public-key query against
-// MaxAuthTries, which charm.land/ssh leaves at x/crypto's default of 6. A relay
-// offers one certificate per signing key, so the pinned key has to be among the
-// first six.
+// The guest door bounds rejected offers independently of x/crypto's allowance
+// for public-key queries. A relay offers one certificate per signing key, so
+// the pinned key has to be among the first six.
 func TestGuestSurvivesFiveRejectedOffersBeforeTheAcceptedOne(t *testing.T) {
 	authorized := testSigner(t)
 	h := startHost(t, &Server{
@@ -135,5 +177,48 @@ func TestGuestIsDisconnectedAfterSixRejectedOffers(t *testing.T) {
 	signers = append(signers, guestCert(t, h.relaySigner, authorized.PublicKey()))
 
 	_, _, _, err := h.dialGuest(t, withGuestSigners(signers...))
-	require.Error(t, err, "the sixth rejection hits MaxAuthTries, so the good offer is never reached")
+	require.Error(t, err, "the sixth rejection closes the connection, so the good offer is never reached")
+}
+
+func TestGuestRepeatedRejectedOffersCountTowardTheLimit(t *testing.T) {
+	authorized := testSigner(t)
+	h := startHost(t, &Server{
+		Command:        []string{"sh", "-c", "sleep 30"},
+		AuthorizedKeys: []ssh.PublicKey{authorized.PublicKey()},
+	})
+	refused := guestCert(t, testSigner(t), authorized.PublicKey())
+	good := guestCert(t, h.relaySigner, authorized.PublicKey())
+
+	_, _, _, err := h.dialGuest(t, withGuestSigners(refused, refused, refused, refused, refused, refused, good))
+	require.Error(t, err, "cached key refusals must still count toward the connection's limit")
+
+	// The exhausted budget belongs to that connection, not to the guest door.
+	_, _, _, err = h.dialGuest(t, withGuestSigners(good))
+	require.NoError(t, err)
+}
+
+func TestGuestConcurrentConnectionsHaveSeparateFailureBudgets(t *testing.T) {
+	authorized := testSigner(t)
+	h := startHost(t, &Server{
+		Command:        []string{"sh", "-c", "sleep 30"},
+		AuthorizedKeys: []ssh.PublicKey{authorized.PublicKey()},
+	})
+	refused := guestCert(t, testSigner(t), authorized.PublicKey())
+	good := guestCert(t, h.relaySigner, authorized.PublicKey())
+	start := make(chan struct{})
+	accepted, rejected := make(chan error, 1), make(chan error, 1)
+	go func() {
+		<-start
+		_, _, _, err := h.dialGuest(t, withGuestSigners(refused, refused, refused, refused, refused, good))
+		accepted <- err
+	}()
+	go func() {
+		<-start
+		_, _, _, err := h.dialGuest(t, withGuestSigners(refused, refused, refused, refused, refused, refused, good))
+		rejected <- err
+	}()
+	close(start)
+	acceptedErr, rejectedErr := <-accepted, <-rejected
+	require.NoError(t, acceptedErr)
+	require.Error(t, rejectedErr)
 }

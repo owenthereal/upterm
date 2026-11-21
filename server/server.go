@@ -272,18 +272,20 @@ func Start(ctx context.Context, opt Opt, logger *slog.Logger) error {
 		return err
 	}
 
-	// key signers + corresponding cert signers
+	// Always offer the raw host keys; certificates must name configured hosts.
 	hostSigners := slices.Clone(signers)
-	for _, s := range signers {
-		hs := HostCertSigner{
-			Hostnames: opt.Hostnames,
-		}
-		ss, err := hs.SignCert(s)
-		if err != nil {
-			return err
-		}
+	if len(opt.Hostnames) > 0 {
+		for _, s := range signers {
+			hs := HostCertSigner{
+				Hostnames: opt.Hostnames,
+			}
+			ss, err := hs.SignCert(s)
+			if err != nil {
+				return err
+			}
 
-		hostSigners = append(hostSigners, ss)
+			hostSigners = append(hostSigners, ss)
+		}
 	}
 
 	// logger is already the parameter, just add context
