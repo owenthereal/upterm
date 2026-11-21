@@ -79,8 +79,8 @@ func newFakeRelay(t *testing.T, scripts ...relayKnobs) *fakeRelay {
 		ln:      bufconn.Listen(relayBuffer),
 		addr:    fmt.Sprintf("relay%d.test:22", relays.Add(1)),
 	}
-	hostKey := newSigner(t)
-	listen(t, r.ln, func(i int, conn net.Conn) { r.script(i).serve(conn, hostKey, r.log(i)) })
+	hostKey, historical := relayHostKey(t, scripts...)
+	listen(t, r.ln, func(i int, conn net.Conn) { r.script(i).serve(conn, hostKey, r.log(i), historical) })
 	return r
 }
 

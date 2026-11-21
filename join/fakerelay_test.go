@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/owenthereal/upterm/internal/termsize"
+	"github.com/owenthereal/upterm/internal/testhelpers/legacyssh"
 	"github.com/owenthereal/upterm/upterm"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/crypto/ssh"
@@ -50,8 +51,8 @@ type relayKnobs struct {
 	refuseAll       bool          // every publickey query fails
 	allow           ssh.PublicKey // accept only this key (nil: any)
 	dropOnPublicKey bool          // close the conn once a publickey request arrives
-	maxAuthTries    int
-	banner          string // sent with each refusal
+	maxAuthTries    int           // explicit limits exercise historical unsigned-offer accounting
+	banner          string        // sent with each refusal
 	version         string
 	pubKeyAlgos     []string
 	rejectSession   string // reject "session" with ConnectionFailed and this message
@@ -148,8 +149,32 @@ const permKey = "fixture-key"
 // serve runs the relay's end of one connection until it closes, noting in seen
 // what it saw. It is the one place that end is written, so a behaviour the
 // fixture learns lands here.
-func (k relayKnobs) serve(conn net.Conn, hostKey ssh.Signer, seen *connLog) {
+func (k relayKnobs) serve(conn net.Conn, hostKey ssh.Signer, seen *connLog, historical *legacyssh.Peer) {
 	defer func() { _ = conn.Close() }()
+
+	if k.maxAuthTries > 0 {
+		cfg := legacyssh.Config{
+			MaxAuthTries: k.maxAuthTries, RefuseAll: k.refuseAll,
+			Version: cmp.Or(k.version, defaultRelayVersion), Banner: k.banner, Exit: k.exit,
+		}
+		if k.allow != nil {
+			cfg.Allow = k.allow.Marshal()
+		}
+		historical.Serve(conn, cfg, func(kind string, data []byte) {
+			switch kind {
+			case "offer", "authenticated":
+				key, err := ssh.ParsePublicKey(data)
+				if err == nil {
+					if kind == "offer" {
+						seen.offer(key)
+					} else {
+						seen.setKey(key)
+					}
+				}
+			}
+		})
+		return
+	}
 
 	if k.stallHandshake {
 		// A relay that took the connection and then stopped: it reads what the
@@ -364,9 +389,9 @@ func listen(t *testing.T, ln net.Listener, serve func(i int, conn net.Conn)) {
 func (k relayKnobs) open(t *testing.T, signers []ssh.Signer, checkHostKey ssh.HostKeyCallback) (*ssh.Client, *evidence, error) {
 	t.Helper()
 
-	hostKey := newSigner(t)
+	hostKey, historical := relayHostKey(t, k)
 	ln := bufconn.Listen(relayBuffer)
-	listen(t, ln, func(_ int, conn net.Conn) { k.serve(conn, hostKey, &connLog{}) })
+	listen(t, ln, func(_ int, conn net.Conn) { k.serve(conn, hostKey, &connLog{}, historical) })
 	nc, err := ln.Dial()
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = nc.Close() })
@@ -379,6 +404,20 @@ func (k relayKnobs) open(t *testing.T, signers []ssh.Signer, checkHostKey ssh.Ho
 	}
 	require.NoError(t, nc.SetDeadline(time.Time{}))
 	return ssh.NewClient(conn, chans, reqs), ev, nil
+}
+
+// relayHostKey prepares the historical peer only for explicit offer-limit
+// fixtures, before the caller starts any handshake or join timer. Mixed
+// scripts use the same host key on both library versions.
+func relayHostKey(t *testing.T, scripts ...relayKnobs) (ssh.Signer, *legacyssh.Peer) {
+	t.Helper()
+	for _, k := range scripts {
+		if k.maxAuthTries > 0 {
+			peer := legacyssh.New(t)
+			return peer.HostKey, peer
+		}
+	}
+	return newSigner(t), nil
 }
 
 // connect runs ssh.NewClientConn with track, an AuthCallback and a
