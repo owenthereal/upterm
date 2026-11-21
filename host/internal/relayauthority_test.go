@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net"
 	"net/url"
+	"os"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -95,6 +96,22 @@ func hostCert(t *testing.T, ca ssh.Signer, key ssh.PublicKey, principals []strin
 	return cert
 }
 
+// legacyHostCert is an inert OpenSSH-issued host certificate with no principals.
+// Generated with ssh-keygen -s CA -I legacy-no-principals -h -V always:forever
+// HOST.pub (without -n). Only the public certificate is kept. Current x/crypto
+// refuses to issue this shape, but relays using older versions can present it.
+func legacyHostCert(t *testing.T) *ssh.Certificate {
+	t.Helper()
+	blob, err := os.ReadFile("testdata/legacy-host-no-principals.pub")
+	require.NoError(t, err)
+	key, _, _, _, err := ssh.ParseAuthorizedKey(blob)
+	require.NoError(t, err)
+	cert, ok := key.(*ssh.Certificate)
+	require.True(t, ok)
+	require.Empty(t, cert.ValidPrincipals)
+	return cert
+}
+
 func TestPinnedRelayAuthority(t *testing.T) {
 	relay, other, hostKey := testSigner(t), testSigner(t), testSigner(t)
 	var a RelayAuthority
@@ -113,7 +130,7 @@ func TestPinnedRelayAuthority(t *testing.T) {
 		"the same key":                      {relay.PublicKey(), true},
 		"another key":                       {other.PublicKey(), false},
 		"a cert for this host":              {hostCert(t, relay, hostKey.PublicKey(), []string{"relay.example"}, ssh.CertTimeInfinity), true},
-		"a cert naming no host":             {hostCert(t, relay, hostKey.PublicKey(), nil, ssh.CertTimeInfinity), true},
+		"a cert naming no host":             {legacyHostCert(t), false},
 		"a cert for another host":           {hostCert(t, relay, hostKey.PublicKey(), []string{"elsewhere.example"}, ssh.CertTimeInfinity), false},
 		"an expired cert":                   {hostCert(t, relay, hostKey.PublicKey(), []string{"relay.example"}, 1), false},
 		"a user cert":                       {userCert, false},
@@ -121,7 +138,13 @@ func TestPinnedRelayAuthority(t *testing.T) {
 		"another authority certifying ours": {hostCert(t, other, relay.PublicKey(), []string{"relay.example"}, ssh.CertTimeInfinity), false},
 	} {
 		t.Run(name, func(t *testing.T) {
-			err := pinned("relay.example:22", nil, tc.key)
+			check := pinned
+			if cert, ok := tc.key.(*ssh.Certificate); ok && len(cert.ValidPrincipals) == 0 {
+				var legacy RelayAuthority
+				require.NoError(t, legacy.Wrap(ssh.InsecureIgnoreHostKey())("relay.example:22", nil, cert.SignatureKey))
+				check = legacy.Pinned()
+			}
+			err := check("relay.example:22", nil, tc.key)
 			if tc.ok {
 				require.NoError(t, err)
 				return
@@ -131,6 +154,9 @@ func TestPinnedRelayAuthority(t *testing.T) {
 			require.Equal(t, "relay.example:22", changed.Hostname)
 			require.Equal(t, tc.key, changed.Key)
 			require.Error(t, changed.Err, "the checker's own reason is kept")
+			if cert, ok := tc.key.(*ssh.Certificate); ok && len(cert.ValidPrincipals) == 0 {
+				require.ErrorContains(t, changed.Err, "not in the set of valid principals")
+			}
 		})
 	}
 
@@ -148,7 +174,7 @@ func TestPinnedRelayAuthority(t *testing.T) {
 	var none RelayAuthority
 	var changed *RelayKeyChangedError
 	require.ErrorAs(t, none.Pinned()("relay.example:22", nil, relay.PublicKey()), &changed, "nothing recorded admits nothing")
-	require.ErrorAs(t, none.Pinned()("relay.example:22", nil, hostCert(t, relay, hostKey.PublicKey(), nil, ssh.CertTimeInfinity)), &changed, "nothing recorded admits no certificate either")
+	require.ErrorAs(t, none.Pinned()("relay.example:22", nil, hostCert(t, relay, hostKey.PublicKey(), []string{"relay.example"}, ssh.CertTimeInfinity)), &changed, "nothing recorded admits no certificate either")
 	require.False(t, none.IsUserAuthority(relay.PublicKey()), "refusing must not record what it refused")
 }
 
@@ -230,11 +256,14 @@ func TestCheckRedialSaysWhenARedialWouldBeRefused(t *testing.T) {
 	}{
 		"a plain key":                 {relay.PublicKey(), true},
 		"a cert for the hostname":     {hostCert(t, relay, hostKey.PublicKey(), []string{"relay.example"}, ssh.CertTimeInfinity), true},
-		"a cert naming no host":       {hostCert(t, relay, hostKey.PublicKey(), nil, ssh.CertTimeInfinity), true},
+		"a cert naming no host":       {legacyHostCert(t), false},
 		"a cert for another hostname": {hostCert(t, relay, hostKey.PublicKey(), []string{"203.0.113.7"}, ssh.CertTimeInfinity), false},
 	} {
 		t.Run(name, func(t *testing.T) {
 			err := shown(tc.key).CheckRedial(host)
+			if cert, ok := tc.key.(*ssh.Certificate); ok && len(cert.ValidPrincipals) == 0 {
+				require.ErrorContains(t, err, "not in the set of valid principals")
+			}
 			if tc.ok {
 				require.NoError(t, err)
 				return
@@ -274,7 +303,7 @@ func TestRelayKeyChangedErrorReads(t *testing.T) {
 	// A certificate is named by the key that signed it, as the host key prompt
 	// does: the certificate's own digest is not one anyone can compare.
 	ca := testSigner(t)
-	cert := hostCert(t, ca, key, nil, ssh.CertTimeInfinity)
+	cert := hostCert(t, ca, key, []string{"relay.example"}, ssh.CertTimeInfinity)
 	require.Contains(t, (&RelayKeyChangedError{Hostname: "relay.example:22", Key: cert}).Error(),
 		"("+utils.FingerprintSHA256(ca.PublicKey())+")")
 
@@ -388,7 +417,7 @@ func TestPinnedRelayAuthorityRefusalsReadAsWhatHappened(t *testing.T) {
 	t.Run("a certificate has no recorded authority to name when nothing is recorded", func(t *testing.T) {
 		var none RelayAuthority
 		var changed *RelayKeyChangedError
-		require.ErrorAs(t, none.Pinned()(host, nil, hostCert(t, relay, hostKey.PublicKey(), nil, ssh.CertTimeInfinity)), &changed)
+		require.ErrorAs(t, none.Pinned()(host, nil, hostCert(t, relay, hostKey.PublicKey(), []string{"relay.example"}, ssh.CertTimeInfinity)), &changed)
 		require.Equal(t, changedKey(relay), changed.Error())
 	})
 }
@@ -406,7 +435,7 @@ func TestRelayKeyChangedErrorSurvivesWhatItIsGivenToPrint(t *testing.T) {
 	// The authority's text needs a reason to give. Without one the message is
 	// the other, not a half-sentence.
 	ca := testSigner(t)
-	cert := hostCert(t, ca, testSigner(t).PublicKey(), nil, ssh.CertTimeInfinity)
+	cert := hostCert(t, ca, testSigner(t).PublicKey(), []string{"relay.example"}, ssh.CertTimeInfinity)
 	fingerprint := utils.FingerprintSHA256(ca.PublicKey())
 	err := &RelayKeyChangedError{Hostname: "relay.example:22", Key: cert, namesAuthority: true}
 	require.Equal(t, "the relay's key for relay.example:22 ("+fingerprint+") is not the one this session started with", err.Error())
@@ -501,7 +530,7 @@ func TestDelegatedRunTrustsOnlyItsPins(t *testing.T) {
 		"the pinned key":                  {pinned.PublicKey(), true},
 		"a pinned authority's cert":       {hostCert(t, pinned, hostKey.PublicKey(), []string{"relay.example"}, ssh.CertTimeInfinity), true},
 		"another key":                     {other.PublicKey(), false},
-		"a cert naming no host":           {hostCert(t, pinned, hostKey.PublicKey(), nil, ssh.CertTimeInfinity), false},
+		"a cert naming no host":           {legacyHostCert(t), false},
 		"a cert for another host":         {hostCert(t, pinned, hostKey.PublicKey(), []string{"elsewhere.example"}, ssh.CertTimeInfinity), false},
 		"an expired cert":                 {hostCert(t, pinned, hostKey.PublicKey(), []string{"relay.example"}, 1), false},
 		"a user cert":                     {userCert, false},
@@ -510,7 +539,11 @@ func TestDelegatedRunTrustsOnlyItsPins(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			var a RelayAuthority
-			err := a.PinnedTo(pins, "Example")("relay.example:22", nil, tc.key)
+			casePins := pins
+			if cert, ok := tc.key.(*ssh.Certificate); ok && len(cert.ValidPrincipals) == 0 {
+				casePins = mustPins(t, cert.SignatureKey)
+			}
+			err := a.PinnedTo(casePins, "Example")("relay.example:22", nil, tc.key)
 			if tc.ok {
 				require.NoError(t, err)
 				require.True(t, a.IsUserAuthority(pinned.PublicKey()))
@@ -519,11 +552,15 @@ func TestDelegatedRunTrustsOnlyItsPins(t *testing.T) {
 			var notPinned *RelayKeyNotPinnedError
 			require.ErrorAs(t, err, &notPinned)
 			require.Equal(t, tc.key, notPinned.Key)
+			if cert, ok := tc.key.(*ssh.Certificate); ok && len(cert.ValidPrincipals) == 0 {
+				require.ErrorContains(t, notPinned.Err, "not in the set of valid principals")
+				require.False(t, a.IsUserAuthority(cert.SignatureKey))
+			}
 			require.True(t, strings.HasSuffix(err.Error(), " is not one Example listed for this relay"), err.Error())
 			require.False(t, a.IsUserAuthority(pinned.PublicKey()), "a refused key recorded an authority")
 			require.False(t, a.IsUserAuthority(other.PublicKey()), "a refused key recorded an authority")
 			// Refused again on a second sight: nothing was learned from the first.
-			require.Error(t, a.PinnedTo(pins, "Example")("relay.example:22", nil, tc.key))
+			require.Error(t, a.PinnedTo(casePins, "Example")("relay.example:22", nil, tc.key))
 		})
 	}
 

@@ -537,7 +537,7 @@ func TestIdentitySigners_SelectorsAgainstCertificateEntries(t *testing.T) {
 	_, caPriv := newEd25519(t)
 	ca, err := ssh.NewSignerFromKey(caPriv)
 	require.NoError(t, err)
-	cert := &ssh.Certificate{Key: pub, CertType: ssh.UserCert, KeyId: "alice", ValidBefore: ssh.CertTimeInfinity}
+	cert := &ssh.Certificate{Key: pub, CertType: ssh.UserCert, KeyId: "alice", ValidPrincipals: []string{"alice"}, ValidBefore: ssh.CertTimeInfinity}
 	require.NoError(t, cert.SignCert(rand.Reader, ca))
 
 	// The agent holds only the certificate entry, which is what ssh-add
@@ -561,7 +561,7 @@ func TestIdentitySigners_SelectorsAgainstCertificateEntries(t *testing.T) {
 		t.Cleanup(cleanup)
 		require.Equal(t, cert.Marshal(), signers[0].PublicKey().Marshal())
 
-		other := &ssh.Certificate{Key: pub, CertType: ssh.UserCert, KeyId: "bob", ValidBefore: ssh.CertTimeInfinity}
+		other := &ssh.Certificate{Key: pub, CertType: ssh.UserCert, KeyId: "bob", ValidPrincipals: []string{"bob"}, ValidBefore: ssh.CertTimeInfinity}
 		require.NoError(t, other.SignCert(rand.Reader, ca))
 		otherFile := writeTestFile(t, dir, "other-cert.pub", ssh.MarshalAuthorizedKey(other))
 		_, _, err = identitySigners([]string{otherFile}, ta.socket, failingPrompt(t))

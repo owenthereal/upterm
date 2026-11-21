@@ -63,10 +63,9 @@ func isExpectedShutdownError(err error) bool {
 	return false
 }
 
-// sshOpenUnanswered is x/crypto's error for a channel open still waiting for
-// its answer when the connection ends (mux.go). There is no exported error to
-// match on, so match the text: if it ever drifts the refusal is simply logged
-// as an error, which is the safe direction to fail in.
+// sshOpenUnanswered is older x/crypto versions' error for a channel open still
+// waiting for its answer when the connection ends (mux.go). Current versions
+// return EOF. The proxy passes either error's text in its channel refusal.
 const sshOpenUnanswered = "ssh: unexpected packet in response to channel open: <nil>"
 
 // refusedForHostLeaving reports whether err is the SSH proxy refusing a channel
@@ -79,7 +78,7 @@ func refusedForHostLeaving(err error) bool {
 	if !errors.As(err, &rejection) || rejection.Reason != gossh.ConnectionFailed {
 		return false
 	}
-	return rejection.Message == sshPeerDisconnected || rejection.Message == sshOpenUnanswered
+	return rejection.Message == sshPeerDisconnected || rejection.Message == sshOpenUnanswered || rejection.Message == io.EOF.Error()
 }
 
 func newStreamlocalForwardHandler(

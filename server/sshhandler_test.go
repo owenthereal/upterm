@@ -10,6 +10,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/suite"
+	"golang.org/x/crypto/ssh"
 )
 
 type SSHHandlerTestSuite struct {
@@ -134,4 +135,23 @@ func (s *SSHHandlerTestSuite) TestIsExpectedShutdownError_WrappedErrors() {
 	wrappedEOF := fmt.Errorf("read operation failed: %w", io.EOF)
 	assert.True(s.T(), isExpectedShutdownError(wrappedEOF),
 		"Properly wrapped io.EOF should be detected")
+}
+
+func TestRefusedForHostLeaving(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"pending open on disconnect", &ssh.OpenChannelError{Reason: ssh.ConnectionFailed, Message: "EOF"}, true},
+		{"legacy pending open on disconnect", &ssh.OpenChannelError{Reason: ssh.ConnectionFailed, Message: "ssh: unexpected packet in response to channel open: <nil>"}, true},
+		{"peer disconnected", &ssh.OpenChannelError{Reason: ssh.ConnectionFailed, Message: sshPeerDisconnected}, true},
+		{"unrelated connection failure", &ssh.OpenChannelError{Reason: ssh.ConnectionFailed, Message: "upstream failed"}, false},
+		{"administrative refusal", &ssh.OpenChannelError{Reason: ssh.Prohibited, Message: "EOF"}, false},
+		{"unwrapped EOF", io.EOF, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, refusedForHostLeaving(tc.err))
+		})
+	}
 }

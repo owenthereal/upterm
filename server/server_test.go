@@ -1272,3 +1272,77 @@ func TestProxyRequiredNeedsInternal(t *testing.T) {
 	opt.InternalAddr = "127.0.0.1:2223"
 	require.NoError(t, opt.Validate())
 }
+
+// Start must offer the persistent raw host key without requiring a hostname.
+// Configured hostnames additionally enable a certificate for those names.
+func TestStartHostIdentity(t *testing.T) {
+	for _, named := range []bool{false, true} {
+		name := "raw key by default"
+		if named {
+			name = "certificate and raw key with hostname"
+		}
+		t.Run(name, func(t *testing.T) {
+			t.Setenv("PRIVATE_KEY", "")
+			keyPath := filepath.Join(t.TempDir(), "host_key")
+			require.NoError(t, os.WriteFile(keyPath, []byte(TestPrivateKeyContent), 0600))
+			signer, err := ssh.ParsePrivateKey([]byte(TestPrivateKeyContent))
+			require.NoError(t, err)
+			opt := Opt{SSHAddr: "127.0.0.1:0", PrivateKeys: []string{keyPath}, Network: "mem"}
+			if named {
+				opt.Hostnames = []string{"127.0.0.1"}
+			}
+			logs := make(proxyProtocolTestLogs, 128)
+			ctx, cancel := context.WithCancel(t.Context())
+			done := make(chan error, 1)
+			go func() { done <- Start(ctx, opt, slog.New(slog.NewJSONHandler(logs, nil))) }()
+			stopped := false
+			t.Cleanup(func() {
+				cancel()
+				if !stopped {
+					select {
+					case err := <-done:
+						require.NoError(t, err)
+					case <-time.After(5 * time.Second):
+						t.Error("server did not stop")
+					}
+				}
+			})
+			var addr string
+			timer := time.NewTimer(5 * time.Second)
+			defer timer.Stop()
+			for addr == "" {
+				select {
+				case err := <-done:
+					stopped = true
+					t.Fatalf("server stopped before serving: %v", err)
+				case record := <-logs:
+					if record["msg"] == "starting server" {
+						addr = record["ssh_addr"].(string)
+					}
+				case <-timer.C:
+					t.Fatal("server did not start")
+				}
+			}
+			dial := func(algorithms []string, callback ssh.HostKeyCallback) {
+				t.Helper()
+				client, err := ssh.Dial("tcp", addr, &ssh.ClientConfig{
+					User: "host-identity", ClientVersion: upterm.HostSSHClientVersion,
+					Auth:              []ssh.AuthMethod{ssh.PublicKeys(signer)},
+					HostKeyAlgorithms: algorithms, HostKeyCallback: callback, Timeout: 5 * time.Second,
+				})
+				require.NoError(t, err)
+				require.NoError(t, client.Close())
+			}
+			dial([]string{ssh.KeyAlgoED25519}, ssh.FixedHostKey(signer.PublicKey()))
+			if !named {
+				dial(nil, ssh.FixedHostKey(signer.PublicKey()))
+			}
+			if named {
+				checker := &ssh.CertChecker{IsHostAuthority: func(key ssh.PublicKey, _ string) bool {
+					return utils.KeysEqual(key, signer.PublicKey())
+				}}
+				dial([]string{ssh.CertAlgoED25519v01}, checker.CheckHostKey)
+			}
+		})
+	}
+}
