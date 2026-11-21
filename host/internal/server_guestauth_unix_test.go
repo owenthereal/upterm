@@ -218,6 +218,7 @@ func TestGuestConcurrentConnectionsHaveSeparateFailureBudgets(t *testing.T) {
 		rejected <- err
 	}()
 	close(start)
-	require.NoError(t, <-accepted)
-	require.Error(t, <-rejected)
+	acceptedErr, rejectedErr := <-accepted, <-rejected
+	require.NoError(t, acceptedErr)
+	require.Error(t, rejectedErr)
 }
