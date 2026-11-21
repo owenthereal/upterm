@@ -17,7 +17,7 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
-// Config and event are the local pipe protocol used by legacyssh.Serve.
+// config precedes SSH on stdin; authentication observations go to Events.
 type config struct {
 	MaxAuthTries int
 	RefuseAll    bool
@@ -46,21 +46,29 @@ func run() error {
 	if err := json.Unmarshal(line, &cfg); err != nil {
 		return err
 	}
-	key, err := ssh.ParsePrivateKey(cfg.HostKey)
-	if err != nil {
-		return err
-	}
 	events, err := os.OpenFile(cfg.Events, os.O_WRONLY|os.O_APPEND, 0600)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = events.Close() }()
+	return serve(pipeConn{input}, cfg, events)
+}
+
+func serve(conn net.Conn, cfg config, events io.Writer) error {
+	key, err := ssh.ParsePrivateKey(cfg.HostKey)
+	if err != nil {
+		return err
+	}
 	encoder := json.NewEncoder(events)
+	var recordErr error
 	record := func(kind string, key ssh.PublicKey) error {
-		return encoder.Encode(struct {
-			Kind string
-			Data []byte
-		}{kind, key.Marshal()})
+		if recordErr == nil {
+			recordErr = encoder.Encode(struct {
+				Kind string
+				Data []byte
+			}{kind, key.Marshal()})
+		}
+		return recordErr
 	}
 	server := &ssh.ServerConfig{
 		MaxAuthTries:  cfg.MaxAuthTries,
@@ -83,10 +91,11 @@ func run() error {
 		},
 	}
 	server.AddHostKey(key)
-	sconn, channels, requests, err := ssh.NewServerConn(pipeConn{input}, server)
+	sconn, channels, requests, err := ssh.NewServerConn(conn, server)
 	if err != nil {
-		// Authentication refusals and departing clients are the test input.
-		return nil
+		// Authentication refusals and departing clients are the test input;
+		// an observation failure must instead make the helper fail visibly.
+		return recordErr
 	}
 	defer func() { _ = sconn.Close() }()
 	go func() {

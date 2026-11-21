@@ -58,8 +58,12 @@ var build = sync.OnceValues(func() (string, error) {
 	if runtime.GOOS == "windows" {
 		binary += ".exe"
 	}
-	_, source, _, _ := runtime.Caller(0)
-	peerDir := filepath.Join(filepath.Dir(source), "testdata", "peer")
+	// Both callers, host and join, run one directory below the module root.
+	// Use their working directory so source discovery also works with -trimpath.
+	peerDir, err := filepath.Abs(filepath.Join("..", "internal", "testhelpers", "legacyssh", "testdata", "peer"))
+	if err != nil {
+		return "", err
+	}
 	cmd := exec.Command("go", "build", "-mod=readonly", "-modfile="+filepath.Join(peerDir, "legacy.mod"), "-o", binary, ".")
 	cmd.Dir = peerDir
 	// Build for the running test, independently of workspace/modfile flags or
